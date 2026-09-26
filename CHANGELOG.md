@@ -1,6 +1,26 @@
 # Version history
 
-The current application version is **2.30.3**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.30.4**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.30.4 — No invite link on the site; the day's records
+
+Issue [#54](https://github.com/deconfined/tarubot/issues/54). This release changes docs, tests and records only, so Deploy production should end `no-runtime-change`.
+
+- **No invite link.** @deconfined decided that the site carries no Discord invite or authorization URL, not even a template. Every deployment runs its own Discord application, and whoever runs one builds their own invite: "If they can't do that on their own, they're not going to have a good time self-managing a bot."
+  - "Add TaruBot to a server" now has an "Adding the bot" section. It says the application's owner adds the bot with the `bot` and `applications.commands` scopes and the permissions the page lists. With **Public Bot** off, which is recommended, nobody else can.
+  - The Discord application page says to turn Public Bot off. If Discord refuses, it says to set Install Link to None first.
+  - The install page and README point to the page instead of a link.
+- **Test.** `docs-site.test.ts` no longer pins an invite integer. Instead it checks:
+  - that the page's Permissions table lists exactly the code's `requiredBotPermissions` plus Manage Channels;
+  - that the page still names its key terms;
+  - that no site page, and not README, carries a Discord authorization URL, a `discordapp.com` link, or a server invite link.
+- **Records.** The 2.30.1–2.30.3 rollouts are recorded:
+  - the first normal automated deploy;
+  - 2.30.2's deploy, including a cancelled manual dispatch;
+  - DevBot's updates;
+  - the 2.30.3 rehearsal on DevBot and production verified hardened.
+
+  Also recorded, all confirmed read-only: the zone is now DNSSEC-signed, the host clone has no group-writable files, and both Discord applications have Presence, Message Content and Public Bot off. The open items close, and a check that the first hardened nightly backup ran green is added. The staging host and #50's Quadlet and pull-based host-configuration decisions are in the handoff.
 
 ## 2.30.3 — Hardened containers
 

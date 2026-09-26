@@ -510,16 +510,26 @@ Discord makes Private Channel Obfuscation mandatory on 2026-11-16; [#47](https:/
 - **Gateway:** DevBot's gateway view now shows the hidden community updates channel and its category obfuscated, with one fake permission overwrite and the parent kept. REST reads are unchanged until 2026-11-16.
 - **Onboarding pass:** unaffected, because it excludes the community updates channel by its ID, not by what the channel shows.
 
+### 2.30.1 rollout — 2026-09-26
+
+2.30.1 (the cleanup patch, #48, [PR #49](https://github.com/deconfined/tarubot/pull/49), `ea7212e`) changes no bot behavior and adds no migration and no command change. @deconfined merged PR #49 at 15:55:47 UTC with every check green; the Claude review passed without reviewing, as it does for a pull request that changes `claude-code-review.yml`. #48 closed. Publish run 36253640366 published `tarubot:2.30.1`.
+
+- **Production, the first normal automated deploy:** Deploy production run 36253924529 started after the publish (`workflow_run`, 16:00:49 UTC), and @deconfined approved it in GitHub. The host went through the steps `preflight`, `pull`, `up` and `commands`: `outcome=deployed version=2.30.1 previous=2.30.0 path=plain downtime=6 commands=registered`.
+  - Read-only check afterwards: `ghcr.io/deconfined/tarubot:2.30.1` started at 16:06:23 UTC and healthy; `.env` pins 2.30.1; the host clone at `ea7212e`; readiness 200 with the writer lease and effects on; no warning or error in 30 minutes. @deconfined confirmed that `/version` shows 2.30.1.
+  - `ops/deploy.sh` became mode 700, rewritten by the deploy under `umask 077`. Files the deploy didn't touch, such as `docker-compose.production.yml`, stayed 664 until @deconfined's one-time `chmod -R go-w ~/tarubot` later that day ([VERIFICATION.md](VERIFICATION.md)).
+- **DevBot** stayed on 2.30.0 and went straight to 2.30.2 ([below](#2302-rollout--2026-09-26)).
+- **Update post:** none was due: 2.30.1 has no member note.
+
 ### 2.30.2 channel obfuscation checks (#47) — pending
 
 The [plan on #47](https://github.com/deconfined/tarubot/issues/47#issuecomment-5846832387) and @deconfined's [answers](https://github.com/deconfined/tarubot/issues/47#issuecomment-5847261822) of 2026-09-26: fail closed on channels TaruBot can't see, ship 2.30.2 after 2.30.1 and before 2.31.0, and keep DevBot's toggle on until 2026-11-16.
 
 - **Why DevBot needs 2.30.2 before the date.** From 2026-11-16 REST leaves `#moderator-only` (the test guild's community updates channel) and its `Admin` category out of the channel list. Up to 2.30.1 the access pass needs the updates channel in that list, so every `channels.access` pass and every `/setup` here would be refused with "Discord didn't return the Community Updates channel or its category…". The job would sit `blocked` (logged at warn, with no issue report), and each channel event would requeue it only for it to block again. 2.30.2 finds the updates area in the gateway cache and, while it can't read the area, leaves @everyone's View Channel default as it is (ACCESS-05). The #47 audit found the test guild's default already lowered, and nothing raises it.
-- **Fallback** if 2.30.2 can't be deployed in time: the owner gives DevBot's role View Channel on the `Admin` category and in `#moderator-only`. Both stay excluded by ID.
+- **Fallback** if 2.30.2 can't be deployed in time: the owner gives DevBot's role View Channel on the `Admin` category and in `#moderator-only`. Both stay excluded by ID. Not needed: DevBot has run 2.30.2 since 2026-09-26, and 2.30.3 since that evening ([below](#2302-rollout--2026-09-26)).
 - **What the toggle can't show.** It changes the gateway only. REST keeps listing every channel until the date, and each pass re-patches the cache from REST, so before the date DevBot can't reproduce the refused pass, a hidden managed channel or a hidden saved room. The fixture tests model those ([VERIFICATION.md](VERIFICATION.md#automated-suites)).
 - **Checks.** A restart, a deploy or a Discord write needs the owner's go-ahead; reads don't.
   1. **Baseline under the toggle on 2.30.0 (done, 2026-09-26).** Right after the toggle, REST still returned all 13 channels, none obfuscated. After the 13:34:49 UTC restart the startup `channels.access` job was `secured` (11 channels, nothing changed, the same excluded channels as before the restart), and `reconcile.guild`, `roles.layout` and 8 `reconcile.user` jobs succeeded. The logs had no warn or error lines and no `___hidden___`.
-  2. **After 2.30.2 is deployed** (the usual update procedure): readiness with the writer lease, no warn or error lines, and a startup `channels.access` result identical to the baseline, because REST still returns the real overwrites before the date. `discord-inspect` output unchanged.
+  2. **After 2.30.2 is deployed** (the usual update procedure): readiness with the writer lease, no warn or error lines, and a startup `channels.access` result identical to the baseline, because REST still returns the real overwrites before the date. `discord-inspect` output unchanged. **Done on 2026-09-26** ([the rollout](#2302-rollout--2026-09-26)): readiness 200 with the writer lease, no warn or error lines, and `channels.access` `secured` for 11 channels with nothing changed and the same two excluded channels. The `discord-inspect` comparison wasn't recorded.
   3. **The owner, in `#moderator-only`:** `/channel` shows the "can't see this channel's details" card, never `___hidden___` (on 2.30.0 the name depends on timing). `/config changelog channel:#moderator-only` is refused with "TaruBot needs View Channel, Send Messages, Embed Links and Read Message History in <#…>, and it must be a text channel in this server.", and `/config show` is unchanged.
   4. **Optional negative check (writes to Discord):** a temporary text channel that denies DevBot's role View Channel. The next `channels.access` job is blocked in `/sync status`, naming the channel with the channel-permissions fix; after the channel is deleted, the next pass is `secured`. Before the date 2.30.0 does the same; after it, only 2.30.2 does.
   5. **On or just after 2026-11-16 (read-only):** `discord-inspect` no longer lists `#moderator-only`; `channels.access` is `secured` with the same excluded channels and `preservedEveryoneView: true`; readiness shows nothing blocked; the logs have no repeating "community channel scope changed" lines; `/config validate` reports every channel available. Repeat check 4 if it hasn't run since the date. Then record what Discord answers a single-channel read of `#moderator-only`, which it doesn't document for hidden channels (the fixture assumes 50001, as today). The read prints only the HTTP status, Discord's JSON code, the name and the flags:
@@ -531,9 +541,22 @@ The [plan on #47](https://github.com/deconfined/tarubot/issues/47#issuecomment-5
      2.30.2 refuses a hidden managed channel on 50001; on 10003 while the gateway still holds the entry obfuscated or its cached overwrites deny DevBot View Channel (a channel option clears the flag but keeps the fake deny); and on a 200 that is obfuscated (`flags` includes `131072`) or denies DevBot View Channel. A 10003 for a stale entry DevBot could view is a deleted channel; anything else is rethrown. If Discord answers some other way, open an issue before relying on the refusal.
   6. Record each result as a new dated entry here, in VERIFICATION.md and in OPEN_ITEMS.md. Turning the toggle off, if ever needed, takes a restart.
 
-### 2.30.3 rehearsal (planned) — container hardening
+### 2.30.2 rollout — 2026-09-26
 
-2.30.3 ([#51](https://github.com/deconfined/tarubot/issues/51)) changes only the Compose files. The bot gets `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges` from `docker-compose.yml`; the DevBot overlay adds nothing ([HOSTING.md](HOSTING.md#container-hardening)). There is no migration and no command change. Throwaway containers passed before the merge ([VERIFICATION.md](VERIFICATION.md)), but none of them logged in to Discord, so the gateway, job processing, Discord posts and a parse from a real `/refresh` are left to DevBot. DevBot rehearses them live, with @deconfined's go-ahead. **The "Deploy production" request for 2.30.3 waits, unapproved, until this rehearsal passes.**
+2.30.2 (Discord channel obfuscation, #47, [PR #52](https://github.com/deconfined/tarubot/pull/52), `225d27a`) adds no migration and no command change. @deconfined merged PR #52 at 20:24 UTC with every check green; its Claude review, the first under 2.30.1's read-only tool list, found no issues. #47 closed. Publish run 36269408071 published `tarubot:2.30.2` (`sha256:1b532ba0…`, revision `225d27a`).
+
+- **Production:** the automatic Deploy production run 36269730046 (`workflow_run`, 20:29:59 UTC) waited for approval. @deconfined also dispatched run 36270596511 at 20:45:07 and cancelled it while it waited: its Deploy job ended cancelled at 20:45:44, and its Notify job ran. The approved automatic run went through `preflight`, `pull`, `up` and `commands`: `outcome=deployed version=2.30.2 previous=2.30.1 path=plain downtime=6 commands=registered`.
+  - Read-only check: `tarubot:2.30.2` started at 20:45:58 UTC and healthy; `.env` pins 2.30.2; the host clone at `225d27a`; readiness 200 with the writer lease and effects on; no warning or error since the start.
+  - Behavior is unchanged there: onboarding is off in production, and TaruBot holds Administrator and sees every channel.
+- **DevBot** (2.30.0 to 2.30.2, on @deconfined's "Go ahead and update DevBot."): the checkout moved to `225d27a`. 762 jobs, all succeeded. The writer stopped at 20:49:21 UTC with no lease holders, head 010. The backup `.cache/backups/tarubot_dev-before-2.30.2-225d27a.dump` is 148,296 bytes (mode 600), sha256 `e023cd1126dc52c3aaa9066df6c012234db7badf7fd74659c89ed91ba615b343`; 2.30.2's `check-restore.js` verified the restore at 010 and the copy was dropped. No migration.
+  - `up` at 20:49:23, healthy at 20:49:39 on image `sha256:1b532ba0…`. Readiness 200 with the writer lease held; no warning or error.
+  - The 11 startup jobs succeeded: `reconcile.guild`, `roles.layout`, 8 `reconcile.user`, and `channels.access`, `secured` for 11 channels with nothing changed, the same two excluded channels and `preservedEveryoneView` false (REST still lists the hidden community updates channel before 2026-11-16). That is check 2 [above](#2302-channel-obfuscation-checks-47--pending).
+  - `commands.js list` was clean (global 0, production guild 0, test guild 21). No registration: the commands are unchanged.
+- **Update post:** none was due: 2.30.2 has no member note.
+
+### 2.30.3 rehearsal procedure — container hardening
+
+2.30.3 ([#51](https://github.com/deconfined/tarubot/issues/51)) changes only the Compose files. The bot gets `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges` from `docker-compose.yml`; the DevBot overlay adds nothing ([HOSTING.md](HOSTING.md#container-hardening)). There is no migration and no command change. Throwaway containers passed before the merge ([VERIFICATION.md](VERIFICATION.md)), but none of them logged in to Discord, so the gateway, job processing, Discord posts and a parse from a real `/refresh` were left to DevBot. DevBot rehearsed them live after publication, and the "Deploy production" request for 2.30.3 waited, unapproved, until the rehearsal passed ([the record](#2303-rehearsal-and-rollout--2026-09-26)). The steps below stay as the procedure for a later hardening change.
 
 The settings are in the Compose file, not in the image. So DevBot can rehearse either before the merge, on the image it already runs, or after 2.30.3 is published:
 
@@ -551,6 +574,28 @@ The settings are in the Compose file, not in the image. So DevBot can rehearse e
 After a rehearsal before the merge, `git switch main` puts the checkout back. The container keeps the settings until it is next recreated, which does no harm, because its release runs unchanged under them. DevBot moves to 2.30.3 as usual once it is published.
 
 DevBot has no backup service (that is production's `backup`). After the production deploy, the next 04:30 UTC run of `ops/backup.sh` must end `backup ok`, with its success ping, under the new settings.
+
+### 2.30.3 rehearsal and rollout — 2026-09-26
+
+2.30.3 (container hardening, #51, [PR #53](https://github.com/deconfined/tarubot/pull/53), `03203c8`) changes only the Compose files: no migration and no command change. @deconfined merged PR #53 at 20:49 UTC, and #51 closed. Publish run 36270848458 published `tarubot:2.30.3` (`sha256:96f698a4…`, revision `03203c8`). DevBot rehearsed it after publication, following the [procedure above](#2303-rehearsal-procedure--container-hardening).
+
+- **DevBot rehearsal:**
+  - **Checkout and restart** (steps 1 and 2): the checkout at `03203c8`, and the rendered Compose file gave the bot `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges`. The writer stopped at 20:56:17 UTC with no lease holders. The backup `.cache/backups/tarubot_dev-before-2.30.3-03203c8.dump` is 149,003 bytes (mode 600), sha256 `e42badba223a2ef386759ec9043cebc5ced96c50e63fa17de74a3d26135649f8`; the restore was verified at 010 and the copy dropped. `up` at 20:56:19, healthy at 20:56:35.
+  - **Settings in force** (step 3): `docker inspect` showed a read-only root filesystem, `CapDrop` `[ALL]` and `no-new-privileges`, with Docker's `docker-default` AppArmor profile and user `bun`. In the container, `/proc/1/status` showed `CapPrm`, `CapEff` and `CapBnd` all zero and `NoNewPrivs: 1`, and `touch /tmp/x` failed with "Read-only file system".
+  - **Readiness and logs** (step 4): readiness 200 with the writer lease held; no warning or error, and no `EROFS`, `EACCES` or `EPERM`; "Modules loaded" and "Database writer lease acquired" at info. The startup jobs succeeded: `channels.access` (secured, with the same exclusions), `reconcile.guild`, `roles.layout` and 8 `reconcile.user`.
+  - **Discord** (step 5): @deconfined confirmed the startup plan post, `/config validate` and `/refresh force:true`: "Everything looks good on dev."
+  - **Tools** (step 6): `commands.js list` through `exec` was clean (test guild 21).
+- **Production:** Deploy production run 36271201222 (`workflow_run` after the publish), which @deconfined approved after the rehearsal: `outcome=deployed version=2.30.3 previous=2.30.2 path=plain downtime=6 commands=registered`.
+  - Read-only check: `tarubot:2.30.3` started at 20:58:55 UTC and healthy, with a read-only root filesystem, `CapDrop` `[ALL]`, `no-new-privileges`, the `docker-default` AppArmor profile and user `bun`; `/proc/1/status` showed `CapEff` and `CapBnd` zero and `NoNewPrivs: 1`. `.env` pins 2.30.3 and the host clone is at `03203c8`. Readiness 200 with the writer lease and effects on; no warning or error, and no `EROFS`, `EACCES` or `EPERM`.
+  - The `backup` service renders `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges` and its `/tmp` tmpfs (`size=1m,mode=0700`).
+- **Still to confirm:** the first hardened nightly backup. The 04:30 UTC run of `ops/backup.sh` on 2026-09-27 must end `backup ok` with its success ping ([OPEN_ITEMS.md](OPEN_ITEMS.md#owner-checks-owed)).
+- **Update post:** none was due: 2.30.3 has no member note.
+
+### Developer Portal settings — 2026-09-26
+
+- **Changed by @deconfined** on both applications, DevBot and the production application: the **Presence** and **Message Content** intents off, and **Public Bot** off. TaruBot asks Discord only for the Guilds and Server Members intents (`src/discord/gateway.ts`, OPS-12).
+- **Read back** with a read-only `GET /applications/@me` for each application: Presence off, Message Content off, Server Members on (`limited`, Discord's flag for an application in fewer than 100 servers), `bot_public` false and `bot_require_code_grant` false. With Public Bot off, only an application's owner can add its bot to a server.
+- DevBot's Private Channel Obfuscation toggle stays on ([above](#channel-obfuscation-test-toggle--2026-09-26)).
 
 ### Remaining unverified-visitor form checks (on hold until after launch)
 

@@ -47,7 +47,7 @@ The **2.9.0 adoption added no migration** and used `002_setup_and_ranks.sql`. Mi
 
 Registered-visitor Guest needs no schema change. First-activation grants, their per-grant and completion audits, the marker, and the effects flip commit on the activation transaction's client.
 
-The current **2.30.3** source adds no migration and requires `SCHEMA_VERSION=010_status_notices.sql`, which **2.29.0** added. It is additive and needs no superuser privileges. It adds three nullable `guild_users` columns for the officer status posts, with no default, index or constraint (every query filters on `guild_id`, the primary key's prefix):
+The current **2.30.4** source adds no migration and requires `SCHEMA_VERSION=010_status_notices.sql`, which **2.29.0** added. It is additive and needs no superuser privileges. It adds three nullable `guild_users` columns for the officer status posts, with no default, index or constraint (every query filters on `guild_id`, the primary key's prefix):
 
 - **`status_state`** (`jsonb`): the join time the state belongs to, the flags last announced (or silently taken as the baseline), the last decisive flags, the reason for each difference, and confirmed FC departures not yet posted. `src/domain/status.ts` validates it with zod on every read; an unreadable value counts as NULL, a new silent baseline, so a bad row never wedges reconciliation.
 - **`status_since`** (`timestamptz`): when something first waited to be announced, from the database clock; NULL exactly when nothing waits. The two-minute window is computed in SQL from the oldest.

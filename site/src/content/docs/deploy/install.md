@@ -87,7 +87,7 @@ Readiness must report `database`, `writerLease`, `discord` and `effects` as `tru
 
 ## 6. Add the bot to your server
 
-Invite the bot with [the invite link](/tarubot/admin/add-to-server/#invite-link), place its role, and [set the server up](/tarubot/admin/setup/). A new server goes live with its first `/config` or `/setup`: there's no activation step.
+Add the bot with [the scopes and permissions it needs](/tarubot/admin/add-to-server/#adding-the-bot), place its role, and [set the server up](/tarubot/admin/setup/). A new server goes live with its first `/config` or `/setup`: there's no activation step.
 
 Next: [back up](/tarubot/deploy/operations/#backup) the database regularly, and read [Updates, backups and recovery](/tarubot/deploy/operations/) before your first update.
 

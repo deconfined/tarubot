@@ -1,9 +1,10 @@
 /**
  * The documentation site (site/, Starlight on GitHub Pages) against the code it describes. The
  * site's own build checks its frontmatter and internal links; this test is the required gate for
- * what a build can't know: the hand-written command reference, settings, reply codes and invite
+ * what a build can't know: the hand-written command reference, settings, reply codes and bot
  * permissions must match the code, repository links must resolve, the site package must stay a
- * pnpm package, and the public pages must carry placeholders only.
+ * pnpm package, and the public pages must carry placeholders only, with no Discord invite or
+ * authorization URL (each deployment builds its own for its own application).
  *
  * Site files are read as text and never imported, so neither CI's checks job nor the image build
  * needs the site's dependencies. Paths resolve against the working tree with existsSync, because
@@ -91,12 +92,25 @@ async function siteFiles(): Promise<string[]> {
 }
 
 /**
- * The Discord permissions the invite link asks for: the code's bot permissions plus Manage Channels,
- * the /setup onboarding addition.
+ * The name add-to-server.md's Permissions table gives each of the code's bot permissions (Discord's
+ * name for it). Typed by the code's keys, so a permission added to requiredBotPermissions fails the
+ * typecheck until it has a name here, and then the test below until the page lists it.
  */
-const invitePermissions =
-  Object.values(requiredBotPermissions).reduce((total, bit) => total | bit, 0n) |
-  PermissionFlagsBits.ManageChannels;
+const permissionNames: { readonly [key in keyof typeof requiredBotPermissions]: string } = {
+  ManageRoles: "Manage Roles",
+  ManageNicknames: "Manage Nicknames",
+  ViewChannel: "View Channel",
+  SendMessages: "Send Messages",
+  EmbedLinks: "Embed Links",
+  AttachFiles: "Attach Files",
+  ReadMessageHistory: "Read Message History",
+};
+
+/** The permission names in the first column of a page's "## Permissions" table, in page order. */
+function permissionRows(markdown: string): string[] {
+  const section = markdown.split(/^## /mu).find((part) => part.startsWith("Permissions\n")) ?? "";
+  return [...section.matchAll(/^\| \*\*([^*|]+)\*\* \|/gmu)].map((match) => match[1] ?? "");
+}
 
 /** A pattern that must never appear on a public page, what it guards, and samples it must catch. */
 interface Guard {
@@ -104,6 +118,47 @@ interface Guard {
   readonly what: string;
   readonly bad: readonly string[];
 }
+
+/**
+ * No invite template: each deployment runs its own application, and its owner builds the link
+ * (add-to-server.md). Any authorization path counts, on either domain and API version. Kept apart
+ * from the other guards because the README, public but not a site page, is held to these too.
+ * Their host patterns end in `(?:$|.)` for the reason given in `forbidden` below.
+ */
+const inviteGuards: readonly Guard[] = [
+  {
+    pattern: /discord(?:app)?\.com\/(?:api\/(?:v\d+\/)?)?oauth2\/authorize(?:$|.)/imu,
+    what: "a Discord authorization (bot invite) URL",
+    bad: [
+      "https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=bot",
+      "https://discord.com/api/oauth2/authorize?client_id=1&scope=bot",
+      "https://discord.com/api/v10/oauth2/authorize?client_id=1",
+      "https://canary.discord.com/oauth2/authorize?client_id=1",
+      "https://discordapp.com/oauth2/authorize?client_id=1",
+      "DISCORD.COM/OAUTH2/AUTHORIZE",
+      "discord.com/oauth2/authorize",
+    ],
+  },
+  {
+    pattern: /discordapp\.com(?:$|.)/imu,
+    what: "Discord's former domain (old invite, authorization or file links)",
+    bad: [
+      "https://discordapp.com/invite/abc",
+      "discordapp.com",
+      "cdn.discordapp.com/attachments/1",
+    ],
+  },
+  {
+    pattern: /discord\.gg\/(?:$|.)|discord\.com\/invite\/(?:$|.)/imu,
+    what: "a Discord server invite link",
+    bad: [
+      "https://discord.gg/abc",
+      "discord.gg/",
+      "https://discord.com/invite/abc",
+      "DISCORD.GG/X",
+    ],
+  },
+];
 
 /**
  * The fixed patterns. Samples shaped like secrets are built at run time with repeat(), so this file
@@ -182,6 +237,7 @@ const forbidden: readonly Guard[] = [
     bad: ["TaruBot production", "TaruBot backups"],
   },
   { pattern: /04:30 UTC/u, what: "the upstream backup schedule", bad: ["daily at 04:30 UTC"] },
+  ...inviteGuards,
   {
     pattern: /Woven Souls|«Souls»|Fussy Bunbun/iu,
     what: "the upstream FC's name, tag or rank title",
@@ -229,7 +285,6 @@ const allowedNumbers = new Set([
   "714882491",
   "714882492",
   "714882494",
-  String(invitePermissions), // the invite link's permission integer
 ]);
 /** The only UUIDs a page may carry: the failure replies' job-ID examples (EXAMPLES). */
 const allowedUuids = new Set([
@@ -282,7 +337,8 @@ const allowedSamples = [
   "/lodestone/character/99000001/",
   "<@123456789012345678>",
   "3F2B8C1E-5D4A-4B3C-9E2F-1A0B9C8D7E6F",
-  `permissions=${invitePermissions}`,
+  "https://discord.com/developers/applications", // the Developer Portal link
+  "`discord·gg`, `discord.gg∕x`", // the look-alike separators monitoring.md names
   "backups/tarubot-20260101T000000Z.dump",
 ];
 
@@ -355,14 +411,27 @@ describe("the reference pages cover the code's settings, codes and permissions",
     expect(codes.filter((code) => !replies.includes(`\`${code}\``))).toEqual([]);
   });
 
-  test("the invite link asks for exactly the code's bot permissions plus Manage Channels", async () => {
-    const bits = invitePermissions;
+  test("add-to-server lists exactly the code's bot permissions plus Manage Channels", async () => {
     // Manage Channels is the /setup onboarding addition, not part of the launch set.
     expect(Object.values(requiredBotPermissions)).not.toContain(PermissionFlagsBits.ManageChannels);
-    const invite = await page("admin/add-to-server");
-    expect(invite).toContain(`permissions=${bits}`);
-    const asked = [...invite.matchAll(/permissions=(\d+)/gu)].map((match) => match[1]);
-    expect(new Set(asked)).toEqual(new Set([String(bits)]));
+    const listed = permissionRows(await page("admin/add-to-server"));
+    const expected = [...Object.values(permissionNames), "Manage Channels"];
+    // Each once, none missing and none extra, so the table can't drift from the code either way.
+    expect([...listed].sort()).toEqual([...expected].sort());
+  });
+
+  test("add-to-server keeps what an owner adds the bot with, now that it has no link", async () => {
+    // #54 dropped the invite template; the page must still name the scopes, the privileged intent,
+    // the permission whoever adds the bot needs, and the Public Bot recommendation.
+    const text = await page("admin/add-to-server");
+    const needed = [
+      "`bot`",
+      "`applications.commands`",
+      "**Server Members Intent**",
+      "**Manage Server**",
+      "**Public Bot**",
+    ];
+    expect(needed.filter((phrase) => !text.includes(phrase))).toEqual([]);
   });
 });
 
@@ -402,6 +471,14 @@ describe("the site's links and public content", () => {
     const problems: string[] = [];
     for (const file of await siteFiles()) problems.push(...publicProblems(file, await read(file)));
     expect(problems).toEqual([]);
+  });
+
+  test("the README carries no Discord invite or authorization URL either", async () => {
+    // The README is public too, and its "Run a server" line points at add-to-server.
+    const readme = await read("README.md");
+    expect(
+      inviteGuards.filter(({ pattern }) => pattern.test(readme)).map(({ what }) => what),
+    ).toEqual([]);
   });
 
   test("every public-content guard catches its known-bad samples", () => {

@@ -7,7 +7,7 @@ A Bun/TypeScript Discord bot for Final Fantasy XIV Free Companies. It verifies c
 **The documentation site is <https://deconfined.github.io/tarubot/>.** It describes the latest release on `main`:
 
 - [Use TaruBot](https://deconfined.github.io/tarubot/use/getting-started/): for members and visitors.
-- [Run a server](https://deconfined.github.io/tarubot/admin/add-to-server/): for officers and server managers, including the invite link and permissions.
+- [Run a server](https://deconfined.github.io/tarubot/admin/add-to-server/): for officers and server managers, including adding the bot and the permissions it needs.
 - [Deploy and operate](https://deconfined.github.io/tarubot/deploy/requirements/): for self-hosters, from requirements and installation to updates, backups and monitoring.
 - [Architecture and design](https://deconfined.github.io/tarubot/architecture/overview/): how the bot is built and why.
 - [Reference](https://deconfined.github.io/tarubot/reference/commands/): every command and option, and every reply code.

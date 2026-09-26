@@ -1,21 +1,17 @@
 ---
 title: Add TaruBot to a server
-description: The invite link, the permissions TaruBot needs and why, and where its role must sit.
+description: Who adds TaruBot to a server, the permissions it needs and why, and where its role must sit.
 sidebar:
   order: 1
 ---
 
-These pages are for the officers and managers of a Discord server that uses TaruBot. Every TaruBot deployment runs its own Discord application: you add the one your community runs, using its application ID. If you run TaruBot yourself, [create the application](/tarubot/deploy/discord-application/) first.
+These pages are for the officers and managers of a Discord server that uses TaruBot.
 
-## Invite link
+## Adding the bot
 
-Replace `YOUR_APPLICATION_ID` with the application's ID and open the link as someone with **Manage Server** in the target server:
+Every TaruBot deployment runs its own Discord application, and the application's owner adds the bot to a server. If you run TaruBot yourself, [create the application](/tarubot/deploy/discord-application/) first.
 
-```text
-https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=bot+applications.commands&permissions=402770960
-```
-
-The link asks for the two scopes TaruBot needs, `bot` and `applications.commands`, and the eight permissions below. The application also needs the **Server Members Intent** switched on in the Discord Developer Portal; the deployment's operator does that once.
+The owner adds it with the two scopes TaruBot needs, `bot` and `applications.commands`, and the [permissions](#permissions) below, and needs **Manage Server** in that server. With **Public Bot** off, as recommended, nobody else can add the bot: if someone else runs your deployment, ask them to add it. The application also needs the **Server Members Intent**, which the owner switches on once in the Discord Developer Portal.
 
 ## Gateway intents
 
