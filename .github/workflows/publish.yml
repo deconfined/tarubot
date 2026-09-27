@@ -119,6 +119,11 @@ jobs:
           fi
           echo "Signing ghcr.io/deconfined/tarubot@${DIGEST}"
       - name: Attest build provenance
+        # With no sbom-path and no predicate input, actions/attest v4 runs in its "Provenance" mode
+        # and generates the SLSA build provenance itself (src/detect.ts, detectAttestationType, at
+        # this commit); predicate-type is required only alongside predicate or predicate-path.
+        # Versions before v3 needed a predicate. actions/attest-build-provenance v4 is only a
+        # wrapper around this action, and its README says new implementations should use this one.
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           # The image name without a tag; the digest alone says which image is signed.
