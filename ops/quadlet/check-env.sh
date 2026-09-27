@@ -82,7 +82,9 @@ check_environment() {
 #     assignment (or a comment).
 #   - systemd ignores an `export NAME=` line and a line without "=", which Compose reads.
 #   - ops/deploy.sh and ops/backup.sh find settings with ^NAME=, so an assignment starts its line,
-#     no line inside a quoted value may look like one, and each name is assigned once.
+#     no line inside a quoted value may look like one of theirs, and each name is assigned once.
+#     Every name they read contains "_" (quadlet.test.ts checks it), and base64 never does, so
+#     only a NAME= with "_" is refused inside a value: a PEM line such as "MIIB...==" passes.
 check_syntax() {
   if [ ! -f "$1" ] || [ ! -r "$1" ]; then
     say "cannot read the settings file"
@@ -113,7 +115,7 @@ check_syntax() {
       if (quote == "") key = ""
       if (index($0, "\r")) refuse("a carriage return (CRLF line endings)")
       if (quote != "") {
-        if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/)
+        if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/ && substr($0, 1, index($0, "=") - 1) ~ /_/)
           refuse("a line inside a quoted value that the host scripts would read as a setting")
         quote = quoted($0, quote)
         next

@@ -55,7 +55,7 @@ The unit runs it twice before every start, because systemd reads `.env` again on
   - an inline comment;
   - text after a closing quote;
   - `export`;
-  - an indented assignment, or a line inside a quoted value that looks like one, because deploy.sh and backup.sh find settings with `^NAME=`;
+  - an indented assignment, or a line inside a quoted value that looks like one with a `_` in its name, because deploy.sh and backup.sh find settings with `^NAME=` (every name they read has a `_`, and base64 has none, so PEM lines pass);
   - a name assigned twice;
   - CRLF line endings.
 - **`check-env.sh`** checks the settings systemd read. It requires:

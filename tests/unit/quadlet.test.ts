@@ -14,7 +14,15 @@
  * The hardening itself is pinned beside Compose's in container-hardening.test.ts.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { YAML } from "bun";
@@ -614,6 +622,10 @@ describe("check-env.sh --syntax, the file's lines", () => {
     "  # an indented comment",
     `DATABASE_CA_CERT="-----BEGIN CERTIFICATE-----`,
     MARK,
+    // PEM body lines that look like NAME=: base64 letters and digits, then padding.
+    "MIIBkTCBAAIJAKHBfpegPjMCMA0GCSqGSIb3DQEBBQUAMBExDzANBgNVBAMMBnVu",
+    "Zm9vYmFyYmF6cXV4==",
+    "MIIC0w=",
     `-----END CERTIFICATE-----"`,
     `DISCORD_TOKEN='${MARK}$not#expanded"'  `,
     "GITHUB_REPORTS_TOKEN=",
@@ -646,7 +658,8 @@ describe("check-env.sh --syntax, the file's lines", () => {
         [`; ${MARK}`, "line 1: not NAME=value at the start of the line"],
         [`A=1\nB=2\nA=${MARK}`, "line 3 (A): assigned again (first on line 1)"],
         [`A=${MARK}\r\nB=2`, "line 1: a carriage return"],
-        [`A="${MARK}\nB=${MARK}\n"`, "line 2 (A): a line inside a quoted value"],
+        [`A="${MARK}\nB_C=${MARK}\n"`, "line 2 (A): a line inside a quoted value"],
+        [`A="${MARK}\nTARUBOT_IMAGE_TAG=2.30.0\n"`, "line 2 (A): a line inside a quoted value"],
         [`A=1\nB="${MARK}\n${MARK}`, "line 2 (B): a quoted value that never closes"],
       ];
       for (const [text, message] of cases) {
@@ -669,6 +682,23 @@ describe("check-env.sh --syntax, the file's lines", () => {
       });
     });
   }
+
+  test("every setting the host scripts read has a _ in its name, which base64 never has", () => {
+    // check-env.sh refuses a NAME= line inside a quoted value only when NAME has a "_", so a
+    // multi-line PEM (DATABASE_CA_CERT, GITHUB_APP_PRIVATE_KEY) whose padding line looks like
+    // NAME= still passes. That is safe only while deploy.sh and backup.sh read no name without one.
+    const names = new Set<string>();
+    for (const script of ["ops/deploy.sh", "ops/backup.sh"]) {
+      const text = readFileSync(root(script), "utf8");
+      for (const match of text.matchAll(/\^([A-Za-z_][A-Za-z0-9_]*)=/gu)) names.add(match[1] ?? "");
+      for (const match of text.matchAll(/\$\(setting ([A-Za-z_][A-Za-z0-9_]*)\)/gu))
+        names.add(match[1] ?? "");
+    }
+    expect([...names]).toContain("TARUBOT_IMAGE_TAG");
+    expect([...names]).toContain("BACKUP_STORAGE_SECRET_KEY");
+    for (const name of names)
+      expect({ name, underscore: name.includes("_") }).toEqual({ name, underscore: true });
+  });
 
   test("the repository's settings templates pass, so a host's .env copied from one does too", () => {
     // Every *.env.example at the root, including a staging template once it exists.
