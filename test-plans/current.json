@@ -1,13 +1,13 @@
 {
-  "title": "Session: 2.32.0 staging host layer",
-  "objective": "2.32.0 (#50 part 1) adds the host playbook (AlmaLinux 10, SELinux, rootless Podman), the Quadlet unit, the staging tool profile and signed build provenance. The playbook ran on the staging host only; no bot runs there yet. Nothing changes for members; production restarts for the tool-guard change.",
+  "title": "Session: 2.32.1 maintenance",
+  "objective": "2.32.1 moves the Ansible pip pins to ansible-core 2.16.19 (GHSA-w8p5-mx5w-cpqj; never exposed) and drops Dependabot's always-failing Bun entry. The bot is unchanged: Deploy production should end no-runtime-change.",
   "user": [
-    "Merge, then approve the 2.32.0 Deploy production run (restart path, no migration).",
-    "When convenient: remove staging's stale RSA and ECDSA SSHFP records (sshd offers only Ed25519 now)."
+    "Approve the waiting 2.32.0 Deploy production run first (restart path, no migration).",
+    "Then merge 2.32.1; it should ask nothing (no-runtime-change)."
   ],
   "assistant": [
-    "After the merge: watch the attest job's first real run, then gh attestation verify the signed digest.",
-    "After the deploy: /version shows 2.32.0, readiness holds, and the next nightly backup stays green."
+    "After the 2.32.0 deploy: /version shows 2.32.0 and readiness holds; record it.",
+    "After the 2.32.1 merge: the Dependabot alerts close, and the deploy plan ends no-runtime-change."
   ],
   "bot": [
     "Run 2.32.0 on schema 010; nothing changes for members.",

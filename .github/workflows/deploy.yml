@@ -93,7 +93,9 @@ jobs:
           IMAGE=ghcr.io/deconfined/tarubot
           VER='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
           # Paths that never change what runs in production; every other path is a runtime change.
-          NON_RUNTIME='^(docs/|site/|tests/|test-plans/|\.github/|[^/]+\.md$|docker-compose(\.devbot|\.tools|\.build)?\.yml$|\.env\.example$|production\.env\.example$|staging\.env\.example$|biome\.json$)'
+          # ops/ansible's pip pins feed only CI and the operator's venv: hosts install AlmaLinux's
+          # own ansible-core.
+          NON_RUNTIME='^(docs/|site/|tests/|test-plans/|\.github/|[^/]+\.md$|docker-compose(\.devbot|\.tools|\.build)?\.yml$|\.env\.example$|production\.env\.example$|staging\.env\.example$|ops/ansible/requirements(-lint)?\.txt$|biome\.json$)'
           ALWAYS_RUNTIME='^\.github/workflows/publish\.yml$'
           # Files that run on the host as a docker-group user, or shape its .env.
           HOST_SIDE='^(ops/|docker-compose\.production\.yml$|production\.env\.example$)'

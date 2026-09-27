@@ -113,7 +113,6 @@ Dependabot (`.github/dependabot.yml`) proposes updates, and a maintainer complet
 
 | Updates | Schedule | Pull requests | Maintainer adds |
 | --- | --- | --- | --- |
-| Bun packages (`package.json`, `bun.lock`) | Weekly | Minor and patch updates grouped; majors and `drizzle-orm` separately; at most 3 open | Version commit, plus `bun run format` if a Biome update changes formatting, and the README stack table when a listed package moves |
 | Bun runtime (`oven/bun` in the `Dockerfile`) | Monthly | One per Bun release | The same Bun version in `packageManager`, `engines.bun`, `@types/bun`, and the README stack table; a regenerated `bun.lock`; version commit |
 | PostgreSQL (`docker-compose.yml`) | Monthly | Minor updates only | The same image in `.github/workflows/ci.yml` `services.postgres` and the README stack table; version commit |
 | GitHub Actions | Monthly, after a 7-day cooldown; no security updates, because GitHub raises no Dependabot alerts for SHA-pinned actions | All actions in one PR | Version commit |
@@ -125,9 +124,13 @@ Dependabot does not manage:
 
 - `lodestone-css-selectors`. The bot follows its HEAD live; refresh the bundled set with `bun run selectors:update` on a feature branch. (Nodestone was removed in 2.20.0.)
 - The CI PostgreSQL service image in `ci.yml`, because Dependabot reads only `uses:` lines in workflows.
+- Bun packages (`package.json`, `bun.lock`), since 2.32.1 (below).
+- `ops/ansible/requirements.txt` and `requirements-lint.txt`: hash-pinned with a header Dependabot can't rewrite. Alerts still cover them; regenerate them by hand as their headers describe.
 - PostgreSQL major versions. A new major image starts an empty cluster, so plan the upgrade as a migration.
 
-Until GitHub's Dependabot updater can read Bun 1.4 lockfiles ([dependabot-core#16026](https://github.com/dependabot/dependabot-core/issues/16026)), the Bun packages job fails with `DependencyFileNotSupported`. The advisory **Dependency audit** workflow runs `bun audit` against every locked package, including transitive ones, weekly and on PRs that change `package.json` or `bun.lock`. Until Dependabot recovers, apply package updates through a normal feature branch.
+GitHub's Dependabot updater can't read Bun 1.4 lockfiles ([dependabot-core#16026](https://github.com/dependabot/dependabot-core/issues/16026)), so the Bun packages entry failed with `DependencyFileNotSupported` on every run; 2.32.1 removed it. The advisory **Dependency audit** workflow runs `bun audit` against every locked package, including transitive ones, weekly and on PRs that change `package.json` or `bun.lock`. Apply package updates through a normal feature branch (a version commit, `bun run format` if a Biome update changes formatting, and the README stack table when a listed package moves), and restore the entry once the updater supports the lockfile.
+
+Dependabot **security updates**, the pull requests it opens on its own to fix an alert, are off (@deconfined, 2026-09-27). Like version updates they can't pass the version gate without a maintainer's commit, and their one attempt failed on the hash-pinned Ansible requirements. Dependabot **alerts** stay on.
 
 ### Completing a Dependabot pull request
 
@@ -160,7 +163,7 @@ The required gate for page content is `tests/unit/docs-site.test.ts`, in CI's ch
 
 ## Security reporting and scanning
 
-`.github/SECURITY.md` routes vulnerability reports to GitHub private vulnerability reporting. Secret scanning with push protection and the GitGuardian PR check cover credentials. Dependabot alerts cover published advisories for the direct `package.json` dependencies in the dependency graph, and the **Dependency audit** workflow covers every locked Bun package. SHA-pinned actions receive no alerts, so review action advisories when the monthly Actions update arrives. Dismiss a code-scanning false positive individually with a written justification rather than disabling its query, so the query still protects future code.
+`.github/SECURITY.md` routes vulnerability reports to GitHub private vulnerability reporting. Secret scanning with push protection and the GitGuardian PR check cover credentials. Dependabot alerts cover published advisories for the direct `package.json` dependencies in the dependency graph and for the Ansible pins in `ops/ansible/`, and the **Dependency audit** workflow covers every locked Bun package. SHA-pinned actions receive no alerts, so review action advisories when the monthly Actions update arrives. Dismiss a code-scanning false positive individually with a written justification rather than disabling its query, so the query still protects future code.
 
 The workflows also support manual dispatch. Since 2.30.0 only `main` publishes (the `v*` tag trigger was dropped), and only `main` advances `latest`. PR/main changes must advance the base version. Published versions omit SemVer build metadata (`+...`) and fit Docker's 128-character tag limit so their registry tag is exactly the manifest version.
 

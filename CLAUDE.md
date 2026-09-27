@@ -38,7 +38,7 @@ AGENTS.md holds the repository rules: branching, SemVer, signing, Drizzle, migra
   - It never links or starts the bot. 2.32.0 has no `start` tag; it arrives with 2.33.0's first start.
   - A host applies it to itself (`-c local`, the pull unit from 2.33.0) only from a root-owned checkout `tarubot` can't write, never from `~tarubot/tarubot`.
   - `ansible.cfg` sets `inject_facts_as_vars = False` and points the collection and role paths at `/dev/null`: `ansible.builtin` only, no Galaxy. Host settings are extra vars only (`host.example.yml`), and `vars/layout.yml` only reads them. The real inventory and settings live outside the repository (`inventory.example.yml` is the example).
-  - `requirements.txt` pins ansible-core 2.16.16 (AlmaLinux 10.2's AppStream version) by hash, and `requirements-lint.txt` adds ansible-lint for CI's **Host playbook** job (syntax check, ansible-lint, ShellCheck).
+  - `requirements.txt` pins ansible-core 2.16.19 (the 2.16 series AlmaLinux 10.2's AppStream ships, at its security fixes) by hash, and `requirements-lint.txt` adds ansible-lint for CI's **Host playbook** job (syntax check, ansible-lint, ShellCheck).
 - `ops/quadlet/` (2.32.0): the release's rootless Quadlet unit (`units/tarubot.container`, `units/tarubot.env`), the `production/` and `staging/` targets (a `target.env` and a `50-target.conf` drop-in each), and `check-env.sh` (the `.env` checks; names, never values). No host links it yet: 2.33.0's start tag makes the two links at the DevBot move, and `deploy.sh`'s and `backup.sh`'s Quadlet paths, the backup timer and Podman secrets arrive in 2.33.0. `tests/unit/quadlet.test.ts` keeps the unit in step with `docker-compose.production.yml` (and compares a real generator dry run when `QUADLET_DRYRUN` names one; `ops/quadlet/README.md`).
 - `src/infrastructure/lodestone/`: the Lodestone adapter, in the bot process since 2.21.0 (there is no sidecar and no Nodestone).
   - `client.ts` (`Lodestone`): parse slots (`LODESTONE_CONCURRENCY`, waiting rather than refusing), retries, reachability, and validation of every parsed field.
@@ -61,7 +61,7 @@ CI_BASE_SHA=$(git rev-parse origin/main) bun run ci:version                     
 (cd site && pnpm install --frozen-lockfile && pnpm run build)                       # the site, with its link validator
 ```
 
-The host playbook needs ansible-core 2.16.16 from `ops/ansible/requirements.txt` in a virtual environment (docs/HOSTING.md "Running it from the operator machine"). Its offline check, from `ops/ansible/` with `ANSIBLE_CONFIG="$PWD/ansible.cfg" LC_ALL=C.UTF-8`, is `ansible-playbook --syntax-check -i inventory.example.yml -e @host.example.yml site.yml < /dev/null 2>&1 | cat` (see the staging gotcha for why the redirections).
+The host playbook needs ansible-core 2.16.19 from `ops/ansible/requirements.txt` in a virtual environment (docs/HOSTING.md "Running it from the operator machine"). Its offline check, from `ops/ansible/` with `ANSIBLE_CONFIG="$PWD/ansible.cfg" LC_ALL=C.UTF-8`, is `ansible-playbook --syntax-check -i inventory.example.yml -e @host.example.yml site.yml < /dev/null 2>&1 | cat` (see the staging gotcha for why the redirections).
 
 Run a single file with `bun test tests/unit/<name>.test.ts`. Integration tests need PostgreSQL, so run them through `test:docker`.
 

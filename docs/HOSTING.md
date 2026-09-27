@@ -142,7 +142,7 @@ Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-0
 ### A deploy
 
 1. Merge the release as today. Trying it on DevBot stays manual (GitHub can't reach the dev VM).
-2. When "Publish containers" finishes, GitHub asks you to review "Deploy production". A merge that changes only documentation, tests, CI or the version asks nothing; a quiet Pushover message says so.
+2. When "Publish containers" finishes, GitHub asks you to review "Deploy production". A merge that changes only documentation, tests, CI, the version or the Ansible pip pins (`ops/ansible/requirements*.txt`, used only by CI and the operator's venv) asks nothing; a quiet Pushover message says so.
 3. Open the run and read its summary: the version, commit and image digest, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file, `production.env.example`, which run on the host as a root-equivalent docker-group user), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
 4. **Review deployments** → tick `production` → **Approve and deploy**, or **Reject**. Approval comments are public, like the summary.
 5. One Pushover message reports the outcome.
