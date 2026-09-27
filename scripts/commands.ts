@@ -16,6 +16,7 @@ import { REST, Routes } from "discord.js";
 import { z } from "zod";
 import { loadCommands } from "../src/bot/discovery.js";
 import { assertToolScope, type Deployment, type Launch } from "../src/config/deployment.js";
+import { resolveSettings } from "../src/config/secrets.js";
 import { commandPaths, type CommandOption, inventoryDiff } from "../src/discord/inspection.js";
 import { Failure, id, idSchema, json } from "../src/domain/values.js";
 
@@ -367,7 +368,8 @@ const settingsSchema = z.object({
 
 /**
  * The whole CLI behind an injectable REST factory, so tests can drive the guard and every mode.
- * The guard runs before the REST client exists; the token is never printed.
+ * The guard runs before the REST client exists; the token is never printed. The token may come
+ * from DISCORD_TOKEN_FILE (a Quadlet host's container), resolved into a copy of env.
  */
 export async function run(
   argv: readonly string[],
@@ -377,7 +379,7 @@ export async function run(
 ): Promise<{ deployment: Deployment; result: InventoryReport | ClearResult; exitCode: number }> {
   const mode = parseArguments(argv);
   const deployment = assertToolScope(env, commandToolScope(mode), launch);
-  const parsed = settingsSchema.safeParse(env);
+  const parsed = settingsSchema.safeParse(resolveSettings(env));
   if (!parsed.success)
     throw new Failure(
       "configuration",

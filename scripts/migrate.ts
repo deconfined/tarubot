@@ -13,6 +13,7 @@
  * holds it. Stop the bot before migrating (site/src/content/docs/deploy/operations.md).
  */
 import { assertToolScope, type ToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import { Failure } from "../src/domain/values.js";
 import { Database } from "../src/infrastructure/postgres/database.js";
 
@@ -44,7 +45,8 @@ if (import.meta.main) {
   const args = migrateArguments(process.argv.slice(2));
   // The database must belong to this env's deployment profile before any connection.
   assertToolScope(process.env, migrateToolScope(args));
-  const url = process.env.DATABASE_URL;
+  // DATABASE_URL, or the file DATABASE_URL_FILE names inside a Quadlet host's container.
+  const url = secretSetting(process.env, "DATABASE_URL");
   if (!url) throw new Error("DATABASE_URL is required");
   const db = new Database(url);
   try {

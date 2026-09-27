@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Stand-in for date in tests/unit/backup-quadlet.test.ts: the real GNU date at the fixed time
+# $BACKUP_SIM_NOW (seconds since the epoch), so the backup's stamp and its monthly upload are
+# predictable.
+set -euo pipefail
+for real in /usr/bin/date /bin/date; do
+  if [[ -x $real ]]; then exec "$real" -d "@${BACKUP_SIM_NOW:?}" "$@"; fi
+done
+exit 127

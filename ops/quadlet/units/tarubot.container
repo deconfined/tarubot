@@ -24,6 +24,18 @@ Pull=never
 # the value systemd read from .env, and only when it is set; later files win, and the target's
 # drop-in adds its target.env after this one. .env itself never reaches Podman's parser.
 EnvironmentFile=%h/tarubot/ops/quadlet/units/tarubot.env
+# The secrets (2.33.0) reach the bot as files, never as environment variables, which every
+# dependency in the process could read. ops/quadlet/secrets.sh copies each value from .env into
+# its Podman secret before every start (ExecStartPre below); tarubot.env's NAME_FILE lines tell the
+# bot where to read them. Each file belongs to the image's bun user (uid and gid 1000) and only it
+# may read it. The mount is read-only only because the container is (ReadOnly=true): Podman bind
+# mounts its per-container copy of the secret, and adds ro to that mount only for a read-only
+# container. The GitHub App key is production's alone, in its drop-in.
+Secret=tarubot-database-url,type=mount,target=/run/secrets/database_url,uid=1000,gid=1000,mode=0400
+Secret=tarubot-database-ca-cert,type=mount,target=/run/secrets/database_ca_cert,uid=1000,gid=1000,mode=0400
+Secret=tarubot-discord-token,type=mount,target=/run/secrets/discord_token,uid=1000,gid=1000,mode=0400
+Secret=tarubot-github-reports-token,type=mount,target=/run/secrets/github_reports_token,uid=1000,gid=1000,mode=0400
+Secret=tarubot-healthchecks-ping-url,type=mount,target=/run/secrets/healthchecks_ping_url,uid=1000,gid=1000,mode=0400
 # Nothing from Podman's own environment or a containers.conf default passes through.
 EnvironmentHost=false
 HttpProxy=false
@@ -53,12 +65,20 @@ LogDriver=journald
 # systemd parses the host's one settings file: quoted values may span lines (the PEMs), and no
 # value appears on a command line. The file is required, so a missing .env stops the start.
 EnvironmentFile=%h/tarubot/.env
-# ops/backup.sh's settings never reach Podman, conmon or the bot.
-UnsetEnvironment=BACKUP_STORAGE_ENDPOINT BACKUP_STORAGE_ACCESS_KEY BACKUP_STORAGE_SECRET_KEY BACKUP_STORAGE_REGION HEALTHCHECKS_BACKUP_URL
+# Nothing secret stays in the service's environment, which Podman, conmon and pasta inherit and
+# keep for the container's lifetime: ops/backup.sh's settings, the six secrets (secrets.sh reads
+# them from .env itself), and three names a .env may hold that the bot never needs:
+# POSTGRES_PASSWORD (a local Compose database's) and check-restore's RESTORE_DATABASE_* settings.
+# tests/unit/quadlet.test.ts checks that every name in the settings templates is either listed for
+# the container or unset here, and that ops/deploy.sh and run-tool.sh use this same list.
+UnsetEnvironment=BACKUP_STORAGE_ENDPOINT BACKUP_STORAGE_ACCESS_KEY BACKUP_STORAGE_SECRET_KEY BACKUP_STORAGE_REGION HEALTHCHECKS_BACKUP_URL DATABASE_CA_CERT DATABASE_URL DISCORD_TOKEN GITHUB_APP_PRIVATE_KEY GITHUB_REPORTS_TOKEN HEALTHCHECKS_PING_URL POSTGRES_PASSWORD RESTORE_DATABASE_CA_CERT RESTORE_DATABASE_URL
 # systemd re-reads .env on every start, crash restarts and reboots included, so every start checks
-# it: first the file's lines, then the settings systemd read. Both print names, never values.
+# it: first the file's lines, then the settings systemd read. Then secrets.sh copies the secrets
+# from the file into Podman secrets, replacing the previous ones, and refuses a missing required
+# one. All three print names, never values.
 ExecStartPre=%h/tarubot/ops/quadlet/check-env.sh --syntax %h/tarubot/.env
 ExecStartPre=%h/tarubot/ops/quadlet/check-env.sh
+ExecStartPre=%h/tarubot/ops/quadlet/secrets.sh sync %h/tarubot/.env
 Restart=always
 RestartSec=1s
 # Restarts back off from 1 s to 60 s over six steps.

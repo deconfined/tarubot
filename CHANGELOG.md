@@ -1,6 +1,29 @@
 # Version history
 
-The current application version is **2.32.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.33.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.33.0 — Quadlet deploys, the staging target, Podman secrets and the provenance check
+
+Issue [#50](https://github.com/deconfined/tarubot/issues/50), part 2's runtime half (the pull unit follows as 2.34.0). Nothing changes for members and there is no migration. Production stays on Compose: its Deploy run for 2.33.0 asks for approval as usual and restarts the bot, and its argument-less `deploy.sh` path is behaviorally unchanged. Nobody starts the staging bot in this release; that waits for the DevBot move.
+
+- **Provenance check.** The Deploy plan runs `gh attestation verify` on the release's index digest, with the exact signer identity (`publish.yml` on `refs/heads/main`) and SLSA provenance v1, before any early exit and before either deploy job. An unsigned image is refused as `unattested`. 2.32.0 was the first signed release, so a rollback to 2.30.x now goes through the manual procedure in docs/HOSTING.md.
+- **Staging deploy target.** The workflow is now "Deploy", with a `target` input (production or staging) and a "Deploy staging" job beside production's.
+  - Staging uses a `staging` environment with no reviewers, gated by the repository variable `STAGING_DEPLOY_ENABLED` (unset at merge).
+  - A staging dispatch must be started by @deconfined; both the plan and the host check the actor by login and id.
+  - Notify reports production only, and the production host refuses any title ending " to staging".
+  - The live `deploy.sh` identifies runs by workflow path, title and the "Deploy" job, so the rename doesn't affect production.
+- **Quadlet mode in `ops/deploy.sh`.** `deploy.sh quadlet staging` (staging now) and `deploy.sh quadlet` (production after its rebuild) pin the digest, pull by digest, restart the user unit, wait on the health check, judge the release from journald, and roll back as the Compose path does.
+  - One-off tools run through the target release's own `ops/quadlet/run-tool.sh`.
+  - The Quadlet contract has its own level, `QUADLET_FLOOR=2.33.0`, and a `CAPABILITIES` declaration the plan checks. The Compose FLOOR stays at 2.30.0, and older copies exit 64 on any argument.
+  - Runs share a root-owned host lock, `/run/tarubot/host.lock`, which the 2.34.0 pull unit will hold too.
+- **Podman secrets.** `.env` stays the single source. `ops/quadlet/secrets.sh` reads it itself and syncs the six secrets into Podman secrets at every start and before one-off tools. The unit mounts them read-only under `/run/secrets/`, and `UnsetEnvironment=` keeps 14 settings out of podman's, conmon's and pasta's environments.
+  - `src/config/secrets.ts` resolves `NAME_FILE` alongside `NAME` for the bot, the tools' guard and the scripts, without writing `process.env`.
+  - Self-hosters can use the `_FILE` settings too (the site's configuration page).
+- **Quadlet backups.** `ops/backup.sh quadlet` pipes a hardened, read-only `podman run` pg_dump into `age`. It reads the database secrets as mounted files, and its PostgreSQL image is pinned by digest. It runs from a systemd user timer and service in `ops/systemd/`, never from a Quadlet unit, which would log the plaintext.
+- **The first start.** The playbook's `start` tag is back. It takes a version and a digest verified on the workstation, re-checks the image, labels and commit on the host, links the units from that commit, starts the bot and enables the backup timer. It exists and is tested; it runs at the DevBot move and at production's rebuild. HOSTING.md covers recovering a failed first start.
+- **Tests.** Stub-driven Quadlet scenarios for deploy.sh (health `starting` included), backup.sh and the secrets sync; the workflow's gates, dispatcher rule, provenance refusals and exact signer identity; the playbook's start tag and lock; Podman 5.8.2's generator output for both targets. A throwaway Podman container rehearsed the Quadlet deploy path as far as it can run without credentials.
+- **Staging.** Check mode against the staging host reports only the new tmpfiles lock. The auto-mode classifier refused the real apply during the build, and the agent didn't retry it. After @deconfined's go-ahead, the host layer was applied: two changes, then `changed=0`, and the root-owned lock `tarubot` can only open read-only.
+- **Docs.** HOSTING.md (the provenance check, manual rollbacks, staging deploys, the host lock, Quadlet backups, the first start, owner steps), CI_CD.md ("Deploy workflow"), CONFIGURATION.md ("Secrets from files"), the site's configuration and install pages, CLAUDE.md, AGENTS.md (its quoted rule unchanged; "Deploy production" there means `deploy.yml` for both targets), and REQUIREMENTS.md implementation notes.
 
 ## 2.32.1 — ansible-core 2.16.19; Dependabot trimmed
 

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stand-in for docker in tests/unit/backup-quadlet.test.ts: it records the call, and `compose ...
+# run` writes a dummy dump larger than the backup's size guard, as Compose's backup service would.
+set -euo pipefail
+# shellcheck source=tests/fixtures/backup-stubs/record.sh
+. "$(dirname "$(readlink -f "$0")")/record.sh"
+record docker "$@"
+for arg in "$@"; do
+  if [[ $arg == run ]]; then
+    head -c 8192 /dev/zero | tr '\0' D
+    break
+  fi
+done

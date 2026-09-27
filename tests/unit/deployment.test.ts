@@ -1,11 +1,13 @@
 /**
  * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
  * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
- * and the tracked production and staging env templates. Every refusal is checked to be a
- * configuration Failure that never echoes a secret.
+ * and the tracked production and staging env templates, and the file-delivered secrets (2.33.0).
+ * Every refusal is checked to be a configuration Failure that never echoes a secret.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertAuthenticatedApplication,
@@ -948,6 +950,129 @@ describe("staging (#50)", () => {
   });
 });
 
+describe("file-delivered secrets (#50, 2.33.0)", () => {
+  /**
+   * Write the given settings as files, the way secrets.sh fills a Podman secret (the value and one
+   * newline), run the check with their NAME_FILE paths, and clean up.
+   */
+  function withFiles<T>(
+    values: Record<string, string>,
+    check: (paths: Record<string, string>) => T,
+  ) {
+    const directory = mkdtempSync(join(tmpdir(), "tarubot-guard-secrets-"));
+    try {
+      const paths = Object.fromEntries(
+        Object.entries(values).map(([name, value]) => {
+          const path = join(directory, name.toLowerCase());
+          writeFileSync(path, `${value}\n`);
+          return [`${name}_FILE`, path];
+        }),
+      );
+      return check(paths);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  /** Refused as `refused` checks, and without naming a file path either. */
+  function refusedWithoutPath(action: () => unknown, fragment: string): void {
+    refused(action, fragment);
+    try {
+      action();
+    } catch (error) {
+      expect(String(error)).not.toContain(tmpdir());
+    }
+  }
+
+  test("staging's container reads its database URL and CA from files, as the bot does", () => {
+    // In a Quadlet container the unit unsets the plain names and sets NAME_FILE instead.
+    const url = managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE);
+    withFiles({ DATABASE_URL: url, DATABASE_CA_CERT: CA }, (paths) => {
+      const env = stagingEnv({ DATABASE_URL: undefined, DATABASE_CA_CERT: undefined, ...paths });
+      for (const tool of [scope.migrate, scope.register(DEV_GUILD), scope.preview(DEV_GUILD)])
+        expect(assertToolScope(env, tool, container).name).toBe("staging");
+      // The file's database still has to be staging's own.
+      withFiles({ DATABASE_URL: managedUrl("tarubot") }, (wrong) =>
+        refused(
+          () => assertToolScope({ ...env, ...wrong }, scope.migrate, container),
+          `must be staging's database ${STAGING_DATABASE}`,
+        ),
+      );
+    });
+  });
+
+  test("production reads them from files too, and restore checks fall back to the file's CA", () => {
+    withFiles({ DATABASE_URL: managedUrl("tarubot"), DATABASE_CA_CERT: CA }, (paths) => {
+      const env = productionEnv({ DATABASE_URL: undefined, DATABASE_CA_CERT: undefined, ...paths });
+      expect(assertToolScope(env, scope.import(PRODUCTION_GUILD), direct).name).toBe("production");
+      expect(restoreCertificate(env)).toBe(CA);
+      expect(restoreCertificate({ ...env, RESTORE_DATABASE_CA_CERT: "" })).toBe(CA);
+      expect(restoreCertificate({ ...env, RESTORE_DATABASE_CA_CERT: "fork" })).toBe("fork");
+      // check-restore's second database uses the file's CA as its fallback.
+      expect(
+        assertToolScope(
+          { ...env, RESTORE_DATABASE_URL: managedUrl("tarubot", FORK) },
+          scope.restore,
+          direct,
+        ).name,
+      ).toBe("production");
+    });
+  });
+
+  test("a managed profile refuses an empty or unreadable CA file", () => {
+    // secrets.sh writes an empty value as a lone newline, which reads back as empty.
+    for (const [profile, build] of [
+      ["staging", stagingEnv],
+      ["production", productionEnv],
+    ] as const)
+      withFiles({ DATABASE_CA_CERT: "" }, (paths) => {
+        const env = build({ DATABASE_CA_CERT: undefined, ...paths });
+        refused(
+          () => assertToolScope(env, scope.migrate, container),
+          "DATABASE_CA_CERT must hold the managed cluster's CA certificate",
+        );
+        refusedWithoutPath(
+          () =>
+            assertToolScope(
+              { ...env, DATABASE_CA_CERT_FILE: join(tmpdir(), `tarubot-no-such-${profile}`) },
+              scope.migrate,
+              container,
+            ),
+          "DATABASE_CA_CERT_FILE names a file that can't be read",
+        );
+      });
+  });
+
+  test("setting both forms of one secret is refused, naming both and no value", () => {
+    withFiles(
+      { DATABASE_URL: managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE) },
+      (paths) => {
+        refusedWithoutPath(
+          () => assertToolScope(stagingEnv(paths), scope.migrate, container),
+          "Set DATABASE_URL or DATABASE_URL_FILE, not both.",
+        );
+        // Even the token, which the guard itself doesn't read: every tool reads all six the same way.
+        refusedWithoutPath(
+          () =>
+            assertToolScope(
+              devbotEnv({ DISCORD_TOKEN_FILE: paths.DATABASE_URL_FILE ?? "" }),
+              scope.migrate,
+              direct,
+            ),
+          "Set DISCORD_TOKEN or DISCORD_TOKEN_FILE, not both.",
+        );
+      },
+    );
+    // An empty NAME_FILE counts as unset, so a plain value next to it is fine.
+    expect(
+      assertToolScope(
+        stagingEnv({ DATABASE_URL_FILE: "", DATABASE_CA_CERT_FILE: "" }),
+        scope.migrate,
+        container,
+      ).name,
+    ).toBe("staging");
+  });
+});
+
 describe("templates", () => {
   const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
   const keys = (text: string) =>
@@ -961,12 +1086,16 @@ describe("templates", () => {
     expect(child.exitCode).toBe(0);
     return JSON.parse(child.stdout.toString());
   };
-  /** A Quadlet target list's fixed NAME=value lines (bare names copy from .env and are skipped). */
+  /**
+   * A Quadlet target list's fixed NAME=value lines (bare names copy from .env and are skipped). A
+   * NAME_FILE line names a file that exists only inside the container, so it is skipped too; the
+   * template's plain values stand in for those files here.
+   */
   const fixedValues = async (path: string): Promise<Record<string, string>> =>
     Object.fromEntries(
-      [...(await Bun.file(root(path)).text()).matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)].map(
-        (match) => [match[1] ?? "", match[2] ?? ""],
-      ),
+      [...(await Bun.file(root(path)).text()).matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)]
+        .filter((match) => !(match[1] ?? "").endsWith("_FILE"))
+        .map((match) => [match[1] ?? "", match[2] ?? ""]),
     );
 
   test("(n) production.env.example lists every key and loads as a passing production env", async () => {

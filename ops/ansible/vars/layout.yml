@@ -19,10 +19,41 @@ tb_pubkey_pattern: >-
   ^(ssh-ed25519|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ecdsa-sha2-nistp(256|384|521)|ssh-rsa)
   AAAA[0-9A-Za-z+/]+={0,3}( [^\r\n]*)?$
 
-# The deploy key's forced-command words for each role (ops/deploy.sh's Quadlet modes, #50 part 2).
+# The deploy key's forced-command words for each role (ops/deploy.sh's Quadlet modes, 2.33.0).
 # deploy.sh up to 2.32.x exits 64 on any argument, so until 2.33.0 reaches the host the line fails
 # closed; staging never gets production's argument-less Compose mode.
 tb_deploy_args: "{{ {'staging': 'quadlet staging', 'production': 'quadlet'}[tb_role] | default('') }}"
+
+# The first start (the start tag, 2.33.0): a release and its image index digest, both verified on
+# the workstation first (site.yml's header). Passed with -e only, never kept in host.yml; empty
+# means no start. The first play refuses one without the other, or either malformed.
+tb_start_version: "{{ tarubot_start_version | default('') }}"
+tb_start_digest: "{{ tarubot_start_digest | default('') }}"
+# A release number, exactly as ops/deploy.sh's VERSION reads it, and an image index digest.
+tb_version_pattern: '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
+tb_digest_pattern: '^sha256:[0-9a-f]{64}$'
+# The line a release's ops/deploy.sh declares its contract words on (deploy.sh's CAPABILITY_LINE).
+# The start requires `quadlet`, and on staging `staging`, from the commit it starts: the words say
+# what a release speaks, so no floor number is copied here.
+tb_capability_line: '^readonly CAPABILITIES="([a-z0-9]+( [a-z0-9]+)*)"$'
+# What the bot logs while another writer holds the database lease (src/application/lifecycle.ts).
+# The start waits for it or for a healthy bot: a new host's bot waits there while an old host still
+# runs (production's rebuild by overlap).
+tb_start_marker: Waiting for the database writer lease
+# The bot's image repository; the unit fixes it, and the start pulls it by the verified digest.
+tb_image: ghcr.io/deconfined/tarubot
+
+# The host lock (2.33.0): a root-owned file that systemd-tmpfiles creates
+# (files/tmpfiles-tarubot.conf) and ops/deploy.sh's Quadlet modes hold, as QUADLET_LOCK, around
+# every change. The tarubot play's user-manager commands (daemon-reload, enable, start) run under
+# tb_locked, which waits up to five minutes for it. flock locks belong to an open file, so a
+# command that opened the file again would wait on its own caller: a caller that already holds the
+# lock, such as the pull unit (2.34.0), passes -e tarubot_host_lock_held=true, and tb_locked is
+# then empty. The first play checks that something really holds the lock when the flag is set, and
+# the start refuses the flag.
+tb_host_lock: /run/tarubot/host.lock
+tb_lock_held: "{{ tarubot_host_lock_held | default(false) | bool }}"
+tb_locked: "{{ [] if tb_lock_held | bool else ['flock', '-w', '300', tb_host_lock] }}"
 
 # The layout: fixed, like the paths in ops/quadlet/units/tarubot.container and ops/deploy.sh.
 tb_user: tarubot
@@ -31,12 +62,28 @@ tb_clone: /home/tarubot/tarubot
 tb_repository: https://github.com/deconfined/tarubot.git
 tb_quadlet: /home/tarubot/tarubot/ops/quadlet
 tb_links_dir: /home/tarubot/.config/containers/systemd
-# The release's two links in tb_links_dir, and where they point (ops/quadlet/README.md). 2.33.0's
-# start tag makes them; the playbook only checks them.
+# The release's two links in tb_links_dir, and where they point (ops/quadlet/README.md). Only the
+# start tag makes them; every other run checks them.
 tb_links:
   tarubot: /home/tarubot/tarubot/ops/quadlet/units
   tarubot-target: "/home/tarubot/tarubot/ops/quadlet/{{ tb_role }}"
 tb_generator: /usr/lib/systemd/system-generators/podman-system-generator
+# The backup's user units (2.33.0), which belong to the release like the bot's unit: each is a link
+# in tarubot's user unit directory to the clone's ops/systemd/<unit>, so a deploy's daemon-reload
+# picks up a release's change to them.
+tb_backup_units:
+  - tarubot-backup.service
+  - tarubot-backup.timer
+tb_user_units_dir: /home/tarubot/.config/systemd/user
+# What ~/tarubot/.env loses before check-env.sh reads it, exactly the unit's [Service]
+# UnsetEnvironment= and ops/deploy.sh's UNSET_SETTINGS (the `quadlet` contract, so a release that
+# declares the word has this list): the backup's settings, the secrets and the other secret-bearing
+# names. The start's settings check runs through systemd-run with it, as a deploy's does.
+tb_unset_settings: >-
+  BACKUP_STORAGE_ENDPOINT BACKUP_STORAGE_ACCESS_KEY BACKUP_STORAGE_SECRET_KEY BACKUP_STORAGE_REGION
+  HEALTHCHECKS_BACKUP_URL DATABASE_CA_CERT DATABASE_URL DISCORD_TOKEN GITHUB_APP_PRIVATE_KEY
+  GITHUB_REPORTS_TOKEN HEALTHCHECKS_PING_URL POSTGRES_PASSWORD RESTORE_DATABASE_CA_CERT
+  RESTORE_DATABASE_URL
 
 # Podman units that stay masked for the system and for every user: no API socket or service, and
 # no auto-update (images move only through deploy.sh, by digest).

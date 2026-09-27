@@ -6,6 +6,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import * as schema from "./schema.js";
 import type { PoolClient, QueryResultRow } from "pg";
+import { secretSetting } from "../../config/secrets.js";
 import { Failure } from "../../domain/values.js";
 import { postgresConnection } from "./connection.js";
 
@@ -71,10 +72,14 @@ export class Database {
   healthy = false;
   /**
    * Bound connection/query waits and normalize all database-generated instants to UTC.
-   * `ca` defaults to DATABASE_CA_CERT; a second connection (for example check-restore against a
-   * PITR fork) can supply its own provider CA, and "" forces a connection without a provider CA.
+   * `ca` defaults to DATABASE_CA_CERT, or the file DATABASE_CA_CERT_FILE names on a Quadlet host
+   * (src/config/secrets.ts); a second connection (for example check-restore against a PITR fork)
+   * can supply its own provider CA, and "" forces a connection without a provider CA.
    */
-  constructor(url: string, ca: string | undefined = process.env.DATABASE_CA_CERT) {
+  constructor(
+    url: string,
+    ca: string | undefined = secretSetting(process.env, "DATABASE_CA_CERT"),
+  ) {
     this.pool = new pg.Pool({
       ...postgresConnection(url, ca),
       max: 12,

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# A simulated `systemctl --user` for tests/unit/deploy-script.test.ts, over the host in
+# tests/fixtures/deploy-stubs/sim.sh. Without --user first it fails, as reaching the system
+# manager would. It records the calls that change something in $SIM/calls:
+#
+#   daemon-reload          unit stop           unit restart pin=<release>
+#   unit start pin=<release>                   unit start-no-block pin=<release>
+#
+# where <release> is what .env's digest names (see pin_of). Knobs: system_state (the manager's
+# state, running by default), daemon_reload (fail, fail-once), stop (fail), the start modes up.<release>
+# (sim.sh's start_unit), and backup_unit (tarubot-backup.service's answer to is-active, such as
+# activating:2 for two polls, or unknown for a unit that doesn't exist).
+set -euo pipefail
+# shellcheck source=tests/fixtures/deploy-stubs/sim.sh
+source "$DEPLOY_STUBS/sim.sh"
+trace systemctl "$@"
+[[ ${1-} == --user ]] || exit 1
+shift
+
+case $1 in
+  show)
+    case "$*" in
+      'show -p SystemState --value') printf '%s\n' "$(knob system_state | grep . || printf running)" ;;
+      'show -p NRestarts --value tarubot.service') cat "$S/nrestarts" ;;
+      'show -p ActiveState -p SubState tarubot.service')
+        read -r active sub <"$S/unit"
+        # systemd prints properties in its own order, whatever order -p named them in.
+        printf 'ActiveState=%s\nSubState=%s\n' "$active" "$sub"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  daemon-reload)
+    record daemon-reload
+    case $(knob daemon_reload) in
+      fail) exit 1 ;;
+      fail-once)
+        rm -f "$S/knob/daemon_reload"
+        exit 1
+        ;;
+    esac
+    ;;
+  stop)
+    [[ $2 == tarubot.service ]] || exit 1
+    record "unit stop"
+    if [[ $(knob stop) == fail ]]; then exit 1; fi
+    stop_current
+    ;;
+  restart)
+    [[ $2 == tarubot.service ]] || exit 1
+    record "unit restart pin=$(pin_of)"
+    stop_current
+    start_unit
+    ;;
+  start)
+    if [[ $2 == --no-block && $3 == tarubot.service ]]; then
+      record "unit start-no-block pin=$(pin_of)"
+      start_unit || true
+    elif [[ $2 == tarubot.service ]]; then
+      record "unit start pin=$(pin_of)"
+      start_unit
+    else
+      exit 1
+    fi
+    ;;
+  is-active)
+    [[ $2 == tarubot-backup.service ]] || exit 1
+    answer=$(knob backup_unit)
+    case $answer in
+      *:*)
+        state=${answer%%:*} left=${answer#*:}
+        if ((left > 0)); then
+          printf '%s:%s\n' "$state" "$((left - 1))" >"$S/knob/backup_unit"
+        else
+          state=inactive
+        fi
+        ;;
+      unknown | '') state=inactive ;;
+      *) state=$answer ;;
+    esac
+    printf '%s\n' "$state"
+    # is-active answers 0 only for active, 4 for a unit that doesn't exist, 3 otherwise.
+    if [[ $state == active ]]; then exit 0; fi
+    if [[ $answer == unknown ]]; then exit 4; fi
+    exit 3
+    ;;
+  *) exit 1 ;;
+esac

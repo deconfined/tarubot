@@ -1,9 +1,11 @@
 /**
- * The daily database backup (2.24.0): ops/backup.sh runs on the production host and the production
- * Compose file's `backup` service dumps the database. These pin the properties that keep it safe:
- * strict shell error handling, no unencrypted dump on disk, secrets kept out of process arguments,
- * a failure reported to healthchecks.io, and a service `up` never starts. The live run is recorded
- * in docs/VERIFICATION.md.
+ * The daily database backup (2.24.0): ops/backup.sh runs on the production host and, with no
+ * argument, the production Compose file's `backup` service dumps the database. These pin the
+ * properties that keep it safe: strict shell error handling, no unencrypted dump on disk, secrets
+ * kept out of process arguments, a failure reported to healthchecks.io, and a service `up` never
+ * starts. The live run is recorded in docs/VERIFICATION.md. The Quadlet path (`backup.sh quadlet`,
+ * 2.33.0) and its systemd units are pinned in backup-quadlet.test.ts, which also runs the Compose
+ * path with stand-ins.
  */
 import { expect, test } from "bun:test";
 import { YAML } from "bun";

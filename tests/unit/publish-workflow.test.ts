@@ -14,7 +14,8 @@
  *   token, and only the publish and latest jobs may write packages.
  * - latest waits for attest and promotes the digest the build returned, not a tag.
  *
- * Nothing verifies the signature yet; the deploy plan's `gh attestation verify` is 2.33.0's.
+ * Since 2.33.0 the deploy plan verifies the signature with `gh attestation verify` before either
+ * deploy job (tests/unit/deploy-workflow.test.ts pins its flags).
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";

@@ -8,6 +8,7 @@
  * migration both databases must still report (with this build's checksum for that file) instead.
  */
 import { assertToolScope, restoreCertificate, type ToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import {
   Database,
   MIGRATION_FILE,
@@ -80,7 +81,8 @@ if (import.meta.main) {
     throw new Error(`This build has no migrations/${schemaVersion}.`);
   // Both databases must belong to this env's deployment profile before any connection.
   assertToolScope(process.env, restoreToolScope());
-  const original = process.env.DATABASE_URL;
+  // DATABASE_URL may come from DATABASE_URL_FILE; RESTORE_DATABASE_URL has no file form.
+  const original = secretSetting(process.env, "DATABASE_URL");
   const recovered = process.env.RESTORE_DATABASE_URL;
   if (!original || !recovered)
     throw new Error("DATABASE_URL and RESTORE_DATABASE_URL are required.");

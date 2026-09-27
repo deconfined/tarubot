@@ -1,6 +1,7 @@
 /** Operator CLI: requeue failed/blocked delivery without repeating its committed decision. */
 import { z } from "zod";
 import { assertToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import { id } from "../src/domain/values.js";
 import { audit, Database } from "../src/infrastructure/postgres/database.js";
 import { retryJob } from "../src/jobs/queue.js";
@@ -13,7 +14,8 @@ assertToolScope(process.env, {
   discord: "none",
   databases: ["DATABASE_URL"],
 });
-const url = process.env.DATABASE_URL;
+// DATABASE_URL, or the file DATABASE_URL_FILE names inside a Quadlet host's container.
+const url = secretSetting(process.env, "DATABASE_URL");
 if (!url) throw new Error("DATABASE_URL is required");
 const db = new Database(url);
 try {

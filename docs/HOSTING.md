@@ -4,19 +4,19 @@ Production TaruBot has run on a **Linode Docker host with Linode managed Postgre
 
 The cutover first went live on DigitalOcean App Platform, then moved the same evening, with about 90 seconds of downtime, because **the Lodestone refuses DigitalOcean's addresses**: HTTP 403 at the edge, within milliseconds. From App Platform, Nodestone could not refresh profiles, verify claims or read the roster. Linode's addresses get HTTP 200. [MIGRATION.md](MIGRATION.md#record-of-the-2026-09-24-cutover) has the record. [APP_PLATFORM.md](APP_PLATFORM.md) records the App Platform setup, retired in 2.21.0; the owner has since deleted the app and its cluster (recorded 2026-09-26).
 
-A second Linode, the [staging host](#staging-host-50) (#50), is being built beside it on AlmaLinux with rootless Podman, from the Ansible playbook production will be rebuilt from.
+A second Linode, the [staging host](#staging-host-50) (#50), is being built beside it on AlmaLinux with rootless Podman, from the Ansible playbook production will be rebuilt from. Since 2.33.0 the same Deploy workflow can deploy to it, with no approval, once the owner turns staging deploys on after the DevBot move ([Staging deploys](#staging-deploys-2330)).
 
 ## Layout
 
 | Piece | Where |
 | --- | --- |
-| Host | Linode `tarubot`: us-iad-2, 1 vCPU / 2 GB, Ubuntu 26.04. Reached as `tarubot@<production host>`. The DNS zone carries the host's SSHFP records and is DNSSEC-signed, with its DS record at the parent since 2026-09-26, so validating resolvers set the AD flag on the SSHFP answers. `ssh -o VerifyHostKeyDNS=yes` then trusts a matching key without asking, but only when the machine's own resolver validates and passes the flag on (for example systemd-resolved with DNSSEC on; glibc keeps the flag only with `options trust-ad` in `resolv.conf`). Otherwise OpenSSH only reports the matching fingerprint and asks as usual. The Deploy production workflow never uses DNS: it pins the key in `DEPLOY_KNOWN_HOSTS` (setup step 7). |
+| Host | Linode `tarubot`: us-iad-2, 1 vCPU / 2 GB, Ubuntu 26.04. Reached as `tarubot@<production host>`. The DNS zone carries the host's SSHFP records and is DNSSEC-signed, with its DS record at the parent since 2026-09-26, so validating resolvers set the AD flag on the SSHFP answers. `ssh -o VerifyHostKeyDNS=yes` then trusts a matching key without asking, but only when the machine's own resolver validates and passes the flag on (for example systemd-resolved with DNSSEC on; glibc keeps the flag only with `options trust-ad` in `resolv.conf`). Otherwise OpenSSH only reports the matching fingerprint and asks as usual. The Deploy workflow never uses DNS: it pins the key in `DEPLOY_KNOWN_HOSTS` (setup step 7). |
 | Bot | `~/tarubot` on the host: a clone of this repository, run with [`docker-compose.production.yml`](../docker-compose.production.yml). It has only `tarubot`: no bundled PostgreSQL, no parser sidecar (the Lodestone parser runs inside the bot since 2.21.0), the release pinned by `TARUBOT_IMAGE_TAG`, bounded logs, and since 2.30.3 a read-only root filesystem with no capabilities ([Container hardening](#container-hardening)). |
 | Settings | `~/tarubot/.env` on the host, mode 600, never committed: `TARUBOT_IMAGE_TAG`, `DATABASE_URL`, `DATABASE_CA_CERT`, `DISCORD_TOKEN`, since 2.18.0 `GITHUB_REPORTS_TOKEN` (the issue reporter's token; empty saves reports without sending them), since 2.22.0 `HEALTHCHECKS_PING_URL` (the heartbeat; see below), and since 2.28.0 `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_PRIVATE_KEY` (the TaruBot GitHub App behind `/suggest`; the key is a double-quoted multi-line PEM like the CA, and either one empty switches `/suggest` off; see [Public suggestions](#public-suggestions-the-github-app)). Everything else is fixed in the Compose file: the production application ID, `TARUBOT_ENVIRONMENT=production`, effects on, and no test-guild scoping. |
 | Database | Linode managed PostgreSQL `tarubot-pgsql`, PostgreSQL 18, us-iad-2. Use the **direct port 27520**, never the 27521 pool, which can't hold the writer lease. The login and database are `tarubot`, and `tarubot` owns the database. The admin login `akmadmin` is for provisioning only; the tool guard refuses it. The allow list holds the host and the operator's address. |
 | Settings copy | Encrypted with `age` in `~/tarubot-cutover/env-backups/` on the operator machine (2.23.0; see "Settings copy"). |
 | Backups | A daily encrypted dump at 04:30 UTC, and a settings copy, uploaded to Linode Object Storage `tarubot-backups` (2.24.0; see "Backups and recovery"). |
-| Deploys | The **Deploy production** workflow deploys each published release over SSH once the owner approves it in GitHub (2.30.0; see [Automated deploys](#automated-deploys-2300)). The manual procedure under [Updating to a release](#updating-to-a-release) stays for work by hand. |
+| Deploys | The **Deploy** workflow's production job (the workflow was named "Deploy production" until 2.33.0) deploys each published release over SSH once the owner approves it in GitHub (2.30.0; see [Automated deploys](#automated-deploys-2300)). Since 2.33.0 its plan first verifies the image's signed build provenance ([Provenance check](#provenance-check-2330)). The manual procedure under [Updating to a release](#updating-to-a-release) stays for work by hand. |
 | Operator tools | Run from a clean clone of the deployed release on the operator machine, as `prod dist/scripts/<tool>.js`, with `~/tarubot-cutover/production.env` ([MIGRATION.md](MIGRATION.md#e0-conventions) E0). That file points at the Linode database, with its CA in `DATABASE_CA_CERT`. |
 
 ## Everyday checks
@@ -52,7 +52,7 @@ Since 2.30.3 ([#51](https://github.com/deconfined/tarubot/issues/51)), both prod
 - **What stays the same.** The bot still runs as the image's unprivileged `bun` user. Both containers keep Docker's `docker-default` AppArmor profile, its builtin seccomp filter, and its own `/dev/shm` (which the bot doesn't use). `pg_dump` still runs as the PostgreSQL image's root user, but that user now has no capabilities.
 - **For operators.** `docker compose exec` and `run` in the bot's container can't write files. Most tools only print to stdout, so redirect their output on the host. The everyday checks above and the deploy steps work as before. The change takes effect when the container is recreated, which the next deploy does, since the Compose file changed.
 - **The two tools that write a file.** `preview.js --output` (the grandfathering plan) and `snapshot.js --output` fail with `EROFS` in the container, after their Discord and database reads. Production runs them from the operator clone ([MIGRATION.md](MIGRATION.md#e0-conventions) E0), not in the container, so nothing changes there. In a container, give that one run a writable bind mount and point `--output` into it, as the site's [maintenance tools page](../site/src/content/docs/deploy/tools.md#previewjs) shows. The host directory must be writable by uid 1000, the image's `bun` user.
-- **Rolling back.** The Deploy production workflow's rollback checks out the older release's commit (`git reset --keep` in `ops/deploy.sh`), so it brings back that release's Compose file and Docker's defaults. The manual [rollback](#updating-to-a-release) only re-pins `TARUBOT_IMAGE_TAG`, so it keeps these settings. That is safe for every release it can reach on schema 010 (2.29.0 and later): their runtime code makes no file writes, and 2.30.0 ran unchanged under these settings in throwaway containers.
+- **Rolling back.** The Deploy workflow's rollback checks out the older release's commit (`git reset --keep` in `ops/deploy.sh`), so it brings back that release's Compose file and Docker's defaults. The manual [rollback](#updating-to-a-release) only re-pins `TARUBOT_IMAGE_TAG`, so it keeps these settings. That is safe for every release it can reach on schema 010 (2.29.0 and later): their runtime code makes no file writes, and 2.30.0 ran unchanged under these settings in throwaway containers.
 
 ## Heartbeat
 
@@ -103,7 +103,7 @@ Since 2.28.0 (REQUIREMENTS.md "Approved public-suggestion amendments"), `/sugges
 
 ## Updating to a release
 
-Releases are published by the repository's `Publish containers` workflow. Try each one on DevBot before production. Since 2.30.0 the **Deploy production** workflow deploys them after your approval in GitHub ([Automated deploys](#automated-deploys-2300)); the procedure below stays for work by hand, and automated runs refuse while you do it.
+Releases are published by the repository's `Publish containers` workflow. Try each one on DevBot before production. Since 2.30.0 the **Deploy** workflow deploys them after your approval in GitHub ([Automated deploys](#automated-deploys-2300)); the procedure below stays for work by hand, and automated runs refuse while you do it. A deploy by hand still needs the owner's explicit go-ahead.
 
 **A release without a migration:**
 
@@ -133,27 +133,65 @@ docker compose -f docker-compose.production.yml up -d --wait --remove-orphans
 
 The `pg` helper and the writer-lease gate are MIGRATION.md's [E0 conventions](MIGRATION.md#e0-conventions), with Linode's values: `PGHOST` is the cluster host, `PGPORT=27520`, `PGUSER=tarubot`, and `PGSSLROOTCERT=/work/linode-ca.crt` (the cluster CA, saved in `~/tarubot-cutover/work/`).
 
-**Rollback** means pinning the previous `TARUBOT_IMAGE_TAG` and running `up -d --wait` again. That only works when no migration lies between the two releases. After a migration, the way back is a fix release or a restore. Rolling back past 2.21.0 also needs the older Compose file, which still has the sidecar: check out that release's commit in `~/tarubot` before `up -d --wait`. Releases carry no Git tags; the commit is the image's `org.opencontainers.image.revision` label (`docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' ghcr.io/deconfined/tarubot:X.Y.Z`). The Deploy production workflow rolls back to releases from 2.30.0 on (`rollback=true`), on the same schema only.
+**Rollback** means pinning the previous `TARUBOT_IMAGE_TAG` and running `up -d --wait` again. That only works when no migration lies between the two releases. After a migration, the way back is a fix release or a restore. Rolling back past 2.21.0 also needs the older Compose file, which still has the sidecar: check out that release's commit in `~/tarubot` before `up -d --wait`. Releases carry no Git tags; the commit is the image's `org.opencontainers.image.revision` label (`docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' ghcr.io/deconfined/tarubot:X.Y.Z`). The Deploy workflow rolls back (`rollback=true`) on the same schema only, and since 2.33.0 only to releases with signed build provenance, 2.32.0 and later: an older one (2.30.x) is refused `unattested` and goes back by hand, below.
+
+### Rolling back to a release without provenance (before 2.32.0)
+
+`publish.yml` signs build provenance from 2.32.0 on, and a signature can't be made honestly for an older image afterwards, so since 2.33.0 the Deploy plan refuses every release before 2.32.0 (`unattested`), for a rollback and for an `already-live` re-check alike. Of the releases the workflow could roll back to before (2.30.0 and later, on schema 010), that leaves 2.30.0 to 2.30.4 (2.31.0 was skipped) to this procedure. Staging never needs it: its floor is 2.33.0. It is a deploy by hand, so it needs the owner's explicit go-ahead, and only on the same schema (no migration file between the two releases).
+
+The plan's check stood in for trusting the registry: any workflow in this repository could move a version tag. By hand, the digest comes from a record made when the release was published instead:
+
+1. **Find the recorded digest and commit.** The release's own Deploy run summary shows them (its **Image** row, `ghcr.io/deconfined/tarubot@sha256:…`, and its **Commit**); for a release that never needed a deploy, such as 2.30.4, its Publish containers run's log does. [VERIFICATION.md](VERIFICATION.md) records some too. Don't take them from the registry now.
+2. **Check that the registry still agrees,** from the operator machine: both tags must name the recorded digest, or stop, because a tag moved.
+
+   ```sh
+   for t in X.Y.Z sha-<commit>; do
+     docker buildx imagetools inspect "ghcr.io/deconfined/tarubot:$t" --format '{{json .Manifest}}' | jq -r .digest
+   done
+   ```
+
+3. **On the host,** move the clone and the pin, and pull, without restarting yet: `cd ~/tarubot && umask 077 && git reset --keep <commit>`, then `sed -i 's/^TARUBOT_IMAGE_TAG=.*/TARUBOT_IMAGE_TAG=X.Y.Z/' .env` and `docker compose -f docker-compose.production.yml pull`.
+4. **Check what was pulled:** `docker image inspect ghcr.io/deconfined/tarubot:X.Y.Z --format '{{json .RepoDigests}}'` must include `ghcr.io/deconfined/tarubot@<recorded digest>`, and the image's labels must name X.Y.Z and the commit. Otherwise put the clone and the pin back and stop.
+5. **Start it:** `docker compose -f docker-compose.production.yml up -d --wait --remove-orphans`, then check readiness, and register and read back the commands as after any manual deploy: `docker compose -f docker-compose.production.yml exec -T tarubot bun dist/scripts/register.js --global`, then `commands.js list` the same way, which must exit 0.
+
+Afterwards the workflow deploys forward as usual: the older release's `ops/deploy.sh` speaks the same command contract, and it checks that the pin names the running release. Re-registering that release's commands through the workflow is refused `unattested` too, so repeat step 5's registration by hand if needed.
 
 ## Automated deploys (2.30.0)
 
-Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"), the **Deploy production** workflow (`.github/workflows/deploy.yml`) deploys each published release to this host once @deconfined approves it in GitHub. That approval is the go-ahead for a production deploy. What agents may and may not do around it is REQUIREMENTS.md's "Agent rule" (verbatim in AGENTS.md), which @deconfined confirmed in full on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)): among its clauses, Claude sessions never approve, reject or bypass a deployment and never hold the deploy key. The workflow's jobs, environments and settings are in [CI_CD.md](CI_CD.md#deploy-production); this section is the host side and what to do.
+Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"), the **Deploy** workflow (`.github/workflows/deploy.yml`, named "Deploy production" until 2.33.0) deploys each published release to this host once @deconfined approves it in GitHub. That approval is the go-ahead for a production deploy. What agents may and may not do around it is REQUIREMENTS.md's "Agent rule" (verbatim in AGENTS.md), which @deconfined confirmed in full on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)): among its clauses, Claude sessions never approve, reject or bypass a deployment and never hold the deploy key. The rule's "Deploy production workflow" is this file, whatever its display name. The workflow's jobs, environments and settings are in [CI_CD.md](CI_CD.md#deploy-workflow); this section is the host side and what to do. Since 2.33.0 the same workflow also has a staging job, which needs no approval; [Staging deploys](#staging-deploys-2330) covers it, and production's path described here doesn't change, apart from the [provenance check](#provenance-check-2330) in the plan.
 
 ### A deploy
 
 1. Merge the release as today. Trying it on DevBot stays manual (GitHub can't reach the dev VM).
-2. When "Publish containers" finishes, GitHub asks you to review "Deploy production". A merge that changes only documentation, tests, CI, the version or the Ansible pip pins (`ops/ansible/requirements*.txt`, used only by CI and the operator's venv) asks nothing; a quiet Pushover message says so.
-3. Open the run and read its summary: the version, commit and image digest, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file, `production.env.example`, which run on the host as a root-equivalent docker-group user), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
+2. When "Publish containers" finishes, a Deploy run plans the release, and GitHub asks you to review its `production` deployment. A merge that changes only documentation, tests, CI, the version, the settings templates or the Ansible pip pins (`ops/ansible/requirements*.txt`, used only by CI and the operator's venv) asks nothing; a quiet Pushover message says so. The plan first verifies the image's signed provenance, and an image that fails it is never planned ([Provenance check](#provenance-check-2330)).
+3. Open the run and read its summary: the targets (production, and staging beside it once staging deploys are on), the version, commit and image digest, the "Provenance verified" line, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file, `production.env.example` and `staging.env.example`: on this Docker host they run as a docker-group user, which is root-equivalent here; on the staging host as the unprivileged `tarubot` user under rootless Podman; `ops/ansible/` runs as root when the playbook is applied), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
 4. **Review deployments** → tick `production` → **Approve and deploy**, or **Reject**. Approval comments are public, like the summary.
 5. One Pushover message reports the outcome.
 
-**By hand:** **Run workflow** on `main` with a version. The live version is re-verified and its commands registered again (`already-live`), which is also the retry after `commands-failed`. A rollback ticks `rollback` and names the live version in `from`; it goes only to an older release (2.30.0 or later) on the same schema. The same approval follows.
+**By hand:** **Run workflow** on `main` with a version, and `target` left at `production`. The live version is re-verified and its commands registered again (`already-live`), which is also the retry after `commands-failed`. A rollback ticks `rollback` and names the live version in `from`; it goes only to an older release (2.32.0 or later, which carry provenance; older ones [by hand](#rolling-back-to-a-release-without-provenance-before-2320)) on the same schema. The same approval follows. The run is titled `Deploy <version>` (or `… rollback from <from>`), and the production host refuses every title that ends in ` to staging`.
 
 Several requests may wait at once. Approve the newest; an older one approved later ends as `superseded` and changes nothing. Reject stale requests, or let them expire after 30 days.
 
+### Provenance check (2.33.0)
+
+Since 2.32.0, `publish.yml` signs each image's build provenance ([CI_CD.md](CI_CD.md#signed-build-provenance)), and since 2.33.0 the plan verifies it before anything else can use the digest: before the "nothing to deploy" exit and before either deploy job. It runs, anonymously except for the job's own token (the package is public, so there is no registry login):
+
+```sh
+gh attestation verify "oci://ghcr.io/deconfined/tarubot@<digest>" --repo deconfined/tarubot \
+  --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+  --source-ref refs/heads/main --source-digest <commit> \
+  --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners --format json
+```
+
+It must exit 0 with at least one verified attestation. The summary then says `Provenance verified: publish.yml on refs/heads/main, commit <commit>`. Otherwise the plan fails `unattested`, and no environment is touched. The check proves that `main`'s own `publish.yml` built exactly this digest from this commit on a GitHub-hosted runner. Any workflow in the repository can move a GHCR tag, but none but that one can make this signature, so an approval no longer trusts the digest a tag names. The signer is named by the certificate's exact identity (`--cert-identity`), never by `--signer-workflow`: gh turns that flag into a pattern anchored only at its start, so a workflow named, say, `publish.yml-canary.yml` on `main` would pass it too (checked on 2.32.1's image with a truncated name).
+
+- **A temporary failure.** gh also exits 1 on a network or signature-root (TUF) error, so `unattested` may be temporary. Re-runs are refused, so retry with a new dispatch of the same version.
+- **Releases before 2.32.0** carry no attestation and are always refused: roll back to them [by hand](#rolling-back-to-a-release-without-provenance-before-2320).
+- **By hand.** The same command, without `--format json`, checks any later image from a workstation with a `gh` login (gh asks for a token even for a public repository); it prints nothing on success without a terminal. The first start on a Quadlet host takes a digest checked this way ([The first start](#the-first-start-the-start-tag)).
+
 ### What the host does
 
-The deploy key's line in the `tarubot` user's `~/.ssh/authorized_keys` forces every connection to `ops/deploy.sh` (`restrict,command=`): no shell, no file transfer, no forwarding. The script accepts exactly `deploy <version> <commit> <digest> <run>` or `rollback <version> <commit> <digest> <run> <from>` and starts a detached worker for that run, so a dropped connection reconnects to the same run. At most four workers run at once; beyond that a new run is refused `too-many-runs` before it gets a run directory. The worker:
+The deploy key's line in the `tarubot` user's `~/.ssh/authorized_keys` forces every connection to `ops/deploy.sh` (`restrict,command=`): no shell, no file transfer, no forwarding. The script accepts exactly `deploy <version> <commit> <digest> <run>` or `rollback <version> <commit> <digest> <run> <from>` and starts a detached worker for that run, so a dropped connection reconnects to the same run. At most four workers run at once; beyond that a new run is refused `too-many-runs` before it gets a run directory. On this host the forced command has no arguments, which selects the Compose mode described here; since 2.33.0 a Quadlet host's line adds `quadlet` or `quadlet staging` ([Quadlet mode](#the-quadlet-mode-of-opsdeploysh)), and any other words print the usage line and exit 64. The worker:
 
 1. **Checks the approval** with GitHub's public API: the run is `deploy.yml` on `main`, in progress, first attempt, titled with this target, with its Deploy job running, and approved by @deconfined (by login and account id) for `production`. A copied key alone deploys nothing. A run refused here (`not-approved`, `approval-unverified`, `missing-tool`, or `worker-not-started`) isn't final: nothing happened in it, so the next request for that run id, from the workflow or anyone else, starts it over. A request sent before your approval therefore can't block the approved run.
 2. **Checks that no manual work is in progress** (nothing changes yet): the host lock (another deploy; it waits up to 5 minutes); the clone on `main` with no tracked change; `.env` a regular file, mode 600, with one plain `TARUBOT_IMAGE_TAG` line, no `TARUBOT_IMAGE`, and `LOG_LEVEL` unset or at most `info` (the container logs are the writer-lease evidence); Docker answering and 2 GB free; exactly one `tarubot` container, running or restarting, whose release is the pinned one; no `backup` container running (it waits up to 5 minutes); and the target commit on `main`, carrying the version, at or above 2.30.0.
@@ -198,16 +236,18 @@ The deploy never prunes images, so the previous release stays available. Past ma
 - `worker-died`: see [When the worker dies](#when-the-worker-dies).
 - `unexpected-error`: a command failed where the script didn't expect it, after something had changed; read `worker.log`.
 
-**Refusal reasons:** `not-approved` (includes a re-run, and a run cancelled or a Deploy job ended before the first change), `approval-unverified` (GitHub's API didn't answer; anonymous calls are limited to 60 an hour per address, and a run makes five), `busy` (another deploy over 5 minutes, or a backup running over 5 minutes), `too-many-runs` (four workers already running: look for stray requests in `entry.log`), `clone-not-clean`, `env-file`, `log-level`, `host`, `bot-not-running`, `manual-change-in-progress` (the pin isn't the running release), `live-unknown`, `fetch-failed`, `not-on-main`, `version-mismatch`, `below-floor`, `commit-mismatch`, `not-descendant`, `applied-migration-changed`, `live-changed` (a rollback's `from` isn't live), `rollback-not-older`, `rollback-across-migration`, `pull-failed`, `digest-mismatch` (the tag moved after the plan), `label-mismatch`, `clone-reset`, `compose-config` (the host's `.env` lacks a setting the new Compose file requires), `missing-tool` (`jq` or `curl`), `worker-not-started`, and `unexpected-error` when nothing had changed yet (after a change it is `needs-you`). `not-approved`, `approval-unverified`, `missing-tool` and `worker-not-started` start over on the next request for the same run.
+**Refusal reasons:** `not-approved` (includes a re-run, and a run cancelled or a Deploy job ended before the first change), `approval-unverified` (GitHub's API didn't answer; anonymous calls are limited to 60 an hour per address, and a run makes five), `busy` (another deploy over 5 minutes, or a backup running over 5 minutes), `too-many-runs` (four workers already running: look for stray requests in `entry.log`), `clone-not-clean`, `env-file`, `log-level`, `host`, `bot-not-running`, `manual-change-in-progress` (the pin isn't the running release), `live-unknown`, `fetch-failed`, `not-on-main`, `version-mismatch`, `below-floor`, `commit-mismatch`, `not-descendant`, `applied-migration-changed`, `live-changed` (a rollback's `from` isn't live), `rollback-not-older`, `rollback-across-migration`, `pull-failed`, `digest-mismatch` (the tag moved after the plan), `label-mismatch`, `clone-reset`, `compose-config` (the host's `.env` lacks a setting the new Compose file requires), `missing-tool` (`jq` or `curl`), `worker-not-started`, and `unexpected-error` when nothing had changed yet (after a change it is `needs-you`). `not-approved`, `approval-unverified`, `missing-tool` and `worker-not-started` start over on the next request for the same run. A Quadlet host adds `quadlet-config`, `settings-missing`, `hardening-mismatch` and `pin-failed` (the pin failed before anything restarted), and `needs-you` `hardening-mismatch` after a start ([Quadlet mode](#the-quadlet-mode-of-opsdeploysh)).
 
-**When no result arrives** the workflow reports: `host-key` (the host key changed: check the host before updating `DEPLOY_KNOWN_HOSTS`), `key-rejected`, `known-hosts` or `no-key` (the production environment's settings), `unreachable` (every attempt for 80 minutes failed before sshd answered, so nothing started), `bad-request` (the host refused the command format), or `outcome-unknown` (the host may have been reached, or the run outlasted the reconnect window). With `outcome-unknown`, the host's run directory is authoritative: the worker carries on alone, and `runs/<run id>/public.log` ends with its result.
+**Plan refusals** reach no host: the plan job fails with an error that names the check, and for a production run the Pushover message names the reason. `unattested` (the [provenance check](#provenance-check-2330)), `gate` (no requested target's environment passed its gate), `dispatcher` (a staging dispatch by anyone but @deconfined), `below-floor` (a staging-only run whose release doesn't declare Quadlet staging deploys), `target`, `version`, `version-mismatch`, `from`, `image`, `digest-mismatch` (the version and `sha-` tags name different images), `not-on-main`, `compare`, `compare-too-large`, `applied-migration-changed`, `rollback-not-older` and `rollback-across-migration`. `paused` isn't a failure: the requested target's switch is off, so nothing is planned.
+
+**When no result arrives** the workflow reports: `host-key` (the host key changed: check the host before updating `DEPLOY_KNOWN_HOSTS`), `key-rejected`, `known-hosts` or `no-key` (the deploy environment's settings), `unreachable` (every attempt for 80 minutes, 5 on staging, failed before sshd answered, so nothing started), `bad-request` (the host refused the command format), or `outcome-unknown` (the host may have been reached, or the run outlasted the reconnect window). With `outcome-unknown`, the host's run directory is authoritative: the worker carries on alone, and `runs/<run id>/public.log` ends with its result.
 
 ### Logs on the host
 
 Everything lives under `~/.local/state/tarubot-deploy/`, which the script creates (mode 700):
 - `runs/<run id>/`: `public.log` (the lines GitHub showed), `result`, `step` (the last step reached), `request`, `lock`, and `worker.log`, every tool's output (Git, Compose, `backup.sh`, `migrate.js`, `register.js`, `commands.js`). `worker.log` is private: the command read-back names guilds.
 - `entry.log`: each run's start, runs that started over, refused requests (sanitized to one line) and entry errors, kept to its last megabyte.
-- `lock`: the host lock that runs one deploy at a time.
+- `lock`: the host lock that runs one deploy at a time. A Quadlet host holds `/run/tarubot/host.lock` instead ([The host lock](#the-host-lock)).
 
 Finished runs are pruned after 90 days, and runs refused before the approval was confirmed after 10 minutes. `cat ~/.local/state/tarubot-deploy/runs/<run id>/public.log` shows a run's result on the host.
 
@@ -224,17 +264,20 @@ A host reboot, the OOM killer or a kill ends the worker without a result. The ne
 | `migrated`, `up` | `.env` pins the new release on the new schema. | `up -d --wait --remove-orphans`. |
 | `commands` | The new release is live. | Run the workflow with its version. |
 
+On a Quadlet host the same steps apply with `systemctl --user` in place of Compose, with one difference: a restart moves the pin (`TARUBOT_IMAGE_TAG` and `TARUBOT_IMAGE_DIGEST`) before it restarts, so after `up` `.env` already names the target, and systemd starts whatever `.env` names, at a reboot too. To go back there, put the clone and both pin lines back to the previous release (`git reset --keep <commit>`, the tag and the index digest), then `systemctl --user daemon-reload && systemctl --user restart tarubot.service`. A migration moves the pin only after "Schema ready.", as on Compose.
+
 ### Pause, stop and kill
 
-- **Pause:** delete the repository variable `DEPLOY_ENABLED` (Settings → Secrets and variables → Actions → Variables → Repository variables, or `gh variable delete DEPLOY_ENABLED`). Nothing new plans, and a request already waiting ends `refused` `paused` if you approve it. Setting it back to `true` (`gh variable set DEPLOY_ENABLED --body true`) resumes. This holds only while the `production` environment has no `DEPLOY_ENABLED` of its own: inside the deploy job such a copy overrides the repository variable, so a waiting request would still go ahead ([setup](#setting-it-up-owner) step 12).
-- **Stop:** `gh workflow disable deploy.yml`.
-- **Kill:** delete the deploy key's line from `authorized_keys`, or the `DEPLOY_SSH_KEY` secret.
+- **Pause:** delete the repository variable `DEPLOY_ENABLED` (Settings → Secrets and variables → Actions → Variables → Repository variables, or `gh variable delete DEPLOY_ENABLED`). Nothing new plans, and a request already waiting ends `refused` `paused` if you approve it. Pushover still reports that, and any other outcome of a run that planned while the switch was on: the plan decides whether a run gets a message when it starts, never when notify runs. Setting it back to `true` (`gh variable set DEPLOY_ENABLED --body true`) resumes. This holds only while the `production` environment has no `DEPLOY_ENABLED` of its own: inside the deploy job such a copy overrides the repository variable, so a waiting request would still go ahead ([setup](#setting-it-up-owner) step 12).
+- **Pause staging only:** delete the repository variable `STAGING_DEPLOY_ENABLED` the same way. Production's switch is separate, so this never touches production, and pausing production leaves staging running. With both unset, the plan doesn't run at all.
+- **Stop:** `gh workflow disable deploy.yml` (both targets).
+- **Kill:** delete the deploy key's line from `authorized_keys`, or the `DEPLOY_SSH_KEY` secret of the environment concerned (`production` or `staging`; each host has its own key).
 - **Cancelling a run in GitHub stops a host run only before its first change,** when the host checks the run again (`refused` `not-approved`, nothing changed). After that it finishes on its own, and its result stays in its run directory.
 - **Don't approve while you work by hand.** Automated runs refuse while the bot is stopped or the pin differs from the running release, but not every manual step shows.
 
 ### Setting it up (owner)
 
-Each step is the owner's, with the owner's go-ahead; Claude prepares the commands only. **Status (2026-09-26):** steps 1 to 13 are done. Steps 1, 4, 5 (the line names `/opt/tarubot/tarubot/ops/deploy.sh`, and `authorized_keys` is mode 600) and 7 to 11 came before the 2.30.0 merge; after it, the hand deploy (step 2), the prerequisites (step 3), the key probe (step 6), `DEPLOY_ENABLED` (step 12, on the second try) and the first run (step 13). Step 14 followed with 2.30.1 (run 36253924529, `deployed`), and 2.30.2 and 2.30.3 went the same way; no migration release has gone through the workflow yet. Since step 11 the dev VM's `gh` token is read-only, so the `gh secret set` and `gh variable set` commands below need a token with write access; the same settings can be made in the web UI (Settings → Environments → the environment, or Settings → Secrets and variables → Actions → Variables → Repository variables for `DEPLOY_ENABLED`).
+Each step is the owner's, with the owner's go-ahead; Claude prepares the commands only. **Status (2026-09-26):** steps 1 to 13 are done. Steps 1, 4, 5 (the line names `/opt/tarubot/tarubot/ops/deploy.sh`, and `authorized_keys` is mode 600) and 7 to 11 came before the 2.30.0 merge; after it, the hand deploy (step 2), the prerequisites (step 3), the key probe (step 6), `DEPLOY_ENABLED` (step 12, on the second try) and the first run (step 13). Step 14 followed with 2.30.1 (run 36253924529, `deployed`), and 2.30.2, 2.30.3 and 2.32.0 went the same way; no migration release has gone through the workflow yet. These steps are production's; staging's environment, key and switch are in [Owner steps before the move](#owner-steps-before-the-move). Since step 11 the dev VM's `gh` token is read-only, so the `gh secret set` and `gh variable set` commands below need a token with write access; the same settings can be made in the web UI (Settings → Environments → the environment, or Settings → Secrets and variables → Actions → Variables → Repository variables for `DEPLOY_ENABLED`).
 
 1. **Before the 2.30.0 pull request merges,** create the environments in Settings → Environments:
    - `production`: required reviewer `deconfined` only; "Prevent self-review" **off**; "Allow administrators to bypass configured protection rules" **off**; deployment branches "Selected branches and tags" with the branch rule `main` only; no wait timer.
@@ -282,7 +325,7 @@ Each step is the owner's, with the owner's go-ahead; Claude prepares the command
    gh variable set DEPLOY_KNOWN_HOSTS --env production --body "$kh"
    ```
 
-   `DEPLOY_KNOWN_HOSTS` is exactly one line: the `DEPLOY_HOST` name, `ssh-ed25519` and the key, with no comment. The workflow never trusts DNS for the key. Both are variables, so every deploy run's public log shows them (GitHub masks only secrets); the name isn't secret ([CI_CD.md](CI_CD.md#deploy-production)). The agent's read-only token can't read back the values set on 2026-09-26: if the first run stops with `known-hosts`, look for a trailing comment.
+   `DEPLOY_KNOWN_HOSTS` is exactly one line: the `DEPLOY_HOST` name, `ssh-ed25519` and the key, with no comment. The workflow never trusts DNS for the key. Both are variables, so every deploy run's public log shows them (GitHub masks only secrets); the name isn't secret ([CI_CD.md](CI_CD.md#deploy-workflow)). The agent's read-only token can't read back the values set on 2026-09-26: if the first run stops with `known-hosts`, look for a trailing comment.
 8. **Pushover:** create an application "TaruBot deploys", then `gh secret set PUSHOVER_TOKEN --env notify` and `gh secret set PUSHOVER_USER --env notify`.
 9. **Check the secrets:** `gh secret list` shows only `CLAUDE_CODE_OAUTH_TOKEN` at repository level; `gh secret list --env production` shows `DEPLOY_SSH_KEY`; `gh secret list --env notify` shows both Pushover secrets.
 10. **Firewall:** attach the Cloud Firewall with TCP 22 from all sources, plus ICMP (done 2026-09-26).
@@ -304,7 +347,7 @@ The cluster's weekly maintenance runs Tuesdays from 19:00 UTC for up to 4 hours.
 
 ### Daily dumps
 
-`ops/backup.sh` runs at 04:30 UTC from the `tarubot` user's crontab on the host:
+`ops/backup.sh` runs at 04:30 UTC from the `tarubot` user's crontab on this host (a Quadlet host runs `ops/backup.sh quadlet` from a systemd user timer instead: [below](#backups-on-a-quadlet-host-2330)):
 1. `pg_dump` runs in the pinned PostgreSQL 18 image, through the production Compose file's `backup` service. The service sits behind a profile, so `up` never starts it. It uses the bot's database URL and CA. Its logging is off, because a logging driver would copy the unencrypted dump on stdout to disk.
 2. The dump streams straight into `age`, encrypted for [`ops/age-recipients.txt`](../ops/age-recipients.txt). No unencrypted dump touches the disk, and the host can't decrypt what it wrote.
 3. `curl` uploads it with SigV4 signing to `daily/`, and also to `monthly/` on the 1st.
@@ -372,6 +415,21 @@ Compare the result with `check-restore.js`, then stop the bot and point `DATABAS
 **Before a manual migration** keep taking an independent `pg_dump` on the operator machine, as in the migration procedure above. Running `~/tarubot/ops/backup.sh` on the host right before also puts a fresh copy off-site. An automated deploy runs `ops/backup.sh` on the host after it stops the bot and names the object (`daily/tarubot-<UTC time>.dump.age`) in its result; that extra run also resets the "TaruBot backups" check's daily timer, which the 04:30 run then keeps as usual. The 2026-09-24 cutover left `pre-activation.dump` and `move-to-linode.dump` in `~/tarubot-cutover/work/backups/`.
 
 **Restore checks:** `check-restore.js` compares a restored copy with the source. The production profile accepts `tarubot` on another host, such as a new cluster, or `tarubot_restore` on the same host.
+
+### Backups on a Quadlet host (2.33.0)
+
+On a Quadlet host (staging now, production after its rebuild) the same script runs as `ops/backup.sh quadlet`, from a systemd user timer that belongs to the release, never from a crontab and never as a Quadlet unit: Quadlet runs its containers detached with their output in a log, which would keep the plaintext dump (question 11 of the staging amendments).
+
+- **The units.** `ops/systemd/tarubot-backup.timer` starts `ops/systemd/tarubot-backup.service` at 04:30 UTC every day (`Persistent=true`, so a run missed while the host was down starts when it's back). The service is a one-shot that runs `%h/tarubot/ops/backup.sh quadlet` with a 15-minute limit, after Podman's network-online wait, and sets no environment. The playbook links both into `~/.config/systemd/user` from the clone, so a deploy's `daemon-reload` picks up a release's change to them, and enables the timer once the bot's unit is linked ([The first start](#the-first-start-the-start-tag)).
+- **The dump.** `ops/quadlet/secrets.sh sync` copies only `DATABASE_URL` and `DATABASE_CA_CERT` from `.env` into their Podman secrets, so a blank Discord token never stops a backup. A one-off `podman run` of `docker.io/library/postgres:18.4-alpine`, Compose's backup image fully qualified and pinned by its image index digest (the container reads the database secrets and can reach the network, so a moved tag must not reach it; a new image is a release's change to `ops/backup.sh`), then runs `pg_dump` as hardened as Compose's service: a read-only root with no tmpfs, no capabilities, `no-new-privileges`, no environment from the host, stdin closed, and the two secrets mounted read-only as files, with `PGSSLMODE=verify-full` against the mounted CA. It writes no file, so it needs no `/tmp`. Its output streams straight into `age`, as on Compose.
+- **No log of the dump.** The container runs with `--log-driver=none`: Podman keeps nothing, while an attached run still streams stdout. 2.33.0's check on Podman 5.8.2 found the stream byte-exact and a failing `pg_dump`'s exit status returned by `podman run` ([VERIFICATION.md](VERIFICATION.md)).
+- **Labels.** The dump container is `tarubot-backup-<stamp>`, labelled `io.tarubot.role=backup`. A deploy waits up to 5 minutes while that container runs or `tarubot-backup.service` is active, as it waits for Compose's `backup` container.
+- **The rest is unchanged:** the size guard, the encrypted `.env` copy to `env/`, the uploads to `daily/` and `monthly/`, the healthchecks.io pings and the last line, `<time> backup ok: tarubot-<stamp> (<n> bytes, settings <m> bytes)`, which a deploy's migration path reads.
+- **Settings.** The same five names in the host's `.env`. Staging's name its own bucket, key and backup check, never production's (question 3). The bot's unit unsets all five, so the bot never sees them.
+- **By hand:** `systemctl --user start tarubot-backup.service` (as `tarubot`, which waits until the run ends). **Logs:** `journalctl --user -u tarubot-backup`; there is no `~/tarubot-backup.log` on a Quadlet host. **Next run:** `systemctl --user list-timers tarubot-backup.timer`.
+- **Not locked.** The backup doesn't take the host lock. A nightly dump that starts after a deploy's 5-minute wait can overlap a migration, as on Compose. Making the timer's service wait on the lock is a later option ([OPEN_ITEMS.md](OPEN_ITEMS.md)).
+
+`pg_dump` still takes the connection string as its argument inside the container while it runs, on both runtimes, as before.
 
 ## Settings copy (off the host)
 
@@ -441,7 +499,7 @@ You need the latest settings copy and the `age` key (above), access to Linode, t
 
 The staging host is a second Linode. It will run DevBot the way production will run after its rebuild: AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under `tarubot`'s systemd, no Docker, and its own database and role on the same managed cluster. @deconfined's decisions are in REQUIREMENTS.md "Approved staging amendments (2026-09-26)". The host is online on AlmaLinux 10.2, reached as `root@<staging host>` with a staging-only Ansible key from the operator machine, and the playbook configured it on 2026-09-26 ([VERIFICATION.md](VERIFICATION.md)).
 
-**No bot runs there yet.** The staging host holds no DevBot token. DevBot moves after 2.33.0, with a new token, and until then it stays on the development machine ([DEV_GUILD.md](DEV_GUILD.md)). One Discord application must never run in two places.
+**No bot runs there yet.** The staging host holds no DevBot token and no `.env`. 2.33.0 brings everything a bot there needs (the deploy path, the staging target, Podman secrets, the backup timer and the first start), but nobody starts it before the DevBot move: the move comes after 2.34.0's pull unit and the rebuild from cloud-init and OpenTofu, with a new token, and until then DevBot stays on the development machine ([DEV_GUILD.md](DEV_GUILD.md)). One Discord application must never run in two places.
 
 ### What 2.32.0 delivers (#50 part 1)
 
@@ -452,6 +510,21 @@ The staging host is a second Linode. It will run DevBot the way production will 
 | The staging tool profile | `TARUBOT_ENVIRONMENT=staging`: DevBot's application, the test guild and `tarubot_staging` ([CONFIGURATION.md](CONFIGURATION.md#maintenance-tool-profiles)). `staging.env.example` is the template for the host's `.env` ([CONFIGURATION.md](CONFIGURATION.md#runtime-configuration)). |
 | Signed build provenance | `publish.yml` signs each image `main` publishes ([CI_CD.md](CI_CD.md#signed-build-provenance)). The deploy plan verifies the signature from 2.33.0. |
 | CI | The **Host playbook** job: a syntax check with the example inventory and host settings, ansible-lint (pinned and offline), and ShellCheck on the playbook's scripts. `CI result` requires it. The Checks job also runs Podman 5.8.2's own generator over the unit for both targets and compares the result in `tests/unit/quadlet.test.ts`, and `tests/unit/playbook.test.ts` pins the playbook's rules (below). |
+
+### What 2.33.0 delivers (#50 part 2a)
+
+#50's second part was split: 2.33.0 is the runtime half, and the pull unit follows in 2.34.0 ([Not yet automated](#not-yet-automated)). Production's Compose path, its forced command and `ops/backup.sh` without an argument don't change.
+
+| Piece | What it is |
+| --- | --- |
+| `ops/deploy.sh` Quadlet modes | `deploy.sh quadlet` (production after its rebuild) and `deploy.sh quadlet staging` (staging now), chosen by the deploy key's forced command. They deploy the release's Quadlet unit with `systemctl --user` and Podman, under their own contract level ([Quadlet mode](#the-quadlet-mode-of-opsdeploysh)). |
+| The staging deploy target | The Deploy workflow's **Deploy staging** job, in a `staging` environment with no reviewers, behind its own switch `STAGING_DEPLOY_ENABLED`; a staging dispatch must come from @deconfined ([Staging deploys](#staging-deploys-2330)). |
+| The provenance check | The plan verifies each image's signed build provenance before anything else, for both targets ([Provenance check](#provenance-check-2330)). |
+| Podman secrets | `.env` stays the only place the secrets are kept. `ops/quadlet/secrets.sh` copies the six secrets into Podman secrets before every start, the unit mounts them read-only as files, and the bot and its tools read `NAME_FILE` ([CONFIGURATION.md](CONFIGURATION.md#secrets-from-files); [Quadlet README](../ops/quadlet/README.md#secrets)). The unit's `[Service]` unsets them, so they never reach Podman, conmon or pasta. |
+| One-off tools | `ops/quadlet/run-tool.sh` runs a maintenance tool, such as a deploy's `migrate.js`, in a one-off container with the target's own settings, secrets and hardening ([Quadlet README](../ops/quadlet/README.md#run-toolsh)). |
+| The backup | `ops/backup.sh quadlet`, run by the release's systemd user timer `ops/systemd/tarubot-backup.timer` ([Backups on a Quadlet host](#backups-on-a-quadlet-host-2330)). |
+| The host lock | `/run/tarubot/host.lock`, root-owned, from a tmpfiles line the playbook installs; deploys and the playbook's user-manager commands hold it, and the 2.34.0 pull unit will ([The host lock](#the-host-lock)). |
+| The `start` tag | The playbook's first start of the bot on a host, from a release and digest verified on the workstation ([The first start](#the-first-start-the-start-tag)). It exists and is tested, but nobody runs it in this release. |
 
 ### What the playbook does
 
@@ -472,6 +545,7 @@ It runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, and stops on an
   - The journal is persistent, capped at 1 GB, with one file per user. The bot logs to it, and deploys will read it.
   - Every boot reaches `network-online.target`. `tarubot-ipv6-online.service` holds that target until the host has a global IPv6 address and a default route, so the bot's first start sees IPv6. It waits at most 60 seconds and never fails.
   - logind's `KillUserProcesses` must stay off (EL's default).
+- **The host lock (2.33.0).** It installs `files/tmpfiles-tarubot.conf` as `/etc/tmpfiles.d/tarubot.conf` and runs `systemd-tmpfiles --create` on it, then checks that `/run/tarubot` is root's directory (0755) and `host.lock` root's plain file (0644), neither a link ([The host lock](#the-host-lock)). A check run before the first real one skips those checks, since nothing is there yet.
 - **The `tarubot` account.**
   - No groups, no sudo (each run checks `sudo -l -U tarubot`) and a locked password.
   - Umask 0022, through the `umask=` field in its GECOS.
@@ -485,11 +559,13 @@ It runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, and stops on an
 - **No root password** (question 20). After the `sshd -T` check, the run locks root's password. Key logins still work, because sshd leaves a locked account to PAM, and PAM doesn't refuse one. Linode's Reset Root Password with the Lish console is the break-glass, and `su -` has no password left to guess.
 - **As `tarubot`, in the last play:**
   - It clones the repository into `~/tarubot` once, under umask 077. Deploys move the clone after that.
-  - It refuses a user `containers.conf`, runtime Quadlet units, a Podman API socket, an event logger other than journald, a Podman unit that `tarubot`'s user manager doesn't load as masked, and anything in `~/.config/containers/systemd` except the release's two links. 2.33.0's start tag makes those links; in 2.32.0 no host has them.
+  - It refuses a user `containers.conf`, runtime Quadlet units, a Podman API socket, an event logger other than journald, a Podman unit that `tarubot`'s user manager doesn't load as masked, and anything in `~/.config/containers/systemd` except the release's two links. Only the start tag makes those links; no host has them yet.
+  - It links the backup's two user units into `~/.config/systemd/user` from the clone's `ops/systemd/`, when the clone has them (2.33.0 and later; staging's clone, still at 2.30.4, has none until its first start). Once the bot's unit and both backup units are linked, it enables `tarubot-backup.timer` if it isn't enabled; it never disables it.
+  - Its user-manager commands (`daemon-reload`, `enable`, `start`) run under the host lock, waiting up to 5 minutes for a deploy.
   - It runs Quadlet's generator as a dry run, twice. Over the real search path, it must find no unit before the links exist. Over the clone's unit and this host's target, it must produce exactly `tarubot.service`. A clone from before 2.32.0 has no `ops/quadlet/`, and the second run is skipped.
-  - If `~/tarubot/.env` is there, it must be a regular file of `tarubot`'s at mode 600, and pass `check-env.sh --syntax`. It needs exactly one `TARUBOT_IMAGE_TAG`, no `TARUBOT_IMAGE_DIGEST` before the links, no `TARUBOT_IMAGE`, and on staging no `GITHUB_APP_*` value. The checks print names and counts, never values.
+  - If `~/tarubot/.env` is there, it must be a regular file of `tarubot`'s at mode 600, and pass `check-env.sh --syntax`. It needs exactly one `TARUBOT_IMAGE_TAG`, no `TARUBOT_IMAGE_DIGEST` before the links, no `TARUBOT_IMAGE`, and on staging no `GITHUB_APP_*` value. Since 2.33.0, when the clone has `ops/quadlet/secrets.sh`, it also runs `secrets.sh check`, which requires `DATABASE_URL`, `DATABASE_CA_CERT` and `DISCORD_TOKEN`. The checks print names and counts, never values.
 
-It never links, starts, stops or restarts the bot; its handlers only reload systemd, sshd, journald's configuration and sysctl. 2.32.0 has no start tag: it arrives with 2.33.0, together with the first start. The deploy key's forced command is `ops/deploy.sh quadlet staging` on staging and `ops/deploy.sh quadlet` on production. `ops/deploy.sh` up to 2.32.x exits 64 on any argument, so the line fails closed until 2.33.0 reaches the host.
+Outside the start tag it never links, starts, stops or restarts the bot; its handlers only reload systemd, sshd, journald's configuration and sysctl. The start tag (2.33.0) is the one exception, run once per host ([The first start](#the-first-start-the-start-tag)). The deploy key's forced command is `ops/deploy.sh quadlet staging` on staging and `ops/deploy.sh quadlet` on production. `ops/deploy.sh` up to 2.32.x exits 64 on any argument, so the line fails closed until the first start moves the clone to 2.33.0 or later; staging's clone is still at 2.30.4.
 
 **Code running as `tarubot` never steers root.** `tests/unit/playbook.test.ts` pins the checkable parts.
 - The first play runs as root and writes only system paths. It looks at `tarubot`'s home without following links, so a planted link stops the run.
@@ -525,21 +601,23 @@ settings=/path/outside/any/checkout/host.yml
 
 - **Check mode first, every time.** `--check --diff` changes nothing. Before the first real run it lists every change a fresh host needs, and its second play stops early, because `tarubot` doesn't exist yet. A few checks run only for real: sshd's effective settings and the ptrace and terminal-injection settings.
 - **Then apply.** A second real run must report `changed=0`. Anything else is drift to explain.
-- **`--skip-tags start`** changes nothing in 2.32.0, which has no start tag. It keeps 2.33.0's start tag out, even by mistake, once that exists. That tag links the release's unit, which from then on starts at every boot, and starts it for the first time, so it runs only at the DevBot move.
+- **`--skip-tags start`** keeps the start tag out, even by mistake. Its tasks also need the start variables, so a run without them skips them anyway, but the flag stays in every normal command. That tag links the release's unit, which from then on starts at every boot, and starts it for the first time, so it runs only at the DevBot move on staging and at the rebuild on production ([The first start](#the-first-start-the-start-tag)).
 - **Configuration and locale.** Ansible reads `ansible.cfg` from the working directory only when that directory isn't world-writable, so the example sets `ANSIBLE_CONFIG`. ansible-core 2.16 refuses to start under `LC_ALL=C`.
 - **For Claude sessions:**
   - Ansible refuses non-blocking standard streams in Claude Code's shell, so run every ansible command as `<command> < /dev/null 2>&1 | cat`.
   - Claude may run check mode against staging freely, and apply to staging under @deconfined's standing go-ahead for the build phase (question 5 of the amendments).
-  - Starting the bot (2.33.0's start tag), stopping DevBot, reboots and the move each need @deconfined's go-ahead.
+  - Starting the bot (the start tag), stopping DevBot, reboots and the move each need @deconfined's go-ahead. The start tag never runs on staging before the DevBot move.
+  - A real apply that the session's permission check refuses isn't retried in any form; it goes to @deconfined (2.33.0's apply of the host lock was one: it went ahead only after @deconfined's go-ahead in chat, [VERIFICATION.md](VERIFICATION.md)).
   - Production runs are @deconfined's alone, and the production inventory and root key stay off the operator machine.
 
-**Applying it on the host itself** (`-c local`) is how the pull unit will run it from 2.33.0:
+**Applying it on the host itself** (`-c local`) is how the pull unit will run it from 2.34.0, holding the host lock around the whole run:
 
 ```sh
-ansible-playbook -c local -i localhost, site.yml -e @/etc/tarubot/host.yml --skip-tags start
+flock -w 300 /run/tarubot/host.lock ansible-playbook -c local -i localhost, site.yml \
+  -e @/etc/tarubot/host.yml --skip-tags start -e tarubot_host_lock_held=true
 ```
 
-Run that only from a root-owned checkout that `tarubot` can't write, such as the pull unit's own clone in `/var/lib/tarubot-config/repo` (2.33.0). Never run it from `~tarubot/tarubot`, or from anything else under `/home`. Ansible runs the playbook, reads `ansible.cfg` from its directory, and loads the files beside it, so running from a checkout `tarubot` can write hands root to `tarubot`. The playbook can't check this itself, because a changed copy would leave the check out. Until 2.33.0 brings that clone, apply from the operator machine as above.
+Run that only from a root-owned checkout that `tarubot` can't write, such as the pull unit's own clone in `/var/lib/tarubot-config/repo` (2.34.0). Never run it from `~tarubot/tarubot`, or from anything else under `/home`. Ansible runs the playbook, reads `ansible.cfg` from its directory, and loads the files beside it, so running from a checkout `tarubot` can write hands root to `tarubot`. The playbook can't check this itself, because a changed copy would leave the check out. Until 2.34.0 brings that clone, apply from the operator machine as above, without the lock flag.
 
 ### After the first apply
 
@@ -550,21 +628,150 @@ Run that only from a root-owned checkout that `tarubot` can't write, such as the
 - **Staging may reboot itself** after a daily security update that needs it.
 - **The unit a start would run:** see "What Podman generates" in the [Quadlet README](../ops/quadlet/README.md#what-podman-generates). As `tarubot`, set `XDG_RUNTIME_DIR=/run/user/$(id -u)` first.
 
+### The host lock
+
+On a Quadlet host one lock keeps deploys, the playbook's user-manager commands and, from 2.34.0, the pull unit from overlapping: `/run/tarubot/host.lock`.
+
+- **Root's file.** The playbook's tmpfiles line creates `/run/tarubot` (root, 0755) and `host.lock` (root, 0644) at every boot and on every apply. The pull unit will run as root, and root must never open a file `tarubot` could replace, so the lock isn't under `tarubot`'s home. Everyone opens it read-only: `flock` needs no write access.
+- **`ops/deploy.sh`** refuses `host` unless the lock is a plain file owned by root, not a link, then waits up to 5 minutes for it (`busy`). It closes the lock on the calls that can leave a process behind (`backup.sh quadlet` and `run-tool.sh`, whose containers leave a conmon), so a stray process never holds it.
+- **The playbook** runs each `systemctl --user daemon-reload`, `enable` and `start` of the `tarubot` play under `flock -w 300`, so a deploy never sees a reload half way. Link and file tasks aren't locked.
+- **The held-lock protocol.** A `flock` lock belongs to one open file, so a task that opened the file again would wait on its own caller. A caller that already holds the lock, as the pull unit will, passes `-e tarubot_host_lock_held=true`, and the play's commands then don't lock again. The first play then checks with `flock --nonblock --conflict-exit-code 75` that something really holds the lock, so the flag can never skip a lock nobody holds, and the start tag refuses the flag. Manual runs never pass it.
+- **Compose** (production today) keeps its own lock in `~/.local/state/tarubot-deploy/lock`.
+
+The lock's path, owner and protocol are part of `ops/deploy.sh`'s `quadlet` contract ([below](#the-quadlet-mode-of-opsdeploysh)).
+
+### The first start (the `start` tag)
+
+The `start` tag links the release's unit on a host and starts the bot for the first time. It exists and is tested (`tests/unit/playbook.test.ts`, and a rehearsal on a throwaway systemd host; [VERIFICATION.md](VERIFICATION.md)), but **nobody runs it in 2.33.0**. On staging it runs at the DevBot move and never before it; on production, at its rebuild. It needs @deconfined's go-ahead, and on production it is @deconfined's own run.
+
+1. **Verify the release on the workstation** (question 26; for staging, an agent may do this) with the plan's own check:
+
+   ```sh
+   gh attestation verify oci://ghcr.io/deconfined/tarubot@<digest> --repo deconfined/tarubot \
+     --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+     --source-ref refs/heads/main --source-digest <commit> \
+     --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+   ```
+
+   The host can't run this itself: it holds no GitHub token, and the playbook uses no lookups or delegation.
+2. **Run the whole playbook** with the start variables, without `--skip-tags start` and without `tarubot_host_lock_held`. Check mode first; a check run stops after the start's own checks:
+
+   ```sh
+   ~/tarubot-ansible/bin/ansible-playbook -i "$inventory" -e "@$settings" site.yml \
+     -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:<digest> --check --diff
+   ~/tarubot-ansible/bin/ansible-playbook -i "$inventory" -e "@$settings" site.yml \
+     -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:<digest>
+   ```
+
+   Never keep the start variables in the host settings file: every run reads it, and the pull unit's will.
+
+After the whole host layer, the lock included, the start runs as `tarubot`:
+
+1. It refuses unless this is the whole playbook without the lock flag, no unit is linked, no `tarubot` container exists, `.env` exists with one `TARUBOT_IMAGE_TAG` line and no `TARUBOT_IMAGE_DIGEST`, the host lock is free, and the clone is on `main` with no tracked change. So it runs once per host, and later releases arrive through deploys.
+2. It fetches `main` and pulls the image by the verified digest.
+3. The image's RepoDigests must include `ghcr.io/deconfined/tarubot@<digest>`, its version label must be the requested version, and its revision label must name a commit.
+4. That commit must be on `main`, its `package.json` must say the version, and its `ops/deploy.sh` must declare `quadlet`, and on staging `staging`, on its `CAPABILITIES` line.
+5. It resets the clone to the commit (`git reset --keep`, under `umask 077`).
+6. It runs that commit's `check-env.sh --syntax` and `secrets.sh check` on `.env`.
+7. It pins the release in `.env`: `TARUBOT_IMAGE_TAG` replaced and `TARUBOT_IMAGE_DIGEST` added (mode 600; neither logged nor shown in a diff).
+8. It checks the settings the unit will see, through `systemd-run` with the unit's `EnvironmentFile=` and 14-name `UnsetEnvironment=`, as a deploy does.
+9. It links the unit's two Quadlet links and both backup units from the commit, and refuses a commit without the backup units.
+10. Quadlet's generator must then produce exactly `tarubot.service`, running the pinned digest.
+11. It reloads the user manager and starts `tarubot.service`, both under the host lock.
+12. It waits up to 3 minutes for the bot to turn healthy, or to log "Waiting for the database writer lease" (`src/application/lifecycle.ts`): a new production host's bot waits there while the old host still runs, in the rebuild by overlap.
+13. It enables `tarubot-backup.timer`.
+
+It never touches Discord. The first staging dispatch of the same version, which ends `already-live`, registers the commands in the test guild. Production's global registration survives its rebuild.
+
+**The database must already be at the start release's schema.** The start never migrates. The bot's startup check refuses a database whose newest applied migration isn't the release's own `SCHEMA_VERSION`, and systemd then restarts it until the wait in step 12 gives up. So start the release whose schema the restored dump already has. At the DevBot move that means: update DevBot to the release you will start first (its update procedure migrates `tarubot_dev`, [DEV_GUILD.md](DEV_GUILD.md)), then dump it, and start that same version. A dump one or more migrations behind can still be migrated after a failed start (below). A dump from a newer release can't be started by an older one at all.
+
+**If the first start fails.** The run stops at the step that failed, usually the wait in step 12. Whatever it had done by then stays: the clone at the commit, the digest pin, and from step 9 on the links. The backup timer isn't enabled yet, and running the start again is refused, because `.env` has a digest (and the unit may be linked). As `tarubot` (`XDG_RUNTIME_DIR=/run/user/$(id -u)` set), read `journalctl --user -u tarubot.service` first. Deploys don't reach the host before its first start has succeeded (staging's switch goes on only then), so nothing else takes the host lock now, and these commands don't take it either. On production, use `production` where these say `staging`.
+
+- **The schema is behind** (the journal says "Schema version/checksum mismatch" or "Run db:migrate", and the dump came from an older release; the same mismatch from a newer one can't be fixed this way): stop the bot, migrate in the release's own image with the host's settings and secrets, and start it again. `migrate.js` must print "Schema ready.":
+
+  ```sh
+  systemctl --user stop tarubot.service
+  ~/tarubot/ops/quadlet/run-tool.sh staging sha256:<digest> tarubot-migrate bun dist/scripts/migrate.js
+  systemctl --user start tarubot.service
+  systemctl --user enable --now tarubot-backup.timer
+  ```
+
+- **Anything else:** fix the cause, usually a setting in `.env`, then `systemctl --user restart tarubot.service`, and `systemctl --user enable --now tarubot-backup.timer` once the bot is healthy. The next playbook run would also enable the timer, since the unit is linked.
+- **To undo the start completely,** so that it can run again from the beginning:
+
+  ```sh
+  systemctl --user stop tarubot.service
+  systemctl --user disable --now tarubot-backup.timer
+  rm -f ~/.config/containers/systemd/tarubot ~/.config/containers/systemd/tarubot-target
+  rm -f ~/.config/systemd/user/tarubot-backup.service ~/.config/systemd/user/tarubot-backup.timer
+  sed -i '/^TARUBOT_IMAGE_DIGEST=/d' ~/tarubot/.env
+  systemctl --user daemon-reload
+  podman ps -a
+  ```
+
+  `podman ps -a` must list no `tarubot` container (the unit's stop removes it). `.env` keeps its mode 600 and its `TARUBOT_IMAGE_TAG` line. The clone stays at the commit, on `main`: the next start fetches and resets it again. If `disable` reports the timer's unit missing, the start failed before it linked the backup units, and there is nothing to disable.
+
+### Staging deploys (2.33.0)
+
+The Deploy workflow deploys staging beside production, from the same plan, with no approval ("If it breaks, who cares?", @deconfined's answer on #50). [CI_CD.md](CI_CD.md#deploy-workflow) has the workflow's side.
+
+- **Which releases.** An automatic run after a publish of `main` asks for both targets, so staging takes exactly the merges production is asked about, at once, beside production's approval request. A dispatch asks for the one its `target` input names. A staging dispatch is titled `Deploy <version> to staging`, or `Deploy <version> rollback from <from> to staging`.
+- **The switch.** The repository variable `STAGING_DEPLOY_ENABLED`, exactly `true`, turns staging on; production's `DEPLOY_ENABLED` is separate. Like production's, it belongs at repository level only, never in the `staging` environment, whose copy would override it inside the job. While it's off, staging is left out of every run, and a staging dispatch ends `paused`.
+- **The environment.** `staging` has no required reviewers and accepts only `main`, through one branch rule. The plan checks both, and turns staging off in a run whose gate fails. The environment holds staging's own `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_KNOWN_HOSTS`, under the same names as production's.
+- **Who may dispatch.** Only @deconfined. The plan and the host both require the run's actor and its triggering actor to be @deconfined, by login and account id. That refuses a dispatch by a GitHub App or a workflow's `GITHUB_TOKEN` on purpose, since staging has no approval to stop one; an automatic run needs no dispatcher. Agents dispatch the workflow, for either target, only when @deconfined asks in that session (question 5 of the staging amendments, as amended on 2026-09-27), and for staging only through a credential of @deconfined's own.
+- **What the release must declare.** The plan reads the target commit's `ops/deploy.sh` and requires `quadlet` and `staging` on its `CAPABILITIES` line. Without them staging is left out of the run, and a staging-only run fails `below-floor`. Only 2.33.0 and later declare them.
+- **The job.** **Deploy staging** has a 30-minute limit and reconnects for 5 minutes, the accepted plan's limits, so a dead staging host never holds a runner for 90 minutes. The trade-off: a long migration trial, or a connection lost for more than 5 minutes, outlives the job. The host run then goes on by itself, the job ends cancelled or `outcome-unknown`, `~/.local/state/tarubot-deploy/runs/<run>/result` on the staging host keeps the result, and the next staging run waits up to 5 minutes for the host lock.
+- **No Pushover message.** The messages are about production only. A failed staging job shows as a failed job in the run.
+- **Production's result is its own job's.** The two deploy jobs run side by side, and production never waits for staging, so a run can fail on its staging job while production deployed. Whether production deployed a run is the **Deploy** job's conclusion together with the production approval, never the run's conclusion. Notify reads it that way, and the 2.34.0 pull unit must too.
+- **The host's checks.** In staging mode `ops/deploy.sh` requires the **Deploy staging** job running, the ` to staging` title for a dispatch, and @deconfined as the dispatcher. It queries no approval. It accepts the run status `waiting` as well as `in_progress`: production's job may wait for its approval while staging's runs, and how GitHub then reports the whole run is confirmed only by the first real staging run. The job, path, branch, repository, attempt and title checks decide. Production refuses every staging title, a `waiting` run, and a run where only **Deploy staging** runs, even with a production approval.
+- **Commands** are registered in the test guild (`register.js --guild` with the target's `TEST_GUILD_ID`) and read back, on every run that starts or verifies a release.
+
+**Everyday checks on the staging host,** once a bot runs there, as `tarubot`:
+
+```sh
+ssh tarubot@<staging host>
+systemctl --user status tarubot.service
+journalctl --user -u tarubot.service --since -1h
+podman exec tarubot bun -e 'const r = await fetch("http://127.0.0.1:3000/health/ready"); console.log(await r.text())'
+systemctl --user list-timers tarubot-backup.timer
+```
+
+### The Quadlet mode of `ops/deploy.sh`
+
+The forced command's words choose the mode; nothing is detected. `ops/deploy.sh quadlet` is production after its rebuild, and `ops/deploy.sh quadlet staging` the staging host. The request forms, the run directory, the result line and the outcomes are Compose's ([Automated deploys](#automated-deploys-2300)). What differs:
+
+- **Its own contract level.** Compose keeps `FLOOR=2.30.0`. A Quadlet host runs whichever release's copy is live, so every target there must speak the Quadlet contract: at or above `QUADLET_FLOOR` (2.33.0), with the mode's words on the target's own `readonly CAPABILITIES="…"` line (`quadlet`, plus `staging` on staging). Otherwise the run refuses `below-floor`. The header of `ops/deploy.sh` lists what the contract covers: the mode words, the host layout and the pin, the host lock and its protocol, the CLIs of `check-env.sh`, `secrets.sh`, `run-tool.sh` and `backup.sh quadlet`, the secret names, the unset list, what Quadlet's generator must make of the links (exactly `tarubot.service`, both settings lists in order, the pinned digest, nothing loaded from outside the clone), the hardening read-back and the health check, the registration commands run in the container (on staging with the container's own `TEST_GUILD_ID`), the labels, the backup unit and the journald evidence. `tests/unit/deploy-script.test.ts` ties the list to the functions that make those checks. An incompatible change to any of them replaces the word `quadlet` with a new one, so older copies refuse such a target exactly. The plan and the start tag read the same line, so no floor number is copied anywhere.
+- **The session.** The worker derives `tarubot`'s runtime directory (`/run/user/<uid>`, which must be its own, mode 700) and exports `XDG_RUNTIME_DIR` and the user bus, so Podman, `systemctl --user` and the release's scripts reach the user manager. Every `podman`, `systemctl --user`, `journalctl --user` and `systemd-run --user` call is bounded by `timeout`, and nothing talks to a Podman API socket.
+- **Preflight** (refusing `host` unless noted):
+  - the host lock ([above](#the-host-lock));
+  - `.env` a private regular file with one `TARUBOT_IMAGE_TAG` and one `TARUBOT_IMAGE_DIGEST` (the image index digest), no `TARUBOT_IMAGE`, no `NAME_FILE` line (`env-file`: the release fixes where the bot reads its secrets), and a log level of at most `info`;
+  - Podman answering, with journald as its event logger; the user manager running (or degraded) and lingering; no Podman API socket; the user journal readable; 2 GB free where Podman keeps images; and exactly the mode's two links;
+  - the live release: `tarubot.service` active, or activating between restarts, with the pinned image's labels matching the tag pin (`manual-change-in-progress` otherwise), and its one container running the pinned image with the unit's hardening (`hardening-mismatch`);
+  - a backup running (the labelled dump container, or `tarubot-backup.service` active) delays it up to 5 minutes.
+- **Staging the target,** before anything stops: `podman pull` by the approved digest, with RepoDigests and labels checked, and `git reset --keep` to the target. Then the target's own configuration must hold on this host. Quadlet's generator must turn the links into exactly `tarubot.service`, with both of the mode's settings lists and the pinned digest, loading nothing from outside the clone (`quadlet-config`). The target's `check-env.sh --syntax`, its `check-env.sh` run through `systemd-run` with the unit's `EnvironmentFile=` and `UnsetEnvironment=`, and `secrets.sh check` must pass (`settings-missing`). Either refusal puts the clone back.
+- **Restart.** The pin moves first, both lines in one rename at mode 600; a pin that fails before anything restarted is `refused` `pin-failed`. Then `daemon-reload` and `systemctl --user restart tarubot.service`, whose `ExecStartPre=` checks the settings and syncs the secrets. The new container must turn healthy within 3 minutes, and a minute later still be the same container (systemd's `NRestarts` unchanged) on the approved image, with the hardening read back. Then the commands.
+- **Migration.** `systemctl --user stop`, then `ops/backup.sh quadlet`, then `migrate.js` through the target's own `ops/quadlet/run-tool.sh`: a one-off container with the target's settings, secrets and hardening, labelled `io.tarubot.role=tool`. The pin moves only after "Schema ready.", then the reload, the start, the checks and the commands. A failed migration first stops the tool's container, which rolls its transaction back, then the previous release returns.
+- **The writer-lease evidence** comes from Podman's journald events since the change (the live container's `died` event as the positive control, then the target's `start` events) and each container's own journal lines, read by container ID. The frozen "Modules loaded" and "Database writer lease acquired" markers decide, as on Compose.
+- **The one difference in recovery.** A restart pinned the target before it started, so a target left for you stays pinned. When Podman's log gives no clear account of the target, nothing is restored, and `needs-you` `lease-evidence-incomplete` leaves `.env` naming the target (on Compose it still names the previous release). Read `journalctl --user -u tarubot.service` and `podman ps -a`, then pin what should run.
+- **The hardening read-back,** at preflight and after every start: a read-only root, no added or effective capabilities, `no-new-privileges`, no bind or volume mount at all, and none of the unset names in the container's environment. It catches a `containers.conf` default that the generator's output can't show. Podman lists the secrets only under `.Config.Secrets`, never as mounts, so any mount, even one at `/run/secrets/<name>`, is refused: a host file or volume there could stand in for a secret's value.
+
 ### Not yet automated
 
 | When | What |
 | --- | --- |
-| 2.33.0 | The staging deploy target: a "Deploy staging" job with a `staging` environment that needs no approval, and its own enable switch. Also `ops/deploy.sh`'s and `ops/backup.sh`'s Quadlet paths, the backup timer, Podman secrets with `env.ts`'s `_FILE` support, the provenance check in the deploy plan, the pull unit, and the start tag, which links the release's unit and starts it for the first time. Once secrets are Podman secrets, `UnsetEnvironment=` also names them, so they never sit in Podman's, conmon's or pasta's environment ([Quadlet README](../ops/quadlet/README.md#secrets)). |
+| 2.34.0 | The pull unit, `tarubot-host-config`: a root-owned timer with its own root-owned clone, fetched from `main` only and moving forward only, which applies the playbook to its host while it holds the host lock (`--skip-tags start -e tarubot_host_lock_held=true`, never the start variables). Staging takes the head of `main`. Production takes the newest run whose **Deploy** job succeeded after @deconfined's approval, never judged by the run's conclusion, which a staging job can fail. It requires @deconfined's SSH signature on merged heads that touch `ops/ansible/`, re-applies daily with its own health check, and can be paused or run for an emergency. Squash merging must be off first (question 14). |
 | Next | cloud-init user data and OpenTofu (the Linodes, their firewalls, the database access list and DNS), proven by rebuilding staging from scratch. The hand-built host is deleted after that. |
-| The move | DevBot moves: stop local DevBot, dump and restore into `tarubot_staging`, reset DevBot's token into staging's `.env` only, start it on staging, then retire the local copy. |
-| 2.34.0 | PR images on staging, dispatched by @deconfined. |
-| 2.35.0 | Production rebuilt onto AlmaLinux, rootless Podman and Quadlet, by overlap. Before it, the playbook needs the path that moves production's container stack, which its automatic updates skip, after a week on staging (REQUIREMENTS.md question 2): pinned versions, or a deliberate update run. The packages are `state: present`, so on a rebuilt production host nothing would upgrade them yet. |
+| The move | DevBot moves: stop local DevBot, dump and restore into `tarubot_staging`, reset DevBot's token into staging's `.env` only, run the start tag, turn staging deploys on, then retire the local copy in a patch. |
+| Numbered when it lands | PR images on staging, dispatched by @deconfined: `preview.yml`, a separate `tarubot-pr` package, a `pr` input and `ops/deploy.sh`'s `preview` word. |
+| Numbered when it lands | Production rebuilt onto AlmaLinux, rootless Podman and Quadlet, by overlap: its forced command becomes `ops/deploy.sh quadlet`, the start tag runs at the handover (which also links the backup units and enables their timer), and the old host is fenced. Production's workflow rollbacks then reach 2.33.0 and later only. Before it, the playbook needs the path that moves production's container stack, which its automatic updates skip, after a week on staging (REQUIREMENTS.md question 2): pinned versions, or a deliberate update run. The packages are `state: present`, so on a rebuilt production host nothing would upgrade them yet. |
+| After that | The Compose-path cleanup: the Compose twins leave `ops/deploy.sh` and `ops/backup.sh`, and `docker-compose.production.yml` goes (question 12). |
 
 ### Owner steps before the move
 
-None of these has run yet.
+In this order. None had run on 2026-09-27; agents never create, read or change the GitHub environments, their secrets or variables, or either switch, and never hold a deploy key.
 
-1. **The database and role,** before any staging credential exists. As the admin role, in `defaultdb`, first read `SHOW max_connections` and the current use, and check whether any provider role relies on PUBLIC's CONNECT. Then:
+1. **Merge 2.33.0 with `STAGING_DEPLOY_ENABLED` unset.** Production's Deploy run for it asks for your approval as usual, and approving restarts production onto 2.33.0 under Compose. Its plan is the first to run `gh attestation verify`: check the summary's "Provenance verified" line.
+2. **The database and role,** before any staging credential exists. As the admin role, in `defaultdb`, first read `SHOW max_connections` and the current use, and check whether any provider role relies on PUBLIC's CONNECT. Then:
 
    ```sql
    CREATE ROLE tarubot_staging LOGIN CONNECTION LIMIT <n>;
@@ -582,12 +789,30 @@ None of these has run yet.
    `\password` keeps the password out of the statement text. Check production's readiness right after the second part. Then confirm with `has_database_privilege` that `tarubot_staging` can't connect to `tarubot`, that `tarubot` can't connect to `tarubot_staging`, and that PUBLIC holds neither. The staging tool profile accepts exactly these names.
 
    **The same rule for every later database on the cluster:** revoke PUBLIC's `CONNECT` and `TEMPORARY` as soon as it is created, and grant `CONNECT` only to the roles that need it. That includes `tarubot_restore` ("Restoring a dump" above). The tool guard checks only the maintenance tools. The bot process itself, which on staging runs pull-request code, is held back only by these grants: a database it can connect to is one where it can take the writer-lease lock (advisory locks belong to one database), and a staging bot holding it in a database production is repointed at would keep production unready.
-2. **The access list:** add the staging host's addresses to the managed database's access list, IPv6 first.
-3. **Staging's own services,** never production's (they are listed empty in `staging.env.example`):
+3. **The access list:** add the staging host's IPv6 /128 and IPv4 address to the managed database's access list, IPv6 first, before its first start.
+4. **Staging's own services,** never production's (they are listed empty in `staging.env.example`):
    - a reports token limited to the reports repository's issues, because staging runs PR code;
    - a heartbeat check without alerts;
-   - a separate bucket, with a key limited to it and its own backup check.
-4. **`.env`:** add your operator key to `tarubot_operator_keys` and apply. Then write `~/tarubot/.env` from `staging.env.example` over SSH stdin, with `DISCORD_TOKEN` left as its placeholder, and take a settings copy.
-5. **The break-glass key:** add the FIDO2 key's public line to `tarubot_root_keys` and apply. Try it on staging; it asks for the PIN on every use. Then remove your personal keys from root's `authorized_keys`, outside the playbook's block, as the plan asks. The staging-only Ansible key stays until the pull unit is proven.
-6. **SSHFP:** remove the stale RSA and ECDSA records (above).
-7. **Before 2.33.0's pull unit:** turn off squash merging (question 14).
+   - a separate Linode Object Storage bucket with `ops/bucket-lifecycle.xml`'s rules (set as under [Daily dumps](#daily-dumps)), an access key limited to it, and its own healthchecks.io backup check.
+5. **The `staging` GitHub environment** (Settings → Environments → New environment):
+   - no required reviewers and no wait timer;
+   - deployment branches "Selected branches and tags" with the branch rule `main` only;
+   - the variable `DEPLOY_HOST`, staging's DNS name;
+   - the variable `DEPLOY_KNOWN_HOSTS`, one line: that name, `ssh-ed25519` and the host key read from the Lish console, as in the host-key step (REQUIREMENTS.md);
+   - the secret `DEPLOY_SSH_KEY` (the next step).
+6. **The staging deploy key,** a new Ed25519 key of its own, never production's. Generate it in your own terminal as in production's [step 4](#setting-it-up-owner), with `gh secret set DEPLOY_SSH_KEY --env staging`, so the private half goes straight into the environment. Put the public line in `tarubot_deploy_key_public` in staging's host settings (outside the repository) and apply with `--skip-tags start`: the playbook writes `restrict,command="/home/tarubot/tarubot/ops/deploy.sh quadlet staging"` into `/etc/ssh/authorized_keys/tarubot`. Then delete the local copy.
+
+   This apply is the first real apply of 2.33.0's host layer on staging: besides the key, it installs the root-owned host lock from tmpfiles. The clone stays at 2.30.4, so no backup link, timer, start or container follows. Check afterwards, as root, that `stat -c '%U %a %F' /run/tarubot /run/tarubot/host.lock` prints `root 755 directory` and `root 644 regular empty file`, and that a second apply reports `changed=0`. Steps 7 and 8 apply again for their keys. On staging this layer is already in place: @deconfined gave the go-ahead on 2026-09-27 and the agent applied it, so this apply only adds the key ([VERIFICATION.md](VERIFICATION.md)).
+
+   **Probe it** with the new key alone (`IdentitiesOnly=yes`, `IdentityAgent=none`): until the first start moves the clone to 2.33.0 or later, 2.30.4's `deploy.sh` exits 64 without a word on the mode words; after it, any command but a request prints the usage line and exits 64. None may give a shell or a file listing, and sshd's `DisableForwarding` refuses every forward.
+7. **`.env`:** add your operator key to `tarubot_operator_keys` and apply. Then write `~/tarubot/.env` from `staging.env.example` over SSH stdin (mode 600), with staging's own bucket, key and check values, and `DISCORD_TOKEN` left as its placeholder until the move. Take a settings copy. `.env` stays the only place the secrets are kept; the unit refreshes the Podman secrets from it at every start. It holds no `NAME_FILE` line and no `TARUBOT_IMAGE_DIGEST`: the unit sets the files, and the first start writes the digest.
+8. **The break-glass key:** add the FIDO2 key's public line to `tarubot_root_keys` and apply. Try it on staging; it asks for the PIN on every use. Then remove your personal keys from root's `authorized_keys`, outside the playbook's block, as the plan asks. The staging-only Ansible key stays until the pull unit is proven.
+9. **Stale host keys:** remove staging's RSA and ECDSA SSHFP records and `known_hosts` lines whenever convenient (above); they are left over from part 1.
+10. **Before 2.34.0's pull unit:** turn off squash merging (question 14).
+11. **At the DevBot move** (not in this release):
+    1. update local DevBot to the release you will start (2.33.0 or later; its update procedure applies any migration), stop it, then dump its database and restore the dump into `tarubot_staging`. The start never migrates, so the restored database must be at that release's schema: start exactly the version DevBot ran when it was dumped ([The first start](#the-first-start-the-start-tag), which also says how to recover from a failed start);
+    2. reset DevBot's token in the Developer Portal and put the new one only in staging's `.env`;
+    3. verify the release's index digest with `gh attestation verify` ([The first start](#the-first-start-the-start-tag)); an agent may do this for staging;
+    4. run, or give the go-ahead for, the playbook with `-e tarubot_start_version=<version> -e tarubot_start_digest=<digest>`, without `--skip-tags start` and without `tarubot_host_lock_held`. It applies the host layer (the lock included), resets the clone to the verified commit, links the unit and the backup units from it, starts the bot and enables the backup timer.
+12. **Then staging deploys.** Set the repository variable `STAGING_DEPLOY_ENABLED` to `true`, at repository level, never in an environment. Then run the Deploy workflow yourself with `target=staging` and the live version: expect `already-live`, which checks the live release and registers its commands in the test guild. If it fails, deleting the switch pauses staging again without touching production. The dispatcher rule refuses a dispatch by a GitHub App or `GITHUB_TOKEN`, so an agent could start one only with a credential of your own account that can dispatch, which you would have to grant, and only when you ask in that session.
+13. **Older rollback targets on production:** the plan now refuses releases before 2.32.0, so a rollback to one of them follows [the manual procedure](#rolling-back-to-a-release-without-provenance-before-2320).

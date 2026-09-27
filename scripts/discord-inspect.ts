@@ -16,6 +16,7 @@
 import { PermissionFlagsBits, PermissionsBitField } from "discord.js";
 import { z } from "zod";
 import { configuration } from "../src/config/env.js";
+import { secretSetting } from "../src/config/secrets.js";
 import {
   assertAuthenticatedApplication,
   assertToolScope,
@@ -192,7 +193,8 @@ async function production(): Promise<void> {
     discord: "read",
     databases: [],
   });
-  const token = z.string().min(1).safeParse(process.env.DISCORD_TOKEN);
+  // DISCORD_TOKEN, or the file DISCORD_TOKEN_FILE names.
+  const token = z.string().min(1).safeParse(secretSetting(process.env, "DISCORD_TOKEN"));
   if (!token.success) throw new Error("DISCORD_TOKEN is required.");
   const call = (path: string) => get(token.data, path);
 

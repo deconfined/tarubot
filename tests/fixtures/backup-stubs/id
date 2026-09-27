@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stand-in for id in tests/unit/backup-quadlet.test.ts: `id -u` prints $BACKUP_SIM_UID when it is
+# set, so a test can name a user whose /run/user directory doesn't exist; anything else runs the
+# real id.
+set -euo pipefail
+if [[ $* == -u && -n ${BACKUP_SIM_UID-} ]]; then
+  printf '%s\n' "$BACKUP_SIM_UID"
+  exit 0
+fi
+for real in /usr/bin/id /bin/id; do
+  if [[ -x $real ]]; then exec "$real" "$@"; fi
+done
+exit 127

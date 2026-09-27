@@ -12,6 +12,7 @@ import { REST, Routes } from "discord.js";
 import { z } from "zod";
 import { loadCommands } from "../src/bot/discovery.js";
 import { assertToolScope, type ToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import { commandPaths } from "../src/discord/inspection.js";
 import { Failure, id, idSchema, json } from "../src/domain/values.js";
 import type { CommandRest, DeclaredCommand } from "./commands.js";
@@ -99,7 +100,8 @@ export async function registerCommands(
 if (import.meta.main) {
   const scope = registrationScope(process.argv.slice(2), process.env);
   assertToolScope(process.env, registerToolScope(scope));
-  const token = process.env.DISCORD_TOKEN;
+  // DISCORD_TOKEN, or the file DISCORD_TOKEN_FILE names inside a Quadlet host's container.
+  const token = secretSetting(process.env, "DISCORD_TOKEN");
   if (!token) throw new Error("DISCORD_TOKEN is required");
   const application = id(process.env.DISCORD_APPLICATION_ID);
   const rest = new REST({ version: "10" }).setToken(token);
