@@ -2,15 +2,14 @@
   "title": "Session: 2.32.1 maintenance",
   "objective": "2.32.1 moves the Ansible pip pins to ansible-core 2.16.19 (GHSA-w8p5-mx5w-cpqj; never exposed) and drops Dependabot's always-failing Bun entry. The bot is unchanged: Deploy production should end no-runtime-change.",
   "user": [
-    "Approve the waiting 2.32.0 Deploy production run first (restart path, no migration).",
-    "Then merge 2.32.1; it should ask nothing (no-runtime-change)."
+    "Merge 2.32.1; it should ask nothing (no-runtime-change)."
   ],
   "assistant": [
-    "After the 2.32.0 deploy: /version shows 2.32.0 and readiness holds; record it.",
-    "After the 2.32.1 merge: the Dependabot alerts close, and the deploy plan ends no-runtime-change."
+    "After the merge: the Dependabot alerts close, and the deploy plan ends no-runtime-change.",
+    "Keep an eye on production 2.32.0 (deployed 06:26 UTC): readiness and the next nightly backup."
   ],
   "bot": [
-    "Run 2.32.0 on schema 010; nothing changes for members.",
+    "Run 2.32.0 on schema 010 in production; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }
