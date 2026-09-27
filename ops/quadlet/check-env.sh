@@ -76,6 +76,8 @@ check_environment() {
 # assignment, its setting. What the two parsers do (systemd 257 and Compose's dotenv parser):
 #   - Unquoted, systemd keeps " # text" in the value and unescapes backslashes; Compose drops the
 #     comment, keeps backslashes and expands $NAME.
+#     A quote later in an unquoted value is literal to both (systemd enters a quoted value only
+#     at its first character), so a password such as pa'sw passes unquoted.
 #   - Double-quoted (may span lines), Compose expands $NAME and escapes; systemd expands nothing.
 #   - Single-quoted (may span lines) is literal to both, except that Compose reads \' as a quote.
 #   - After a closing quote, systemd appends any text to the value; Compose reads it as a new

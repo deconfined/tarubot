@@ -631,7 +631,9 @@ describe("check-env.sh --syntax, the file's lines", () => {
     "GITHUB_REPORTS_TOKEN=",
     `SPACED= interior ${MARK} spaces`,
     `HASH=a#${MARK}`,
+    // A quote after the first character is literal to both parsers.
     `QUOTE=a"${MARK}`,
+    `PASSWORD=pa'sw${MARK}`,
     "",
   ].join("\n");
 

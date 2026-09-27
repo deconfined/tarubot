@@ -6,8 +6,8 @@
     "When convenient: remove staging's stale RSA and ECDSA SSHFP records (sshd offers only Ed25519 now)."
   ],
   "assistant": [
-    "Confirm the first hardened nightly backup (04:30 UTC, 2026-09-27) ended green, and record it.",
-    "After the merge: gh attestation verify the first signed image digest; after the deploy, /version shows 2.32.0 and readiness holds."
+    "After the merge: watch the attest job's first real run, then gh attestation verify the signed digest.",
+    "After the deploy: /version shows 2.32.0, readiness holds, and the next nightly backup stays green."
   ],
   "bot": [
     "Run 2.32.0 on schema 010; nothing changes for members.",
