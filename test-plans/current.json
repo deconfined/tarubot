@@ -1,16 +1,17 @@
 {
-  "title": "Session: 2.30.4 docs and records",
-  "objective": "2.30.4 (#54) removes the site's invite-link template (each deployment runs its own Discord application) and records the 2.30.1–2.30.3 rollouts and today's settings. No runtime change: Deploy production should end no-runtime-change.",
+  "title": "Session: 2.32.0 staging host layer",
+  "objective": "2.32.0 (#50 part 1) adds the host playbook (AlmaLinux 10, SELinux, rootless Podman), the Quadlet unit, the staging tool profile and signed build provenance. The playbook ran on the staging host only; no bot runs there yet. Nothing changes for members; production restarts for the tool-guard change.",
   "user": [
-    "Merge when convenient; no production approval should be needed (no-runtime-change).",
-    "Tomorrow: confirm the 04:30 UTC backup check stayed green (the first hardened run)."
+    "Go-ahead (or not) for one supervised staging reboot before merge; the boot path is unverified and dnf-automatic may reboot staging unattended from 06:10 UTC.",
+    "Answer the #50 dispatch question: does question 5's 'never dispatch' replace 'dispatch Deploy production when asked'?",
+    "Merge, then approve the 2.32.0 Deploy production run (restart path, no migration)."
   ],
   "assistant": [
-    "Check the Pages site after the merge: no invite link, the add-to-server page reads correctly.",
-    "Keep building #50's playbook on its branch with read-only checks against staging only."
+    "After a reboot go-ahead: record the IPv6 wait unit, network-online, hostname, journal boots, host key, linger and no AVCs.",
+    "After the merge: gh attestation verify the first signed image digest; after the deploy, /version shows 2.32.0 and readiness holds."
   ],
   "bot": [
-    "Keep running 2.30.3; nothing changes for members.",
+    "Run 2.32.0 on schema 010; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

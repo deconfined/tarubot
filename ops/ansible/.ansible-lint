@@ -1,0 +1,9 @@
+---
+# ansible-lint's settings for TaruBot's host playbook (#50). CI runs it pinned (requirements-lint.txt)
+# and offline: the playbook uses ansible.builtin only, so nothing needs installing.
+profile: production
+offline: true
+# The hashed requirements files aren't Ansible content.
+exclude_paths:
+  - requirements.txt
+  - requirements-lint.txt

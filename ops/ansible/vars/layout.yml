@@ -1,0 +1,88 @@
+---
+# Shared by both plays in site.yml. Nothing here is a setting: the host's settings arrive as extra
+# vars (-e @host.yml; see host.example.yml), and the tb_* names below only read them once, with
+# their defaults, so every task uses the same validated value. site.yml's first play asserts them.
+
+# The host's settings.
+tb_role: "{{ tarubot_role | default('') }}"
+tb_hostname: "{{ tarubot_hostname | default('') }}"
+tb_deploy_key: "{{ tarubot_deploy_key_public | default('', true) | trim }}"
+tb_operator_keys: "{{ tarubot_operator_keys | default([], true) }}"
+tb_root_keys: "{{ tarubot_root_keys | default([], true) }}"
+
+# A host name: one DNS label or name, lowercase, at most 64 characters (the kernel's limit).
+tb_hostname_pattern: '^(?=.{1,64}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
+
+# A public key line with no options: an algorithm, the key, and an optional comment, all on one
+# line. The playbook adds the options (restrict, command=, verify-required) itself.
+tb_pubkey_pattern: >-
+  ^(ssh-ed25519|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ecdsa-sha2-nistp(256|384|521)|ssh-rsa)
+  AAAA[0-9A-Za-z+/]+={0,3}( [^\r\n]*)?$
+
+# The deploy key's forced-command words for each role (ops/deploy.sh's Quadlet modes, #50 part 2).
+# deploy.sh up to 2.32.x exits 64 on any argument, so until 2.33.0 reaches the host the line fails
+# closed; staging never gets production's argument-less Compose mode.
+tb_deploy_args: "{{ {'staging': 'quadlet staging', 'production': 'quadlet'}[tb_role] | default('') }}"
+
+# The layout: fixed, like the paths in ops/quadlet/units/tarubot.container and ops/deploy.sh.
+tb_user: tarubot
+tb_home: /home/tarubot
+tb_clone: /home/tarubot/tarubot
+tb_repository: https://github.com/deconfined/tarubot.git
+tb_quadlet: /home/tarubot/tarubot/ops/quadlet
+tb_links_dir: /home/tarubot/.config/containers/systemd
+# The release's two links in tb_links_dir, and where they point (ops/quadlet/README.md). 2.33.0's
+# start tag makes them; the playbook only checks them.
+tb_links:
+  tarubot: /home/tarubot/tarubot/ops/quadlet/units
+  tarubot-target: "/home/tarubot/tarubot/ops/quadlet/{{ tb_role }}"
+tb_generator: /usr/lib/systemd/system-generators/podman-system-generator
+
+# Podman units that stay masked for the system and for every user: no API socket or service, and
+# no auto-update (images move only through deploy.sh, by digest).
+tb_podman_masks:
+  - podman.socket
+  - podman.service
+  - podman-auto-update.timer
+  - podman-auto-update.service
+
+# Packages the hosts need. Nothing from Docker: the bot runs under rootless Podman and Quadlet.
+tb_packages:
+  - podman
+  - crun
+  - passt
+  - container-selinux
+  - acl
+  - chrony
+  - dnf-automatic
+  - git
+  - gnupg2
+  - jq
+  - sudo
+# age (the backups' encryption) comes from EPEL, restricted to that package.
+tb_epel_packages:
+  - age
+tb_epel_fingerprint: 7D8D15CBFC4E62688591FB2633D98517E37ED158
+tb_podman_minimum: 5.8.2
+
+# Packages that must never be installed: Docker and the Docker shims, whose API socket or CLI
+# would give a second way to run containers.
+tb_forbidden_packages_pattern: '^(docker|docker-ce.*|docker-buildx-plugin|docker-compose-plugin|containerd\.io|moby-.*|podman-docker|podman-compose)$'
+
+# Production's automatic updates skip these (the container stack and ansible-core).
+tb_production_update_excludes:
+  - podman*
+  - crun*
+  - conmon
+  - passt*
+  - container-selinux
+  - containers-common*
+  - netavark
+  - aardvark-dns
+  - catatonit
+  - criu*
+  - skopeo
+  - buildah
+  - fuse-overlayfs
+  - slirp4netns
+  - ansible-core

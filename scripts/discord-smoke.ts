@@ -9,15 +9,16 @@ import { id, json } from "../src/domain/values.js";
 
 const config = configuration();
 if (!config.TEST_GUILD_ID) throw new Error("TEST_GUILD_ID is required for this development probe.");
-// DevBot only: the probe sends (and deletes) a message, so it never runs under another profile.
+// DevBot's application only: the probe sends (and deletes) a message in the test guild, so it runs
+// under the devbot profile, or under staging (#50), which is DevBot on the staging host.
 const deployment = assertToolScope(process.env, {
   tool: "discord-smoke",
   guilds: [config.TEST_GUILD_ID],
   discord: "write",
   databases: [],
 });
-if (deployment.name !== "devbot")
-  throw new Error("discord-smoke runs only under the devbot profile.");
+if (deployment.name !== "devbot" && deployment.name !== "staging")
+  throw new Error("discord-smoke runs only under the devbot or staging profile.");
 const args = process.argv.slice(2);
 /** All optional mutation targets are explicit; the only write is a temporary message by DevBot. */
 const option = (name: string): string | undefined => {

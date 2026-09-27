@@ -1187,6 +1187,7 @@ describe("the runtime-change rule", () => {
       ["docker-compose.tools.yml", false],
       [".env.example", false],
       ["production.env.example", false],
+      ["staging.env.example", false],
       ["biome.json", false],
       [".github/workflows/publish.yml", true],
       ["src/main.ts", true],

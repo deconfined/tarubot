@@ -7,6 +7,7 @@
 - The production application **TaruBot**, `965294750741692416`, is no longer in this guild (404 in the 2.13.0 rollout).
 - DevBot's isolated PostgreSQL database is `tarubot_dev`.
 - `docker-compose.devbot.yml` supplies the development database and requires explicit test-guild scope.
+- **The staging host** ([#50](https://github.com/deconfined/tarubot/issues/50)) will take DevBot over after 2.33.0, as a rootless Quadlet unit against its own `tarubot_staging` database under the `staging` tool profile ([HOSTING.md](HOSTING.md#staging-host-50)). The 2.32.0 playbook configured that host on 2026-09-26, but no bot runs there, and it holds no DevBot token. The move is a planned stop, dump and restore, with DevBot's token reset so it never runs in two places. Until then DevBot runs here as below, and its local `devbot` profile is unchanged.
 
 Use the development overlay consistently for this running instance:
 

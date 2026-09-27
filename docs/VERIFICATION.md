@@ -21,6 +21,88 @@ Live registration, gateway connection/restart, complete member enumeration, hier
 
 ## Automated suites
 
+**2.32.0 host playbook on the staging host (2026-09-26, branch `feat/staging-ansible-2.32.0`, #50 part 1).** The playbook was applied by hand from the branch, from the operator machine. The run used ansible-core 2.16.16 (the hosts' AppStream version), `LC_ALL=C.UTF-8`, `ANSIBLE_CONFIG` set to `ops/ansible/ansible.cfg`, and the out-of-repository inventory. It went ahead under question 5's standing go-ahead to apply the playbook to staging during the build phase (REQUIREMENTS.md "Approved staging amendments (2026-09-26)"). The session's permission check refused the first real apply; it was retried once, citing that go-ahead. The start tag never ran, no bot or container ran, and nothing touched Discord or production. No playbook or unit change was needed.
+- **Runs.**
+
+  | Step | Result |
+  | --- | --- |
+  | `--syntax-check` | Exit 0. |
+  | Read-only pre-check | Podman 5.8.2-9.el10_2.alma.1 is in AppStream. dnf gives `releasever_minor=2`, so EPEL's metalink resolves to EPEL 10.2. |
+  | `--check --diff --skip-tags start` | ok=51 changed=28 failed=0. Every change was one a fresh host needs. The second play stopped early, because `tarubot` didn't exist yet. |
+  | First real run, `--skip-tags start` | ok=84 changed=34 failed=0. The clone checked out `3d80d64` (2.30.4, which has no `ops/quadlet/`, so the clone's generator check was skipped). The sshd effective-settings and ptrace asserts passed. |
+  | Second real run | ok=77 **changed=0** failed=0. |
+  | A check run after it | ok=72 changed=0 failed=0. |
+- **SELinux and identity.** `getenforce` said Enforcing, and `ausearch` found no AVC, USER_AVC or SELINUX_ERR record since the run. The hostname was set, and cloud-init's `90-tarubot.cfg` sets `preserve_hostname: true`.
+- **sshd** (`sshd -T`):
+  - password, keyboard-interactive and GSSAPI authentication off, and X11 forwarding off;
+  - `permitrootlogin without-password`, OpenSSH's older name for prohibit-password;
+  - one host key, `/etc/ssh/ssh_host_ed25519_key`;
+  - `authorizedkeysfile /etc/ssh/authorized_keys/%u` for `tarubot` only, and `.ssh/authorized_keys` for root.
+
+  `sshd_config.d` holds `00-tarubot.conf`, and the hand-made `10-tarubot.conf` is gone. `/etc/ssh/authorized_keys/tarubot` is root-owned, mode 644, with no key yet.
+- **The `tarubot` account.**
+  - uid and gid 1000, no supplementary groups, GECOS `TaruBot,umask=0022`;
+  - password locked (`passwd -S` L, shadow `!`);
+  - subuid and subgid one range of 65,536 each;
+  - lingering on.
+  - Umask 0022 through `runuser -l`, `su -`, `systemd-run --machine=tarubot@ --user`, and the user manager's `/proc/<pid>/status`.
+- **Podman.**
+  - Podman 5.8.2 with crun 1.27, passt and container-selinux 2.248; `age` 1.3.1 from EPEL; acl, git and dnf-automatic installed.
+  - Rootless `podman info` as `tarubot`: rootless, cgroups v2 with the systemd manager, netavark and pasta, crun, overlay storage under the home, events to journald, SELinux on, UID map `[{0 1000 1} {1 524288 65536}]`.
+  - No containers and no images.
+- **Masks.**
+  - Podman's socket, service and both auto-update units are masked for the system and for `tarubot`'s user manager. The user socket is inactive, and neither `/run/podman` nor `/run/user/1000/podman` exists.
+  - rpcbind's socket and service are masked, and nothing listens on port 111.
+  - `sshd-keygen@rsa` and `sshd-keygen@ecdsa` are masked.
+- **Boot and updates.**
+  - `tarubot-ipv6-online.service` is enabled for the next boot, and `systemd-analyze verify` is clean. It sits under `network-online.target`, which `multi-user.target` wants. The script, run by hand, printed "IPv6 is ready after 0 s."
+  - dnf-automatic's timer is active (next run 2026-09-27 06:10 UTC), with `upgrade_type = security`, `apply_updates = yes` and `reboot = when-needed`.
+  - journald runs with `Storage=persistent`, `SystemMaxUse=1G` and `SplitMode=uid`, and holds `system.journal` and `user-1000.journal`.
+  - `ptrace_scope=1`, `use_tempaddr=0` for all, default and the interface; chronyd synchronised with leap status Normal; `systemctl --failed` lists nothing.
+- **Quadlet's generator on the host.** The branch's `ops/quadlet/` was copied into a temporary directory owned by `tarubot` and linked the way the start tag links it. `podman-system-generator --user --dryrun` then produced only `tarubot.service` for each target, and `podman-user-generator --dryrun` the same for staging.
+  - Staging's `ExecStart` merged the `50-target.conf` drop-in: both `--env-file` lists, `--read-only`, `--read-only-tmpfs=false`, `--cap-drop all`, `no-new-privileges`, `--pull never`, and the image at `@${TARUBOT_IMAGE_DIGEST}`.
+  - Over `tarubot`'s real search path, with `XDG_RUNTIME_DIR=/run/user/1000`: "No files parsed", exit 0.
+  - The output, saved as `staging.txt` and `production.txt`, passes `QUADLET_DRYRUN=<that directory> bun test tests/unit/quadlet.test.ts` with 42 pass and none skipped. AlmaLinux's own Podman 5.8.2 generates what the tests expect.
+  - The temporary directory was removed. Afterwards `~/.config/containers` doesn't exist, `tarubot.service` is inactive, and there are no containers.
+- **SSH after the run.**
+  - Fresh connections as root, with the staging Ansible key and with the owner's key, worked over IPv4 and IPv6.
+  - `ssh-keyscan` gets only an ssh-ed25519 host key, and a password or keyboard-interactive attempt gets "Permission denied (publickey)".
+  - The owner's key is refused for `tarubot`, as expected with no keys listed.
+  - Root's other keys are unchanged: with `tarubot_root_keys` empty, the playbook wrote no block.
+- **Left for the owner** ([OPEN_ITEMS.md](OPEN_ITEMS.md#owner-checks-owed)): the RSA and ECDSA SSHFP records and `known_hosts` lines are stale, because sshd now offers only the Ed25519 key. Staging may reboot itself after the next security update that needs it. The clone has mode 700, so git run as root reports "dubious ownership"; nobody set `safe.directory`.
+
+**2.32.0 review fixes on the staging host (2026-09-26, the same branch).** Two reviews of the branch led to these playbook changes: `dev.tty.legacy_tiocsti = 0` in the sysctl file, checked with ptrace before the handover to `tarubot`; `DisableForwarding yes` and `PermitUserRC no` in the sshd drop-in, and `UsePAM yes` added to the effective-settings check; root's password locked after that check (question 20); a check that `sudo -l -U tarubot` grants nothing; a check that `tarubot`'s user manager loads Podman's API and auto-update units as masked; Docker refused before any package is installed; pipelining moved to `[connection]`, which the local connection reads too; and the start tag removed until 2.33.0. The same standing go-ahead applied, from the operator machine with the same tools. No bot or container ran, and nothing touched Discord or production.
+- **Runs.**
+
+  | Step | Result |
+  | --- | --- |
+  | `--check --diff --skip-tags start` | ok=80 changed=4 failed=0: the sysctl file, the sshd drop-in, sshd's reload, and root's password lock. So root's password was usable before. |
+  | Real run, `--skip-tags start` | ok=87 changed=5 failed=0: those four and the sysctl handler. The new sshd, kernel, sudo and user-mask checks passed. |
+  | Second real run | ok=84 **changed=0** failed=0. |
+  | A check run after it | ok=79 changed=0 failed=0. |
+- **Probes afterwards,** over a fresh connection with no connection sharing:
+  - root logs in with the staging key after the lock (sshd leaves a locked account to PAM), and `passwd -S root` shows `L`;
+  - `dev.tty.legacy_tiocsti = 0` and `kernel.yama.ptrace_scope = 1`;
+  - `sshd -T` for `tarubot` shows `usepam yes`, `disableforwarding yes`, `permituserrc no`, `x11forwarding no` and `authorizedkeysfile /etc/ssh/authorized_keys/%u`. `ssh -W` is refused ("administratively prohibited");
+  - no AVC, USER_AVC or SELINUX_ERR record since the run, and `systemctl --failed` lists nothing;
+  - EL10's sudo 1.9.17p2 already runs commands in their own pseudo-terminal (`sudo -V`: "Always run commands in a pseudo-tty"), and `run0 --user=tarubot id -un` prints `tarubot`. These are the documented ways to act as `tarubot`, besides SSH.
+- **Not yet seen:** the boot path. Staging hasn't rebooted since the first apply, so a supervised reboot waits for @deconfined's go-ahead ([OPEN_ITEMS.md](OPEN_ITEMS.md#owner-checks-owed)).
+
+**2.32.0 local checks after the review fixes (2026-09-26).**
+- typecheck, lint, format and build clean.
+- `test:unit` 1,529 pass and 2 skipped across 65 files. With `QUADLET_DRYRUN` set to the generator output below, 1,531 pass and none are skipped. `test:contract` 34 pass.
+- `tests/unit/playbook.test.ts` (new) 19 pass. Each of five mutations failed the test that names it: a root play after the `tarubot` play, a `group_vars` directory, pipelining back under `[ssh_connection]`, a `become_user` on a root task together with a copy without a mode, and a shebang script under `ops/` that ShellCheck doesn't cover.
+- CI's new generator step, run locally through Docker with `quay.io/podman/stable:v5.8.2` at the pinned digest, produced only `tarubot.service` for each target, and `quadlet.test.ts` then gave 42 pass and none skipped.
+- In `ops/ansible/`: `--syntax-check` with the example inventory and host settings exits 0, and ansible-lint 26.6.0 on ansible-core 2.16.16 reports 0 failures and 0 warnings under the `production` profile.
+- ShellCheck 0.9.0 (the ubuntu-24.04 runner's version, run from its image) is clean on `ops/*.sh`, `ops/quadlet/check-env.sh`, the IPv6 wait script and the skeleton files.
+- The site builds 35 pages, with every internal link valid.
+
+**2.32.0 local checks (2026-09-26, the same branch, after the documentation).**
+- typecheck, lint, format and build clean.
+- `test:unit` 1,510 pass and 2 skipped across 64 files. The two skips are `quadlet.test.ts`'s dry-run comparisons, which need `QUADLET_DRYRUN`; with the host's output, that file gives 42 pass and none skipped. The six files this release touches (`deployment`, `quadlet`, `publish-workflow`, `container-hardening`, `deploy-workflow`, `docs-site`) give 148 pass and those 2 skips.
+- `test:contract` 34 pass.
+- Offline in `ops/ansible/`: `ansible-playbook --syntax-check` with the example inventory and host settings exits 0, and `ansible-lint --offline` 26.6.0 on ansible-core 2.16.16 reports 0 failures and 0 warnings under the `production` profile. ShellCheck isn't installed on the development machine; CI's Host playbook job runs it.
+
 **2.30.4 (2026-09-26, branch `docs/invite-and-records-2.30.4`, #54):** typecheck, lint, format and build clean; `docs-site.test.ts` 12 pass; `test:unit` 1,446 pass across 62 files; the site builds 35 pages with every internal link valid. The new checks: add-to-server's Permissions table lists exactly `requiredBotPermissions` plus Manage Channels; the page still names `bot`, `applications.commands`, the Server Members Intent, Manage Server and Public Bot; and the three Discord-URL guards (authorization URLs on either domain and any API version, `discordapp.com`, server invites) hold for every site page and the README. Run against 2.30.3's page, the authorization-URL guard catches the removed template, and the long-number rule its permission integer. Both new tests were checked by mutation: an authorization URL appended to the README, and **Public Bot** unbolded on the page, each failed the test that names it. No file under `src/` changes. `test:contract` 34 pass; `test:docker` 1,596 pass and 40 skipped with the supplied fixture; `ci:version` accepts 2.30.4 above 2.30.3.
 
 **Host file modes, DNSSEC and the Discord application settings (2026-09-26):**

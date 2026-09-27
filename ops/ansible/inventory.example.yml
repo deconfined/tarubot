@@ -1,0 +1,16 @@
+---
+# Example inventory for TaruBot's host playbook (#50): how to reach one host, and nothing else. Copy
+# it outside the repository (the repository names no host) and replace the placeholders. The host's
+# settings go in a separate file passed with -e @host.yml (host.example.yml), not here.
+#
+# The address is a documentation address (RFC 3849); IPv6 first, as the hosts are dual-stack.
+all:
+  hosts:
+    staging:
+      ansible_host: "2001:db8::10"
+      # The playbook runs as root, reached with a key. Before the pull unit (#50 part 2) this is a
+      # key kept for the build phase only; after it, hosts apply the playbook to themselves.
+      ansible_user: root
+      ansible_ssh_private_key_file: ~/.ssh/REPLACE_WITH_KEY_FILE
+      # Only that key, and only a host key already in known_hosts (confirmed through the console).
+      ansible_ssh_common_args: "-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"

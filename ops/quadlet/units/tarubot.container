@@ -1,0 +1,71 @@
+# TaruBot as a rootless Quadlet unit under the tarubot user's systemd (#50). Podman's generator
+# turns this file into tarubot.service; ops/quadlet/README.md describes the layout, the host links
+# and how to check the generated unit. The file belongs to the release: a host links
+# ~/.config/containers/systemd/tarubot to ~/tarubot/ops/quadlet/units, so a rollback brings back
+# that release's own unit. The host's target (production/ or staging/) adds its settings through a
+# drop-in. tests/unit/quadlet.test.ts and tests/unit/container-hardening.test.ts keep this unit in
+# step with the bot service in docker-compose.production.yml. Comments stay on their own lines:
+# systemd has no inline comments.
+
+[Unit]
+Description=TaruBot
+# Docker's unless-stopped policy never gives up, and neither does this: no start rate limit.
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=tarubot
+# The repository is fixed here, so no .env edit can make a host run another package. The digest is
+# the pin deploy.sh writes to ~/tarubot/.env; systemd expands ${...} in the generated ExecStart
+# from [Service] EnvironmentFile= below, so a re-pin needs no daemon-reload.
+Image=ghcr.io/deconfined/tarubot@${TARUBOT_IMAGE_DIGEST}
+# A start or a reboot never contacts GHCR: deploy.sh pulls by digest before it pins.
+Pull=never
+# The container gets only the names these lists give (Podman env-file format). A bare NAME copies
+# the value systemd read from .env, and only when it is set; later files win, and the target's
+# drop-in adds its target.env after this one. .env itself never reaches Podman's parser.
+EnvironmentFile=%h/tarubot/ops/quadlet/units/tarubot.env
+# Nothing from Podman's own environment or a containers.conf default passes through.
+EnvironmentHost=false
+HttpProxy=false
+# Container hardening (2.30.3, #51), as in docker-compose.production.yml: a read-only root with no
+# tmpfs at all. ReadOnlyTmpfs= defaults to true, which would mount writable tmpfs on /dev, /dev/shm,
+# /run, /tmp and /var/tmp; false mounts none and leaves /dev/shm read-only too.
+ReadOnly=true
+ReadOnlyTmpfs=false
+DropCapability=all
+NoNewPrivileges=true
+# Compose's health check, with the same exec array (JSON, without Docker's CMD word) and timings.
+# Podman runs it from a transient systemd timer, which needs the user's lingering.
+HealthCmd=["bun","-e","const r=await fetch('http://localhost:3000/health/ready');process.exit(r.ok?0:1)"]
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=3
+# A new bot waits, unready, for the writer lease while the previous one stops.
+HealthStartPeriod=60s
+# An unhealthy bot keeps running, as under Docker; only an exit makes systemd restart it.
+HealthOnFailure=none
+# Compose's stop_grace_period, below TimeoutStopSec so systemd never kills `podman rm` itself.
+StopTimeout=30
+# The container's output goes to the user journal, where a removed container's lines stay.
+LogDriver=journald
+
+[Service]
+# systemd parses the host's one settings file: quoted values may span lines (the PEMs), and no
+# value appears on a command line. The file is required, so a missing .env stops the start.
+EnvironmentFile=%h/tarubot/.env
+# ops/backup.sh's settings never reach Podman, conmon or the bot.
+UnsetEnvironment=BACKUP_STORAGE_ENDPOINT BACKUP_STORAGE_ACCESS_KEY BACKUP_STORAGE_SECRET_KEY BACKUP_STORAGE_REGION HEALTHCHECKS_BACKUP_URL
+# systemd re-reads .env on every start, crash restarts and reboots included, so every start checks
+# it: first the file's lines, then the settings systemd read. Both print names, never values.
+ExecStartPre=%h/tarubot/ops/quadlet/check-env.sh --syntax %h/tarubot/.env
+ExecStartPre=%h/tarubot/ops/quadlet/check-env.sh
+Restart=always
+RestartSec=1s
+# Restarts back off from 1 s to 60 s over six steps.
+RestartSteps=6
+RestartMaxDelaySec=60s
+TimeoutStopSec=60
+
+[Install]
+# Generated units can't be enabled; the generator applies this at every daemon-reload and boot.
+WantedBy=default.target

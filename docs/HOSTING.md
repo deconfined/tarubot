@@ -4,6 +4,8 @@ Production TaruBot has run on a **Linode Docker host with Linode managed Postgre
 
 The cutover first went live on DigitalOcean App Platform, then moved the same evening, with about 90 seconds of downtime, because **the Lodestone refuses DigitalOcean's addresses**: HTTP 403 at the edge, within milliseconds. From App Platform, Nodestone could not refresh profiles, verify claims or read the roster. Linode's addresses get HTTP 200. [MIGRATION.md](MIGRATION.md#record-of-the-2026-09-24-cutover) has the record. [APP_PLATFORM.md](APP_PLATFORM.md) records the App Platform setup, retired in 2.21.0; the owner has since deleted the app and its cluster (recorded 2026-09-26).
 
+A second Linode, the [staging host](#staging-host-50) (#50), is being built beside it on AlmaLinux with rootless Podman, from the Ansible playbook production will be rebuilt from.
+
 ## Layout
 
 | Piece | Where |
@@ -341,7 +343,18 @@ printf 'user = "%s:%s"\n' "$BACKUP_STORAGE_ACCESS_KEY" "$BACKUP_STORAGE_SECRET_K
     --data-binary @ops/bucket-lifecycle.xml "https://${BACKUP_STORAGE_ENDPOINT%/}/?lifecycle"
 ```
 
-**Restoring a dump.** Restore into a new database, never over the live one. Use a new cluster, or `tarubot_restore` on the same cluster:
+**Restoring a dump.** Restore into a new database, never over the live one. Use a new cluster, or `tarubot_restore` on the same cluster. Lock `tarubot_restore` down before anything is restored into it: a new database lets PUBLIC connect, and the staging role shares the cluster (#50). As the admin role, in `defaultdb`:
+
+```sql
+CREATE DATABASE tarubot_restore OWNER tarubot TEMPLATE template0;
+-- As its owning role (SET ROLE tarubot if the admin can, or connect as tarubot):
+REVOKE CONNECT, TEMPORARY ON DATABASE tarubot_restore FROM PUBLIC;
+GRANT CONNECT ON DATABASE tarubot_restore TO akmadmin;
+```
+
+The owner, `tarubot`, keeps its own `CONNECT`. Confirm with `has_database_privilege` that PUBLIC and `tarubot_staging` can't connect.
+
+Then fetch, decrypt and restore:
 
 ```sh
 set -a; . ~/tarubot-cutover/backup-storage.env; set +a
@@ -423,3 +436,158 @@ You need the latest settings copy and the `age` key (above), access to Linode, t
 9. **Check it** with the everyday checks above. Readiness must be all true, and the logs must show "Database writer lease acquired" and "TaruBot ready". Resume the healthchecks.io check; it should turn green within five minutes. Commands are registered globally and survive a rebuild, so there is nothing to register.
 10. **Restore the backup schedule:** add the database's new access-list entry first (step 5), then follow "Setting it up" under Daily dumps. The first run should turn the "TaruBot backups" check green.
 11. **Retire the old host.** Delete the old Linode and remove its database access entry. Update the Layout table above, and take a fresh settings copy (`bun run host:env-backup -- --host tarubot@<production host>`).
+
+## Staging host (#50)
+
+The staging host is a second Linode. It will run DevBot the way production will run after its rebuild: AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under `tarubot`'s systemd, no Docker, and its own database and role on the same managed cluster. @deconfined's decisions are in REQUIREMENTS.md "Approved staging amendments (2026-09-26)". The host is online on AlmaLinux 10.2, reached as `root@<staging host>` with a staging-only Ansible key from the operator machine, and the playbook configured it on 2026-09-26 ([VERIFICATION.md](VERIFICATION.md)).
+
+**No bot runs there yet.** The staging host holds no DevBot token. DevBot moves after 2.33.0, with a new token, and until then it stays on the development machine ([DEV_GUILD.md](DEV_GUILD.md)). One Discord application must never run in two places.
+
+### What 2.32.0 delivers (#50 part 1)
+
+| Piece | What it is |
+| --- | --- |
+| `ops/ansible/` | The host playbook (`site.yml`), its `ansible.cfg`, the files and templates it installs, examples of the inventory and host settings, and the pinned requirements ([CONFIGURATION.md](CONFIGURATION.md#host-playbook-and-quadlet-unit)). It prepares the host and never starts the bot. |
+| `ops/quadlet/` | The release's unit, its production and staging targets, and `check-env.sh` ([README](../ops/quadlet/README.md)). No host links it yet. |
+| The staging tool profile | `TARUBOT_ENVIRONMENT=staging`: DevBot's application, the test guild and `tarubot_staging` ([CONFIGURATION.md](CONFIGURATION.md#maintenance-tool-profiles)). `staging.env.example` is the template for the host's `.env` ([CONFIGURATION.md](CONFIGURATION.md#runtime-configuration)). |
+| Signed build provenance | `publish.yml` signs each image `main` publishes ([CI_CD.md](CI_CD.md#signed-build-provenance)). The deploy plan verifies the signature from 2.33.0. |
+| CI | The **Host playbook** job: a syntax check with the example inventory and host settings, ansible-lint (pinned and offline), and ShellCheck on the playbook's scripts. `CI result` requires it. The Checks job also runs Podman 5.8.2's own generator over the unit for both targets and compares the result in `tests/unit/quadlet.test.ts`, and `tests/unit/playbook.test.ts` pins the playbook's rules (below). |
+
+### What the playbook does
+
+It runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, and stops on anything else, including `selinux=0` or `enforcing=0` on the kernel command line. Never lower SELinux to make it pass. It also stops on missing or malformed host settings. Then:
+
+- **Base system.** It sets the hostname and UTC, and tells cloud-init to keep the hostname (`preserve_hostname`), since cloud-init would otherwise reset it at every boot.
+  - It installs Podman, crun, passt, container-selinux, acl, chrony, dnf-automatic, git, gnupg2, jq and sudo from AlmaLinux's repositories.
+  - `age` comes from EPEL, limited to that one package. EPEL's key ships with the playbook and is trusted only at its pinned fingerprint.
+  - It refuses Docker and the Docker shims (`podman-docker`, `podman-compose`) before it installs anything, so a host that has them is left as it was. After installing, it refuses a Podman older than 5.8.2, the version the unit was checked with.
+- **Updates.** dnf-automatic applies security updates daily, at 06:00 UTC plus up to an hour. Staging reboots itself when an update needs it (`shutdown -r +5`). Production never does, and its automatic updates skip the container stack and ansible-core.
+- **Kernel and services.**
+  - `kernel.yama.ptrace_scope=1`, and `dev.tty.legacy_tiocsti=0`, so only root can push input into a terminal.
+  - No temporary IPv6 addresses, so outbound IPv6 comes from the stable address on the database's access list.
+  - It masks rpcbind, which listens on port 111 on Linode's image.
+  - It masks the units that would generate RSA and ECDSA host keys.
+  - It masks Podman's API socket, API service and auto-update for the system, and by default for every user. The user masks in `/etc/systemd/user` are a default, not a barrier: `tarubot`'s own `~/.config/systemd/user` comes first, and `tarubot` can run Podman directly anyway. Each run checks that `tarubot`'s user manager still loads all four as masked.
+- **Journal and boot.**
+  - The journal is persistent, capped at 1 GB, with one file per user. The bot logs to it, and deploys will read it.
+  - Every boot reaches `network-online.target`. `tarubot-ipv6-online.service` holds that target until the host has a global IPv6 address and a default route, so the bot's first start sees IPv6. It waits at most 60 seconds and never fails.
+  - logind's `KillUserProcesses` must stay off (EL's default).
+- **The `tarubot` account.**
+  - No groups, no sudo (each run checks `sudo -l -U tarubot`) and a locked password.
+  - Umask 0022, through the `umask=` field in its GECOS.
+  - Shell files that return at once for non-interactive shells, such as the deploy key's forced command.
+  - A UID of 1000 or higher, and one 65,536-ID subordinate UID and GID range each.
+  - Lingering, so its systemd runs without a login.
+- **SSH.** The drop-in `00-tarubot.conf` replaces `10-tarubot.conf`, the one applied by hand. It sets keys only, no GSSAPI, root by key only, no forwarding of any kind (`DisableForwarding`), no `~/.ssh/rc` (`PermitUserRC no`), and one Ed25519 host key.
+  - `tarubot`'s keys live in the root-owned `/etc/ssh/authorized_keys/tarubot`, written from the host settings: the deploy key's restricted line, then the operator keys. `tarubot` can't grant itself access through `~/.ssh`.
+  - Root's break-glass keys go in a managed block in `/root/.ssh/authorized_keys`, and a FIDO key gets `verify-required`. Keys outside the block stay.
+  - sshd reloads only after `sshd -t` accepts the whole configuration. The run then checks the effective settings for root and `tarubot` with `sshd -T`, including `UsePAM yes`.
+- **No root password** (question 20). After the `sshd -T` check, the run locks root's password. Key logins still work, because sshd leaves a locked account to PAM, and PAM doesn't refuse one. Linode's Reset Root Password with the Lish console is the break-glass, and `su -` has no password left to guess.
+- **As `tarubot`, in the last play:**
+  - It clones the repository into `~/tarubot` once, under umask 077. Deploys move the clone after that.
+  - It refuses a user `containers.conf`, runtime Quadlet units, a Podman API socket, an event logger other than journald, a Podman unit that `tarubot`'s user manager doesn't load as masked, and anything in `~/.config/containers/systemd` except the release's two links. 2.33.0's start tag makes those links; in 2.32.0 no host has them.
+  - It runs Quadlet's generator as a dry run, twice. Over the real search path, it must find no unit before the links exist. Over the clone's unit and this host's target, it must produce exactly `tarubot.service`. A clone from before 2.32.0 has no `ops/quadlet/`, and the second run is skipped.
+  - If `~/tarubot/.env` is there, it must be a regular file of `tarubot`'s at mode 600, and pass `check-env.sh --syntax`. It needs exactly one `TARUBOT_IMAGE_TAG`, no `TARUBOT_IMAGE_DIGEST` before the links, no `TARUBOT_IMAGE`, and on staging no `GITHUB_APP_*` value. The checks print names and counts, never values.
+
+It never links, starts, stops or restarts the bot; its handlers only reload systemd, sshd, journald's configuration and sysctl. 2.32.0 has no start tag: it arrives with 2.33.0, together with the first start. The deploy key's forced command is `ops/deploy.sh quadlet staging` on staging and `ops/deploy.sh quadlet` on production. `ops/deploy.sh` up to 2.32.x exits 64 on any argument, so the line fails closed until 2.33.0 reaches the host.
+
+**Code running as `tarubot` never steers root.** `tests/unit/playbook.test.ts` pins the checkable parts.
+- The first play runs as root and writes only system paths. It looks at `tarubot`'s home without following links, so a planted link stops the run.
+- The second and last play runs every task as `tarubot`, so no root task reads what a `tarubot` task returned. That rule is the boundary. Code running as `tarubot` can change what a `tarubot` task does, and even with pipelining a module run as `tarubot` unpacks itself into a directory `tarubot` owns. `PYTHONNOUSERSITE=1`, `ptrace_scope=1` and `legacy_tiocsti=0` are defence in depth.
+- Facts are gathered once and stay under `ansible_facts`, and settings arrive only as extra vars. `ops/ansible/` has no `group_vars`, `host_vars`, roles, `library` or plugin directories, which Ansible would load from beside the playbook.
+- `ansible.cfg` loads nothing but `ansible.builtin`, and the playbook uses no lookups or delegation and reads nothing from outside `ops/ansible/`. It assumes nothing about the machine that runs it, so a host can apply it to itself (`-c local`), as the pull unit will from 2.33.0, but only from a checkout `tarubot` can't write (below).
+
+### Running it from the operator machine
+
+Once, create a virtual environment with the hosts' ansible-core:
+
+```sh
+python3.12 -m venv ~/tarubot-ansible
+~/tarubot-ansible/bin/pip install --require-hashes --no-deps -r ops/ansible/requirements.txt
+```
+
+The repository names no host, so the inventory and the host settings live outside it (mode 600). Never copy them into a checkout.
+- **The inventory**, from `ops/ansible/inventory.example.yml`, says how to reach the host: its address, `root`, the staging-only key, `IdentitiesOnly=yes` and `StrictHostKeyChecking=yes`.
+- **The host settings**, from `ops/ansible/host.example.yml`: `tarubot_role: staging`, the hostname, and the public key lines.
+- **The host key** must already be in `known_hosts`, confirmed through the console or the host's SSHFP records.
+
+From a checkout of the release (or, while building, the branch), check first, then apply:
+
+```sh
+cd ops/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg" LC_ALL=C.UTF-8
+inventory=/path/outside/any/checkout/inventory.yml
+settings=/path/outside/any/checkout/host.yml
+~/tarubot-ansible/bin/ansible-playbook -i "$inventory" -e "@$settings" site.yml --syntax-check
+~/tarubot-ansible/bin/ansible-playbook -i "$inventory" -e "@$settings" site.yml --check --diff --skip-tags start
+~/tarubot-ansible/bin/ansible-playbook -i "$inventory" -e "@$settings" site.yml --skip-tags start
+```
+
+- **Check mode first, every time.** `--check --diff` changes nothing. Before the first real run it lists every change a fresh host needs, and its second play stops early, because `tarubot` doesn't exist yet. A few checks run only for real: sshd's effective settings and the ptrace and terminal-injection settings.
+- **Then apply.** A second real run must report `changed=0`. Anything else is drift to explain.
+- **`--skip-tags start`** changes nothing in 2.32.0, which has no start tag. It keeps 2.33.0's start tag out, even by mistake, once that exists. That tag links the release's unit, which from then on starts at every boot, and starts it for the first time, so it runs only at the DevBot move.
+- **Configuration and locale.** Ansible reads `ansible.cfg` from the working directory only when that directory isn't world-writable, so the example sets `ANSIBLE_CONFIG`. ansible-core 2.16 refuses to start under `LC_ALL=C`.
+- **For Claude sessions:**
+  - Ansible refuses non-blocking standard streams in Claude Code's shell, so run every ansible command as `<command> < /dev/null 2>&1 | cat`.
+  - Claude may run check mode against staging freely, and apply to staging under @deconfined's standing go-ahead for the build phase (question 5 of the amendments).
+  - Starting the bot (2.33.0's start tag), stopping DevBot, reboots and the move each need @deconfined's go-ahead.
+  - Production runs are @deconfined's alone, and the production inventory and root key stay off the operator machine.
+
+**Applying it on the host itself** (`-c local`) is how the pull unit will run it from 2.33.0:
+
+```sh
+ansible-playbook -c local -i localhost, site.yml -e @/etc/tarubot/host.yml --skip-tags start
+```
+
+Run that only from a root-owned checkout that `tarubot` can't write, such as the pull unit's own clone in `/var/lib/tarubot-config/repo` (2.33.0). Never run it from `~tarubot/tarubot`, or from anything else under `/home`. Ansible runs the playbook, reads `ansible.cfg` from its directory, and loads the files beside it, so running from a checkout `tarubot` can write hands root to `tarubot`. The playbook can't check this itself, because a changed copy would leave the check out. Until 2.33.0 brings that clone, apply from the operator machine as above.
+
+### After the first apply
+
+- **SSH as `tarubot`** works only with keys the host settings list: the deploy key and `tarubot_operator_keys`. With none listed, add your operator key there and apply again before restoring `.env`.
+- **The clone has mode 700,** so git run as root refuses it ("dubious ownership"). Run git as `tarubot`, and never set `safe.directory` for root: root would then read the clone's `.git/config`, whose hooks, pager and fsmonitor `tarubot` controls.
+- **Acting as `tarubot`.** Use `ssh tarubot@<staging host>` with an operator key, `run0 --user=tarubot` as root on the host, or `sudo -u tarubot -i` (EL10's sudo runs commands in their own pseudo-terminal). Each gives `tarubot` a terminal of its own. Never use plain `su` or `runuser` from a root terminal: they hand `tarubot`'s code root's terminal. `legacy_tiocsti=0` stops that code from typing into it, but a process left behind could still read what root types next.
+- **sshd offers only the Ed25519 host key.** The RSA and ECDSA key files stay on disk, unused. Their SSHFP records and `known_hosts` lines no longer match anything sshd offers, so remove them (an owner step at the DNS provider).
+- **Staging may reboot itself** after a daily security update that needs it.
+- **The unit a start would run:** see "What Podman generates" in the [Quadlet README](../ops/quadlet/README.md#what-podman-generates). As `tarubot`, set `XDG_RUNTIME_DIR=/run/user/$(id -u)` first.
+
+### Not yet automated
+
+| When | What |
+| --- | --- |
+| 2.33.0 | The staging deploy target: a "Deploy staging" job with a `staging` environment that needs no approval, and its own enable switch. Also `ops/deploy.sh`'s and `ops/backup.sh`'s Quadlet paths, the backup timer, Podman secrets with `env.ts`'s `_FILE` support, the provenance check in the deploy plan, the pull unit, and the start tag, which links the release's unit and starts it for the first time. Once secrets are Podman secrets, `UnsetEnvironment=` also names them, so they never sit in Podman's, conmon's or pasta's environment ([Quadlet README](../ops/quadlet/README.md#secrets)). |
+| Next | cloud-init user data and OpenTofu (the Linodes, their firewalls, the database access list and DNS), proven by rebuilding staging from scratch. The hand-built host is deleted after that. |
+| The move | DevBot moves: stop local DevBot, dump and restore into `tarubot_staging`, reset DevBot's token into staging's `.env` only, start it on staging, then retire the local copy. |
+| 2.34.0 | PR images on staging, dispatched by @deconfined. |
+| 2.35.0 | Production rebuilt onto AlmaLinux, rootless Podman and Quadlet, by overlap. Before it, the playbook needs the path that moves production's container stack, which its automatic updates skip, after a week on staging (REQUIREMENTS.md question 2): pinned versions, or a deliberate update run. The packages are `state: present`, so on a rebuilt production host nothing would upgrade them yet. |
+
+### Owner steps before the move
+
+None of these has run yet.
+
+1. **The database and role,** before any staging credential exists. As the admin role, in `defaultdb`, first read `SHOW max_connections` and the current use, and check whether any provider role relies on PUBLIC's CONNECT. Then:
+
+   ```sql
+   CREATE ROLE tarubot_staging LOGIN CONNECTION LIMIT <n>;
+   \password tarubot_staging
+   GRANT tarubot_staging TO akmadmin WITH INHERIT FALSE, SET TRUE;
+   CREATE DATABASE tarubot_staging OWNER tarubot_staging TEMPLATE template0;
+   SET ROLE tarubot_staging;
+   REVOKE CONNECT, TEMPORARY ON DATABASE tarubot_staging FROM PUBLIC;
+   RESET ROLE;
+   -- Production's database, as its owning role (SET ROLE tarubot if the admin can, or connect as tarubot):
+   REVOKE CONNECT, TEMPORARY ON DATABASE tarubot FROM PUBLIC;
+   GRANT CONNECT ON DATABASE tarubot TO akmadmin;
+   ```
+
+   `\password` keeps the password out of the statement text. Check production's readiness right after the second part. Then confirm with `has_database_privilege` that `tarubot_staging` can't connect to `tarubot`, that `tarubot` can't connect to `tarubot_staging`, and that PUBLIC holds neither. The staging tool profile accepts exactly these names.
+
+   **The same rule for every later database on the cluster:** revoke PUBLIC's `CONNECT` and `TEMPORARY` as soon as it is created, and grant `CONNECT` only to the roles that need it. That includes `tarubot_restore` ("Restoring a dump" above). The tool guard checks only the maintenance tools. The bot process itself, which on staging runs pull-request code, is held back only by these grants: a database it can connect to is one where it can take the writer-lease lock (advisory locks belong to one database), and a staging bot holding it in a database production is repointed at would keep production unready.
+2. **The access list:** add the staging host's addresses to the managed database's access list, IPv6 first.
+3. **Staging's own services,** never production's (they are listed empty in `staging.env.example`):
+   - a reports token limited to the reports repository's issues, because staging runs PR code;
+   - a heartbeat check without alerts;
+   - a separate bucket, with a key limited to it and its own backup check.
+4. **`.env`:** add your operator key to `tarubot_operator_keys` and apply. Then write `~/tarubot/.env` from `staging.env.example` over SSH stdin, with `DISCORD_TOKEN` left as its placeholder, and take a settings copy.
+5. **The break-glass key:** add the FIDO2 key's public line to `tarubot_root_keys` and apply. Try it on staging; it asks for the PIN on every use. Then remove your personal keys from root's `authorized_keys`, outside the playbook's block, as the plan asks. The staging-only Ansible key stays until the pull unit is proven.
+6. **SSHFP:** remove the stale RSA and ECDSA records (above).
+7. **Before 2.33.0's pull unit:** turn off squash merging (question 14).

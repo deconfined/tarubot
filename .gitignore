@@ -13,6 +13,11 @@ coverage/
 !.env.example
 # Operator env files such as production.env; the production.env.example template stays tracked.
 *.env
+# The Quadlet unit's setting lists (#50) are Podman env files that hold names and fixed public
+# values, never secrets (tests/unit/quadlet.test.ts), and belong to the release.
+!/ops/quadlet/units/tarubot.env
+!/ops/quadlet/production/target.env
+!/ops/quadlet/staging/target.env
 # Captures, reports, and diagnostics may contain guild-owned operational information.
 artifacts/
 # The supplied database dump is a local migration fixture and may contain private records.

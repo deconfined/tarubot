@@ -1,11 +1,12 @@
 /**
  * Deployment-identity guard for maintenance tools. Before any Discord or database I/O, each tool
  * declares what it will touch; this pure module works out which deployment profile the environment
- * belongs to (production, production rehearsal, DevBot, or unmanaged) and refuses mixed identities:
- * a DevBot env aimed at the production guild, production credentials without an explicit marker, a
- * production run silently merged with a checkout's .env, or a database belonging to another
- * deployment. Errors are Failure("configuration") and name settings, hosts and database names only,
- * never a URL, password or token (OPS-05). env.ts and the bot's startup configuration are unchanged.
+ * belongs to (production, production rehearsal, staging, DevBot, or unmanaged) and refuses mixed
+ * identities: a DevBot env aimed at the production guild, production credentials without an
+ * explicit marker, a production or staging run silently merged with a checkout's .env, or a
+ * database belonging to another deployment. Errors are Failure("configuration") and name settings,
+ * hosts and database names only, never a URL, password or token (OPS-05). env.ts and the bot's
+ * startup configuration are unchanged.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -31,8 +32,13 @@ export const deployments = {
   },
 } as const;
 
-/** `rehearsal` is the production application against a disposable database, read-only on Discord. */
-export type DeploymentName = "production" | "rehearsal" | "devbot" | "unmanaged";
+/**
+ * `rehearsal` is the production application against a disposable database, read-only on Discord.
+ * `staging` (#50) is DevBot's application on the staging host, against its own database on the
+ * managed cluster; `devbot` is the same application on the workstation's local database, until the
+ * DevBot move retires it.
+ */
+export type DeploymentName = "production" | "rehearsal" | "staging" | "devbot" | "unmanaged";
 export type DatabaseSetting = "DATABASE_URL" | "RESTORE_DATABASE_URL";
 
 /** What one tool invocation will touch; the guard checks it before any I/O. */
@@ -48,14 +54,16 @@ export interface ToolScope {
   globalCommands?: boolean;
   /**
    * register.js only: the scope it replaces, "global" or a guild ID. A managed profile registers
-   * only in its own declared registrationScope (production: global; DevBot: its guild), so a
-   * production --guild registration cannot shadow the global set with duplicate commands.
+   * only in its own declared registrationScope (production: global; staging and DevBot: the test
+   * guild), so a production --guild registration cannot shadow the global set with duplicate
+   * commands.
    */
   registerScope?: string;
   /**
    * migrate.js --restore-rehearsal only: DATABASE_URL names a disposable restore copy (ending in
    * _restore_test) on which a new migration is rehearsed before the live database. DevBot's
-   * profile then accepts that copy in place of tarubot_dev; production and rehearsal refuse it.
+   * profile then accepts that copy in place of tarubot_dev; production, rehearsal and staging
+   * refuse it.
    */
   restoreRehearsal?: boolean;
   /**
@@ -113,7 +121,7 @@ export function currentLaunch(cwd = process.cwd()): Launch {
 const snowflake = z.union([z.string().regex(/^[1-9][0-9]{0,19}$/), z.literal("")]);
 /** Only the settings the guard needs; everything else in the environment is ignored. */
 const settingsSchema = z.object({
-  TARUBOT_ENVIRONMENT: z.enum(["production", "rehearsal", "devbot", ""]).optional(),
+  TARUBOT_ENVIRONMENT: z.enum(["production", "rehearsal", "staging", "devbot", ""]).optional(),
   DISCORD_APPLICATION_ID: snowflake.optional(),
   TEST_GUILD_ID: snowflake.optional(),
   PUBLIC_TEST_RESPONSES: z.string().optional(),
@@ -141,7 +149,11 @@ function settings(env: Environment): Settings {
 /** Unset, empty and whitespace-only values all mean "not configured". */
 const present = (value: string | undefined): value is string => (value ?? "").trim() !== "";
 
-/** Pick the profile from the explicit marker, else infer it from the application ID. */
+/**
+ * Pick the profile from the explicit marker, else infer it from the application ID. Staging shares
+ * DevBot's application, so only its marker selects it, and the marker is checked before the
+ * inference: DevBot's application ID alone always means the local devbot profile.
+ */
 function profile(values: Settings): Deployment {
   const marker = values.TARUBOT_ENVIRONMENT || null;
   const application = values.DISCORD_APPLICATION_ID || null;
@@ -150,14 +162,17 @@ function profile(values: Settings): Deployment {
     guilds: deployments.production.guilds,
     registrationScope: deployments.production.registrationScope,
   };
-  const devbot = {
-    name: "devbot" as const,
+  // DevBot's identity, which the staging profile uses as well: its application, its test guild,
+  // and command registration in that guild only.
+  const devbotIdentity = {
     applicationId: deployments.devbot.applicationId,
     guilds: deployments.devbot.guilds,
     registrationScope: deployments.devbot.registrationScope,
   };
   if (marker === "production" || marker === "rehearsal") return { name: marker, ...production };
-  if (marker === "devbot" || application === deployments.devbot.applicationId) return devbot;
+  if (marker === "staging") return { name: "staging", ...devbotIdentity };
+  if (marker === "devbot" || application === deployments.devbot.applicationId)
+    return { name: "devbot", ...devbotIdentity };
   // Production credentials must say so explicitly: they come only from the production env file.
   if (application === deployments.production.applicationId)
     throw new Failure(
@@ -245,6 +260,21 @@ export const MANAGED_DIRECT_PORTS: readonly number[] = [27520];
 /** The provider's administrator login (Linode); tools connect as the application user. */
 export const MANAGED_ADMIN_USERS: readonly string[] = ["akmadmin"];
 
+/**
+ * The databases production's tools may use as DATABASE_URL: the live `tarubot`, or
+ * `tarubot_restore` after docs/HOSTING.md "Restoring a dump" repoints the bot at a same-cluster
+ * restore. (A PITR fork is a new cluster that holds `tarubot`.) Anything else, staging's database
+ * included, is refused.
+ */
+export const PRODUCTION_DATABASES: readonly string[] = ["tarubot", "tarubot_restore"];
+
+/**
+ * Staging's database and the role it connects as (#50), on the same managed cluster as production.
+ * Both are exactly this name, and the role owns its database. The production application refuses
+ * every database or user whose name starts with it, so a staging URL never passes as production's.
+ */
+export const STAGING_DATABASE = "tarubot_staging";
+
 /** A --env-file (or --no-env-file) flag means Bun did not auto-load the working directory's files. */
 const envFileFlag = (argument: string): boolean =>
   argument === "--env-file" || argument.startsWith("--env-file=") || argument === "--no-env-file";
@@ -270,11 +300,18 @@ export function assertToolScope(
   const refuse = (reason: string) =>
     new Failure("configuration", `Refusing ${scope.tool} under the ${name} profile: ${reason}`);
   const productionApp = name === "production" || name === "rehearsal";
+  /** Profiles that run DevBot's application: staging on its host, devbot on the workstation. */
+  const devbotApp = name === "staging" || name === "devbot";
   const application = values.DISCORD_APPLICATION_ID || null;
 
   // Launch: `bun run` children and plain `bun` reload the checkout's env files, which would fill
-  // any gap in the production env file with development values. Containers have none of these.
-  if (productionApp && launch.envFiles.length && !launch.execArgv.some(envFileFlag))
+  // any gap in the production or staging settings with development values. Containers have none
+  // of these; staging's tools run in the bot's container on its host.
+  if (
+    (productionApp || name === "staging") &&
+    launch.envFiles.length &&
+    !launch.execArgv.some(envFileFlag)
+  )
     throw refuse(
       `${launch.envFiles.join(", ")} in the working directory would be merged into this run. Start it as bun --env-file=PATH dist/scripts/<tool>.js, never with bun run.`,
     );
@@ -288,19 +325,20 @@ export function assertToolScope(
     throw refuse(
       `DISCORD_APPLICATION_ID must be the production application ${deployments.production.applicationId}.`,
     );
-  if (name === "devbot" && application !== deployments.devbot.applicationId)
+  if (devbotApp && application !== deployments.devbot.applicationId)
     throw refuse(
       `DISCORD_APPLICATION_ID must be DevBot's application ${deployments.devbot.applicationId}.`,
     );
 
-  // Test scope: production never carries development scoping; DevBot always does.
+  // Test scope: production never carries development scoping; DevBot's application always does,
+  // on staging too. Staging may show replies publicly and name its test-plan channel, like DevBot.
   if (productionApp) {
     if (present(values.TEST_GUILD_ID)) throw refuse("TEST_GUILD_ID must be empty.");
     if (values.PUBLIC_TEST_RESPONSES?.trim() === "true")
       throw refuse("PUBLIC_TEST_RESPONSES must not be true.");
     if (present(values.TEST_PLAN_CHANNEL_ID)) throw refuse("TEST_PLAN_CHANNEL_ID must be empty.");
   }
-  if (name === "devbot" && values.TEST_GUILD_ID !== deployments.devbot.guilds[0])
+  if (devbotApp && values.TEST_GUILD_ID !== deployments.devbot.guilds[0])
     throw refuse(`TEST_GUILD_ID must be DevBot's test guild ${deployments.devbot.guilds[0]}.`);
 
   // Guilds: each managed profile touches only its own; unmanaged touches none of them.
@@ -323,8 +361,8 @@ export function assertToolScope(
       );
   }
 
-  // Commands and Discord writes.
-  if (scope.globalCommands && (name === "devbot" || name === "rehearsal"))
+  // Commands and Discord writes. Staging writes to Discord like DevBot, in the test guild only.
+  if (scope.globalCommands && (devbotApp || name === "rehearsal"))
     throw refuse("global command registration belongs to the production profile.");
   if (name === "rehearsal" && scope.discord === "write")
     throw refuse("a rehearsal is read-only on Discord.");
@@ -342,6 +380,16 @@ export function assertToolScope(
   if (scope.restoreRehearsal && productionApp)
     throw refuse(
       "--restore-rehearsal is DevBot's restore-copy rehearsal; the production application rehearses in a *_rehearsal database.",
+    );
+  // Staging has no restore target: it resets in place, and its role can't create databases. So
+  // neither a restore-copy rehearsal nor check-restore's second database has a staging procedure.
+  if (name === "staging" && scope.restoreRehearsal)
+    throw refuse(
+      `--restore-rehearsal has no staging procedure; staging migrates ${STAGING_DATABASE} itself.`,
+    );
+  if (name === "staging" && scope.databases.includes("RESTORE_DATABASE_URL"))
+    throw refuse(
+      `RESTORE_DATABASE_URL has no staging procedure; staging resets ${STAGING_DATABASE} in place.`,
     );
 
   for (const setting of scope.databases) checkDatabase(deployment, setting, values, refuse, scope);
@@ -391,14 +439,25 @@ function checkDatabase(
       throw refuse("RESTORE_DATABASE_URL must be a different database from DATABASE_URL.");
   }
 
+  // The production application never touches staging's database or role, whichever its profile:
+  // they share a cluster, so the name is what tells them apart.
+  if (
+    (deployment.name === "production" || deployment.name === "rehearsal") &&
+    (target.name.startsWith(STAGING_DATABASE) || target.user.startsWith(STAGING_DATABASE))
+  )
+    throw refuse(`${where} belongs to staging (${STAGING_DATABASE}), never to production.`);
+
   switch (deployment.name) {
     case "production": {
       if (local) throw refuse(`${where} is local; production uses the managed cluster.`);
       managed();
       if (target.user !== "tarubot") throw refuse(`${where} must connect as the tarubot user.`);
       if (source === null) {
-        if (target.name === "tarubot_dev" || /_(test|rehearsal)$/.test(target.name))
-          throw refuse(`${where} is not a production database.`);
+        // The live database, or the same-cluster restore the bot was repointed at.
+        if (!PRODUCTION_DATABASES.includes(target.name))
+          throw refuse(
+            `${where} is not a production database (${PRODUCTION_DATABASES.join(" or ")}).`,
+          );
       } else {
         // A PITR fork is a new cluster holding `tarubot`; a same-cluster restore is `tarubot_restore`.
         const expected = source.host === target.host ? "tarubot_restore" : "tarubot";
@@ -416,6 +475,18 @@ function checkDatabase(
       if (!local) managed();
       return;
     }
+    case "staging": {
+      // Only the primary reaches this point (assertToolScope refuses RESTORE_DATABASE_URL): the
+      // managed cluster over verified TLS, and exactly staging's own database and role, so a
+      // staging run can never reach production's tarubot or tarubot_restore.
+      if (local) throw refuse(`${where} is local; staging uses the managed cluster.`);
+      managed();
+      if (target.name !== STAGING_DATABASE)
+        throw refuse(`${where} must be staging's database ${STAGING_DATABASE}.`);
+      if (target.user !== STAGING_DATABASE)
+        throw refuse(`${where} must connect as the ${STAGING_DATABASE} user.`);
+      return;
+    }
     case "devbot": {
       if (!local) throw refuse(`${where} must be DevBot's local database (localhost or postgres).`);
       if (present(ca)) throw refuse(`${caSetting} must be empty for DevBot's local database.`);
@@ -431,8 +502,8 @@ function checkDatabase(
       return;
     }
     case "unmanaged":
-      // CI and other developers: no deployment-specific database. (The production host's container
-      // sets TARUBOT_ENVIRONMENT=production, so its tools get the production rules.)
+      // CI and other developers: no deployment-specific database. (The production and staging
+      // hosts' containers set TARUBOT_ENVIRONMENT, so their tools get their own profile's rules.)
       return;
   }
 }

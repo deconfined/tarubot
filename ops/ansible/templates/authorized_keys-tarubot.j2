@@ -1,0 +1,12 @@
+# Installed by TaruBot's host playbook as /etc/ssh/authorized_keys/tarubot (#50), from the host
+# settings (tarubot_deploy_key_public, tarubot_operator_keys). Change those settings, not this
+# file: the next run replaces it. sshd reads this file for tarubot instead of ~/.ssh/authorized_keys
+# (00-tarubot.conf), so tarubot can't add keys itself.
+{% if tb_deploy_key %}
+# The deploy key: every connection runs ops/deploy.sh ({{ tb_deploy_args }} mode) and nothing else.
+# restrict turns off forwarding, PTYs and ~/.ssh/rc; command= also captures exec, sftp and scp.
+restrict,command="{{ tb_home }}/tarubot/ops/deploy.sh {{ tb_deploy_args }}" {{ tb_deploy_key }}
+{% endif %}
+{% for key in tb_operator_keys %}
+{{ key | trim }}
+{% endfor %}

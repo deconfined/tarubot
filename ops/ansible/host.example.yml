@@ -1,0 +1,30 @@
+---
+# Example host settings for TaruBot's host playbook (#50), passed with -e @host.yml. These are the
+# playbook's only settings; site.yml refuses a run where one is missing or malformed. Copy the file
+# outside the repository and replace the placeholders. Public keys aren't secrets, but they stay out
+# of the public repository. On a host the pull unit manages (#50 part 2) this file is
+# /etc/tarubot/host.yml, root-only.
+
+# staging or production. Staging reboots itself after updates that need it; production never
+# reboots on its own, and its automatic updates skip the container stack and ansible-core.
+tarubot_role: staging
+
+# The host's name: one lowercase DNS label or name, at most 64 characters.
+tarubot_hostname: tarubot-staging.example.org
+
+# The deploy key's public line, without options: the playbook adds restrict and the forced command
+# (ops/deploy.sh in this role's mode). Empty writes no deploy line.
+tarubot_deploy_key_public: ""
+# tarubot_deploy_key_public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_ME tarubot-deploy-github"
+
+# Operator keys for the tarubot user, one public key line each, without options.
+tarubot_operator_keys: []
+# tarubot_operator_keys:
+#   - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_ME operator@workstation"
+
+# root's break-glass keys, one public key line each, without options. A FIDO key (sk-...) gets
+# verify-required, so every use needs its PIN or biometric. Keys outside the playbook's block in
+# /root/.ssh/authorized_keys stay; an empty list removes only the block.
+tarubot_root_keys: []
+# tarubot_root_keys:
+#   - "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t_REPLACE_ME break-glass"
