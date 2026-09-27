@@ -1,16 +1,17 @@
 # ansible-core for running TaruBot's host playbook from a workstation (#50), pinned with hashes to
-# 2.16.16: the version AlmaLinux 10.2's AppStream ships, which the hosts themselves run. Python 3.12,
-# as on the hosts. Install into a fresh virtual environment:
+# 2.16.19: the 2.16 series AlmaLinux 10.2's AppStream ships to the hosts, at the release with the
+# CVE-2026-11332 fix (AlmaLinux backports it into its own 2.16.16-2.el10_2.1, which PyPI doesn't
+# have). Python 3.12, as on the hosts. Install into a fresh virtual environment:
 #
 #   python3.12 -m venv ~/tarubot-ansible
 #   ~/tarubot-ansible/bin/pip install --require-hashes --no-deps -r ops/ansible/requirements.txt
 #
-# Regenerate (only when the hosts' AppStream version moves):
+# Regenerate when the hosts' AppStream series moves or a 2.16 release fixes a security advisory:
 #   uv pip compile --generate-hashes --python-version 3.12 --no-header --no-annotate \
 #     <(echo ansible-core==X.Y.Z) -o ops/ansible/requirements.txt   (then restore this header)
-ansible-core==2.16.16 \
-    --hash=sha256:3008a443ff76b7e67dc6697a41289b9a8842f769b202751cfdadf6673e15d481 \
-    --hash=sha256:e7a12cfcf17eec7c97bcdff1ce9ad6ec9a4628f7fcd3b3823d8a060d07bbede0
+ansible-core==2.16.19 \
+    --hash=sha256:5125f26412039ffb99a3a7723618535ab80e6ef38944aa2453997350388f4ef4 \
+    --hash=sha256:d7a32ba0f96f9c6582b7ff159a4a6f0e694662cfc4840497c88fed63bf58cd14
 cffi==2.1.1 \
     --hash=sha256:046bfc24911b37851ee1b51aab8bffe713d89c68c6a057b09484ce9fd5f69b4e \
     --hash=sha256:06c72bb76605a4b0cd0aad6930b69d4baf7dd5d806cfc409b824191099700e66 \

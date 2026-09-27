@@ -156,8 +156,8 @@ jobs:
           persist-credentials: false
       - name: Install the pinned ansible-core and ansible-lint
         run: |
-          # ansible-core 2.16.16 is the version AlmaLinux 10.2's AppStream ships, which the hosts
-          # run; the image's Python 3.12 matches theirs. Every package is pinned by hash, and
+          # ansible-core 2.16.19 is the 2.16 series AlmaLinux 10.2's AppStream ships to the hosts,
+          # with its security fixes; the image's Python 3.12 matches theirs. Every package is pinned by hash, and
           # --no-deps keeps pip from fetching anything the file doesn't list.
           python3 --version
           python3 -m venv "$RUNNER_TEMP/ansible"

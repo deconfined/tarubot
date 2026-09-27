@@ -1,6 +1,15 @@
 # Version history
 
-The current application version is **2.32.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.32.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.32.1 — ansible-core 2.16.19; Dependabot trimmed
+
+Maintenance after #50 part 1 ([#56](https://github.com/deconfined/tarubot/pull/56)). The bot is unchanged, so Deploy production should end `no-runtime-change`.
+
+- **ansible-core 2.16.19.** Merging 2.32.0 raised two Dependabot alerts for the pinned ansible-core 2.16.16 (GHSA-w8p5-mx5w-cpqj, CVE-2026-11332: argument injection in `ansible-galaxy role install`). The playbook never runs `ansible-galaxy`, and its role and collection paths are `/dev/null`, so it wasn't exposed. `ops/ansible/requirements.txt` and `requirements-lint.txt` now pin 2.16.19, the same 2.16 series with the fix, with fresh hashes; ansible-lint and its helper stay at 26.6.0. AlmaLinux backports the fix into its own `2.16.16-2.el10_2.1`, which the hosts will install from AppStream. Both files install with `--require-hashes` into a fresh venv, the syntax check and ansible-lint pass, and a check-mode run against the staging host reports `changed=0`.
+- **Deploy production.** The two Ansible pip pin files count as non-runtime, because only CI and the operator's venv read them. Before, any `ops/` change planned a production restart.
+- **Dependabot.** The Bun packages entry is gone from `.github/dependabot.yml`: Dependabot's updater can't read Bun's lockfile version 2 (dependabot-core#16026), so it failed on every run. `bun audit` in the Dependency audit workflow still covers those packages' advisories, and updates go through feature branches. The Ansible pins are listed as unmanaged too, since Dependabot can't rewrite their hashed format. @deconfined turned Dependabot's automatic security-fix pull requests off on 2026-09-27, and alerts stay on. docs/CI_CD.md "Dependency updates" describes all of this.
+- **Records.** The 2.32.0 merge, publish and verified provenance (below), and the first hardened nightly backup.
 
 ## 2.32.0 — Staging host playbook, Quadlet unit and signed images
 

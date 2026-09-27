@@ -1,18 +1,19 @@
 # CI's copy of requirements.txt plus ansible-lint (#50), pinned with hashes. ansible-core stays at
-# 2.16.16, the hosts' AppStream version; ansible-lint 26.6.0 runs against it. CI installs with:
+# requirements.txt's 2.16.19; ansible-lint 26.6.0 runs against it. CI installs with:
 #
 #   pip install --require-hashes --no-deps -r ops/ansible/requirements-lint.txt
 #
 # Regenerate:
 #   uv pip compile --generate-hashes --python-version 3.12 --no-header --no-annotate \
-#     <(printf 'ansible-core==2.16.16\nansible-lint==X.Y.Z\n') -o ops/ansible/requirements-lint.txt
+#     <(printf 'ansible-core==2.16.19\nansible-lint==X.Y.Z\nansible-compat==X.Y.Z\n') \
+#     -o ops/ansible/requirements-lint.txt
 #   (then restore this header)
 ansible-compat==26.6.0 \
     --hash=sha256:739c4d10c791000c4b353f5e725e9ebafb6384dbeb00b94c7c8ac3ee2c172337 \
     --hash=sha256:ad00d3cff84a961165a7dd90f175fd9a4584e2e602e9d8af2062ce7c479dd350
-ansible-core==2.16.16 \
-    --hash=sha256:3008a443ff76b7e67dc6697a41289b9a8842f769b202751cfdadf6673e15d481 \
-    --hash=sha256:e7a12cfcf17eec7c97bcdff1ce9ad6ec9a4628f7fcd3b3823d8a060d07bbede0
+ansible-core==2.16.19 \
+    --hash=sha256:5125f26412039ffb99a3a7723618535ab80e6ef38944aa2453997350388f4ef4 \
+    --hash=sha256:d7a32ba0f96f9c6582b7ff159a4a6f0e694662cfc4840497c88fed63bf58cd14
 ansible-lint==26.6.0 \
     --hash=sha256:162939615eae3b59f38bd829542642b586ccee17eefb0df8718ea4b092eee222 \
     --hash=sha256:790d08ff6ee56525244677411c90a17b374245d3913bc6a462b5d913ece6d615

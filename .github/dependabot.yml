@@ -7,6 +7,12 @@
 # low pull-request limits keep the number of those version commits small.
 #
 # Deliberately not managed here:
+# - Bun packages (package.json and bun.lock). Dependabot's updater can't read Bun's lockfile
+#   version 2 (dependabot/dependabot-core#16026), so that entry failed on every run; it was removed
+#   in 2.32.1. The Dependency audit workflow (bun audit) covers their advisories, and updates go
+#   through a normal feature branch. Restore the entry once the updater supports the lockfile.
+# - ops/ansible/requirements*.txt: hash-pinned with a header Dependabot can't rewrite (its security
+#   update failed on them). Alerts still cover them; regenerate by hand (the files say how).
 # - lodestone-css-selectors: the bot follows its HEAD live, and only `bun run selectors:update`
 #   advances the bundled fallback, because it also rewrites
 #   src/infrastructure/lodestone/upstream-revisions.json and runs the contract suite. (Nodestone and
@@ -16,33 +22,6 @@
 version: 2
 
 updates:
-  # Application and tooling packages (package.json and bun.lock). Until Dependabot's updater ships
-  # a Bun that reads lockfileVersion 2 (dependabot/dependabot-core#16026), these runs fail with
-  # DependencyFileNotSupported; the entry resumes on its own afterwards. Do not downgrade bun.lock.
-  - package-ecosystem: "bun"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    # Each open pull request needs its own version commit, so keep few open at once.
-    open-pull-requests-limit: 3
-    cooldown:
-      # Let new releases age before they are proposed, leaving time for compromised-package takedowns.
-      default-days: 7
-      semver-major-days: 14
-    ignore:
-      # The selectors' bundled fallback moves only with `bun run selectors:update`.
-      - dependency-name: "lodestone-css-selectors"
-      # Bun's type definitions move with the runtime pin, which the docker entry proposes.
-      - dependency-name: "@types/bun"
-    groups:
-      # One pull request for compatible updates; exact pins stay exact. Majors and drizzle-orm
-      # (0.x, where a minor release can break the ORM contract) arrive separately for review.
-      bun-minor-patch:
-        patterns: ["*"]
-        exclude-patterns: ["drizzle-orm"]
-        update-types: ["minor", "patch"]
-
   # Bun runtime image: every Dockerfile stage derives from oven/bun, so all FROM lines update together.
   # The maintainer completes the runtime upgrade in packageManager, engines.bun, and @types/bun;
   # tests/unit/runtime-pins.test.ts fails until they agree.
