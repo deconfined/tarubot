@@ -122,7 +122,7 @@ Run a single file with `bun test tests/unit/<name>.test.ts`. Integration tests n
   - apply it to staging under the owner's standing go-ahead, which covers the build phase only;
   - never start the bot, stop DevBot, reboot a host or run the DevBot move without the owner's go-ahead for that step;
   - never run the playbook against production: production runs, the production inventory and its root key are the owner's alone.
-- Question 5 also says agents never approve or dispatch deploys for either target, never change a deploy environment, its secrets or variables, or either enable switch, never hold either deploy key, and never push a workflow that does any of these. Its "never dispatch" is stricter than the `gh workflow run deploy.yml` allowance above, so dispatch neither target until the owner says which applies.
+- Question 5 also says agents never approve deploys for either target, never change a deploy environment, its secrets or variables, or either enable switch, never hold either deploy key, and never push a workflow that does any of these. On dispatching, the owner kept the allowance above over question 5 (2026-09-27): `gh workflow run deploy.yml`, for either target, only when the owner asks in that session.
 - When OpenTofu arrives, agents may run `plan` with read-only tokens, never `apply`, `import` or state edits (question 24).
 
 ## Gotchas
@@ -183,7 +183,7 @@ Run a single file with `bun test tests/unit/<name>.test.ts`. Integration tests n
   - To act as `tarubot` on the host, use `ssh tarubot@…`, `run0 --user=tarubot` or `sudo -u tarubot -i`, never plain `su` or `runuser` from a root terminal (docs/HOSTING.md "After the first apply").
   - Ansible refuses non-blocking standard streams in Claude Code's shell: run every `ansible`, `ansible-playbook` or `ansible-lint` command as `<command> < /dev/null 2>&1 | cat`. It also needs a UTF-8 locale (`LC_ALL=C.UTF-8`; ansible-core 2.16 refuses `C`), and `ANSIBLE_CONFIG="$PWD/ansible.cfg"` from `ops/ansible/`.
   - Check mode first (`--check --diff --skip-tags start`), then apply. A second real run must report `changed=0`.
-  - The boot path (the IPv6 wait unit, the persistent journal, the hostname, lingering with nobody logged in) hasn't been watched through a reboot yet; a supervised reboot needs the owner's go-ahead.
+  - A supervised reboot on 2026-09-27 showed the boot path working: the IPv6 wait unit, the persistent journal, the kept hostname and lingering with nobody logged in (docs/VERIFICATION.md). Any further reboot by a session still needs the owner's go-ahead.
   - Staging applies security updates daily from 06:00 UTC and reboots itself when one needs it, so a dropped SSH session around then may be that.
   - The playbook writes to neither Discord nor production, and nothing in it authorizes a production run.
 - Leave the old `feat/lobby-access` stash alone. It has been superseded. It exists only in the original Mac clone; this Linux clone has no stashes.

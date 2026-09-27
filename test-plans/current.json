@@ -2,12 +2,11 @@
   "title": "Session: 2.32.0 staging host layer",
   "objective": "2.32.0 (#50 part 1) adds the host playbook (AlmaLinux 10, SELinux, rootless Podman), the Quadlet unit, the staging tool profile and signed build provenance. The playbook ran on the staging host only; no bot runs there yet. Nothing changes for members; production restarts for the tool-guard change.",
   "user": [
-    "Go-ahead (or not) for one supervised staging reboot before merge; the boot path is unverified and dnf-automatic may reboot staging unattended from 06:10 UTC.",
-    "Answer the #50 dispatch question: does question 5's 'never dispatch' replace 'dispatch Deploy production when asked'?",
-    "Merge, then approve the 2.32.0 Deploy production run (restart path, no migration)."
+    "Merge, then approve the 2.32.0 Deploy production run (restart path, no migration).",
+    "When convenient: remove staging's stale RSA and ECDSA SSHFP records (sshd offers only Ed25519 now)."
   ],
   "assistant": [
-    "After a reboot go-ahead: record the IPv6 wait unit, network-online, hostname, journal boots, host key, linger and no AVCs.",
+    "Confirm the first hardened nightly backup (04:30 UTC, 2026-09-27) ended green, and record it.",
     "After the merge: gh attestation verify the first signed image digest; after the deploy, /version shows 2.32.0 and readiness holds."
   ],
   "bot": [

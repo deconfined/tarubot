@@ -86,7 +86,15 @@ Live registration, gateway connection/restart, complete member enumeration, hier
   - `sshd -T` for `tarubot` shows `usepam yes`, `disableforwarding yes`, `permituserrc no`, `x11forwarding no` and `authorizedkeysfile /etc/ssh/authorized_keys/%u`. `ssh -W` is refused ("administratively prohibited");
   - no AVC, USER_AVC or SELINUX_ERR record since the run, and `systemctl --failed` lists nothing;
   - EL10's sudo 1.9.17p2 already runs commands in their own pseudo-terminal (`sudo -V`: "Always run commands in a pseudo-tty"), and `run0 --user=tarubot id -un` prints `tarubot`. These are the documented ways to act as `tarubot`, besides SSH.
-- **Not yet seen:** the boot path. Staging hasn't rebooted since the first apply, so a supervised reboot waits for @deconfined's go-ahead ([OPEN_ITEMS.md](OPEN_ITEMS.md#owner-checks-owed)).
+- **Boot path, after a supervised reboot (2026-09-27, @deconfined's go-ahead).** `systemctl reboot` at 04:03 UTC; SSH answered again about two minutes later, with a new boot ID. Read-only checks afterwards:
+  - startup took 11.8 s (7.9 s in userspace), `systemctl is-system-running` says `running`, and `systemctl --failed` lists nothing;
+  - `tarubot-ipv6-online.service` succeeded ("IPv6 is ready after 3 s"), `network-online.target` is active, the global IPv6 address and the router-advertised default route are back, and SSH works over IPv6 and IPv4;
+  - the hostname the playbook set survived cloud-init's boot stage;
+  - `journalctl --list-boots` lists both boots, and `system.journal` and `user-1000.journal` persisted;
+  - `loginctl` shows `tarubot` lingering, its user manager is `running` with nobody logged in, `podman.socket` is masked and inactive, and no TaruBot unit exists;
+  - SELinux is enforcing, with no AVC, USER_AVC or SELINUX_ERR record since boot;
+  - `ssh-keyscan` gets only an `ssh-ed25519` key, a password attempt is refused ("Permission denied (publickey)"), `sshd -T` keeps `disableforwarding yes` and `permituserrc no`, and the only listeners are sshd on port 22 (both families) and chronyd on loopback; rpcbind stays masked;
+  - `legacy_tiocsti` 0, `ptrace_scope` 1 and `use_tempaddr` 0 held, root's password is still locked, and chrony reports a normal leap status.
 
 **2.32.0 local checks after the review fixes (2026-09-26).**
 - typecheck, lint, format and build clean.
