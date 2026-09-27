@@ -1,0 +1,27 @@
+# TaruBot's daily database backup on a Quadlet host (#50, 2.33.0), as a systemd user service of
+# the tarubot user: tarubot-backup.timer starts it every night, and `systemctl --user start
+# tarubot-backup.service` runs one by hand. `journalctl --user -u tarubot-backup` shows its runs.
+# The file belongs to the release: the playbook links it into ~/.config/systemd/user from the
+# clone, so a deploy's daemon-reload picks up a release's change to it.
+#
+# It runs `ops/backup.sh quadlet`, whose one-off `podman run` dump streams into age; the dump is
+# never a Quadlet unit, whose container output would go to a log. ops/deploy.sh's Quadlet mode
+# waits while this unit is activating, and tests/unit/backup-quadlet.test.ts pins this file.
+# Comments stay on their own lines: systemd has no inline comments.
+
+[Unit]
+Description=TaruBot's daily encrypted database backup
+# The dump reaches the managed database, the image registry and the bucket, so it waits for the
+# network as the bot's Quadlet unit does (Podman's user-level wait unit).
+Wants=podman-user-wait-network-online.service
+After=podman-user-wait-network-online.service
+
+[Service]
+# One run per start: systemd reports it activating while it runs, then inactive or failed.
+Type=oneshot
+# The script reads its settings from ~/tarubot/.env itself and its secrets through
+# ops/quadlet/secrets.sh, so this unit sets no environment: nothing secret enters the service's
+# environment, which Podman and conmon would inherit.
+ExecStart=%h/tarubot/ops/backup.sh quadlet
+# deploy.sh's migration path gives a backup the same 15 minutes.
+TimeoutStartSec=900

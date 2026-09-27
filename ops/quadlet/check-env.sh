@@ -1,23 +1,22 @@
 #!/bin/sh
-# The one check of the bot's settings on a Quadlet host (#50). It prints setting names and line
-# numbers, never a value, and exits 1 after naming every problem it found (64 on a usage error).
+# The check of the bot's settings on a Quadlet host (#50); ops/quadlet/secrets.sh checks the
+# secrets. It prints setting names and line numbers, never a value, and exits 1 after naming every
+# problem it found (64 on a usage error).
 #
 #   check-env.sh                Check the environment it runs in: systemd's reading of
-#                               ~/tarubot/.env. tarubot.service runs it before every start
-#                               (ExecStartPre), and a deploy runs it through
-#                               `systemd-run --user -p EnvironmentFile=...` before anything stops.
+#                               ~/tarubot/.env, after the unit's UnsetEnvironment=. tarubot.service
+#                               runs it before every start (ExecStartPre), and a deploy runs it
+#                               through `systemd-run --user -p EnvironmentFile=...
+#                               -p UnsetEnvironment=...` before anything stops. The secrets are
+#                               unset there, so ops/quadlet/secrets.sh checks those in .env itself.
 #   check-env.sh --syntax FILE  Check FILE's lines for anything systemd's EnvironmentFile= and
 #                               Compose's .env parser read differently. The file is the same one
 #                               under both runtimes (settings copies restore into either), so it
 #                               must mean the same to both.
 #
-# The lists below are the only copy; tests/unit/quadlet.test.ts derives them from
+# The list below is the only copy; tests/unit/quadlet.test.ts derives it from
 # docker-compose.production.yml and the bot's own defaults. ops/quadlet/README.md has the layout.
 set -eu
-
-# Compose's ${NAME:?} settings: the bot can't start without them. Without DATABASE_CA_CERT it would
-# connect to the managed cluster without verifying its certificate.
-readonly REQUIRED='DATABASE_URL DATABASE_CA_CERT DISCORD_TOKEN'
 
 # Compose's ${NAME:-default} settings whose default isn't empty. Compose used the default for an
 # empty value too, but the bot reads "" as it is: zod turns an empty number into 0 (which silently
@@ -28,17 +27,12 @@ readonly NOT_EMPTY='LOG_LEVEL ROSTER_INTERVAL_SECONDS PROFILE_INTERVAL_SECONDS V
 # One problem, by name only, on stderr (the journal under systemd).
 say() { printf 'check-env: %s\n' "$1" >&2; }
 
-# The environment's settings. Each name comes from the fixed lists above, never from input, so the
-# evals only read the variable that name gives.
+# The environment's settings. Each name comes from the fixed list above, never from input, so the
+# eval only reads the variable that name gives. Compose's required settings (DATABASE_URL,
+# DATABASE_CA_CERT, DISCORD_TOKEN) aren't checked here from 2.33.0: they are secrets, which the unit
+# unsets before this runs, and `secrets.sh check` and `sync` require them from .env instead.
 check_environment() {
   failed=0 value='' isset=''
-  for name in $REQUIRED; do
-    eval "value=\${$name-}"
-    if [ -z "$value" ]; then
-      say "$name is missing or empty"
-      failed=1
-    fi
-  done
 
   # The unit's Image= takes the digest as it is, so it must be one: sha256 and 64 hex digits.
   digest=${TARUBOT_IMAGE_DIGEST-}

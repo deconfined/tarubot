@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# A simulated `systemd-run --user` for tests/unit/deploy-script.test.ts. It accepts only the
+# options ops/deploy.sh may pass, fails without --user or --expand-environment=no, records
+# "systemd-run <command's file name>" in $SIM/calls and the UnsetEnvironment= list in
+# $SIM/systemd-run-unset, then runs the command the way the transient unit would: with
+# EnvironmentFile='s single-line assignments, minus the unset names, and nothing else from the
+# caller's environment (the stand-ins still find $SIM and $DEPLOY_STUBS).
+set -euo pipefail
+# shellcheck source=tests/fixtures/deploy-stubs/sim.sh
+source "$DEPLOY_STUBS/sim.sh"
+trace systemd-run "$@"
+[[ ${1-} == --user ]] || exit 1
+expand=0 envfile='' unset=''
+while (($#)) && [[ $1 != -- ]]; do
+  case $1 in
+    --user | --pipe | --wait | --collect | --quiet | --unit=*) ;;
+    --expand-environment=no) expand=1 ;;
+    -p)
+      case $2 in
+        EnvironmentFile=*) envfile=${2#EnvironmentFile=} ;;
+        UnsetEnvironment=*) unset=${2#UnsetEnvironment=} ;;
+        *) exit 1 ;;
+      esac
+      shift
+      ;;
+    *) exit 1 ;;
+  esac
+  shift
+done
+[[ ${1-} == -- ]] || exit 1
+shift
+((expand)) || exit 1
+printf '%s\n' "$unset" >"$S/systemd-run-unset"
+record "systemd-run ${1##*/}"
+vars=()
+if [[ -n $envfile ]]; then
+  while IFS= read -r line; do
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    name=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+    if [[ " $unset " == *" $name "* ]]; then continue; fi
+    vars+=("$name=$value")
+  done <"$envfile"
+fi
+exec env -i HOME="$HOME" PATH="$PATH" SIM="$SIM" DEPLOY_STUBS="$DEPLOY_STUBS" "${vars[@]}" "$@" </dev/null

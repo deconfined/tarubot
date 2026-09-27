@@ -1,26 +1,40 @@
-# Owner-approved production deploys to the Linode host over SSH (2.30.0, issue #41). The owner's
-# decisions are REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"; docs/HOSTING.md
-# "Automated deploys" has the flow and the outcomes, and docs/CI_CD.md "Deploy production" the
-# settings.
+# Deploys over SSH to production, after the owner's approval (2.30.0, issue #41), and to staging,
+# without one (2.33.0, issue #50). The owner's decisions are REQUIREMENTS.md "Approved SSH-deploy
+# amendments (2026-09-26)" and "Approved staging amendments (2026-09-26)"; docs/HOSTING.md
+# "Automated deploys" has the flow and the outcomes, and docs/CI_CD.md the settings.
 #
-#   plan    Public data only (no secret, no environment): the release, its image digest, the diff
-#           and whether anything that runs in production changed. It writes the plan to the run
-#           summary. Docs-, test- and CI-only merges end here, with a quiet Pushover message.
-#   deploy  The `production` environment: it waits for @deconfined's approval, and only then do the
-#           deploy key and the host settings load. It opens one SSH connection, whose forced
-#           command is ops/deploy.sh on the host; the host checks the approval with GitHub itself.
-#   notify  One Pushover message from the `notify` environment.
+#   plan            Public data only (no secret, no environment): the release, its image digest,
+#                   the image's signed build provenance, the diff and whether anything that runs on
+#                   the hosts changed. It writes the plan to the run summary and decides which
+#                   targets this run deploys. Docs-, test- and CI-only merges end here, with a quiet
+#                   Pushover message.
+#   deploy          The `production` environment: it waits for @deconfined's approval, and only
+#                   then do the deploy key and the host settings load. It opens one SSH connection,
+#                   whose forced command is ops/deploy.sh on the host; the host checks the approval
+#                   with GitHub itself.
+#   deploy-staging  The `staging` environment, which has no reviewers: the same SSH step against
+#                   the staging host, beside production's approval request. Production never waits
+#                   for it, and its failure never holds production up.
+#   notify          One Pushover message from the `notify` environment, about production only.
+#
+# An automatic run (after a publish of main) asks for both targets; a dispatch for the one its
+# `target` input names. Each target has its own switch, a repository variable: DEPLOY_ENABLED for
+# production and STAGING_DEPLOY_ENABLED for staging. A target whose switch is off is left out, and
+# with both off nothing runs and no secret loads.
 #
 # No job checks out the repository or uses an action, and every ${{ }} reaches a script through
 # env:. Re-runs are refused (every job requires the first attempt): start a new run instead. There
 # is no concurrency group: several approval requests may wait, an older one approved later ends as
-# superseded, and the host's lock serializes runs. The repository names no host: DEPLOY_HOST and
-# DEPLOY_KNOWN_HOSTS are variables of the production environment.
-name: Deploy production
-# The title names the target; ops/deploy.sh requires the same title before it acts.
+# superseded, and each host's lock serializes its runs. The repository names no host: DEPLOY_HOST
+# and DEPLOY_KNOWN_HOSTS are variables of each deploy environment.
+name: Deploy
+# The title names the target; ops/deploy.sh requires the same title before it acts, and the
+# production host refuses every title that ends in " to staging".
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-      && format('Deploy {0}{1}', inputs.version, inputs.rollback && format(' rollback from {0}', inputs.from) || '')
+      && format('Deploy {0}{1}{2}', inputs.version,
+                inputs.rollback && format(' rollback from {0}', inputs.from) || '',
+                inputs.target == 'staging' && ' to staging' || '')
       || format('Deploy {0}', github.event.workflow_run.head_sha) }}
 
 on:
@@ -43,6 +57,11 @@ on:
         description: "Rollback only: the live version you are leaving"
         type: string
         default: ""
+      target:
+        description: "Where to deploy: production waits for your approval, staging needs none"
+        type: choice
+        options: [production, staging]
+        default: production
 
 permissions: {}
 
@@ -53,9 +72,10 @@ defaults:
 jobs:
   plan:
     name: Plan
-    # DEPLOY_ENABLED is the rollout and pause switch: unset, nothing runs and no secret loads.
+    # The switches are the rollout and pause controls: with both unset, nothing runs and no secret
+    # loads. Each target's own switch is checked again in the plan and in its deploy job.
     if: >-
-      github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true' && (
+      github.run_attempt == '1' && (vars.DEPLOY_ENABLED == 'true' || vars.STAGING_DEPLOY_ENABLED == 'true') && (
         (github.event_name == 'workflow_run'
          && github.event.workflow_run.conclusion == 'success'
          && github.event.workflow_run.event == 'push'
@@ -65,9 +85,12 @@ jobs:
         || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # No packages permission and no registry login: the package is public, so the digests and
+    # `gh attestation verify oci://…` resolve anonymously, and no job token is written to disk.
     permissions:
-      contents: read # package.json, CHANGELOG.md, migrations/ and the compare API
-      actions: read # the environments' protection rules and branch policies
+      contents: read # package.json, CHANGELOG.md, migrations/, ops/deploy.sh and the compare API
+      actions: read # the environments' protection rules and branch policies, and this run's actors
+      attestations: read # the image's build-provenance attestations, for gh attestation verify
     outputs:
       deploy: ${{ steps.plan.outputs.deploy }}
       action: ${{ steps.plan.outputs.action }}
@@ -76,6 +99,10 @@ jobs:
       digest: ${{ steps.plan.outputs.digest }}
       from: ${{ steps.plan.outputs.from }}
       reason: ${{ steps.plan.outputs.reason }}
+      production: ${{ steps.plan.outputs.production }}
+      staging: ${{ steps.plan.outputs.staging }}
+      production_reason: ${{ steps.plan.outputs.production_reason }}
+      notify: ${{ steps.plan.outputs.notify }}
     steps:
       - name: Plan the deploy
         id: plan
@@ -86,19 +113,34 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_ROLLBACK: ${{ inputs.rollback }}
           INPUT_FROM: ${{ inputs.from }}
+          INPUT_TARGET: ${{ inputs.target }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          STAGING_DEPLOY_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
         run: |
           set -Eeuo pipefail
           export LC_ALL=C
           R=$GITHUB_REPOSITORY
           IMAGE=ghcr.io/deconfined/tarubot
           VER='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
-          # Paths that never change what runs in production; every other path is a runtime change.
+          # The one account that approves production and may dispatch staging, by login and by its
+          # numeric id (ops/deploy.sh's REVIEWER and REVIEWER_ID; the test keeps them equal).
+          REVIEWER=deconfined
+          REVIEWER_ID=71469756
+          # The line on which a release's ops/deploy.sh declares the contracts it speaks. Staging
+          # deploys need the words `quadlet` and `staging`; a comment naming them doesn't count.
+          CAPABILITY_LINE='^readonly CAPABILITIES="([a-z0-9]+( [a-z0-9]+)*)"$'
+          # Paths that never change what runs on a host; every other path is a runtime change.
           # ops/ansible's pip pins feed only CI and the operator's venv: hosts install AlmaLinux's
           # own ansible-core.
           NON_RUNTIME='^(docs/|site/|tests/|test-plans/|\.github/|[^/]+\.md$|docker-compose(\.devbot|\.tools|\.build)?\.yml$|\.env\.example$|production\.env\.example$|staging\.env\.example$|ops/ansible/requirements(-lint)?\.txt$|biome\.json$)'
           ALWAYS_RUNTIME='^\.github/workflows/publish\.yml$'
-          # Files that run on the host as a docker-group user, or shape its .env.
-          HOST_SIDE='^(ops/|docker-compose\.production\.yml$|production\.env\.example$)'
+          # Files that run on a host, or shape its .env: on production's Docker host as a
+          # docker-group user, which is root-equivalent there; on the staging host as the
+          # unprivileged tarubot user under rootless Podman. ops/ansible/ runs as root when the
+          # playbook is applied.
+          HOST_SIDE='^(ops/|docker-compose\.production\.yml$|production\.env\.example$|staging\.env\.example$)'
+          HOST_RUN="on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging host as the unprivileged \`tarubot\` user under rootless Podman; \`ops/ansible/\` runs as root when the playbook is applied"
           out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
           fail() { out reason "$1"; echo "::error::$2"; exit 1; }
           summary() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
@@ -117,13 +159,66 @@ jobs:
             (( n < 300 )) || fail compare-too-large "$2 changes 300 files or more, more than GitHub's compare API lists, so the plan can't show the host-side changes or check the migrations. Deploy by hand per docs/HOSTING.md."
           }
 
-          # 1. The gate is real: production needs @deconfined alone, admins can't bypass it, and
-          #    both environments accept only main (an environment a typo auto-created has none).
+          # 1. The targets: an automatic run asks for both, a dispatch for the one it names. A
+          #    target whose switch is off is left out; with nothing left the run is paused.
+          #
+          #    First, before anything can fail: whether notify reports this run. It does for every
+          #    run that asks for production while DEPLOY_ENABLED reads as true to GitHub's
+          #    expressions, which ignore case (this job's own condition reads it so). The decision
+          #    is made here, when the run plans, because notify starts only after the Deploy job
+          #    ends: switching deploys off meanwhile must not silence the outcome of a request
+          #    already waiting or a deploy already running (a `paused` refusal, a NEEDS YOU). An
+          #    output written before `fail` still reaches the job, as `reason` does.
+          if [[ $EVENT == workflow_run || $INPUT_TARGET == production ]] && [[ ${DEPLOY_ENABLED,,} == true ]]; then
+            out notify true
+          else
+            out notify false
+          fi
+          # Why production is off in a run that goes on for staging: paused (its switch isn't
+          # exactly `true`) or gate; "-" when it deploys or wasn't asked for. Notify names it.
+          PRODUCTION=false STAGING=false PRODUCTION_REASON=- target_notes=()
+          if [[ $EVENT == workflow_run ]]; then
+            requested=(production staging)
+          else
+            [[ $INPUT_TARGET == production || $INPUT_TARGET == staging ]] || fail target "The target must be production or staging."
+            requested=("$INPUT_TARGET")
+          fi
+          for target in "${requested[@]}"; do
+            if [[ $target == production && $DEPLOY_ENABLED == true ]]; then
+              PRODUCTION=true
+            elif [[ $target == production ]]; then
+              PRODUCTION_REASON=paused
+              target_notes+=("**Production is paused:** \`DEPLOY_ENABLED\` isn't true.")
+            elif [[ $STAGING_DEPLOY_ENABLED == true ]]; then
+              STAGING=true
+            else
+              target_notes+=("**Staging is paused:** \`STAGING_DEPLOY_ENABLED\` isn't true.")
+            fi
+          done
+          if [[ $PRODUCTION == false && $STAGING == false ]]; then
+            out deploy false
+            out reason paused
+            out production false
+            out staging false
+            out production_reason "$PRODUCTION_REASON"
+            summary "## Deploy: paused" "" "The switch of the requested target is off (\`DEPLOY_ENABLED\` for production, \`STAGING_DEPLOY_ENABLED\` for staging), so nothing is planned or deployed."
+            exit 0
+          fi
+
+          # 2. The gates are real. Production needs @deconfined alone and admins can't bypass it;
+          #    staging needs no reviewer, since its host checks no approval, so a reviewer rule
+          #    there would only look like a protection. Every environment accepts only main (one a
+          #    typo auto-created has no policy). A failed gate turns off only its own target;
+          #    notify's fails the plan.
           gate() {
             local json
             json=$(gh api "repos/$R/environments/$1") || return 1
             jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}' <<< "$json" > /dev/null || return 1
             [[ $(gh api "repos/$R/environments/$1/deployment-branch-policies" | jq -c '[.branch_policies[] | {name, type}]') == '[{"name":"main","type":"branch"}]' ]] || return 1
+            if [[ $1 == staging ]]; then
+              jq -e '[.protection_rules[]? | select(.type == "required_reviewers")] | length == 0' <<< "$json" > /dev/null
+              return
+            fi
             [[ $1 == production ]] || return 0
             jq -e '.can_admins_bypass == false
               and ([.protection_rules[] | select(.type == "required_reviewers")]
@@ -131,10 +226,33 @@ jobs:
                   and .[0].prevent_self_review == false
                   and ([.[0].reviewers[] | {type, login: .reviewer.login}] == [{type: "User", login: "deconfined"}]))' <<< "$json" > /dev/null
           }
-          gate production || fail gate "The production environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main."
           gate notify || fail gate "The notify environment must accept only main."
+          if [[ $PRODUCTION == true ]] && ! gate production; then
+            PRODUCTION=false PRODUCTION_REASON=gate
+            echo "::error::The production environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main."
+            target_notes+=("**Production is off in this run:** its environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main.")
+          fi
+          if [[ $STAGING == true ]] && ! gate staging; then
+            STAGING=false
+            echo "::error::The staging environment must accept only main and require no reviewer."
+            target_notes+=("**Staging is off in this run:** its environment must accept only main and require no reviewer.")
+          fi
+          [[ $PRODUCTION == true || $STAGING == true ]] || fail gate "No requested target passed its environment's gate."
 
-          # 2. The target: version V, commit C and image digest D.
+          # 3. Staging has no approval, so only @deconfined may dispatch it, as both the run's actor
+          #    and its triggering actor, by login and account id. A GitHub App or a workflow's
+          #    GITHUB_TOKEN is refused on purpose: a pushed branch workflow could dispatch Deploy on
+          #    main with its own token. The host checks the same again.
+          if [[ $EVENT == workflow_dispatch && $STAGING == true ]]; then
+            [[ $TRIGGERING_ACTOR == "$REVIEWER" ]] || fail dispatcher "Only @$REVIEWER may dispatch a staging deploy."
+            run=$(gh api "repos/$R/actions/runs/$GITHUB_RUN_ID") || fail dispatcher "The runs API didn't answer, so this run's dispatcher can't be checked."
+            jq -e --arg who "$REVIEWER" --argjson id "$REVIEWER_ID" '
+                .actor.login == $who and .actor.id == $id
+                and .triggering_actor.login == $who and .triggering_actor.id == $id' <<< "$run" > /dev/null ||
+              fail dispatcher "Only @$REVIEWER may dispatch a staging deploy, as the run's actor and its triggering actor, by login and account id; a GitHub App or a workflow token can't."
+          fi
+
+          # 4. The target: version V, commit C and image digest D.
           ACTION=deploy FROM=- C_FROM=
           if [[ $EVENT == workflow_run ]]; then
             [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || fail target "The publish run names no commit."
@@ -164,16 +282,49 @@ jobs:
             fi
           fi
 
-          # 3. Binding: the version tag and the commit tag are the same image, and C is on main.
+          # 5. Binding: the version tag and the commit tag are the same image, and C is on main.
           [[ $(digest_of "sha-$C" || true) == "$D" ]] || fail digest-mismatch "The tags $V and sha-$C point at different images."
           status=$(gh api "repos/$R/compare/$C...main" --jq .status) || fail not-on-main "The compare API didn't answer."
           [[ $status == identical || $status == ahead ]] || fail not-on-main "$C isn't on main."
+
+          # 6. Provenance, before any early exit and before either deploy job: main's publish.yml
+          #    built D from C on a GitHub-hosted runner and signed it (2.32.0 and later). Tags can
+          #    move, and any workflow in this repository could push one; only main's publish.yml can
+          #    make this signature. The signer is the certificate's exact identity: gh turns
+          #    --signer-workflow into a pattern anchored only at its start, which a workflow named
+          #    publish.yml-anything would match too. gh also exits 1 on network or TUF errors, so a
+          #    failure may be temporary: a new dispatch retries, since re-runs are refused.
+          verified=$(gh attestation verify "oci://$IMAGE@$D" --repo deconfined/tarubot \
+            --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+            --source-ref refs/heads/main --source-digest "$C" \
+            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
+            --format json) ||
+            fail unattested "$IMAGE@$D isn't attested as built from $C by publish.yml on main, or the attestation couldn't be verified (gh fails on network and TUF errors too). Releases before 2.32.0 carry no attestation: deploy them by hand per docs/HOSTING.md. To retry, start a new dispatch; re-runs are refused."
+          jq -e 'type == "array" and length >= 1' <<< "$verified" > /dev/null 2>&1 ||
+            fail unattested "gh attestation verify returned no verified attestation for $IMAGE@$D. To retry, start a new dispatch; re-runs are refused."
+          provenance="Provenance verified: publish.yml on refs/heads/main, commit $C"
           out action "$ACTION"
           out commit "$C"
           out digest "$D"
           out from "$FROM"
 
-          # 4. Automatic runs: did anything that runs in production change in this merge?
+          # 7. Staging needs a release whose ops/deploy.sh declares Quadlet staging deploys: the
+          #    words come from the target's own declaration, so no floor number is copied here.
+          if [[ $STAGING == true ]]; then
+            words=
+            if deploy_sh=$(raw ops/deploy.sh "$C"); then
+              declaration=$(grep -m 1 -E "$CAPABILITY_LINE" <<< "$deploy_sh" || true)
+              if [[ $declaration =~ $CAPABILITY_LINE ]]; then words=" ${BASH_REMATCH[1]} "; fi
+            fi
+            if [[ $words != *" quadlet "* || $words != *" staging "* ]]; then
+              STAGING=false
+              [[ $PRODUCTION == true ]] || fail below-floor "$V's ops/deploy.sh doesn't declare Quadlet staging deploys (readonly CAPABILITIES with quadlet and staging), so staging can't take it."
+              echo "::warning::$V's ops/deploy.sh doesn't declare Quadlet staging deploys; staging is off in this run."
+              target_notes+=("**Staging is off in this run:** $V's \`ops/deploy.sh\` doesn't declare Quadlet staging deploys.")
+            fi
+          fi
+
+          # 8. Automatic runs: did anything that runs on a host change in this merge?
           host_files=() added=() previous=
           if [[ $EVENT == workflow_run ]]; then
             P=$(gh api "repos/$R/commits/$C" --jq '.parents[0].sha') || fail compare "The commits API didn't answer."
@@ -194,16 +345,19 @@ jobs:
               fi
               if [[ $f =~ $HOST_SIDE ]]; then host_files+=("$f"); fi
             done < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$cmp")
-            # 5. An applied migration never changes; added files are listed.
+            # 9. An applied migration never changes; added files are listed.
             changed=$(jq -r '.files[] | select((.filename | startswith("migrations/")) or ((.previous_filename // "") | startswith("migrations/"))) | select(.status != "added") | .filename' <<< "$cmp")
             [[ -z $changed ]] || fail applied-migration-changed "This merge edits, renames or removes an applied migration: $(tr -c 'A-Za-z0-9._/-' ' ' <<< "$changed")"
             mapfile -t added < <(jq -r '.files[] | select(.status == "added" and (.filename | startswith("migrations/"))) | .filename' <<< "$cmp")
             if [[ $runtime == false ]]; then
               out deploy false
               out reason no-runtime-change
+              out production false
+              out staging false
+              out production_reason "$PRODUCTION_REASON"
               summary "## Deploy $V: nothing to deploy" "" \
-                "This merge ([$P...$C](https://github.com/$R/compare/$P...$C)) changes nothing that runs in production (documentation, tests, CI or the version only), so no approval is requested." \
-                "If an earlier release wasn't deployed, run **Deploy production** with the newest version."
+                "This merge ([$P...$C](https://github.com/$R/compare/$P...$C)) changes nothing that runs on the hosts (documentation, tests, CI or the version only), so nothing deploys and no approval is requested." \
+                "If an earlier release wasn't deployed, run **Deploy** with the newest version." "" "$provenance"
               exit 0
             fi
           elif [[ $ACTION == rollback ]]; then
@@ -211,7 +365,7 @@ jobs:
           fi
           newest=$(gh api "repos/$R/contents/migrations?ref=$C" --jq '[.[].name | select(test("^[0-9]{3}_[a-z0-9_]+\\.sql$"))] | sort | last // "none"') || newest=unknown
 
-          # 6. The plan, public data only.
+          # 10. The plan, public data only.
           if [[ $ACTION == rollback ]]; then
             summary "## Roll back from $FROM to $V" ""
           else
@@ -223,6 +377,14 @@ jobs:
             "| Image | \`$IMAGE@$D\` |"
           if [[ -n $previous ]]; then summary "| Previous release on main | \`$previous\` |"; fi
           summary "| Newest migration at this commit | \`$newest\` |" ""
+          if [[ $PRODUCTION == true && $STAGING == true ]]; then
+            summary "**Targets:** production, once @$REVIEWER approves it, and staging, which deploys at once beside the approval request, without one."
+          elif [[ $PRODUCTION == true ]]; then
+            summary "**Target:** production, once @$REVIEWER approves it."
+          else
+            summary "**Target:** staging, which deploys at once, without approval."
+          fi
+          summary "${target_notes[@]}" "" "$provenance" ""
           if [[ $EVENT == workflow_run ]]; then
             if (( ${#added[@]} )); then
               summary "**Migration files added in this merge:** ${added[*]}"
@@ -230,11 +392,10 @@ jobs:
               summary "**Migration files added in this merge:** none"
             fi
           fi
-          summary "If production is older than the previous release, earlier migrations are included too; the host decides from what is live." ""
-          # Host-side files run on the host as a docker-group user, which is root-equivalent there.
-          # An automatic run can only list this merge's changes, and a dispatch none: the host
-          # deploys from whatever is live, so both point at the files' history up to C.
-          history="[\`ops/\`](https://github.com/$R/commits/$C/ops), [\`docker-compose.production.yml\`](https://github.com/$R/commits/$C/docker-compose.production.yml) and [\`production.env.example\`](https://github.com/$R/commits/$C/production.env.example)"
+          summary "If a host is older than the previous release, earlier migrations are included too; each host decides from what is live there." ""
+          # An automatic run can only list this merge's host-side changes, and a dispatch none: each
+          # host deploys from whatever is live, so both point at the files' history up to C.
+          history="[\`ops/\`](https://github.com/$R/commits/$C/ops), [\`docker-compose.production.yml\`](https://github.com/$R/commits/$C/docker-compose.production.yml), [\`production.env.example\`](https://github.com/$R/commits/$C/production.env.example) and [\`staging.env.example\`](https://github.com/$R/commits/$C/staging.env.example)"
           label=
           if [[ $ACTION == rollback ]]; then
             label="**Host-side differences between $V and $FROM**"
@@ -242,19 +403,20 @@ jobs:
             label="**Host-side changes in this merge**"
           fi
           if [[ -n $label ]] && (( ${#host_files[@]} )); then
-            summary "$label (they run on the host as a docker-group user, which is root-equivalent there):"
+            summary "$label ($HOST_RUN):"
             for f in "${host_files[@]}"; do summary "- \`$f\`"; done
-            if printf '%s\n' "${host_files[@]}" | grep -qE '^(docker-compose\.production\.yml|production\.env\.example)$'; then
-              summary "" "The Compose file or the settings template changed: **check the host's .env first.**"
+            if printf '%s\n' "${host_files[@]}" | grep -qE '^(docker-compose\.production\.yml|production\.env\.example|staging\.env\.example)$'; then
+              summary "" "The Compose file or a settings template changed: **check the host's .env first.**"
             fi
             summary ""
           elif [[ -n $label ]]; then
-            summary "$label: no file under \`ops/\`, \`docker-compose.production.yml\` or \`production.env.example\` changed." ""
+            summary "$label: no file under \`ops/\`, \`docker-compose.production.yml\`, \`production.env.example\` or \`staging.env.example\` changed." ""
           fi
+          if [[ $PRODUCTION == true ]]; then check="Before approving, check"; else check="Check"; fi
           if [[ $EVENT == workflow_run ]]; then
-            summary "If production is older than the previous release, the host-side changes of the releases in between run too: check the history of $history up to this commit." ""
+            summary "If a host is older than the previous release, the host-side changes of the releases in between run too: check the history of $history up to this commit." ""
           elif [[ $ACTION == deploy ]]; then
-            summary "**Host-side changes:** the host deploys from the live release to this commit. Before approving, check the history of $history up to this commit since the live release." ""
+            summary "**Host-side changes:** each host deploys from its live release to this commit. $check the history of $history up to this commit since the live release." ""
           fi
           day=$(date -u +%u) hm=$(date -u +%H%M)
           if [[ $day == 2 ]] && (( 10#$hm >= 1800 && 10#$hm < 2300 )); then
@@ -265,25 +427,46 @@ jobs:
             echo "::warning::The daily backup runs around now; the host waits up to 5 minutes for it."
             summary "> [!WARNING]" "> The daily backup runs around now. The host waits up to 5 minutes for it, and a migration that meets it rolls back safely." ""
           fi
-          summary "**Tried on DevBot?** Check before approving." ""
-          if [[ $ACTION == rollback ]]; then
+          if [[ $PRODUCTION == true && $STAGING == true ]]; then
+            summary "**Tried on DevBot?** Check before approving. Staging deploys beside this request: its **Deploy staging** job shows how $V went there." ""
+          elif [[ $PRODUCTION == true ]]; then
+            summary "**Tried on DevBot?** Check before approving." ""
+          fi
+          # Production's host-side files run on its Docker host as a docker-group user, which is
+          # root-equivalent there; staging's as the unprivileged tarubot user under rootless Podman.
+          if [[ $PRODUCTION == true && $ACTION == rollback ]]; then
             summary "**Approving** rolls production back from $FROM to $V (\`${C:0:12}\`, \`$D\`), on the same schema: the host restarts onto $V, puts $FROM back automatically if $V never took the writer lease, then registers $V's commands globally and reads them back. Work only $FROM understands then fails as \`invalid_job\`: check \`/sync status\` and requeue it with \`retry.js\`." ""
-          else
-            summary "**Approving** runs Deploy $V (\`${C:0:12}\`, \`$D\`) on production. The host restarts onto $V; or, if $V carries migration files the live release lacks, it stops the bot, takes an encrypted \`ops/backup.sh\` dump, runs \`migrate.js\` in $V's image and starts $V. It puts the previous release back automatically if $V never took the writer lease or the migration did not commit. It registers $V's commands globally and reads them back. It puts this commit's host-side files in place, where they run as a docker-group user (root-equivalent): the Compose file at once, \`ops/backup.sh\` for a migration's dump, and \`ops/deploy.sh\` from the next deploy on, including changes from releases production hasn't had yet. Approval comments are public." ""
+          elif [[ $PRODUCTION == true ]]; then
+            summary "**Approving** runs Deploy $V (\`${C:0:12}\`, \`$D\`) on production. The host restarts onto $V; or, if $V carries migration files the live release lacks, it stops the bot, takes an encrypted \`ops/backup.sh\` dump, runs \`migrate.js\` in $V's image and starts $V. It puts the previous release back automatically if $V never took the writer lease or the migration did not commit. It registers $V's commands globally and reads them back. It puts this commit's host-side files in place on production's Docker host, where they run as a docker-group user, which is root-equivalent there: the Compose file at once, \`ops/backup.sh\` for a migration's dump, and \`ops/deploy.sh\` from the next deploy on, including changes from releases production hasn't had yet. Approval comments are public." ""
+          fi
+          if [[ $PRODUCTION == true ]]; then when="at once, beside the approval request and without one"; else when="at once, without approval"; fi
+          if [[ $STAGING == true && $ACTION == rollback ]]; then
+            summary "**Staging** rolls back from $FROM to $V (\`${C:0:12}\`, \`$D\`) $when, on the same schema: the staging host restarts onto $V, puts $FROM back automatically if $V never took the writer lease, then registers $V's commands in the test guild and reads them back." ""
+          elif [[ $STAGING == true ]]; then
+            summary "**Staging** takes $V (\`${C:0:12}\`, \`$D\`) $when. The staging host restarts onto $V; or, if $V carries migration files staging lacks, it stops the bot, takes an encrypted \`ops/backup.sh\` dump, runs \`migrate.js\` in $V's image and starts $V. It registers $V's commands in the test guild and reads them back. There this commit's host-side files run as the unprivileged \`tarubot\` user under rootless Podman, and \`ops/ansible/\` as root when the playbook is applied. A failed staging deploy never holds production up." ""
           fi
           notes=$(raw CHANGELOG.md "$C" | awk -v v="$V" 'index($0, "## " v " ") == 1 { on = 1 } on && /^## / && index($0, "## " v " ") != 1 { exit } on { print }' || true)
           if [[ -n $notes ]]; then
             summary "<details><summary>Changelog</summary>" "" "$notes" "" "</details>"
           fi
 
-          # 7. Outputs for the deploy job.
+          # 11. Outputs for the deploy jobs.
+          out production "$PRODUCTION"
+          out staging "$STAGING"
+          out production_reason "$PRODUCTION_REASON"
           out deploy true
           out reason -
 
+  # Two deploy jobs run beside each other, and production never needs staging's. A run can
+  # therefore fail because of its staging job while production deployed: whether production
+  # deployed a run is the Deploy job's conclusion together with the production approval, never the
+  # run's conclusion. Notify reads it that way, and the host-configuration pull unit (2.34.0) must
+  # too. The two SSH steps are the same script, written twice (tests/unit/deploy-workflow.test.ts
+  # keeps them byte-identical); only DEPLOY_ENVIRONMENT and RECONNECT_SECONDS differ.
   deploy:
     name: Deploy
     needs: plan
-    if: github.run_attempt == '1' && needs.plan.outputs.deploy == 'true'
+    if: github.run_attempt == '1' && needs.plan.outputs.production == 'true' && (github.event_name == 'workflow_run' || inputs.target == 'production')
     runs-on: ubuntu-24.04
     # Longer than the reconnect deadline below, which covers the host's longest run (its waits and
     # timeouts add up to about 68 minutes).
@@ -321,6 +504,9 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_ENVIRONMENT: production
+          # ops/deploy.sh's waits and timeouts add up to about 68 minutes in the worst case.
+          RECONNECT_SECONDS: "4800"
           ACTION: ${{ needs.plan.outputs.action }}
           VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ needs.plan.outputs.commit }}
@@ -336,12 +522,15 @@ jobs:
           unset DEPLOY_SSH_KEY
           out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
           stop() { out reason "$1"; echo "::error::$2"; exit 1; }
-          grep -q 'PRIVATE KEY' "$dir/key" || stop no-key "DEPLOY_SSH_KEY isn't set in the production environment."
+          # The job's two settings; everything else in this script is the same for both targets.
+          [[ $DEPLOY_ENVIRONMENT =~ ^(production|staging)$ && $RECONNECT_SECONDS =~ ^[1-9][0-9]{0,4}$ ]] ||
+            stop bad-request "The job's DEPLOY_ENVIRONMENT or RECONNECT_SECONDS is malformed."
+          grep -q 'PRIVATE KEY' "$dir/key" || stop no-key "DEPLOY_SSH_KEY isn't set in the $DEPLOY_ENVIRONMENT environment."
 
-          # The host and its pinned key come from the production environment's variables.
+          # The host and its pinned key come from the deploy environment's variables.
           HOST_NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
           KNOWN_HOST='^([^ ]+) ssh-ed25519 [A-Za-z0-9+/]+={0,2}$'
-          [[ $DEPLOY_HOST =~ $HOST_NAME ]] || stop known-hosts "DEPLOY_HOST must be the production host's DNS name."
+          [[ $DEPLOY_HOST =~ $HOST_NAME ]] || stop known-hosts "DEPLOY_HOST must be the $DEPLOY_ENVIRONMENT host's DNS name."
           kh=${DEPLOY_KNOWN_HOSTS%$'\n'}
           kh=${kh%$'\r'}
           if [[ $kh == *$'\n'* ]] || ! [[ $kh =~ $KNOWN_HOST ]] || [[ ${BASH_REMATCH[1]} != "$DEPLOY_HOST" ]]; then
@@ -363,13 +552,14 @@ jobs:
           [[ $CMD =~ $DEPLOY_FORM || $CMD =~ $ROLLBACK_FORM ]] || stop bad-request "The plan's fields don't fit the command contract."
 
           # One connection; only connection failures are retried, with the same command, which
-          # attaches to the same run on the host, for up to 80 minutes. ssh's own messages stay in
-          # a private file. `reached` stays false only while every attempt failed before sshd
-          # answered, which is the only case where nothing can have started on the host.
+          # attaches to the same run on the host, until RECONNECT_SECONDS have passed (80 minutes
+          # for production, 5 for staging). ssh's own messages stay in a private file. `reached`
+          # stays false only while every attempt failed before sshd answered, which is the only
+          # case where nothing can have started on the host.
           NO_CONNECTION='connect to host .* port [0-9]+: |Could not resolve hostname|Connection timed out during banner exchange|kex_exchange_identification'
           : > "$dir/lines"
           reason='' rc=0 reached=false
-          deadline=$((SECONDS + 4800))
+          deadline=$((SECONDS + RECONNECT_SECONDS))
           while :; do
             set +e
             ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
@@ -419,10 +609,161 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/ssh"
 
+  # Staging deploys without approval: the `staging` environment has no reviewers ("If it breaks,
+  # who cares?"), accepts only main, and holds staging's own DEPLOY_SSH_KEY, DEPLOY_HOST and
+  # DEPLOY_KNOWN_HOSTS. The staging host's forced command is `ops/deploy.sh quadlet staging`, which
+  # checks this run, its title, this job and, for a dispatch, that @deconfined started it.
+  #
+  # The accepted plan set 30 minutes and a 5-minute reconnect deadline, so a dead staging host
+  # never holds a runner for 90 minutes. The trade-off: a staging run can outlive this job, through
+  # a long migration trial or a connection lost for more than 5 minutes. The host run then goes on
+  # by itself, the job ends cancelled or `outcome-unknown`, the host's run directory
+  # (~/.local/state/tarubot-deploy/runs/<run>/result) keeps the result, and the next staging
+  # dispatch waits up to 300 s for the host lock.
+  deploy-staging:
+    name: Deploy staging
+    needs: plan
+    if: github.run_attempt == '1' && needs.plan.outputs.staging == 'true' && (github.event_name == 'workflow_run' || inputs.target == 'staging')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: staging
+    permissions: {}
+    steps:
+      - name: Check that staging deploys are still enabled
+        id: start
+        env:
+          STAGING_DEPLOY_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
+        run: |
+          echo started=true >> "$GITHUB_OUTPUT"
+          if [ "$STAGING_DEPLOY_ENABLED" != true ]; then
+            printf 'outcome=refused\nreason=paused\n' >> "$GITHUB_OUTPUT"
+            echo "::error::Staging deploys were paused after this request; nothing changed."
+            exit 1
+          fi
+      - name: Run the deploy on the host
+        id: ssh
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_ENVIRONMENT: staging
+          # The accepted plan's staging limit (see above).
+          RECONNECT_SECONDS: "300"
+          ACTION: ${{ needs.plan.outputs.action }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          DIGEST: ${{ needs.plan.outputs.digest }}
+          FROM: ${{ needs.plan.outputs.from }}
+        run: |
+          set -Eeuo pipefail
+          export LC_ALL=C
+          umask 077
+          dir=$RUNNER_TEMP/ssh
+          mkdir "$dir"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
+          unset DEPLOY_SSH_KEY
+          out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          stop() { out reason "$1"; echo "::error::$2"; exit 1; }
+          # The job's two settings; everything else in this script is the same for both targets.
+          [[ $DEPLOY_ENVIRONMENT =~ ^(production|staging)$ && $RECONNECT_SECONDS =~ ^[1-9][0-9]{0,4}$ ]] ||
+            stop bad-request "The job's DEPLOY_ENVIRONMENT or RECONNECT_SECONDS is malformed."
+          grep -q 'PRIVATE KEY' "$dir/key" || stop no-key "DEPLOY_SSH_KEY isn't set in the $DEPLOY_ENVIRONMENT environment."
+
+          # The host and its pinned key come from the deploy environment's variables.
+          HOST_NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+          KNOWN_HOST='^([^ ]+) ssh-ed25519 [A-Za-z0-9+/]+={0,2}$'
+          [[ $DEPLOY_HOST =~ $HOST_NAME ]] || stop known-hosts "DEPLOY_HOST must be the $DEPLOY_ENVIRONMENT host's DNS name."
+          kh=${DEPLOY_KNOWN_HOSTS%$'\n'}
+          kh=${kh%$'\r'}
+          if [[ $kh == *$'\n'* ]] || ! [[ $kh =~ $KNOWN_HOST ]] || [[ ${BASH_REMATCH[1]} != "$DEPLOY_HOST" ]]; then
+            stop known-hosts "DEPLOY_KNOWN_HOSTS must be one line: DEPLOY_HOST, then ssh-ed25519 and the host's key."
+          fi
+          printf '%s\n' "$kh" > "$dir/kh"
+
+          # The v1 command contract, the same patterns as ops/deploy.sh.
+          DEPLOY_FORM='^deploy ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19})$'
+          ROLLBACK_FORM='^rollback ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19}) ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}))$'
+          RESULT_FORM='^result outcome=(deployed|already-live|superseded|refused|recovered|needs-you) version=(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) previous=((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})|-) path=(plain|migration|rollback|none) downtime=([0-9]{1,5}|-) commands=(registered|failed|skipped) backup=(daily/tarubot-[0-9]{8}T[0-9]{6}Z\.dump\.age|-) restore_point=([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z|-) reason=([a-z0-9-]{1,40}|-)$'
+          STEP_LINE='^step [a-z-]{1,20}$'
+          WARNING_LINE='^warning [a-z0-9-]{1,40}$'
+          if [[ $ACTION == rollback ]]; then
+            CMD="rollback $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID $FROM"
+          else
+            CMD="deploy $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
+          fi
+          [[ $CMD =~ $DEPLOY_FORM || $CMD =~ $ROLLBACK_FORM ]] || stop bad-request "The plan's fields don't fit the command contract."
+
+          # One connection; only connection failures are retried, with the same command, which
+          # attaches to the same run on the host, until RECONNECT_SECONDS have passed (80 minutes
+          # for production, 5 for staging). ssh's own messages stay in a private file. `reached`
+          # stays false only while every attempt failed before sshd answered, which is the only
+          # case where nothing can have started on the host.
+          NO_CONNECTION='connect to host .* port [0-9]+: |Could not resolve hostname|Connection timed out during banner exchange|kex_exchange_identification'
+          : > "$dir/lines"
+          reason='' rc=0 reached=false
+          deadline=$((SECONDS + RECONNECT_SECONDS))
+          while :; do
+            set +e
+            ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/kh" \
+              -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o CheckHostIP=no \
+              -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=20 -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 -o LogLevel=ERROR \
+              "tarubot@$DEPLOY_HOST" "$CMD" < /dev/null 2> "$dir/err" |
+              while IFS= read -r line; do
+                printf '%s\n' "$line" >> "$dir/lines"
+                if [[ $line =~ $STEP_LINE || $line =~ $RESULT_FORM ]]; then
+                  printf '%s\n' "$line"
+                elif [[ $line =~ $WARNING_LINE ]]; then
+                  echo "::warning::The host reports: ${line#warning }"
+                fi
+              done
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [[ -s $dir/lines ]] || ! grep -qE "$NO_CONNECTION" "$dir/err"; then reached=true; fi
+            if grep -qE "$RESULT_FORM" "$dir/lines"; then break; fi
+            if grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$dir/err"; then reason=host-key; break; fi
+            if grep -qF 'Permission denied (publickey' "$dir/err"; then reason=key-rejected; break; fi
+            if (( rc != 255 )) || (( SECONDS >= deadline )); then break; fi
+            sleep 20
+          done
+
+          out connected "$reached"
+          warnings=$(grep -E "$WARNING_LINE" "$dir/lines" | sed 's/^warning //' | sort -u | tr '\n' ' ' || true)
+          out warnings "${warnings% }"
+          result=$(grep -E "$RESULT_FORM" "$dir/lines" | tail -n 1 || true)
+          if [[ -z $result ]]; then
+            if [[ -z $reason ]]; then
+              if (( rc == 64 )); then reason=bad-request
+              elif [[ $reached == true ]]; then reason=outcome-unknown
+              else reason=unreachable
+              fi
+            fi
+            stop "$reason" "No result from the host ($reason)."
+          fi
+          read -r -a fields <<< "${result#result }"
+          for field in "${fields[@]}"; do out "${field%%=*}" "${field#*=}"; done
+          case $result in
+            "result outcome=deployed "* | "result outcome=already-live "* | "result outcome=superseded "*) ;;
+            *) echo "::error::The deploy did not complete: ${result#result }"; exit 1 ;;
+          esac
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"
+
+  # About production only: staging dispatches are skipped, and a run's staging job never changes
+  # the message (it reads the Deploy job, not the run's conclusion). The plan decides whether this
+  # run is reported, at its start (its `notify` output), so a switch turned off while a request
+  # waits or a deploy runs never silences its outcome. Only a plan that never got to write that
+  # output (its runner failed) falls back to the switch as it reads now.
   notify:
     name: Notify
     needs: [plan, deploy]
-    if: github.run_attempt == '1' && always() && needs.plan.result != 'skipped'
+    if: >-
+      github.run_attempt == '1' && always() && needs.plan.result != 'skipped' && (
+        needs.plan.outputs.notify == 'true'
+        || (needs.plan.outputs.notify == '' && vars.DEPLOY_ENABLED == 'true'
+            && (github.event_name == 'workflow_run' || inputs.target != 'staging')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: notify
@@ -434,6 +775,8 @@ jobs:
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_DEPLOY: ${{ needs.plan.outputs.deploy }}
+          PLAN_PRODUCTION: ${{ needs.plan.outputs.production }}
+          PLAN_PRODUCTION_REASON: ${{ needs.plan.outputs.production_reason }}
           PLAN_VERSION: ${{ needs.plan.outputs.version }}
           PLAN_REASON: ${{ needs.plan.outputs.reason }}
           PLAN_ACTION: ${{ needs.plan.outputs.action }}
@@ -465,9 +808,22 @@ jobs:
           priority=0
           if [[ $PLAN_RESULT != success ]]; then
             msg="$V not deployable: $(tok "$WORD" "$PLAN_REASON") (see the run)"
-          elif [[ $PLAN_DEPLOY != true ]]; then
-            msg="$V: no runtime change in this merge. If an earlier release wasn't deployed, run Deploy production with the newest version."
+          elif [[ $PLAN_DEPLOY != true && $PLAN_REASON == paused ]]; then
+            # This job reports a paused plan only when DEPLOY_ENABLED reads as true to GitHub's
+            # expressions, which ignore case, while the plan's own check didn't find exactly
+            # `true` (say `True`). The plan stopped before it named a version.
+            msg="Deploys are paused: DEPLOY_ENABLED must be exactly true (lowercase). Nothing was planned or deployed."
             priority=-1
+          elif [[ $PLAN_DEPLOY != true ]]; then
+            msg="$V: no runtime change in this merge. If an earlier release wasn't deployed, run Deploy with the newest version."
+            priority=-1
+          elif [[ $PLAN_PRODUCTION != true && $PLAN_PRODUCTION_REASON == paused ]]; then
+            # The plan went on for staging alone, with production's switch not exactly `true`.
+            msg="$V not deployed to production: DEPLOY_ENABLED must be exactly true (lowercase). Staging went ahead."
+            priority=-1
+          elif [[ $PLAN_PRODUCTION != true ]]; then
+            # The plan went on for staging alone: production's gate failed.
+            msg="$V not deployable: gate"
           elif [[ $STARTED != true ]]; then
             if [[ $DEPLOY_RESULT == cancelled ]]; then msg="$V: the run was cancelled before the deploy started"; else msg="$V not approved (rejected or expired)"; fi
             priority=-1
@@ -495,7 +851,7 @@ jobs:
               needs-you)
                 priority=1
                 if [[ $reason == commands-failed ]]; then
-                  msg="$V is live, but command registration failed; run Deploy production with $V to retry"
+                  msg="$V is live, but command registration failed; run Deploy with $V to retry"
                 else
                   msg="NEEDS YOU: $V $reason"
                   if [[ $RESTORE_POINT != - && -n $RESTORE_POINT ]]; then msg+="; restore point $point"; fi
@@ -505,8 +861,8 @@ jobs:
                   case $reason in
                     new-release-took-lease | lease-evidence-incomplete | unstable | image-mismatch)
                       case $DEPLOY_PATH in
-                        plain) msg+=". To go back, run Deploy production with version=$prev rollback=true from=$V." ;;
-                        rollback) msg+=". To return to $prev, run Deploy production with version=$prev." ;;
+                        plain) msg+=". To go back, run Deploy with version=$prev rollback=true from=$V." ;;
+                        rollback) msg+=". To return to $prev, run Deploy with version=$prev." ;;
                         migration) msg+=". The migration committed: the way back is a fix release or a point-in-time fork (HOSTING.md)." ;;
                       esac
                       ;;
@@ -537,6 +893,6 @@ jobs:
             curl --config - --silent --show-error --fail --max-time 20 --retry 3 \
               --form-string "title=TaruBot deploy" --form-string "message=$msg" \
               --form-string "priority=$priority" --form-string "url=$run_url" \
-              --form-string "url_title=Deploy production run" --output /dev/null \
+              --form-string "url_title=Deploy run" --output /dev/null \
               https://api.pushover.net/1/messages.json ||
             echo "::warning::The Pushover message could not be sent; the outcome is unchanged."

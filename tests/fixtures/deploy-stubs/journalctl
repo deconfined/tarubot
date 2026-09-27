@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# A simulated `journalctl --user` for tests/unit/deploy-script.test.ts, over the host in
+# tests/fixtures/deploy-stubs/sim.sh. Without --user first it fails. It answers the two reads
+# ops/deploy.sh makes: the user journal's last entry (-n 1 -o json), and one container's lines
+# (CONTAINER_ID_FULL=<id> -o cat) from $SIM/c/<id>.logs, which outlive the container as journald's
+# do. Knobs: journal_host (empty: no entry; fail) for the first, journal (fail) for the second.
+set -euo pipefail
+# shellcheck source=tests/fixtures/deploy-stubs/sim.sh
+source "$DEPLOY_STUBS/sim.sh"
+trace journalctl "$@"
+[[ ${1-} == --user ]] || exit 1
+shift
+
+case "$*" in
+  '-n 1 -o json --no-pager')
+    case $(knob journal_host) in
+      fail) exit 1 ;;
+      empty) exit 0 ;;
+    esac
+    printf '%s\n' '{"__CURSOR":"s=0;i=1","MESSAGE":"Started user manager.","_UID":"1000"}'
+    ;;
+  CONTAINER_ID_FULL=*' -o cat -q --no-pager')
+    [[ $(knob journal) != fail ]] || exit 1
+    id=${1#CONTAINER_ID_FULL=}
+    if [[ -f $S/c/$id.logs ]]; then cat "$S/c/$id.logs"; fi
+    ;;
+  *) exit 1 ;;
+esac

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Stand-in for podman in tests/unit/backup-quadlet.test.ts. It records the call and what its stdin
+# held (stdin: "eof", "data", or "open" for a pipe that stayed silent), then for `run` writes a
+# dummy dump larger than the backup's size guard, or fails as pg_dump would when
+# $BACKUP_SIM/knob/podman exists.
+set -euo pipefail
+# shellcheck source=tests/fixtures/backup-stubs/record.sh
+. "$(dirname "$(readlink -f "$0")")/record.sh"
+record podman "$@"
+# read's status: 0 when a byte came, 1 at end of file, above 128 when the wait ran out.
+stdin=eof
+if IFS= read -r -n 1 -t 2 _; then
+  stdin=data
+elif (($? > 128)); then
+  stdin=open
+fi
+printf '%s' "$stdin" >"$call/stdin"
+if [[ ${1-} == run ]]; then
+  if [[ -f $BACKUP_SIM/knob/podman ]]; then
+    echo 'pg_dump: error: the stand-in failed' >&2
+    exit 1
+  fi
+  head -c 8192 /dev/zero | tr '\0' P
+fi

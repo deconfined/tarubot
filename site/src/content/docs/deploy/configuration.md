@@ -87,6 +87,19 @@ The TaruBot project's own production deployment posts [`/suggest`](/tarubot/admi
 
 A change to either takes effect when the bot's container is recreated (`docker compose up -d --wait`); a plain `docker compose restart` keeps the old values.
 
+## Secrets from files
+
+Since 2.33.0 the bot and its maintenance tools can read six secrets from files instead of from variables: `DATABASE_URL`, `DATABASE_CA_CERT`, `DISCORD_TOKEN`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_REPORTS_TOKEN` and `HEALTHCHECKS_PING_URL`. A secret read from a file never enters the process's environment, which every dependency and child process can read.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `NAME_FILE` | (empty) | For each of the six, such as `DISCORD_TOKEN_FILE`: the path of a file inside the container that holds the value. The bot reads it as UTF-8 and removes one final newline. Empty counts as unset. |
+
+- **One form per secret.** Set `NAME` or `NAME_FILE`, never both: the bot refuses to start, and the tools refuse to run, naming both settings but never a value or a path. A file that can't be read is refused the same way, naming `NAME_FILE`.
+- **With the stock Compose file.** `docker-compose.yml` passes the plain variables only. To use a file, add your own Compose override that mounts it and passes `NAME_FILE`, and leave `NAME` empty in `.env`. Compose's `secrets:` element mounts a file read-only at `/run/secrets/<name>`, which suits the bot's read-only container. The file must be readable by uid 1000, the image's `bun` user that the bot runs as.
+- **`DATABASE_URL` with the bundled database** stays as it is: the stock file builds that URL itself, so a `DATABASE_URL_FILE` there would be refused as both forms.
+- **Maintenance tools** in the container read the same `NAME_FILE` settings, so they need nothing extra. `RESTORE_DATABASE_URL` and `RESTORE_DATABASE_CA_CERT` have no file form.
+
 ## Development only
 
 For a development deployment attached to one test server. Leave them at these values on a real deployment.

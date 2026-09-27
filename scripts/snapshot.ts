@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Events } from "discord.js";
 import { assertAuthenticatedApplication, assertToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import { DiscordGateway } from "../src/discord/gateway.js";
 import { readDump } from "../src/import/dump.js";
 import { snapshotSchema } from "../src/import/importer.js";
@@ -16,7 +17,8 @@ const option = (key: string) => {
 };
 const file = option("--dump");
 const output = option("--output");
-const token = process.env.DISCORD_TOKEN;
+// DISCORD_TOKEN, or the file DISCORD_TOKEN_FILE names.
+const token = secretSetting(process.env, "DISCORD_TOKEN");
 if (!file || !output || !token)
   throw new Error("DISCORD_TOKEN, --dump DUMP.sql, and --output SNAPSHOT.json are required.");
 const data = readDump(await Bun.file(file).text());

@@ -1,7 +1,12 @@
-/** Validate process configuration before startup creates any externally visible work. */
+/**
+ * Validate process configuration before startup creates any externally visible work. The six
+ * secrets may arrive as files (NAME_FILE, 2.33.0): src/config/secrets.ts resolves them first, so
+ * the schema below and the Configuration type only ever see the plain names.
+ */
 import { z } from "zod";
-import { idSchema } from "../domain/values.js";
+import { Failure, idSchema } from "../domain/values.js";
 import { project } from "./project.js";
+import { type Environment, resolveSettings } from "./secrets.js";
 
 const schema = z.object({
   // Secrets are validated for presence/format but are never included in diagnostics.
@@ -53,12 +58,36 @@ const schema = z.object({
     .default(""),
 });
 export type Configuration = z.infer<typeof schema>;
-/** Report setting names and expected formats while avoiding raw environment values. */
-export function configuration(): Configuration {
-  const result = schema.safeParse(process.env);
+
+/**
+ * The deployments whose bot must verify the managed cluster's certificate. Without a CA,
+ * postgresConnection falls back to the URL's own SSL flags, which don't verify it; a CA lost on
+ * the way (a missing DATABASE_CA_CERT_FILE line, say) must stop the start instead.
+ */
+const CA_REQUIRED = ["production", "staging"];
+
+/**
+ * Report setting names and expected formats while avoiding raw environment values. File-delivered
+ * secrets are resolved into a new object; process.env itself is never written.
+ */
+export function configuration(env: Environment = process.env): Configuration {
+  let resolved: Environment;
+  try {
+    resolved = resolveSettings(env);
+  } catch (error) {
+    // The resolver's messages name settings only.
+    if (error instanceof Failure) throw new Error(`Invalid configuration: ${error.message}`);
+    throw error;
+  }
+  const result = schema.safeParse(resolved);
   if (!result.success)
     throw new Error(
       `Invalid configuration: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+    );
+  const marker = env.TARUBOT_ENVIRONMENT ?? "";
+  if (CA_REQUIRED.includes(marker) && !resolved.DATABASE_CA_CERT)
+    throw new Error(
+      `Invalid configuration: DATABASE_CA_CERT: required, directly or through DATABASE_CA_CERT_FILE, when TARUBOT_ENVIRONMENT is ${marker}`,
     );
   return result.data;
 }

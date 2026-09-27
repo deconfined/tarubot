@@ -1,0 +1,10 @@
+# A stand-in for the fixture repository's ops/quadlet/units/tarubot.container
+# (tests/unit/deploy-script.test.ts): only what the generator stand-in reads. The settings lists it
+# names aren't in the fixture, since .gitignore leaves out *.env files and nothing here reads them.
+[Container]
+ContainerName=tarubot
+Image=ghcr.io/deconfined/tarubot@${TARUBOT_IMAGE_DIGEST}
+EnvironmentFile=%h/tarubot/ops/quadlet/units/tarubot.env
+
+[Service]
+EnvironmentFile=%h/tarubot/.env

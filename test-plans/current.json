@@ -1,13 +1,16 @@
 {
-  "title": "Session: 2.32.1 maintenance",
-  "objective": "2.32.1 moves the Ansible pip pins to ansible-core 2.16.19 (GHSA-w8p5-mx5w-cpqj; never exposed) and drops Dependabot's always-failing Bun entry. The bot is unchanged: Deploy production should end no-runtime-change.",
-  "user": ["Merge 2.32.1; it should ask nothing (no-runtime-change)."],
+  "title": "Session: 2.33.0 Quadlet deploys and provenance",
+  "objective": "2.33.0 (#50 part 2a) adds the provenance check to the Deploy plan, the staging deploy target (switch unset), Quadlet modes in deploy.sh and backup.sh, Podman secrets with _FILE settings, and the start tag (not run). Production restarts on Compose; nothing changes for members.",
+  "user": [
+    "Merge, then approve the 2.33.0 Deploy run: its plan is the first to verify provenance.",
+    "Remaining staging owner steps (HOSTING.md): environment, deploy key, bucket, checks, .env; not before the DevBot move for the start."
+  ],
   "assistant": [
-    "After the merge: the Dependabot alerts close, and the deploy plan ends no-runtime-change.",
-    "Keep an eye on production 2.32.0 (deployed 06:26 UTC): readiness and the next nightly backup."
+    "Watch the 2.33.0 plan's 'Provenance verified' line, then check production readiness and hardening.",
+    "Start 2.34.0, the pull unit, with real AlmaLinux VMs on the Proxmox lab for rehearsals."
   ],
   "bot": [
-    "Run 2.32.0 on schema 010 in production; nothing changes for members.",
+    "Run 2.33.0 on schema 010 in production; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

@@ -8,8 +8,9 @@
  * the settings, and that no overlay file loosens them again.
  *
  * The Podman hosts run the bot as a rootless Quadlet unit (#50, ops/quadlet/), which must carry the
- * same hardening as Compose's bot service. The last tests pin that mapping, and that no target's
- * drop-in loosens it; tests/unit/quadlet.test.ts pins the rest of the unit.
+ * same hardening as Compose's bot service. The last tests pin that mapping, that its only mounts
+ * are the secrets (2.33.0), read-only files only the bot's user reads, and that no target's drop-in
+ * loosens it; tests/unit/quadlet.test.ts pins the rest of the unit.
  */
 import { describe, expect, test } from "bun:test";
 import { YAML } from "bun";
@@ -167,6 +168,17 @@ describe("the Quadlet unit (#50)", () => {
     expect(single(bot, "Container", "HttpProxy")).toBe("false");
   });
 
+  test("its only mounts are the secrets: read-only files that only the bot's bun user reads", async () => {
+    // Secret= (2.33.0) is the one mount the unit has, and each is a file of its own under
+    // /run/secrets, owned by uid and gid 1000 (the image's bun user) with mode 0400. Podman makes
+    // the mount read-only only because the container is (ReadOnly=true, pinned above).
+    const secret =
+      /^tarubot-[a-z-]+,type=mount,target=\/run\/secrets\/[a-z_]+,uid=1000,gid=1000,mode=0400$/u;
+    const values = valuesOf(await unit(), "Container", "Secret");
+    expect(values.length).toBeGreaterThan(0);
+    for (const value of values) expect(value).toMatch(secret);
+  });
+
   test("no target's drop-in loosens the hardening", async () => {
     // Quadlet merges every tarubot.container.d/*.conf it finds in a linked directory into the unit,
     // so a drop-in could switch ReadOnly off or hand a capability back, as a Compose overlay could.
@@ -174,17 +186,26 @@ describe("the Quadlet unit (#50)", () => {
     const dropIns = filesUnder(QUADLET).filter((path) => /\.d\/[^/]+$/u.test(path));
     expect(dropIns.length).toBeGreaterThan(0);
     expect(directoriesUnder(QUADLET).filter((path) => path.startsWith("units/"))).toEqual([]);
-    const hardening =
-      /^(ReadOnly|ReadOnlyTmpfs|DropCapability|AddCapability|NoNewPrivileges|Tmpfs|VolatileTmp|Volume|Mount|User|Group|UserNS|PodmanArgs|GlobalArgs|SecurityLabel\w*|Unmask|EnvironmentHost|HttpProxy|Image|Pull)$/u;
     for (const path of dropIns) {
       expect(path).not.toStartWith("units/");
       const lines = parseUnit(await Bun.file(root(`${QUADLET}/${path}`)).text(), path);
+      // A drop-in may add only its target's list and, on production, the GitHub App key's secret,
+      // mounted exactly as the unit mounts its own.
+      const production = path.startsWith("production/");
       for (const line of lines)
-        expect({ path, key: line.key, loosens: hardening.test(line.key) }).toEqual({
+        expect({ path, section: line.section, key: line.key }).toEqual({
           path,
-          key: line.key,
-          loosens: false,
+          section: "Container",
+          key: production && line.key === "Secret" ? "Secret" : "EnvironmentFile",
         });
+      expect(valuesOf(lines, "Container", "Secret")).toEqual(
+        production
+          ? [
+              "tarubot-github-app-private-key,type=mount,target=/run/secrets/github_app_private_key,uid=1000,gid=1000,mode=0400",
+            ]
+          : [],
+      );
+      expect(valuesOf(lines, "Container", "EnvironmentFile")).toHaveLength(1);
     }
   });
 });

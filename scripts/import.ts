@@ -1,5 +1,6 @@
 /** Legacy import CLI: decode/validate first, print a dry run or publish the complete mapped import. */
 import { assertToolScope } from "../src/config/deployment.js";
+import { secretSetting } from "../src/config/secrets.js";
 import { readDump } from "../src/import/dump.js";
 import {
   importLegacy,
@@ -55,7 +56,8 @@ if (args.includes("--dry-run")) {
     discord: "none",
     databases: ["DATABASE_URL"],
   });
-  const url = process.env.DATABASE_URL;
+  // DATABASE_URL, or the file DATABASE_URL_FILE names inside a Quadlet host's container.
+  const url = secretSetting(process.env, "DATABASE_URL");
   if (!url) throw new Error("DATABASE_URL is required");
   const db = new Database(url);
   try {

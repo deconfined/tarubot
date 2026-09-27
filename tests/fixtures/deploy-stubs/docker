@@ -15,9 +15,12 @@
 # list (fail), backup_running (a count of polls), oneoff, lease_after_stop, digest.<version>
 # (wrong). Two knobs act from the first `up` on and are used up by it: ps_after_up (fail: ps
 # fails; two: ps lists a second container; none: ps lists nothing, until the next `up`) and
-# inspect_after_up (fail: the container that `up` created can't be inspected).
+# inspect_after_up (fail: the container that `up` created can't be inspected). Every call is also
+# appended to $SIM/runtime as "docker <arguments>", where the Quadlet stubs log theirs, so a test
+# can show that each runtime's path calls only its own tools.
 set -euo pipefail
 S=$SIM
+printf 'docker %s\n' "$*" >>"$S/runtime"
 
 knob() { if [[ -f $S/knob/$1 ]]; then cat "$S/knob/$1"; fi; }
 record() { printf '%s\n' "$*" >>"$S/calls"; }

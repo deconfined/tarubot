@@ -95,6 +95,19 @@ Next: [back up](/tarubot/deploy/operations/#backup) the database regularly, and 
 
 `TARUBOT_IMAGE_TAG` also accepts `sha-<commit>`, the full commit that published an image. To pin by digest, set `TARUBOT_IMAGE` to the complete reference, such as `ghcr.io/deconfined/tarubot@sha256:<digest>`; it overrides `TARUBOT_IMAGE_TAG`.
 
+### Checking where an image came from
+
+Images from 2.32.0 on carry signed build provenance: a signature, made by the project's publish workflow on `main`, that names the commit the image was built from. The upstream project checks it before every deploy. To check an image yourself, with the [GitHub CLI](https://cli.github.com) signed in (it asks for a login even for this public repository):
+
+```sh
+gh attestation verify oci://ghcr.io/deconfined/tarubot@sha256:<digest> --repo deconfined/tarubot \
+  --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+  --source-ref refs/heads/main --source-digest <commit> \
+  --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+```
+
+`<digest>` is the image's index digest (`docker buildx imagetools inspect ghcr.io/deconfined/tarubot:X.Y.Z` prints it), and `<commit>` the full commit its `org.opencontainers.image.revision` label names. Exit status 0 means the project's publish workflow on `main` built that digest from that commit on a GitHub-hosted runner. Images before 2.32.0 carry no signature, so the check fails for them.
+
 ## The bot's container
 
 The stock Compose file locks the bot's container down. It runs as the image's unprivileged `bun` user, and:

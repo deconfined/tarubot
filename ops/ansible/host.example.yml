@@ -2,7 +2,7 @@
 # Example host settings for TaruBot's host playbook (#50), passed with -e @host.yml. These are the
 # playbook's only settings; site.yml refuses a run where one is missing or malformed. Copy the file
 # outside the repository and replace the placeholders. Public keys aren't secrets, but they stay out
-# of the public repository. On a host the pull unit manages (#50 part 2) this file is
+# of the public repository. On a host the pull unit manages (2.34.0) this file is
 # /etc/tarubot/host.yml, root-only.
 
 # staging or production. Staging reboots itself after updates that need it; production never
@@ -28,3 +28,15 @@ tarubot_operator_keys: []
 tarubot_root_keys: []
 # tarubot_root_keys:
 #   - "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t_REPLACE_ME break-glass"
+
+# Not settings, and never kept in this file: these go on the command line of a single run
+# (site.yml's header). A start variable kept here would ask every run, the pull unit's included, to
+# start the bot.
+#   -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:<64 hex digits>
+#       The first start, without --skip-tags start: a release and its image index digest, both
+#       verified on the workstation with gh attestation verify first. Both or neither; the start
+#       refuses a host where the bot has run before.
+#   -e tarubot_host_lock_held=true
+#       Only for a caller that already holds /run/tarubot/host.lock, such as the pull unit
+#       (2.34.0), so the play's own user-manager commands don't wait on their caller. The run
+#       checks that something holds the lock, and the start refuses the flag.

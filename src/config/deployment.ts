@@ -5,13 +5,16 @@
  * identities: a DevBot env aimed at the production guild, production credentials without an
  * explicit marker, a production or staging run silently merged with a checkout's .env, or a
  * database belonging to another deployment. Errors are Failure("configuration") and name settings,
- * hosts and database names only, never a URL, password or token (OPS-05). env.ts and the bot's
- * startup configuration are unchanged.
+ * hosts and database names only, never a URL, password or token (OPS-05). The guard leaves env.ts
+ * and the bot's startup configuration alone. It reads the file-delivered secrets (NAME_FILE,
+ * 2.33.0) as the tools themselves do, through src/config/secrets.ts: in a Quadlet host's container
+ * DATABASE_URL and DATABASE_CA_CERT exist only as files.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { Failure } from "../domain/values.js";
+import { resolveSettings, secretSetting } from "./secrets.js";
 
 /**
  * Public Discord snowflakes (not credentials) owned by each managed deployment, and where each
@@ -135,9 +138,13 @@ type Settings = z.infer<typeof settingsSchema>;
 /** process.env or a test double. */
 export type Environment = Readonly<Record<string, string | undefined>>;
 
-/** Validate the guard's settings, reporting setting names only (never values). */
+/**
+ * Validate the guard's settings, reporting setting names only (never values). File-delivered
+ * secrets are resolved first, so the rules below see one DATABASE_URL and one DATABASE_CA_CERT
+ * whichever form the environment used; setting both forms of one is refused.
+ */
 function settings(env: Environment): Settings {
-  const result = settingsSchema.safeParse(env);
+  const result = settingsSchema.safeParse(resolveSettings(env));
   if (!result.success)
     throw new Failure(
       "configuration",
@@ -240,13 +247,15 @@ export function localDatabaseHost(host: string): boolean {
 
 /**
  * The CA check-restore uses for RESTORE_DATABASE_URL: its own when set (a PITR fork can have a new
- * CA), otherwise DATABASE_CA_CERT. An empty RESTORE_DATABASE_CA_CERT line (as in the env templates)
- * falls back too, so it can never silently drop certificate verification.
+ * CA), otherwise DATABASE_CA_CERT, read from DATABASE_CA_CERT_FILE when that is how it arrives. An
+ * empty RESTORE_DATABASE_CA_CERT line (as in the env templates) falls back too, so it can never
+ * silently drop certificate verification. The RESTORE_* settings have no file form: a restore
+ * check is an operator's run from a settings file, never a Quadlet unit's.
  */
 export function restoreCertificate(env: Environment): string | undefined {
   return present(env.RESTORE_DATABASE_CA_CERT)
     ? env.RESTORE_DATABASE_CA_CERT
-    : env.DATABASE_CA_CERT;
+    : secretSetting(env, "DATABASE_CA_CERT");
 }
 
 /**

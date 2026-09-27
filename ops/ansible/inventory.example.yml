@@ -8,8 +8,8 @@ all:
   hosts:
     staging:
       ansible_host: "2001:db8::10"
-      # The playbook runs as root, reached with a key. Before the pull unit (#50 part 2) this is a
-      # key kept for the build phase only; after it, hosts apply the playbook to themselves.
+      # The playbook runs as root, reached with a key. Before the pull unit (2.34.0) this is a key
+      # kept for the build phase only; after it, hosts apply the playbook to themselves.
       ansible_user: root
       ansible_ssh_private_key_file: ~/.ssh/REPLACE_WITH_KEY_FILE
       # Only that key, and only a host key already in known_hosts (confirmed through the console).

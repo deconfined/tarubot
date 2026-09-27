@@ -1,10 +1,10 @@
 ---
 # TaruBot's host playbook (#50): the host layer of the staging and production hosts. Both run
 # AlmaLinux 10 with SELinux enforcing, and the bot runs as a rootless Quadlet unit under the tarubot
-# user's systemd. The unit belongs to the release (ops/quadlet/); this playbook prepares the host
-# around it and never links, starts, stops or restarts the bot. The start tag, which links the
-# release's unit and starts it for the first time, arrives with 2.33.0 (#50 part 2); runs already
-# pass --skip-tags start, which changes nothing before then, so the commands stay the same.
+# user's systemd. The unit belongs to the release (ops/quadlet/), and so do the backup's user units
+# (ops/systemd/); this playbook prepares the host around them. Only its start tag links the bot's
+# unit and starts it, once, on a host where it has never run. After that ops/deploy.sh moves the
+# release, and nothing here stops or restarts the bot.
 #
 # Run it as root, with this directory's ansible.cfg and a UTF-8 locale, and always check first:
 #
@@ -13,14 +13,45 @@
 #   LC_ALL=C.UTF-8 ansible-playbook -i INVENTORY site.yml -e @HOST.yml --skip-tags start
 #
 # INVENTORY says only how to reach the host (inventory.example.yml), and HOST.yml holds the host's
-# settings (host.example.yml). Both live outside the repository, which names no host. The playbook
-# assumes nothing about the machine that runs it, so a host can also apply it to itself as root, as
-# the pull unit will (#50 part 2):
+# settings (host.example.yml). Both live outside the repository, which names no host.
 #
-#   ansible-playbook -c local -i localhost, site.yml -e @/etc/tarubot/host.yml --skip-tags start
+# The first start (2.33.0) takes a release and its image index digest, verified on the workstation
+# first (for staging, an agent may verify it) with the deploy plan's own check:
+#
+#   gh attestation verify oci://ghcr.io/deconfined/tarubot@DIGEST --repo deconfined/tarubot \
+#     --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+#     --source-ref refs/heads/main --source-digest COMMIT \
+#     --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+#   LC_ALL=C.UTF-8 ansible-playbook -i INVENTORY site.yml -e @HOST.yml \
+#     -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:DIGEST
+#
+# That is, without --skip-tags start (a check run with them stops after the start's own checks).
+# After the whole host layer, the start re-checks on the host what it can without a GitHub token:
+# the image's digest and labels, the commit's place on main, its version and its deploy.sh's
+# `quadlet` contract. It then resets the clone to that commit, pins the release in ~/tarubot/.env,
+# links the bot's unit and the backup units from the commit, starts the bot, waits for it to turn
+# healthy or to wait for the database writer lease, and enables the backup timer. It refuses a
+# host where the unit is linked, a tarubot container exists or .env already has a digest, so it
+# runs once per host; it never touches Discord (the first deploy of the same release registers the
+# commands). It never migrates either: the database must already be at the release's schema, so
+# start the release the restored dump came from. docs/HOSTING.md "The first start" says how to
+# recover from a start that fails.
+#
+# The playbook assumes nothing about the machine that runs it, so a host can also apply it to
+# itself as root, as the pull unit will (2.34.0), holding the host lock around the whole run:
+#
+#   flock -w N /run/tarubot/host.lock ansible-playbook -c local -i localhost, site.yml \
+#     -e @/etc/tarubot/host.yml --skip-tags start -e tarubot_host_lock_held=true
+#
+# The pull unit never passes the start variables. The host lock, /run/tarubot/host.lock, is a
+# root-owned file from tmpfiles that ops/deploy.sh's Quadlet modes hold around every change. The
+# tarubot play's user-manager commands (daemon-reload, enable, start) take it too (tb_locked in
+# vars/layout.yml). flock locks belong to an open file, so a caller that already holds it passes
+# tarubot_host_lock_held=true, and then the play checks that something really holds it and doesn't
+# take it again; the start refuses the flag.
 #
 # Only ever from a root-owned checkout that tarubot can't write, such as the pull unit's own clone
-# in /var/lib/tarubot-config/repo (2.33.0), and never from ~tarubot/tarubot or anything else under
+# in /var/lib/tarubot-config/repo (2.34.0), and never from ~tarubot/tarubot or anything else under
 # /home. Ansible runs this file, reads ansible.cfg from its directory and loads the files beside it,
 # so a checkout tarubot can write would hand root to tarubot. No check in this file can catch
 # that, because a changed copy would simply leave the check out.
@@ -28,12 +59,12 @@
 # Rules that keep code running as tarubot from steering anything root does (tests/unit/
 # playbook.test.ts enforces the checkable ones):
 # - Two plays. The first runs as root and writes only system paths: /etc, /usr/local, /root,
-#   system and global user units, lingering and sysctl. It only looks at tarubot's home. The
-#   second and last play runs every task in tarubot's context (become_user), and nothing runs as
-#   root after it, so no root task reads what a tarubot task returned. This is the boundary: code
-#   running as tarubot can change what a tarubot task does, and even with pipelining a tarubot
-#   module unpacks itself into a directory tarubot owns. PYTHONNOUSERSITE, ptrace_scope=1 and
-#   legacy_tiocsti=0 are defence in depth.
+#   system and global user units, lingering, sysctl and the host lock in /run/tarubot. It only
+#   looks at tarubot's home. The second and last play runs every task in tarubot's context
+#   (become_user), and nothing runs as root after it, so no root task reads what a tarubot task
+#   returned. This is the boundary: code running as tarubot can change what a tarubot task does,
+#   and even with pipelining a tarubot module unpacks itself into a directory tarubot owns.
+#   PYTHONNOUSERSITE, ptrace_scope=1 and legacy_tiocsti=0 are defence in depth.
 # - Facts are gathered once, at the start, and stay under ansible_facts
 #   (inject_facts_as_vars = False in ansible.cfg).
 # - Settings arrive only as extra vars. Nothing in this directory sets them: there are no
@@ -42,6 +73,8 @@
 # - ansible.builtin only, with no lookups or delegation. Every file task sets its mode, and the
 #   playbook reads nothing from outside this directory.
 # - Handlers only reload: systemd, sshd (after sshd -t), journald's configuration and sysctl.
+# - Only tasks tagged start, all at the end of the last play, link or start the bot's unit or write
+#   the image digest; every other task is untagged.
 
 - name: Configure the host as root
   hosts: all
@@ -102,7 +135,106 @@
           tarubot_root_keys) one public key line without options. host.example.yml shows the form.
         quiet: true
 
+    # Before anything changes: a start needs both inputs, well formed, and the start tag, which
+    # --skip-tags start would silently drop. The pull unit, which holds the host lock, never starts.
+    - name: Refuse malformed first-start inputs, or ones this run would ignore
+      ansible.builtin.assert:
+        that:
+          - tb_start_version is string and tb_start_version is match(tb_version_pattern)
+          - tb_start_digest is string and tb_start_digest is match(tb_digest_pattern)
+          - "'start' not in ansible_skip_tags"
+          - not tb_lock_held | bool
+        fail_msg: >-
+          The first start takes both -e tarubot_start_version=X.Y.Z and -e
+          tarubot_start_digest=sha256:<64 hex digits>, verified on the workstation first
+          (site.yml's header), without --skip-tags start and without tarubot_host_lock_held.
+        quiet: true
+      when: tb_start_version != '' or tb_start_digest != ''
+
   tasks:
+    # ------------------------------------------------------------------------------------------
+    # The host lock (2.33.0), first, so that a caller claiming to hold it is checked before
+    # anything else changes. systemd-tmpfiles recreates it at every boot. Root owns the directory
+    # and the file, and every holder opens it read-only: ops/deploy.sh's Quadlet modes around each
+    # change, the tarubot play's user-manager commands (tb_locked), and the pull unit (2.34.0)
+    # around a whole run.
+    - name: Declare the host lock for systemd-tmpfiles
+      ansible.builtin.copy:
+        src: tmpfiles-tarubot.conf
+        dest: /etc/tmpfiles.d/tarubot.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: tb_tmpfiles
+
+    # Idempotent, so it runs every time: it also puts back a lock removed since the boot.
+    - name: Create the host lock now
+      ansible.builtin.command:
+        argv:
+          - systemd-tmpfiles
+          - --create
+          - /etc/tmpfiles.d/tarubot.conf
+      changed_when: tb_tmpfiles is changed
+
+    # In a check run before the first real one there is no lock yet, so the checks wait for it.
+    - name: Look at the host lock's directory
+      ansible.builtin.stat:
+        path: "{{ tb_host_lock | dirname }}"
+        follow: false
+        get_checksum: false
+      register: tb_lock_dir
+      when: not (ansible_check_mode and tb_tmpfiles is changed)
+
+    - name: Look at the host lock
+      ansible.builtin.stat:
+        path: "{{ tb_host_lock }}"
+        follow: false
+        get_checksum: false
+      register: tb_lock_file
+      when: not (ansible_check_mode and tb_tmpfiles is changed)
+
+    - name: Refuse a host lock that isn't root's own plain file in root's own directory
+      ansible.builtin.assert:
+        that:
+          - tb_lock_dir.stat.isdir | default(false) and not tb_lock_dir.stat.islnk
+          - tb_lock_dir.stat.uid == 0 and tb_lock_dir.stat.mode == '0755'
+          - tb_lock_file.stat.isreg | default(false) and not tb_lock_file.stat.islnk
+          - tb_lock_file.stat.uid == 0 and tb_lock_file.stat.mode == '0644'
+        fail_msg: >-
+          {{ tb_host_lock }} must be a regular file owned by root with mode 644, in a directory owned
+          by root with mode 755, neither a link (/etc/tmpfiles.d/tarubot.conf creates them).
+        quiet: true
+      when: not (ansible_check_mode and tb_tmpfiles is changed)
+
+    # flock exits 75 only when another open file holds the lock; with nobody holding it, it takes
+    # the lock for a moment and exits 0. So the flag can't switch off tb_locked for a run that
+    # nothing actually serialises.
+    - name: With tarubot_host_lock_held, test whether something holds the host lock
+      ansible.builtin.command:
+        argv:
+          - flock
+          - --nonblock
+          - --conflict-exit-code
+          - "75"
+          - "{{ tb_host_lock }}"
+          - "true"
+      register: tb_lock_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: tb_lock_held | bool and not (ansible_check_mode and tb_tmpfiles is changed)
+
+    - name: Refuse tarubot_host_lock_held when nothing holds the host lock
+      ansible.builtin.assert:
+        that:
+          - tb_lock_probe.rc == 75
+        fail_msg: >-
+          tarubot_host_lock_held=true is only for a caller that already holds {{ tb_host_lock }}
+          (flock -w N {{ tb_host_lock }} ansible-playbook ...), and nothing holds it. Run without
+          it: the play then takes the lock itself for each command.
+        quiet: true
+      when: tb_lock_held | bool and not (ansible_check_mode and tb_tmpfiles is changed)
+
     # ------------------------------------------------------------------------------------------
     # Identity and time.
     - name: Set the hostname
@@ -529,7 +661,7 @@
     # Root never writes under tarubot's home; every task there runs as tarubot in the last play.
     # These checks only look, without following links, so that a link planted in the home (say
     # ~/.config/containers/systemd pointing at a root directory) stops the run instead.
-    - name: Look at tarubot's home and the directories on Quadlet's search path
+    - name: Look at tarubot's home and the directories on Quadlet's and the user manager's search paths
       ansible.builtin.stat:
         path: "{{ item }}"
         follow: false
@@ -539,10 +671,12 @@
         - "{{ tb_home }}/.config"
         - "{{ tb_home }}/.config/containers"
         - "{{ tb_links_dir }}"
+        - "{{ tb_home }}/.config/systemd"
+        - "{{ tb_user_units_dir }}"
       register: tb_home_paths
       when: tb_uid != 'none'
 
-    - name: Refuse a home, or a directory on Quadlet's search path, that is a link or isn't tarubot's
+    - name: Refuse a home, or a directory on those search paths, that is a link or isn't tarubot's
       ansible.builtin.assert:
         that:
           - item.stat.exists or item.item != tb_home
@@ -802,8 +936,8 @@
         umask: "0077"
 
     # ------------------------------------------------------------------------------------------
-    # Quadlet's search path holds only the release's unit, through two links. 2.33.0's start tag
-    # makes them; in 2.32.0 no host has them, and nothing here creates them.
+    # Quadlet's search path holds only the release's unit, through two links. Only the start tag
+    # (at the end of this play) makes them; every other run checks them.
     - name: Look for Podman settings and runtime files that would change or bypass the unit
       ansible.builtin.stat:
         path: "{{ item }}"
@@ -893,11 +1027,61 @@
         quiet: true
       when: tb_podman_installed | bool
 
-    - name: Reload tarubot's user manager, which reads the global user masks at a reload
-      ansible.builtin.systemd_service:
-        daemon_reload: true
-        scope: user
-      when: tb_global_user_masks is changed and not ansible_check_mode
+    # ------------------------------------------------------------------------------------------
+    # The backup's user units (2.33.0) belong to the release: links in ~/.config/systemd/user to the
+    # clone's ops/systemd/, made whenever the clone has the files, so a deploy's daemon-reload picks
+    # up a release's change. A clone from before 2.33.0 (staging's until its first start) has none,
+    # and these tasks then do nothing; the first start links them from the commit it starts. The
+    # timer is enabled only once the bot's unit is linked (below), and never disabled here.
+    - name: Look for the backup units in the clone
+      ansible.builtin.stat:
+        path: "{{ tb_clone }}/ops/systemd/{{ item }}"
+        follow: false
+        get_checksum: false
+      loop: "{{ tb_backup_units }}"
+      register: tb_backup_sources
+
+    - name: Create the user manager's unit directory for them
+      ansible.builtin.file:
+        path: "{{ tb_user_units_dir }}"
+        state: directory
+        mode: "0700"
+      when: tb_backup_sources.results | selectattr('stat.exists') | list | length > 0
+
+    - name: Link each backup unit the clone has
+      ansible.builtin.file:
+        src: "{{ tb_clone }}/ops/systemd/{{ item.item }}"
+        dest: "{{ tb_user_units_dir }}/{{ item.item }}"
+        state: link
+        follow: false
+      loop: "{{ tb_backup_sources.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: tb_backup_links
+      when: item.stat.exists
+
+    - name: Read the backup unit links
+      ansible.builtin.stat:
+        path: "{{ tb_user_units_dir }}/{{ item }}"
+        follow: false
+        get_checksum: false
+      loop: "{{ tb_backup_units }}"
+      register: tb_backup_link_stat
+
+    - name: Record whether both backup units are linked into the clone
+      ansible.builtin.set_fact:
+        tb_backup_linked: >-
+          {{ tb_backup_link_stat.results | selectattr('stat.exists') | selectattr('stat.islnk')
+          | map(attribute='stat.lnk_target') | list
+          == tb_backup_units | map('regex_replace', '^', tb_clone ~ '/ops/systemd/') | list }}
+
+    # Under the host lock, like every user-manager command here: a deploy reloads and restarts
+    # under it, and its checks must not see a reload half way.
+    - name: Reload tarubot's user manager, which reads the global user masks and new unit links at a reload
+      ansible.builtin.command:
+        argv: "{{ tb_locked + ['systemctl', '--user', 'daemon-reload'] }}"
+      changed_when: true
+      when: (tb_global_user_masks is changed or tb_backup_links is changed) and not ansible_check_mode
 
     # The global masks are only a default for tarubot (its ~/.config/systemd/user comes first), so
     # check what its user manager actually loads. In a check run before the first real one the
@@ -1067,7 +1251,508 @@
       check_mode: false
       when: tb_env.stat.exists and tb_check_env.stat.executable | default(false)
 
+    - name: Look for the release's secrets check
+      ansible.builtin.stat:
+        path: "{{ tb_quadlet }}/secrets.sh"
+        get_checksum: false
+      register: tb_secrets_check
+
+    # From 2.33.0 the unit copies the secrets from .env into Podman secrets before every start;
+    # this checks now that the ones it can't start without are there. Names only, never values.
+    - name: Check ~/tarubot/.env's secrets with the release's secrets.sh
+      ansible.builtin.command:
+        argv:
+          - "{{ tb_quadlet }}/secrets.sh"
+          - check
+          - "{{ tb_clone }}/.env"
+      changed_when: false
+      check_mode: false
+      when: tb_env.stat.exists and tb_secrets_check.stat.executable | default(false)
+
     - name: Say that no settings file is there yet
       ansible.builtin.debug:
         msg: "{{ tb_clone }}/.env isn't there yet; the owner restores it before the first start."
       when: not tb_env.stat.exists
+
+    # ------------------------------------------------------------------------------------------
+    # The nightly backup, once the bot runs from this clone: the first start enables the timer, and
+    # this puts it back if it was disabled. `enable --now` starts the timer, not a backup.
+    - name: Read whether the backup timer is enabled
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - --user
+          - is-enabled
+          - tarubot-backup.timer
+      register: tb_backup_timer
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: tb_linked | bool and tb_backup_linked | bool
+
+    # A linked unit file reads "linked" until it is enabled; a masked one makes enable fail.
+    - name: Enable the backup timer once the bot's unit and both backup units are linked
+      ansible.builtin.command:
+        argv: "{{ tb_locked + ['systemctl', '--user', 'enable', '--now', 'tarubot-backup.timer'] }}"
+      changed_when: true
+      when: tb_linked | bool and tb_backup_linked | bool and tb_backup_timer.stdout | trim != 'enabled'
+
+    # ------------------------------------------------------------------------------------------
+    # The first start (the start tag; site.yml's header). Every task from here on is tagged start
+    # and guarded by tb_start_digest, and runs after the whole host layer above. The inputs were
+    # verified on the workstation with gh attestation verify, which the host can't do without a
+    # GitHub token, so the host re-checks everything else before it changes anything: the image by
+    # digest and its labels, then the commit's place on main, its version and its contract words.
+    #
+    # 1. Refuse unless the bot has never run here and this is a whole playbook run. These checks
+    # only read, so a check run makes them too, and stops after them.
+    - name: Look for a tarubot container
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "60"
+          - podman
+          - container
+          - exists
+          - tarubot
+      register: tb_start_container
+      changed_when: false
+      failed_when: tb_start_container.rc not in [0, 1]
+      check_mode: false
+      tags: [start]
+      when: tb_start_digest != ''
+
+    # As tarubot, like every holder. Exit 0 means the lock was free (flock held it for a moment).
+    - name: Test whether the host lock is free
+      ansible.builtin.command:
+        argv:
+          - flock
+          - --nonblock
+          - --conflict-exit-code
+          - "75"
+          - "{{ tb_host_lock }}"
+          - "true"
+      register: tb_start_lock
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [start]
+      when: tb_start_digest != '' and not (ansible_check_mode and tb_tmpfiles is changed)
+
+    - name: Read the clone's branch and tracked changes
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - git symbolic-ref --quiet --short HEAD && git status --porcelain --untracked-files=no
+        chdir: "{{ tb_clone }}"
+      register: tb_start_clone
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [start]
+      when: tb_start_digest != ''
+
+    - name: Refuse the first start where the bot has run, or outside a whole playbook run
+      ansible.builtin.assert:
+        that:
+          # The whole playbook, so the host layer above (the lock included) ran first. The pull
+          # unit, which holds the lock, never starts the bot.
+          - ansible_run_tags == ['all']
+          - not tb_lock_held | bool
+          # Nothing started before: no links, no container, one tag pin and no digest yet.
+          - not tb_linked | bool
+          - tb_start_container.rc == 1
+          - tb_env.stat.exists and (tb_env_counts.stdout.split() | map('int') | list)[:2] == [1, 0]
+          # No deploy or other holder at work (unknown only in a check run before the lock exists).
+          - tb_start_lock is skipped or tb_start_lock.rc == 0
+          # deploy.sh's rule for the clone: on main, with no tracked change.
+          - tb_start_clone.rc == 0 and tb_start_clone.stdout_lines == ['main']
+        fail_msg: >-
+          The first start runs once per host, as the whole playbook (no --tags, no
+          tarubot_host_lock_held), where no unit is linked and no tarubot container exists,
+          {{ tb_clone }}/.env has one TARUBOT_IMAGE_TAG line and no TARUBOT_IMAGE_DIGEST, the
+          host lock is free and the clone is on main with no tracked change. Later releases
+          arrive through deploys.
+        quiet: true
+      tags: [start]
+      when: tb_start_digest != ''
+
+    - name: Say that a check run stops the first start here
+      ansible.builtin.debug:
+        msg: >-
+          In check mode the first start stops after its checks; the fetch, pull, reset, pin, links
+          and start run only for real.
+      tags: [start]
+      when: tb_start_digest != '' and ansible_check_mode
+
+    # 2. The commits and the image. Git writes run under umask 077, as deploy.sh's do.
+    - name: Fetch main into the clone
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "120"
+          - sh
+          - -c
+          - umask 077 && exec git fetch --quiet origin main
+        chdir: "{{ tb_clone }}"
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Pull the image by the verified digest
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "600"
+          - podman
+          - pull
+          - --quiet
+          - "{{ tb_image }}@{{ tb_start_digest }}"
+      changed_when: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 3. The image: the digest is its own, and its labels name the version and a commit.
+    - name: Read the pulled image
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "60"
+          - podman
+          - image
+          - inspect
+          - "{{ tb_image }}@{{ tb_start_digest }}"
+      register: tb_start_image
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Refuse an image that isn't the verified digest of the requested version
+      vars:
+        tb_start_inspect: "{{ (tb_start_image.stdout | from_json)[0] }}"
+        tb_start_labels: "{{ tb_start_inspect.Config.Labels | default({}, true) }}"
+      ansible.builtin.assert:
+        that:
+          - (tb_image ~ '@' ~ tb_start_digest) in (tb_start_inspect.RepoDigests | default([], true))
+          - tb_start_labels['org.opencontainers.image.version'] | default('') == tb_start_version
+          - tb_start_labels['org.opencontainers.image.revision'] | default('') is match('^[0-9a-f]{40}$')
+        fail_msg: >-
+          {{ tb_image }}@{{ tb_start_digest }} must list that digest among its RepoDigests and
+          carry the version label {{ tb_start_version }} and a commit as its revision label.
+        quiet: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Record the image's commit
+      ansible.builtin.set_fact:
+        tb_start_commit: "{{ (tb_start_image.stdout | from_json)[0].Config.Labels['org.opencontainers.image.revision'] }}"
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 4. The commit, as a deploy checks a target: on main, carrying the version, and declaring on
+    # its ops/deploy.sh's CAPABILITIES line the `quadlet` contract (and `staging` on staging). The
+    # words, never a copied floor number, say what the release speaks.
+    - name: Test whether the commit is on main
+      ansible.builtin.command:
+        argv:
+          - git
+          - merge-base
+          - --is-ancestor
+          - "{{ tb_start_commit }}"
+          - origin/main
+        chdir: "{{ tb_clone }}"
+      register: tb_start_on_main
+      changed_when: false
+      failed_when: tb_start_on_main.rc not in [0, 1]
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Read the commit's package.json and ops/deploy.sh
+      ansible.builtin.command:
+        argv:
+          - git
+          - show
+          - "{{ tb_start_commit }}:{{ item }}"
+        chdir: "{{ tb_clone }}"
+      loop:
+        - package.json
+        - ops/deploy.sh
+      register: tb_start_files
+      changed_when: false
+      # A commit without either file is refused below, with the others.
+      failed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Refuse a commit off main, of another version, or without this host's contract words
+      vars:
+        tb_start_capabilities: "{{ tb_start_files.results[1].stdout_lines | select('match', tb_capability_line) | list }}"
+        tb_start_words: >-
+          {{ tb_start_capabilities | first | default('') | regex_replace('^readonly CAPABILITIES="|"$', '') }}
+      ansible.builtin.assert:
+        that:
+          - tb_start_on_main.rc == 0
+          - tb_start_files.results | map(attribute='rc') | list == [0, 0]
+          - (tb_start_files.results[0].stdout | from_json).version | default('') == tb_start_version
+          - tb_start_capabilities | length == 1
+          - "'quadlet' in tb_start_words.split(' ')"
+          - tb_role != 'staging' or 'staging' in tb_start_words.split(' ')
+        fail_msg: >-
+          The image's commit must be on main, carry version {{ tb_start_version }} in package.json,
+          and declare `quadlet`{{ ' and `staging`' if tb_role == 'staging' else '' }} on its
+          ops/deploy.sh's CAPABILITIES line.
+        quiet: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 5. The clone moves to the commit as a deploy moves it: main stays checked out, and --keep
+    # refuses to lose a local change.
+    - name: Reset the clone to the verified commit
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - umask 077 && exec git reset --quiet --keep "$1"
+          - sh
+          - "{{ tb_start_commit }}"
+        chdir: "{{ tb_clone }}"
+      changed_when: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 6. The commit's own checks of .env: its lines, then its secrets. Names only, never values.
+    - name: Check .env's lines with the commit's check-env.sh
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "60"
+          - "{{ tb_quadlet }}/check-env.sh"
+          - --syntax
+          - "{{ tb_clone }}/.env"
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Check .env's secrets with the commit's secrets.sh
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "60"
+          - "{{ tb_quadlet }}/secrets.sh"
+          - check
+          - "{{ tb_clone }}/.env"
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 7. The pin: the tag line moves to the version, and the digest the unit's Image= names goes
+    # beside it (deploy.sh moves both from now on). No log and no diff, which would show .env.
+    - name: Pin the release's version in .env
+      ansible.builtin.lineinfile:
+        path: "{{ tb_clone }}/.env"
+        regexp: ^TARUBOT_IMAGE_TAG=
+        line: TARUBOT_IMAGE_TAG={{ tb_start_version }}
+        mode: "0600"
+      no_log: true
+      diff: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Pin the image digest in .env
+      ansible.builtin.lineinfile:
+        path: "{{ tb_clone }}/.env"
+        regexp: ^TARUBOT_IMAGE_DIGEST=
+        insertafter: ^TARUBOT_IMAGE_TAG=
+        line: TARUBOT_IMAGE_DIGEST={{ tb_start_digest }}
+        mode: "0600"
+      no_log: true
+      diff: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 8. What the unit's own check will see at the start: .env as systemd reads it, less the unit's
+    # UnsetEnvironment=, now with the digest. A deploy checks a target the same way.
+    - name: Check the settings the unit will see
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "120"
+          - systemd-run
+          - --user
+          - --pipe
+          - --wait
+          - --collect
+          - --quiet
+          - --expand-environment=no
+          - -p
+          - EnvironmentFile={{ tb_clone }}/.env
+          - -p
+          - UnsetEnvironment={{ tb_unset_settings }}
+          - --
+          - "{{ tb_quadlet }}/check-env.sh"
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 9. The links, from the commit: the bot's unit and this host's target on Quadlet's search
+    # path, and the backup units in the user manager's (the untagged tasks above ran before the
+    # reset, when the clone may not have had them).
+    - name: Look for the backup units in the verified commit
+      ansible.builtin.stat:
+        path: "{{ tb_clone }}/ops/systemd/{{ item }}"
+        follow: false
+        get_checksum: false
+      loop: "{{ tb_backup_units }}"
+      register: tb_start_backup_sources
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Refuse a commit without both backup units
+      ansible.builtin.assert:
+        that:
+          - >-
+            tb_start_backup_sources.results | selectattr('stat.exists') | selectattr('stat.isreg')
+            | list | length == tb_backup_units | length
+        fail_msg: The commit must carry ops/systemd/{{ tb_backup_units | join(' and ops/systemd/') }}.
+        quiet: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Create Quadlet's and the user manager's unit directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ tb_links_dir }}"
+        - "{{ tb_user_units_dir }}"
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Link the release's unit and this host's target into Quadlet's search path
+      ansible.builtin.file:
+        src: "{{ item.value }}"
+        dest: "{{ tb_links_dir }}/{{ item.key }}"
+        state: link
+        follow: false
+      loop: "{{ tb_links | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Link the backup units from the verified commit
+      ansible.builtin.file:
+        src: "{{ tb_clone }}/ops/systemd/{{ item }}"
+        dest: "{{ tb_user_units_dir }}/{{ item }}"
+        state: link
+        follow: false
+      loop: "{{ tb_backup_units }}"
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Read the backup unit links the start made
+      ansible.builtin.stat:
+        path: "{{ tb_user_units_dir }}/{{ item }}"
+        follow: false
+        get_checksum: false
+      loop: "{{ tb_backup_units }}"
+      register: tb_start_backup_links
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 10. What systemd will generate from the links: tarubot.service alone, running the pinned
+    # digest (the dry run writes nothing).
+    - name: Run Quadlet's generator over the linked unit
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "60"
+          - "{{ tb_generator }}"
+          - --user
+          - --dryrun
+      register: tb_start_generator
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Refuse anything but tarubot.service running the pinned digest
+      vars:
+        tb_start_exec: "{{ tb_start_generator.stdout_lines | select('match', '^ExecStart=') | list }}"
+      ansible.builtin.assert:
+        that:
+          - tb_start_generator.rc == 0
+          - tb_start_generator.stdout_lines | select('match', '^---.*---$') | list == ['---tarubot.service---']
+          - tb_start_exec | length == 1
+          - (tb_start_exec | first).endswith(' ' ~ tb_image ~ '@${TARUBOT_IMAGE_DIGEST}')
+        fail_msg: >-
+          Quadlet's generator must turn the links into tarubot.service and nothing else, running
+          {{ tb_image }} at the digest .env pins.
+        quiet: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 11 and 12. Load the units, then start the bot without waiting for systemd: the wait below
+    # judges the start. Both under the host lock.
+    - name: Reload tarubot's user manager with the linked units
+      ansible.builtin.command:
+        argv: "{{ tb_locked + ['systemctl', '--user', 'daemon-reload'] }}"
+      changed_when: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Note when the bot starts, for its journal
+      ansible.builtin.command:
+        argv:
+          - date
+          - +%s
+      register: tb_start_since
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    - name: Start the bot
+      ansible.builtin.command:
+        argv: "{{ tb_locked + ['systemctl', '--user', 'start', '--no-block', 'tarubot.service'] }}"
+      changed_when: true
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 13. Healthy, or waiting on the writer lease another bot holds (production's rebuild by
+    # overlap). If neither comes within three minutes the run fails here and systemd keeps
+    # restarting the bot; journalctl --user -u tarubot.service says why, and docs/HOSTING.md "The
+    # first start" has the recovery (a schema behind the release is migrated with run-tool.sh).
+    - name: Wait up to three minutes for the bot to turn healthy or to wait for the writer lease
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - >-
+            health=$(timeout 30 podman container inspect tarubot 2>/dev/null
+            | jq -r '.[0].State.Health.Status // empty');
+            echo "health ${health:-none}";
+            if timeout 30 journalctl --user --unit tarubot.service --since "@$2" --output cat
+            --no-pager --quiet | grep -qF -e "$1"; then echo lease-wait; fi
+          - sh
+          - "{{ tb_start_marker }}"
+          - "{{ tb_start_since.stdout | trim }}"
+      register: tb_start_wait
+      until: "'health healthy' in tb_start_wait.stdout_lines or 'lease-wait' in tb_start_wait.stdout_lines"
+      retries: 36
+      delay: 5
+      changed_when: false
+      tags: [start]
+      when: tb_start_digest != '' and not ansible_check_mode
+
+    # 14. The nightly backup, from the units linked in step 9.
+    - name: Enable the backup timer
+      ansible.builtin.command:
+        argv: "{{ tb_locked + ['systemctl', '--user', 'enable', '--now', 'tarubot-backup.timer'] }}"
+      changed_when: true
+      tags: [start]
+      when:
+        - tb_start_digest != '' and not ansible_check_mode
+        - >-
+          tb_start_backup_links.results | selectattr('stat.exists') | selectattr('stat.islnk')
+          | list | length == tb_backup_units | length
