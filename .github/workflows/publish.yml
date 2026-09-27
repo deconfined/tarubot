@@ -30,6 +30,13 @@ jobs:
     permissions:
       contents: read
       packages: write # push the versioned and SHA image tags to GHCR
+    outputs:
+      # The index digest the build pushed, straight from build-push-action. The attest and latest
+      # jobs act on this value only and never read a tag back: any same-repository workflow can
+      # repoint a GHCR tag, so a digest read from one proves nothing (2.32.0, #50). Job outputs
+      # from a matrix keep only one entry's value, so the matrix must stay one image
+      # (tests/unit/publish-workflow.test.ts).
+      digest: ${{ steps.build.outputs.digest }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +72,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Build and publish both supported platforms
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -78,9 +86,55 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
+  attest:
+    name: Sign build provenance
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Since 2.32.0 (#50) GitHub signs SLSA build provenance for the index digest the build pushed,
+    # through Sigstore's public-good instance, and stores the attestation with the repository.
+    # Its certificate names this workflow, the ref (refs/heads/main) and the commit, which no pull
+    # request or branch workflow can mint. The BuildKit provenance and SBOM the build attaches stay
+    # unsigned. Nothing verifies the signature yet: the deploy plan's `gh attestation verify`
+    # arrives in 2.33.0.
+    # A separate job keeps the OIDC token out of the build, which runs the repository's code, and
+    # keeps registry write access out of the job that can sign. The attestation isn't pushed to
+    # GHCR (push-to-registry stays off), so this job needs neither packages: write nor a login,
+    # and artifact-metadata storage records apply only to organization-owned repositories.
+    permissions:
+      contents: read
+      id-token: write # request the Sigstore signing certificate
+      attestations: write # store the attestation with the repository
+    steps:
+      - name: Check the digest the build returned
+        # An empty subject-digest would make the action look for subjects elsewhere (the runner's
+        # artifacts list), so anything but one sha256 digest stops the job before it signs.
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          if [[ ! $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The build returned no index digest to sign."
+            exit 1
+          fi
+          echo "Signing ghcr.io/deconfined/tarubot@${DIGEST}"
+      - name: Attest build provenance
+        # With no sbom-path and no predicate input, actions/attest v4 runs in its "Provenance" mode
+        # and generates the SLSA build provenance itself (src/detect.ts, detectAttestationType, at
+        # this commit); predicate-type is required only alongside predicate or predicate-path.
+        # Versions before v3 needed a predicate. actions/attest-build-provenance v4 is only a
+        # wrapper around this action, and its README says new implementations should use this one.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          # The image name without a tag; the digest alone says which image is signed.
+          subject-name: ghcr.io/deconfined/tarubot
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          push-to-registry: false
+
   latest:
     name: Promote latest
-    needs: publish
+    # latest never names an image whose provenance isn't signed.
+    needs: [publish, attest]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -99,10 +153,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Advance the latest tag after successful publication
-        # Since 2.21.0 there is one image: the Lodestone parser runs in the bot.
+        # Since 2.21.0 there is one image: the Lodestone parser runs in the bot. Since 2.32.0 the
+        # source is the digest the build returned and attest signed, not the sha- tag, which
+        # another workflow could have repointed in between.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
+          if [[ ! $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The build returned no index digest to promote."
+            exit 1
+          fi
           # Re-running an older successful workflow must not replace a newer main image.
           current=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
           if [ "$current" != "$GITHUB_SHA" ]; then
@@ -110,4 +171,4 @@ jobs:
             exit 0
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          docker buildx imagetools create --tag "$image:latest" "$image:sha-${GITHUB_SHA}"
+          docker buildx imagetools create --tag "$image:latest" "$image@${DIGEST}"

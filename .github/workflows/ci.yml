@@ -63,15 +63,41 @@ jobs:
       - name: Check the host scripts with ShellCheck
         run: |
           # ops/ runs on the production host (backup.sh, and deploy.sh as the deploy key's forced
-          # command). The ubuntu-24.04 image ships ShellCheck; install it if an image ever drops it.
+          # command), and ops/quadlet/check-env.sh before every Quadlet start. Two explicit levels,
+          # not **, which GitHub's bash doesn't expand without globstar; tests/unit/playbook.test.ts
+          # checks that every script under ops/ is covered here or in the Host playbook job.
+          # The ubuntu-24.04 image ships ShellCheck; install it if an image ever drops it.
           command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck --version | sed -n 2p
-          shellcheck -S warning ops/*.sh
+          shellcheck -S warning ops/*.sh ops/*/*.sh
       - name: Compile the application
         run: bun run build
       - name: Generate synthetic integration input
         run: bun run test:fixture
+      - name: Run Podman's Quadlet generator over the unit
+        env:
+          # The Podman the hosts run (vars/layout.yml's tb_podman_minimum; playbook.test.ts keeps
+          # the two equal), pinned by digest.
+          PODMAN_IMAGE: quay.io/podman/stable:v5.8.2@sha256:663e0dbf407987b7db3f20d3588c283a8228db17b282d2029a482d4d47e36964
+        run: |
+          # ops/quadlet/README.md "What Podman generates": link each target the way a host does,
+          # then dry-run the generator. quadlet.test.ts compares the output with the unit and
+          # Compose, and fails unless it holds exactly tarubot.service.
+          mkdir -p .cache/quadlet
+          for target in production staging; do
+            docker run --rm --network none -v "$PWD/ops:/src/ops:ro" "$PODMAN_IMAGE" sh -c '
+              set -e; export HOME=/home/t; d=$HOME/.config/containers/systemd
+              mkdir -p $HOME/tarubot $d; cp -r /src/ops $HOME/tarubot/
+              ln -s $HOME/tarubot/ops/quadlet/units $d/tarubot
+              ln -s $HOME/tarubot/ops/quadlet/'"$target"' $d/tarubot-target
+              /usr/lib/systemd/system-generators/podman-system-generator --user --dryrun' \
+              > ".cache/quadlet/$target.txt"
+            grep '^---' ".cache/quadlet/$target.txt"
+          done
       - name: Run unit, contract, and PostgreSQL integration tests
+        env:
+          # quadlet.test.ts's comparison with the generator runs only when this names its output.
+          QUADLET_DRYRUN: .cache/quadlet
         run: bun run test
       - name: Validate deployment and source-build Compose models
         run: |
@@ -117,16 +143,60 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
+  playbook:
+    name: Host playbook
+    # ops/ansible/ configures the staging and production hosts as root (#50). It runs here without
+    # a host: a syntax check and ansible-lint, with ansible.builtin only and nothing from Galaxy.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned ansible-core and ansible-lint
+        run: |
+          # ansible-core 2.16.16 is the version AlmaLinux 10.2's AppStream ships, which the hosts
+          # run; the image's Python 3.12 matches theirs. Every package is pinned by hash, and
+          # --no-deps keeps pip from fetching anything the file doesn't list.
+          python3 --version
+          python3 -m venv "$RUNNER_TEMP/ansible"
+          "$RUNNER_TEMP/ansible/bin/pip" install --quiet --disable-pip-version-check \
+            --no-deps --require-hashes -r ops/ansible/requirements-lint.txt
+          echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
+      - name: Check the playbook
+        working-directory: ops/ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ops/ansible/ansible.cfg
+          # ansible-core 2.16 refuses to start under a non-UTF-8 locale.
+          LC_ALL: C.UTF-8
+        run: |
+          ansible-playbook --version | head -n 1
+          # With the example inventory and host settings, so both examples parse too.
+          ansible-playbook --syntax-check -i inventory.example.yml -e @host.example.yml site.yml
+          # ansible-lint runs its own syntax check without an inventory, which ansible.cfg's
+          # unparsed_is_failed would refuse; the setting stays on for real runs.
+          ANSIBLE_INVENTORY_UNPARSED_FAILED=False ansible-lint --offline --project-dir .
+      - name: Check the playbook's scripts with ShellCheck
+        run: |
+          # The IPv6 wait script runs as root at every boot; the skeleton files are tarubot's shell
+          # start-up files.
+          command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
+          shellcheck -S warning ops/ansible/files/tarubot-ipv6-online
+          shellcheck -S warning --shell=bash ops/ansible/files/skel/.bashrc ops/ansible/files/skel/.bash_profile
+
   result:
     name: CI result
     if: always()
-    needs: [checks, images]
+    needs: [checks, images, playbook]
     runs-on: ubuntu-24.04
     steps:
       - name: Require all applicable validation jobs
         env:
           CHECKS: ${{ needs.checks.result }}
           IMAGES: ${{ needs.images.result }}
+          PLAYBOOK: ${{ needs.playbook.result }}
         run: |
           test "$CHECKS" = success
           test "$IMAGES" = success || test "$IMAGES" = skipped
+          test "$PLAYBOOK" = success

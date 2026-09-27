@@ -2,8 +2,9 @@
  * Read-only live preflight over GET-only Discord REST (no gateway session, no database).
  *
  * The mode follows the deployment profile:
- * - devbot (inferred from DevBot's application ID): verify DevBot identity and report the test
- *   guild's capabilities, as before.
+ * - devbot (inferred from DevBot's application ID) and staging (DevBot's application on the
+ *   staging host, #50; only TARUBOT_ENVIRONMENT=staging selects it): verify DevBot identity and
+ *   report the test guild's capabilities, as before.
  * - production / rehearsal: inspect the production application while the legacy bot still owns the
  *   gateway: intents, guilds, the target guild's permissions (also without Administrator), the
  *   managed-role hierarchy and destination-channel access.
@@ -90,7 +91,7 @@ const roleSchema = z.array(
   }),
 );
 
-/** DevBot mode: unchanged behavior, now behind the deployment guard. */
+/** DevBot mode, for the devbot and staging profiles: unchanged behavior, behind the deployment guard. */
 async function devbot(): Promise<void> {
   const config = configuration();
   if (!config.TEST_GUILD_ID)
@@ -306,9 +307,10 @@ async function production(): Promise<void> {
 }
 
 const profile = resolveDeployment(process.env).name;
-if (profile === "devbot") await devbot();
+// Staging runs DevBot's application in DevBot's test guild, so it gets DevBot's checks.
+if (profile === "devbot" || profile === "staging") await devbot();
 else if (profile === "production" || profile === "rehearsal") await production();
 else
   throw new Error(
-    "discord-inspect needs the devbot, production or rehearsal profile; set TARUBOT_ENVIRONMENT or use DevBot's credentials.",
+    "discord-inspect needs the devbot, staging, production or rehearsal profile; set TARUBOT_ENVIRONMENT to one of them.",
   );

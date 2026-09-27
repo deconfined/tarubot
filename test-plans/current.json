@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.30.4 docs and records",
-  "objective": "2.30.4 (#54) removes the site's invite-link template (each deployment runs its own Discord application) and records the 2.30.1–2.30.3 rollouts and today's settings. No runtime change: Deploy production should end no-runtime-change.",
+  "title": "Session: 2.32.0 staging host layer",
+  "objective": "2.32.0 (#50 part 1) adds the host playbook (AlmaLinux 10, SELinux, rootless Podman), the Quadlet unit, the staging tool profile and signed build provenance. The playbook ran on the staging host only; no bot runs there yet. Nothing changes for members; production restarts for the tool-guard change.",
   "user": [
-    "Merge when convenient; no production approval should be needed (no-runtime-change).",
-    "Tomorrow: confirm the 04:30 UTC backup check stayed green (the first hardened run)."
+    "Merge, then approve the 2.32.0 Deploy production run (restart path, no migration).",
+    "When convenient: remove staging's stale RSA and ECDSA SSHFP records (sshd offers only Ed25519 now)."
   ],
   "assistant": [
-    "Check the Pages site after the merge: no invite link, the add-to-server page reads correctly.",
-    "Keep building #50's playbook on its branch with read-only checks against staging only."
+    "After the merge: watch the attest job's first real run, then gh attestation verify the signed digest.",
+    "After the deploy: /version shows 2.32.0, readiness holds, and the next nightly backup stays green."
   ],
   "bot": [
-    "Keep running 2.30.3; nothing changes for members.",
+    "Run 2.32.0 on schema 010; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

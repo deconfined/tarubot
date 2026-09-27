@@ -1,0 +1,13 @@
+# Installed by TaruBot's host playbook as /etc/yum.repos.d/tarubot-epel.repo (#50).
+# AlmaLinux's own repositories carry everything the hosts need except age, the tool that encrypts
+# the backups, so EPEL is limited to that one package. Its signing key ships with the playbook and
+# is imported only when its fingerprint matches (site.yml). The metalink is epel-release's own.
+[tarubot-epel]
+name=EPEL $releasever - $basearch (age only, for TaruBot)
+metalink=https://mirrors.fedoraproject.org/metalink?repo=epel${releasever_minor:+-z}-$releasever&arch=$basearch
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10
+gpgcheck=1
+repo_gpgcheck=0
+metadata_expire=24h
+enabled=1
+includepkgs=age

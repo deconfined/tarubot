@@ -6,10 +6,25 @@
  * Throwaway container runs found what each process writes (docs/VERIFICATION.md): nothing at all
  * for the bot, its tools and its health check, and only /tmp/ca.crt for the backup job. These pin
  * the settings, and that no overlay file loosens them again.
+ *
+ * The Podman hosts run the bot as a rootless Quadlet unit (#50, ops/quadlet/), which must carry the
+ * same hardening as Compose's bot service. The last tests pin that mapping, and that no target's
+ * drop-in loosens it; tests/unit/quadlet.test.ts pins the rest of the unit.
  */
 import { describe, expect, test } from "bun:test";
 import { YAML } from "bun";
 import { z } from "zod";
+import {
+  directoriesUnder,
+  filesUnder,
+  keysOf,
+  parseUnit,
+  QUADLET,
+  root,
+  single,
+  unit,
+  valuesOf,
+} from "../fixtures/quadlet.js";
 
 /** Read a repository file relative to this test. */
 const read = (path: string) => Bun.file(new URL(`../../${path}`, import.meta.url)).text();
@@ -109,4 +124,67 @@ test("no overlay file loosens the hardening", async () => {
           expect(String(volume), `${path} ${name}`).toEndWith(":ro");
     }
   }
+});
+
+describe("the Quadlet unit (#50)", () => {
+  test("carries the bot's Compose hardening, one setting for each", async () => {
+    const compose = await serviceOf("docker-compose.production.yml", "tarubot");
+    const bot = await unit();
+    // read_only: true. ReadOnlyTmpfs= defaults to true, which mounts writable tmpfs on /dev,
+    // /dev/shm, /run, /tmp and /var/tmp; Compose's bot has no tmpfs, so it is false, and no Tmpfs=
+    // or VolatileTmp= adds one back.
+    expect(compose.read_only).toBe(true);
+    expect(compose.tmpfs).toBeUndefined();
+    expect(single(bot, "Container", "ReadOnly")).toBe("true");
+    expect(single(bot, "Container", "ReadOnlyTmpfs")).toBe("false");
+    // cap_drop: [ALL], and nothing handed back.
+    expect(compose.cap_drop).toEqual(["ALL"]);
+    expect(valuesOf(bot, "Container", "DropCapability")).toEqual(["all"]);
+    // no-new-privileges:true.
+    expect(compose.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(single(bot, "Container", "NoNewPrivileges")).toBe("true");
+    // No writable mount and the image's own unprivileged bun user, as under Compose; Podman's
+    // environment and proxy settings stay out of the container too.
+    expect(compose.volumes).toBeUndefined();
+    expect(compose.user).toBeUndefined();
+    const loosening = [
+      "AddCapability",
+      "Tmpfs",
+      "VolatileTmp",
+      "Volume",
+      "Mount",
+      "User",
+      "Group",
+      "UserNS",
+      "PodmanArgs",
+      "GlobalArgs",
+      "SecurityLabelDisable",
+      "SecurityLabelType",
+      "Unmask",
+    ];
+    expect(keysOf(bot, "Container").filter((key) => loosening.includes(key))).toEqual([]);
+    expect(single(bot, "Container", "EnvironmentHost")).toBe("false");
+    expect(single(bot, "Container", "HttpProxy")).toBe("false");
+  });
+
+  test("no target's drop-in loosens the hardening", async () => {
+    // Quadlet merges every tarubot.container.d/*.conf it finds in a linked directory into the unit,
+    // so a drop-in could switch ReadOnly off or hand a capability back, as a Compose overlay could.
+    // Drop-ins live only in the target directories; none sits under units/, which every host links.
+    const dropIns = filesUnder(QUADLET).filter((path) => /\.d\/[^/]+$/u.test(path));
+    expect(dropIns.length).toBeGreaterThan(0);
+    expect(directoriesUnder(QUADLET).filter((path) => path.startsWith("units/"))).toEqual([]);
+    const hardening =
+      /^(ReadOnly|ReadOnlyTmpfs|DropCapability|AddCapability|NoNewPrivileges|Tmpfs|VolatileTmp|Volume|Mount|User|Group|UserNS|PodmanArgs|GlobalArgs|SecurityLabel\w*|Unmask|EnvironmentHost|HttpProxy|Image|Pull)$/u;
+    for (const path of dropIns) {
+      expect(path).not.toStartWith("units/");
+      const lines = parseUnit(await Bun.file(root(`${QUADLET}/${path}`)).text(), path);
+      for (const line of lines)
+        expect({ path, key: line.key, loosens: hardening.test(line.key) }).toEqual({
+          path,
+          key: line.key,
+          loosens: false,
+        });
+    }
+  });
 });

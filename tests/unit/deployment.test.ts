@@ -1,7 +1,8 @@
 /**
  * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
- * ownership, database endpoints per profile, the env-file launch check, and the tracked production
- * env template. Every refusal is checked to be a configuration Failure that never echoes a secret.
+ * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
+ * and the tracked production and staging env templates. Every refusal is checked to be a
+ * configuration Failure that never echoes a secret.
  */
 import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
@@ -15,8 +16,10 @@ import {
   type Environment,
   type Launch,
   localDatabaseHost,
+  PRODUCTION_DATABASES,
   resolveDeployment,
   restoreCertificate,
+  STAGING_DATABASE,
   type ToolScope,
 } from "../../src/config/deployment.js";
 import { Failure } from "../../src/domain/values.js";
@@ -75,11 +78,30 @@ const rehearsalEnv = (overrides: Environment = {}): Environment =>
     ...overrides,
   });
 
+/**
+ * The staging container's settings (#50): the host's .env (staging.env.example, filled in) with the
+ * staging target's fixed values (ops/quadlet/staging/target.env): DevBot's application in its test
+ * guild, public test replies, and staging's own database and role on the managed cluster.
+ */
+const stagingEnv = (overrides: Environment = {}): Environment => ({
+  TARUBOT_ENVIRONMENT: "staging",
+  DISCORD_TOKEN: TOKEN,
+  DISCORD_APPLICATION_ID: DEVBOT_APP,
+  TEST_GUILD_ID: DEV_GUILD,
+  PUBLIC_TEST_RESPONSES: "true",
+  TEST_PLAN_CHANNEL_ID: "",
+  DATABASE_URL: managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE),
+  DATABASE_CA_CERT: CA,
+  ...overrides,
+});
+
 /** Launched as the runbook says: bun --env-file=PATH dist/scripts/<tool>.js, from a checkout. */
 const direct: Launch = {
   execArgv: ["--env-file=/home/operator/production.env"],
   envFiles: [".env"],
 };
+/** Inside a bot container (staging's tools, a deploy's commands): no env file in its directory. */
+const container: Launch = { execArgv: [], envFiles: [] };
 
 /**
  * Each tool's scope exactly as the script declares it: its exported builder over its real argument
@@ -150,8 +172,9 @@ describe("profiles", () => {
     const env = productionEnv({ TARUBOT_ENVIRONMENT: "" });
     refused(() => resolveDeployment(env), "TARUBOT_ENVIRONMENT=production or rehearsal");
     refused(() => assertToolScope(env, scope.migrate, direct), "TARUBOT_ENVIRONMENT");
+    // The marker closes on unknown values; `staging` is a profile of its own (below).
     refused(
-      () => resolveDeployment({ ...env, TARUBOT_ENVIRONMENT: "staging" }),
+      () => resolveDeployment({ ...env, TARUBOT_ENVIRONMENT: "prod" }),
       "TARUBOT_ENVIRONMENT",
     );
   });
@@ -498,6 +521,90 @@ describe("databases", () => {
     );
   });
 
+  test("(#50) production's primary is tarubot or tarubot_restore, so a restore can be repointed", () => {
+    // docs/HOSTING.md "Restoring a dump": restore into tarubot_restore, check it, then point the
+    // bot (and so every later deploy's migrate and register steps) at it.
+    expect(
+      assertToolScope(
+        productionEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_restore") }),
+        scope.restore,
+        direct,
+      ).name,
+    ).toBe("production");
+    const repointed = productionEnv({ DATABASE_URL: managedUrl("tarubot_restore") });
+    for (const tool of [scope.migrate, scope.register(), scope.import(PRODUCTION_GUILD)])
+      expect(assertToolScope(repointed, tool, container).name).toBe("production");
+    // A repointed bot's own check against a PITR fork still expects tarubot on the fork.
+    expect(
+      assertToolScope(
+        { ...repointed, RESTORE_DATABASE_URL: managedUrl("tarubot", FORK) },
+        scope.restore,
+        direct,
+      ).name,
+    ).toBe("production");
+    // A PITR fork the bot was repointed at holds tarubot on another host.
+    expect(
+      assertToolScope(
+        productionEnv({ DATABASE_URL: managedUrl("tarubot", FORK) }),
+        scope.migrate,
+        direct,
+      ).name,
+    ).toBe("production");
+    expect(PRODUCTION_DATABASES).toEqual(["tarubot", "tarubot_restore"]);
+    // Any other name on the cluster is refused, the provider's defaults included.
+    for (const name of ["tarubot_old", "tarubot2", "defaultdb", "postgres", "tarubot_restore_2"])
+      refused(
+        () =>
+          assertToolScope(productionEnv({ DATABASE_URL: managedUrl(name) }), scope.migrate, direct),
+        "not a production database (tarubot or tarubot_restore)",
+      );
+  });
+
+  test("(#50) the production application refuses every tarubot_staging database and user", () => {
+    const belongs = "belongs to staging (tarubot_staging), never to production";
+    // As the primary, by database or by user; the last two are staging's own URL, as a staging .env
+    // on a host that linked production's target would give it. (register.js and commands.js use no
+    // database; there the token check refuses DevBot's token against production's application.)
+    for (const url of [
+      managedUrl(STAGING_DATABASE),
+      managedUrl(`${STAGING_DATABASE}_restore`),
+      managedUrl("tarubot", MANAGED, STAGING_DATABASE),
+      managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE),
+      managedUrl(STAGING_DATABASE, FORK, STAGING_DATABASE),
+    ])
+      for (const tool of [scope.migrate, scope.import(PRODUCTION_GUILD)])
+        refused(() => assertToolScope(productionEnv({ DATABASE_URL: url }), tool, direct), belongs);
+    // As check-restore's target, on the primary's cluster or a fork.
+    for (const restore of [managedUrl(STAGING_DATABASE), managedUrl(STAGING_DATABASE, FORK)])
+      refused(
+        () =>
+          assertToolScope(productionEnv({ RESTORE_DATABASE_URL: restore }), scope.restore, direct),
+        belongs,
+      );
+    // A rehearsal's disposable names can't borrow staging's prefix either.
+    refused(
+      () =>
+        assertToolScope(
+          rehearsalEnv({
+            DATABASE_URL: managedUrl(`${STAGING_DATABASE}_rehearsal`),
+            DATABASE_CA_CERT: CA,
+          }),
+          scope.migrate,
+          direct,
+        ),
+      belongs,
+    );
+    refused(
+      () =>
+        assertToolScope(
+          rehearsalEnv({ RESTORE_DATABASE_URL: localUrl(`${STAGING_DATABASE}_restore_test`) }),
+          scope.restore,
+          direct,
+        ),
+      belongs,
+    );
+  });
+
   test("an empty restore CA line falls back to DATABASE_CA_CERT", () => {
     expect(restoreCertificate({ DATABASE_CA_CERT: CA })).toBe(CA);
     expect(restoreCertificate({ DATABASE_CA_CERT: CA, RESTORE_DATABASE_CA_CERT: "" })).toBe(CA);
@@ -603,10 +710,264 @@ describe("launch and identity", () => {
   });
 });
 
+describe("staging (#50)", () => {
+  test("the staging marker selects DevBot's identity, checked before the application-ID inference", () => {
+    expect(resolveDeployment(stagingEnv())).toEqual({
+      name: "staging",
+      applicationId: DEVBOT_APP,
+      guilds: [DEV_GUILD],
+      registrationScope: DEV_GUILD,
+    });
+    // Only the marker selects staging: DevBot's application alone still means the local profile.
+    expect(resolveDeployment(stagingEnv({ TARUBOT_ENVIRONMENT: "" })).name).toBe("devbot");
+    expect(resolveDeployment(stagingEnv({ TARUBOT_ENVIRONMENT: undefined })).name).toBe("devbot");
+    expect(resolveDeployment(devbotEnv({ TARUBOT_ENVIRONMENT: "devbot" })).name).toBe("devbot");
+    expect(assertToolScope(stagingEnv(), scope.migrate, container)).toMatchObject({
+      name: "staging",
+      applicationId: DEVBOT_APP,
+    });
+  });
+
+  test("staging runs DevBot's application, scoped to its test guild", () => {
+    const devbotApplication = `DevBot's application ${DEVBOT_APP}`;
+    // The production application (a staging .env beside production's identity), none, or another.
+    for (const application of [PRODUCTION_APP, "", "123"])
+      refused(
+        () =>
+          assertToolScope(
+            stagingEnv({ DISCORD_APPLICATION_ID: application }),
+            scope.migrate,
+            container,
+          ),
+        devbotApplication,
+      );
+    refused(
+      () =>
+        assertToolScope(
+          productionEnv({ TARUBOT_ENVIRONMENT: "staging" }),
+          scope.preview(PRODUCTION_GUILD),
+          container,
+        ),
+      devbotApplication,
+    );
+    // Development scoping is required, and it is DevBot's test guild.
+    for (const guild of ["", PRODUCTION_GUILD, "4242"])
+      refused(
+        () => assertToolScope(stagingEnv({ TEST_GUILD_ID: guild }), scope.migrate, container),
+        `TEST_GUILD_ID must be DevBot's test guild ${DEV_GUILD}`,
+      );
+    // Public replies and a test-plan channel are allowed, as on DevBot.
+    for (const overrides of [
+      { PUBLIC_TEST_RESPONSES: "true" },
+      { PUBLIC_TEST_RESPONSES: "false" },
+      { TEST_PLAN_CHANNEL_ID: "1040379370931507252" },
+    ])
+      expect(assertToolScope(stagingEnv(overrides), scope.migrate, container).name).toBe("staging");
+  });
+
+  test("staging's tools touch only the test guild", () => {
+    for (const tool of [
+      scope.preview(DEV_GUILD),
+      scope.lateJoiners(DEV_GUILD),
+      scope.activate(DEV_GUILD),
+      scope.import(DEV_GUILD),
+    ])
+      expect(assertToolScope(stagingEnv(), tool, container).name).toBe("staging");
+    for (const guild of [PRODUCTION_GUILD, "4242"])
+      for (const tool of [
+        scope.preview(guild),
+        scope.lateJoiners(guild),
+        scope.activate(guild),
+        scope.import(guild),
+      ])
+        refused(() => assertToolScope(stagingEnv(), tool, container), `guild ${guild}`);
+  });
+
+  test("staging registers only in the test guild and may write to Discord there", () => {
+    expect(assertToolScope(stagingEnv(), scope.register(DEV_GUILD), container).name).toBe(
+      "staging",
+    );
+    refused(
+      () => assertToolScope(stagingEnv(), scope.register(), container),
+      "global command registration belongs to the production profile",
+    );
+    refused(
+      () => assertToolScope(stagingEnv(), scope.register(PRODUCTION_GUILD), container),
+      `guild ${PRODUCTION_GUILD}`,
+    );
+    // A Discord write in the test guild, such as a probe message, is allowed (never for rehearsal).
+    const write: ToolScope = {
+      tool: "probe",
+      guilds: [DEV_GUILD],
+      discord: "write",
+      databases: [],
+    };
+    expect(assertToolScope(stagingEnv(), write, container).name).toBe("staging");
+    // Command-scope clearing: never the test guild's own registration; another guild the
+    // application belongs to (confirmed by the tool after login) is allowed.
+    const clear = (guild: string): ToolScope => ({
+      tool: "commands clear-guild",
+      guilds: [],
+      commandGuilds: [guild],
+      discord: "write",
+      databases: [],
+    });
+    refused(
+      () => assertToolScope(stagingEnv(), clear(DEV_GUILD), container),
+      "own command registration",
+    );
+    expect(assertToolScope(stagingEnv(), clear("4242"), container).name).toBe("staging");
+  });
+
+  test("staging uses exactly tarubot_staging, as tarubot_staging, on the managed cluster", () => {
+    for (const tool of [scope.migrate, scope.import(DEV_GUILD), scope.activate(DEV_GUILD)])
+      expect(assertToolScope(stagingEnv(), tool, container).name).toBe("staging");
+    const directPort =
+      "must use the managed cluster's direct port 27520 (never its 27521 pool or any other port).";
+    const database = `must be staging's database ${STAGING_DATABASE}`;
+    for (const [url, fragment] of [
+      // Never local: staging's database lives on the managed cluster.
+      [localUrl(STAGING_DATABASE), "is local; staging uses the managed cluster"],
+      [localUrl(STAGING_DATABASE, "postgres"), "is local; staging uses the managed cluster"],
+      [localUrl(STAGING_DATABASE, "127.0.0.1"), "is local; staging uses the managed cluster"],
+      // Never production's databases, whichever user, nor DevBot's or a disposable copy.
+      [managedUrl("tarubot"), database],
+      [managedUrl("tarubot", MANAGED, STAGING_DATABASE), database],
+      [managedUrl("tarubot_restore", MANAGED, STAGING_DATABASE), database],
+      [managedUrl("tarubot_dev", MANAGED, STAGING_DATABASE), database],
+      [managedUrl(`${STAGING_DATABASE}_restore_test`, MANAGED, STAGING_DATABASE), database],
+      [managedUrl("defaultdb", MANAGED, STAGING_DATABASE), database],
+      // Only staging's own role: never production's tarubot user or the administrator.
+      [managedUrl(STAGING_DATABASE, MANAGED, "tarubot"), `connect as the ${STAGING_DATABASE} user`],
+      [managedUrl(STAGING_DATABASE, MANAGED, "akmadmin"), "not an administrator"],
+      [`postgresql://${MANAGED}:27520/${STAGING_DATABASE}`, "not an administrator"],
+      // The direct port only.
+      [managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE, 27521), directPort],
+      [`postgresql://${STAGING_DATABASE}:${PASSWORD}@${MANAGED}/${STAGING_DATABASE}`, directPort],
+    ] as const)
+      refused(
+        () => assertToolScope(stagingEnv({ DATABASE_URL: url }), scope.migrate, container),
+        fragment,
+      );
+    // Verified TLS: the cluster's CA is required.
+    for (const ca of ["", "  ", undefined])
+      refused(
+        () => assertToolScope(stagingEnv({ DATABASE_CA_CERT: ca }), scope.migrate, container),
+        "DATABASE_CA_CERT must hold the managed cluster's CA certificate",
+      );
+    refused(
+      () => assertToolScope(stagingEnv({ DATABASE_URL: "" }), scope.migrate, container),
+      "DATABASE_URL is required",
+    );
+  });
+
+  test("staging has no restore target: no check-restore and no --restore-rehearsal", () => {
+    for (const restore of [
+      managedUrl(`${STAGING_DATABASE}_restore`, MANAGED, STAGING_DATABASE),
+      managedUrl(STAGING_DATABASE, FORK, STAGING_DATABASE),
+      managedUrl("tarubot_restore"),
+    ])
+      refused(
+        () =>
+          assertToolScope(stagingEnv({ RESTORE_DATABASE_URL: restore }), scope.restore, container),
+        "RESTORE_DATABASE_URL has no staging procedure",
+      );
+    // Refused before any database setting is checked, so an unset restore URL gets the same answer.
+    refused(
+      () => assertToolScope(stagingEnv(), scope.restore, container),
+      "RESTORE_DATABASE_URL has no staging procedure",
+    );
+    for (const name of [`${STAGING_DATABASE}_restore_test`, STAGING_DATABASE])
+      refused(
+        () =>
+          assertToolScope(
+            stagingEnv({ DATABASE_URL: managedUrl(name, MANAGED, STAGING_DATABASE) }),
+            scope.rehearseMigration,
+            container,
+          ),
+        "--restore-rehearsal has no staging procedure",
+      );
+    // A restore URL left in the settings doesn't matter to tools that don't use it.
+    expect(
+      assertToolScope(
+        stagingEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_restore") }),
+        scope.migrate,
+        container,
+      ).name,
+    ).toBe("staging");
+  });
+
+  test("staging takes production's launch rule: no auto-loaded env file without --env-file", () => {
+    for (const file of AUTOLOADED_ENV_FILES)
+      refused(
+        () => assertToolScope(stagingEnv(), scope.migrate, { execArgv: [], envFiles: [file] }),
+        `${file} in the working directory would be merged into this run`,
+      );
+    expect(assertToolScope(stagingEnv(), scope.migrate, container).name).toBe("staging");
+    expect(
+      assertToolScope(stagingEnv(), scope.migrate, {
+        execArgv: ["--env-file=/home/operator/staging.env"],
+        envFiles: [".env"],
+      }).name,
+    ).toBe("staging");
+    // The local devbot profile keeps reading the checkout's .env.
+    expect(
+      assertToolScope(devbotEnv(), scope.migrate, { execArgv: [], envFiles: [".env"] }).name,
+    ).toBe("devbot");
+  });
+
+  test("the authenticated application must be DevBot's", () => {
+    const staging = assertToolScope(stagingEnv(), scope.register(DEV_GUILD), container);
+    expect(() => assertAuthenticatedApplication(staging, DEVBOT_APP)).not.toThrow();
+    refused(() => assertAuthenticatedApplication(staging, PRODUCTION_APP), DEVBOT_APP);
+    refused(() => assertAuthenticatedApplication(staging, undefined), "did not report");
+  });
+
+  test("the local devbot profile is unchanged beside staging", () => {
+    // Staging's managed URL can't pass under the local profile, and DevBot's local database can't
+    // pass under staging: the two never share a database.
+    refused(
+      () =>
+        assertToolScope(
+          devbotEnv({ DATABASE_URL: managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE) }),
+          scope.migrate,
+          direct,
+        ),
+      "DevBot's local database",
+    );
+    refused(
+      () =>
+        assertToolScope(
+          stagingEnv({ DATABASE_URL: localUrl("tarubot_dev"), DATABASE_CA_CERT: "" }),
+          scope.migrate,
+          container,
+        ),
+      "is local; staging uses the managed cluster",
+    );
+    expect(assertToolScope(devbotEnv(), scope.register(DEV_GUILD), direct).name).toBe("devbot");
+  });
+});
+
 describe("templates", () => {
   const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
   const keys = (text: string) =>
     [...text.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((match) => match[1] ?? "");
+  /** Load an env file with Bun's own parser (multi-line PEMs included), as --env-file does. */
+  const loadEnvFile = (path: string): Record<string, string> => {
+    const child = Bun.spawnSync(
+      [process.execPath, `--env-file=${path}`, "-e", "console.log(JSON.stringify(process.env))"],
+      { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" } },
+    );
+    expect(child.exitCode).toBe(0);
+    return JSON.parse(child.stdout.toString());
+  };
+  /** A Quadlet target list's fixed NAME=value lines (bare names copy from .env and are skipped). */
+  const fixedValues = async (path: string): Promise<Record<string, string>> =>
+    Object.fromEntries(
+      [...(await Bun.file(root(path)).text()).matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)].map(
+        (match) => [match[1] ?? "", match[2] ?? ""],
+      ),
+    );
 
   test("(n) production.env.example lists every key and loads as a passing production env", async () => {
     const template = await Bun.file(root("production.env.example")).text();
@@ -617,17 +978,7 @@ describe("templates", () => {
     for (const key of developmentKeys) expect(keys(template)).toContain(key);
 
     // Load it exactly as the runbook does, with Bun's own parser (multi-line PEM included).
-    const child = Bun.spawnSync(
-      [
-        process.execPath,
-        `--env-file=${root("production.env.example")}`,
-        "-e",
-        "console.log(JSON.stringify(process.env))",
-      ],
-      { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" } },
-    );
-    expect(child.exitCode).toBe(0);
-    const env: Record<string, string> = JSON.parse(child.stdout.toString());
+    const env = loadEnvFile(root("production.env.example"));
     expect(env).toMatchObject({
       TARUBOT_ENVIRONMENT: "production",
       DISCORD_APPLICATION_ID: PRODUCTION_APP,
@@ -651,6 +1002,82 @@ describe("templates", () => {
     const launch: Launch = { execArgv: ["--env-file=production.env"], envFiles: [".env"] };
     expect(assertToolScope(env, scope.import(PRODUCTION_GUILD), launch).name).toBe("production");
     expect(assertToolScope(env, scope.register(), launch).name).toBe("production");
+  });
+
+  test("(#50) staging.env.example is the staging host's .env: placeholders under the host's rules", async () => {
+    const text = await Bun.file(root("staging.env.example")).text();
+    const names = keys(text);
+    // Each name once, and exactly one plain release pin, which deploy.sh and the playbook require.
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.filter((name) => name === "TARUBOT_IMAGE_TAG")).toHaveLength(1);
+    // The playbook refuses an image override, a digest before the first start, and on staging any
+    // GitHub App value; the staging target fixes the identity and scoping; staging has no restore
+    // target. None of them belongs in the template.
+    for (const name of [
+      "TARUBOT_IMAGE",
+      "TARUBOT_IMAGE_DIGEST",
+      "GITHUB_APP_CLIENT_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "TARUBOT_ENVIRONMENT",
+      "DISCORD_APPLICATION_ID",
+      "TEST_GUILD_ID",
+      "PUBLIC_TEST_RESPONSES",
+      "RESTORE_DATABASE_URL",
+      "RESTORE_DATABASE_CA_CERT",
+    ])
+      expect(names).not.toContain(name);
+    expect(names.filter((name) => name.startsWith("GITHUB_APP_"))).toEqual([]);
+    // Placeholders only: no Discord ID, and every value that isn't empty is a REPLACE_ marker.
+    expect(text).not.toMatch(/\b[1-9][0-9]{16,19}\b/);
+    const env = loadEnvFile(root("staging.env.example"));
+    const values = Object.fromEntries(names.map((name) => [name, env[name] ?? ""]));
+    const filled = Object.entries(values).filter(([, value]) => value !== "");
+    expect(filled.map(([name]) => name).sort()).toEqual(
+      ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN", "TARUBOT_IMAGE_TAG"].sort(),
+    );
+    for (const [name, value] of filled) expect(value, name).toContain("REPLACE_");
+    // The token stays an obvious placeholder until the DevBot move.
+    expect(values.DISCORD_TOKEN).toMatch(/^REPLACE_[A-Z_]+$/);
+    expect(values.DATABASE_CA_CERT).toStartWith("-----BEGIN CERTIFICATE-----\nREPLACE_WITH_");
+    expect(values.DATABASE_CA_CERT).toEndWith("\n-----END CERTIFICATE-----");
+    // Staging's own database and role on the cluster's direct port.
+    expect(databaseIdentity(values.DATABASE_URL ?? "")).toMatchObject({
+      port: 27520,
+      name: STAGING_DATABASE,
+      user: STAGING_DATABASE,
+    });
+
+    // The host's own checks accept it: check-env.sh reads each line the same way systemd and
+    // Compose would, then checks the settings systemd read (with the digest a start would pin).
+    const checkEnv = (args: string[], settings: Record<string, string>) =>
+      Bun.spawnSync(["sh", root("ops/quadlet/check-env.sh"), ...args], {
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...settings },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    const syntax = checkEnv(["--syntax", root("staging.env.example")], {});
+    expect({ code: syntax.exitCode, err: syntax.stderr.toString() }).toEqual({ code: 0, err: "" });
+    const settings = checkEnv([], { ...values, TARUBOT_IMAGE_DIGEST: `sha256:${"0".repeat(64)}` });
+    expect({ code: settings.exitCode, err: settings.stderr.toString() }).toEqual({
+      code: 0,
+      err: "",
+    });
+
+    // Under the staging target's fixed settings, staging's tools resolve the staging profile in
+    // the bot's container.
+    const staging = { ...values, ...(await fixedValues("ops/quadlet/staging/target.env")) };
+    for (const tool of [scope.migrate, scope.register(DEV_GUILD), scope.preview(DEV_GUILD)])
+      expect(assertToolScope(staging, tool, container)).toMatchObject({
+        name: "staging",
+        applicationId: DEVBOT_APP,
+        registrationScope: DEV_GUILD,
+      });
+    // A host that linked production's target by mistake is refused before any I/O: the
+    // production profile never takes staging's database.
+    const wrongTarget = { ...values, ...(await fixedValues("ops/quadlet/production/target.env")) };
+    expect(wrongTarget.TARUBOT_ENVIRONMENT).toBe("production");
+    for (const tool of [scope.migrate, scope.import(PRODUCTION_GUILD)])
+      refused(() => assertToolScope(wrongTarget, tool, container), "belongs to staging");
   });
 
   test("(n, C4) operator env files stay out of Git and images; the templates stay in both", async () => {
