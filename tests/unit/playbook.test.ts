@@ -20,6 +20,11 @@
  *   the bot's unit is linked;
  * - the start tag: the only tasks that link the bot's unit, pin the image digest or start the bot,
  *   all guarded and at the end of the last play, in the order that checks before it changes;
+ * - the pull unit (2.34.0): its script and units installed root-owned from files/host-config/, the
+ *   timer enabled only on a bootstrapped host and never stopped, the allowed signers rendered from
+ *   the host settings, the run source checked and written to the run marker first, a hand run
+ *   refused unless the unit is paused, ansible-core at its floor from AppStream, and no dnf call on
+ *   a run with nothing to install;
  * - CI: ShellCheck covers every script under ops/, and the Quadlet generator image runs the
  *   playbook's minimum Podman.
  *
@@ -216,6 +221,7 @@ describe("the files", () => {
     expect(entries.filter((entry) => entry.kind === "link")).toEqual([]);
     expect(entries.filter((entry) => entry.kind === "dir").map((entry) => entry.path)).toEqual([
       "files",
+      "files/host-config",
       "files/skel",
       "templates",
       "vars",
@@ -225,6 +231,10 @@ describe("the files", () => {
         ".ansible-lint",
         "ansible.cfg",
         "files/cloud-init-tarubot.cfg",
+        "files/host-config/tarubot-host-config",
+        "files/host-config/tarubot-host-config.service",
+        "files/host-config/tarubot-host-config.timer",
+        "files/host-config/timer-production.conf",
         "files/journald-tarubot.conf",
         "files/multi-user-network-online.conf",
         "files/RPM-GPG-KEY-EPEL-10",
@@ -241,6 +251,7 @@ describe("the files", () => {
         "requirements-lint.txt",
         "requirements.txt",
         "site.yml",
+        "templates/allowed_signers.j2",
         "templates/authorized_keys-tarubot.j2",
         "templates/dnf-automatic.conf.j2",
         "vars/layout.yml",
@@ -347,6 +358,7 @@ describe("site.yml's plays", () => {
       [
         "site.yml",
         "vars/layout.yml",
+        "templates/allowed_signers.j2",
         "templates/authorized_keys-tarubot.j2",
         "templates/dnf-automatic.conf.j2",
       ].map(async (file) => [file, await read(`${ANSIBLE}/${file}`)] as const),
@@ -379,6 +391,13 @@ describe("site.yml's plays", () => {
             ? "templates"
             : null;
       if (directory === null) continue;
+      // The run marker is the one copy written from content, built from run variables the first
+      // play has already checked (describe "the pull unit").
+      if (module === "ansible.builtin.copy" && "content" in args) {
+        expect(args.src, String(task.name)).toBeUndefined();
+        expect(args.dest, String(task.name)).toBe("{{ tb_pull_marker }}");
+        continue;
+      }
       const src = String(args.src);
       // A loop's items fill {{ item }}; every item must be a plain string.
       const items = src.includes("{{ item }}")
@@ -437,8 +456,12 @@ describe("site.yml's plays", () => {
       if (words.includes("tarubot.service"))
         for (const verb of ["stop", "restart", "try-restart", "reload-or-restart", "kill"])
           expect(words, name).not.toContain(verb);
-      if (module === "ansible.builtin.systemd_service")
-        expect(String(args.name ?? ""), name).not.toContain("tarubot");
+      // The bot's unit belongs to tarubot's user manager, which no module call reaches. The one
+      // TaruBot unit root's play names is the pull unit's timer (describe "the pull unit").
+      if (module === "ansible.builtin.systemd_service") {
+        const unit = String(args.name ?? "");
+        if (unit.includes("tarubot")) expect(unit, name).toBe("tarubot-host-config.timer");
+      }
     }
     // Two Quadlet links (one looped task), the digest pin and the start.
     expect(guarded).toBe(3);
@@ -1056,6 +1079,495 @@ describe("the start tag", () => {
     // Only this start's lines: the unit's journal since the moment before the start.
     expect(script).toContain('journalctl --user --unit tarubot.service --since "@$2"');
     expect(script).toContain('grep -qF -e "$1"');
+  });
+});
+
+describe("the pull unit", () => {
+  /** The root play's tasks, in order, without its pre-tasks or handlers. */
+  async function rootTasks(): Promise<Task[]> {
+    return (await allTasks()).filter((task) => task.play === 0 && task.list === "tasks");
+  }
+
+  /** A path argument with vars/layout.yml's tb_* names filled in, so every spelling compares. */
+  async function resolver(): Promise<(path: string) => string> {
+    const vars = await layout();
+    return (path) =>
+      path.replace(/\{\{ (tb_[a-z_]+) \}\}/gu, (whole, name: string) =>
+        typeof vars[name] === "string" ? (vars[name] as string) : whole,
+      );
+  }
+
+  /** Every path a writing task writes, loop items filled in. */
+  function writtenPaths(task: Task): string[] {
+    const writers = [
+      "ansible.builtin.file",
+      "ansible.builtin.copy",
+      "ansible.builtin.template",
+      "ansible.builtin.lineinfile",
+      "ansible.builtin.blockinfile",
+      "ansible.builtin.replace",
+    ];
+    if (!writers.includes(task.module)) return [];
+    const target = String(task.args.dest ?? task.args.path ?? "");
+    // A loop over a variable (the Podman masks) keeps its placeholder; none of those is ours.
+    if (!target.includes("{{ item }}") || !Array.isArray(task.task.loop)) return [target];
+    return task.task.loop.map((item) => target.replace("{{ item }}", String(item)));
+  }
+
+  test("the root play forces its handlers, so a later failure still leaves the reloads run", async () => {
+    const [first, last] = await plays();
+    expect(first?.force_handlers).toBe(true);
+    // The tarubot play has no handlers to force (checked above), and sets nothing of the kind.
+    expect(last?.force_handlers).toBeUndefined();
+  });
+
+  test("its paths are fixed, and the service runs the script the playbook installs", async () => {
+    const vars = await layout();
+    expect(vars.tb_pull_dir).toBe("/var/lib/tarubot-config");
+    expect(vars.tb_pull_home).toBe(`${String(vars.tb_pull_dir)}/home`);
+    expect(vars.tb_pull_state).toBe(`${String(vars.tb_pull_dir)}/state.json`);
+    expect(vars.tb_pull_pause).toBe(`${String(vars.tb_pull_dir)}/pause`);
+    expect(vars.tb_pull_marker).toBe(`${String(vars.tb_pull_dir)}/last-run.json`);
+    expect(vars.tb_pull_script).toBe("/usr/local/sbin/tarubot-host-config");
+    // The pull unit builder's service names the same script (interfaces section 15).
+    const service = await read(`${ANSIBLE}/files/host-config/tarubot-host-config.service`);
+    expect(service.split("\n").filter((line) => line.startsWith("ExecStart="))).toEqual([
+      `ExecStart=${String(vars.tb_pull_script)} run`,
+    ]);
+  });
+
+  test("the script and units are installed root-owned from files/host-config", async () => {
+    const tasks = await rootTasks();
+    const copies = tasks.filter(
+      ({ module, args }) =>
+        module === "ansible.builtin.copy" && String(args.src ?? "").startsWith("host-config/"),
+    );
+    expect(copies.map(({ args }) => [args.src, args.dest])).toEqual([
+      ["host-config/tarubot-host-config", "{{ tb_pull_script }}"],
+      [
+        "host-config/tarubot-host-config.service",
+        "/etc/systemd/system/tarubot-host-config.service",
+      ],
+      ["host-config/tarubot-host-config.timer", "/etc/systemd/system/tarubot-host-config.timer"],
+      [
+        "host-config/timer-production.conf",
+        "/etc/systemd/system/tarubot-host-config.timer.d/10-production.conf",
+      ],
+    ]);
+    const [script, ...units] = copies;
+    // bash parses the new copy before it replaces the old one; the default context gives bin_t.
+    expect(script?.args).toEqual({
+      src: "host-config/tarubot-host-config",
+      dest: "{{ tb_pull_script }}",
+      owner: "root",
+      group: "root",
+      mode: "0755",
+      validate: "/usr/bin/bash -n %s",
+    });
+    for (const unit of units) {
+      const name = String(unit.task.name);
+      expect(unit.args, name).toMatchObject({ owner: "root", group: "root", mode: "0644" });
+      expect(unit.task.notify, name).toBe("Reload systemd");
+    }
+  });
+
+  test("production's ten-minute drop-in exists only on production", async () => {
+    const tasks = await rootTasks();
+    const dropIn = "/etc/systemd/system/tarubot-host-config.timer.d";
+    const touching = tasks.filter((task) =>
+      writtenPaths(task).some((path) => path.startsWith(dropIn)),
+    );
+    expect(touching.map(({ args }) => [args.path ?? args.dest, args.state ?? "file"])).toEqual([
+      [dropIn, "directory"],
+      [`${dropIn}/10-production.conf`, "file"],
+      [`${dropIn}/10-production.conf`, "absent"],
+    ]);
+    const [directory, copy, removal] = touching;
+    expect(directory?.args).toMatchObject({ owner: "root", group: "root", mode: "0755" });
+    expect(directory?.task.when).toBe("tb_role == 'production'");
+    expect(copy?.task.when).toBe("tb_role == 'production'");
+    // Elsewhere the file goes, and systemd reloads without it.
+    expect(removal?.task.when).toBe("tb_role != 'production'");
+    expect(removal?.task.notify).toBe("Reload systemd");
+  });
+
+  test("the timer is enabled only on a bootstrapped host, after the reloads, and nothing else touches the unit", async () => {
+    const tasks = await rootTasks();
+    const named = (await allTasks()).filter(({ task }) =>
+      JSON.stringify(task).includes("tarubot-host-config."),
+    );
+    // The two unit copies, the drop-in's three tasks and the timer: nothing starts, stops,
+    // restarts, kills, disables or masks the service or the timer, and no command names them.
+    // A new task that names them must be added here on purpose.
+    expect(named.map(({ module }) => module)).toEqual([
+      "ansible.builtin.copy",
+      "ansible.builtin.copy",
+      "ansible.builtin.file",
+      "ansible.builtin.copy",
+      "ansible.builtin.file",
+      "ansible.builtin.systemd_service",
+    ]);
+    for (const { module, task, args } of named) {
+      const name = String(task.name);
+      expect(module, name).not.toBe("ansible.builtin.command");
+      if (module === "ansible.builtin.file") expect(args.src, name).toBeUndefined();
+      if (module === "ansible.builtin.systemd_service") {
+        expect(args, name).toEqual({
+          name: "tarubot-host-config.timer",
+          enabled: true,
+          state: "started",
+        });
+      }
+    }
+    const timers = named.filter(({ module }) => module === "ansible.builtin.systemd_service");
+    expect(timers).toHaveLength(1);
+    const timer = timers[0] as Task;
+    expect(timer.play).toBe(0);
+    expect(timer.list).toBe("tasks");
+    // The state bootstrap writes, looked at without following links; before the timer file
+    // exists (a check run of the first install) systemd couldn't find the unit.
+    expect(whenOf(timer.task)).toBe(
+      "tb_pull_state_file.stat.exists and not (ansible_check_mode and tb_pull_timer is changed)",
+    );
+    const timerCopy = tasks.find(({ args }) =>
+      String(args.dest ?? "").endsWith("/tarubot-host-config.timer"),
+    );
+    expect(timerCopy?.task.register).toBe("tb_pull_timer");
+    // After a flush of handlers that follows every unit and drop-in change, so systemd has read
+    // them when the timer starts.
+    // (Each allTasks() call parses afresh, so the timer is found again in this list by its name.)
+    const at = tasks.findIndex(({ task }) => task.name === timer.task.name);
+    const flush = tasks.findIndex(
+      ({ module, task }) => module === "ansible.builtin.meta" && task[module] === "flush_handlers",
+    );
+    const lastUnitChange = Math.max(
+      ...tasks
+        .map((task, index) => ({ task, index }))
+        .filter(({ task }) =>
+          writtenPaths(task).some((path) =>
+            path.startsWith("/etc/systemd/system/tarubot-host-config"),
+          ),
+        )
+        .map(({ index }) => index),
+    );
+    expect(lastUnitChange).toBeGreaterThan(0);
+    expect(flush).toBeGreaterThan(lastUnitChange);
+    expect(at).toBeGreaterThan(flush);
+  });
+
+  test("the allowed signers come from the host settings only, validated, under deploy.sh's REVIEWER", async () => {
+    const vars = await layout();
+    expect(vars.tb_allowed_signers).toBe("{{ tarubot_allowed_signers | default([], true) }}");
+    expect(vars.tb_signer_principal).toBe("deconfined");
+    expect(vars.tb_signer_principal).toBe(await deployConstant("REVIEWER"));
+    expect(vars.tb_signer_pattern).toBe(
+      "^(ssh-ed25519|sk-ssh-ed25519@openssh\\.com) AAAA[0-9A-Za-z+/]+={0,3}( [^\\r\\n]*)?$",
+    );
+    // Every line is checked, trimmed, before anything changes.
+    const settings = (await allTasks()).find(({ task }) =>
+      String(task.name).startsWith("Refuse missing or malformed host settings"),
+    );
+    expect(settings?.list).toBe("pre_tasks");
+    expect(settings?.args.that).toEqual(
+      expect.arrayContaining([
+        "tb_allowed_signers is sequence and tb_allowed_signers is not string and tb_allowed_signers is not mapping",
+        "tb_allowed_signers | reject('string') | list == []",
+        "tb_allowed_signers | map('trim') | reject('match', tb_signer_pattern) | list == []",
+      ]),
+    );
+    // The pattern: an Ed25519 key (a FIDO one included) with an optional comment, and nothing
+    // else. Python's re.match reads it the same way on a trimmed line.
+    const pattern = new RegExp(String(vars.tb_signer_pattern), "u");
+    const key = "AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnlyExampleOnlyExampleOnlyExampleOn";
+    for (const line of [
+      `ssh-ed25519 ${key}`,
+      `ssh-ed25519 ${key} signer@workstation`,
+      "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tExampleOnly yubikey",
+    ])
+      expect(pattern.test(line), line).toBe(true);
+    for (const line of [
+      "",
+      `ssh-rsa ${key}`,
+      `ecdsa-sha2-nistp256 ${key}`,
+      `cert-authority ssh-ed25519 ${key}`,
+      `namespaces="git" ssh-ed25519 ${key}`,
+      `ssh-ed25519  ${key}`,
+      `ssh-ed25519 ${key}\nssh-ed25519 ${key}`,
+      `ssh-ed25519 ${key.replace("AAAAC3", "BBBBC3")}`,
+    ])
+      expect(pattern.test(line), JSON.stringify(line)).toBe(false);
+    // Each signer's type and base64, its comment dropped, and the digest of those joined by commas:
+    // what the pull unit computes from its own reading of host.yml and passes as
+    // tarubot_pull_signers (host-config.test.ts pins the script's side).
+    expect(vars.tb_signer_keys).toBe(
+      "{{ tb_allowed_signers | map('trim') | map('split') | map('batch', 2) | map('first') | map('join', ' ') | list }}",
+    );
+    expect(vars.tb_signer_digest).toBe("{{ tb_signer_keys | join(',') | hash('sha256') }}");
+    // The template renders exactly those, under the principal; an empty list leaves only the
+    // comment header.
+    const template = await read(`${ANSIBLE}/templates/allowed_signers.j2`);
+    const lines = template.split("\n").filter((line) => line !== "");
+    const body = lines.filter((line) => !line.startsWith("#"));
+    expect(body).toEqual([
+      "{% for key in tb_signer_keys %}",
+      '{{ tb_signer_principal }} namespaces="git" {{ key }}',
+      "{% endfor %}",
+    ]);
+    expect(
+      [...body.join("\n").matchAll(/\b(tb_[a-z_]+|tarubot_[a-z_]+)\b/gu)].map((m) => m[1]),
+    ).toEqual(["tb_signer_keys", "tb_signer_principal"]);
+    // The same rendering in JavaScript, for one line with a comment.
+    const render = (signer: string) =>
+      `${String(vars.tb_signer_principal)} namespaces="git" ${signer.trim().split(/\s+/u).slice(0, 2).join(" ")}`;
+    expect(render(` ssh-ed25519 ${key} signer@workstation `)).toBe(
+      `deconfined namespaces="git" ssh-ed25519 ${key}`,
+    );
+    // Written root-owned and world-readable, into the directory the account section creates.
+    const tasks = await rootTasks();
+    const signers = tasks.findIndex(({ args }) => args.src === "allowed_signers.j2");
+    expect(tasks[signers]?.args).toEqual({
+      src: "allowed_signers.j2",
+      dest: "/etc/tarubot/allowed_signers",
+      owner: "root",
+      group: "root",
+      mode: "0644",
+    });
+    const etc = tasks.findIndex(
+      ({ module, task }) =>
+        module === "ansible.builtin.file" &&
+        Array.isArray(task.loop) &&
+        task.loop.includes("/etc/tarubot"),
+    );
+    expect(etc).toBeGreaterThan(-1);
+    expect(signers).toBeGreaterThan(etc);
+  });
+
+  test("the run source is checked before anything changes", async () => {
+    const vars = await layout();
+    expect(vars.tb_source).toBe("{{ tarubot_source | default('manual') }}");
+    expect(vars.tb_commit).toBe("{{ tarubot_commit | default('') }}");
+    expect(vars.tb_run).toBe("{{ tarubot_run | default('') }}");
+    expect(vars.tb_pull_role).toBe("{{ tarubot_pull_role | default('') }}");
+    expect(vars.tb_pull_signers).toBe("{{ tarubot_pull_signers | default('') }}");
+    const check = (await allTasks()).find(
+      ({ task }) => task.name === "Refuse a malformed run source",
+    );
+    expect(check?.play).toBe(0);
+    expect(check?.list).toBe("pre_tasks");
+    expect(check?.task.when).toBeUndefined();
+    expect(check?.args.that).toEqual([
+      "tb_source in ['manual', 'pull', 'bootstrap', 'emergency']",
+      // The pull unit's runs: its commit and run id, holding the lock, on its own host, and the
+      // role its plain reading of host.yml found equal to Ansible's.
+      "tb_source == 'manual' or tb_commit is match('^[0-9a-f]{40}$')",
+      "tb_source == 'manual' or tb_run is match('^[0-9a-f]{16}$')",
+      "tb_source == 'manual' or tb_lock_held | bool",
+      "tb_source == 'manual' or ansible_connection == 'local'",
+      "tb_source == 'manual' or tb_pull_role == tb_role",
+      // The signers the script checked signatures against are the ones Ansible reads.
+      "tb_source == 'manual' or tb_pull_signers == tb_signer_digest",
+      // A hand run names none of them.
+      "tb_source != 'manual' or (tb_commit == '' and tb_run == '' and tb_pull_role == '' and tb_pull_signers == '')",
+    ]);
+  });
+
+  test("pre_tasks only look, so every refusal comes before any change", async () => {
+    const [first] = await plays();
+    if (!first) throw new Error("site.yml has no plays");
+    const pre = tasksOf(first, 0).filter((task) => task.list === "pre_tasks");
+    for (const { module, task } of pre)
+      expect(["ansible.builtin.assert", "ansible.builtin.stat"], String(task.name)).toContain(
+        module,
+      );
+  });
+
+  test("a real hand run needs the unit paused, and the flags are never links", async () => {
+    const [first] = await plays();
+    if (!first) throw new Error("site.yml has no plays");
+    const pre = tasksOf(first, 0).filter((task) => task.list === "pre_tasks");
+    const stat = (path: string) =>
+      pre.find(({ module, args }) => module === "ansible.builtin.stat" && args.path === path);
+    const state = stat("{{ tb_pull_state }}");
+    const pause = stat("{{ tb_pull_pause }}");
+    expect(state?.args.follow).toBe(false);
+    expect(pause?.args.follow).toBe(false);
+    expect(state?.task.register).toBe("tb_pull_state_file");
+    expect(pause?.task.register).toBe("tb_pull_pause_file");
+    const links = pre.find(({ task }) => JSON.stringify(task).includes("stat.islnk"));
+    expect(links?.args.that).toEqual([
+      "not tb_pull_state_file.stat.exists or (tb_pull_state_file.stat.isreg and not tb_pull_state_file.stat.islnk)",
+      "not tb_pull_pause_file.stat.exists or (tb_pull_pause_file.stat.isreg and not tb_pull_pause_file.stat.islnk)",
+    ]);
+    const guard = pre.find(
+      ({ task }) => task.name === "Refuse a hand run while the pull unit is active",
+    );
+    // Manual runs only (the pull unit's own runs and its emergency apply go ahead while paused),
+    // with the start's hand run among them; a check run changes nothing, so it isn't refused.
+    expect(guard?.args.that).toEqual([
+      "not (tb_source == 'manual' and tb_pull_state_file.stat.exists and not tb_pull_pause_file.stat.exists)",
+    ]);
+    expect(guard?.task.when).toBe("not ansible_check_mode");
+    expect(guard?.task.tags).toBeUndefined();
+    expect(String(guard?.args.fail_msg)).toContain("tarubot-host-config pause REASON");
+    expect(String(guard?.args.fail_msg)).toContain("tarubot-host-config resume");
+    // Both stats and the refusal come before the guard reads them.
+    for (const task of [state, pause, links])
+      expect(pre.indexOf(task as Task)).toBeLessThan(pre.indexOf(guard as Task));
+  });
+
+  test("the run marker is the first change after the lock checks, and the script's own files stay the script's", async () => {
+    const tasks = await rootTasks();
+    const refuse = tasks.findIndex(({ task }) => task.register === "tb_lock_probe") + 1;
+    expect(tasks[refuse]?.args.that).toEqual(["tb_lock_probe.rc == 75"]);
+    const [directories, marker] = tasks.slice(refuse + 1);
+    expect(directories?.args).toEqual({
+      path: "{{ item }}",
+      state: "directory",
+      owner: "root",
+      group: "root",
+      mode: "0700",
+    });
+    expect(directories?.task.loop).toEqual(["{{ tb_pull_dir }}", "{{ tb_pull_home }}"]);
+    expect(marker?.module).toBe("ansible.builtin.copy");
+    expect(marker?.args).toEqual({
+      content: "{{ {'source': tb_source, 'commit': tb_commit, 'run': tb_run} | to_json }}\n",
+      dest: "{{ tb_pull_marker }}",
+      owner: "root",
+      group: "root",
+      mode: "0600",
+    });
+    // A check run writes nothing, so it shows no marker either. A new run id every pull run
+    // would otherwise count as a change, and a pull run with nothing to do must report changed=0.
+    expect(marker?.task.when).toBe("not ansible_check_mode");
+    expect(marker?.task.changed_when).toBe(false);
+    // Under /var/lib/tarubot-config the playbook writes those three paths and nothing else: the
+    // clone, home/tmp, state.json and the pause and now flags are the script's alone.
+    const resolve = await resolver();
+    const vars = await layout();
+    const dir = String(vars.tb_pull_dir);
+    const written = (await allTasks()).flatMap((task) =>
+      writtenPaths(task)
+        .map(resolve)
+        .filter((path) => path === dir || path.startsWith(`${dir}/`))
+        .map((path) => [String(task.task.name), path]),
+    );
+    expect(written).toEqual([
+      ["Create the pull unit's directory and its HOME", dir],
+      ["Create the pull unit's directory and its HOME", `${dir}/home`],
+      ["Write the run marker", `${dir}/last-run.json`],
+    ]);
+    // And no command names them (the stats and asserts only read).
+    for (const { module, args, task } of await allTasks())
+      if (module === "ansible.builtin.command")
+        expect(JSON.stringify(args), String(task.name)).not.toMatch(/tarubot-config|tb_pull_/u);
+  });
+
+  test("the settings files the pull unit reads must be root's alone", async () => {
+    const tasks = await rootTasks();
+    const look = tasks.find(
+      ({ module, task }) =>
+        module === "ansible.builtin.stat" &&
+        Array.isArray(task.loop) &&
+        task.loop.includes("/etc/tarubot/host.yml"),
+    );
+    expect(look?.task.loop).toEqual(["/etc/tarubot/host.yml", "/etc/tarubot/host-config.env"]);
+    expect(look?.args.follow).toBe(false);
+    const refuse = tasks[tasks.indexOf(look as Task) + 1];
+    expect(refuse?.module).toBe("ansible.builtin.assert");
+    expect(refuse?.task.loop).toBe(`{{ ${String(look?.task.register)}.results }}`);
+    expect(refuse?.task.when).toBe("item.stat.exists");
+    expect(refuse?.args.that).toEqual([
+      "item.stat.isreg and not item.stat.islnk",
+      "item.stat.uid == 0 and item.stat.mode == '0600'",
+    ]);
+  });
+
+  test("ansible-core comes from AppStream at the floor, and no dnf call runs when nothing is missing", async () => {
+    const vars = await layout();
+    // AlmaLinux's build with the CVE-2026-11332 backport, the one requirements.txt names.
+    expect(vars.tb_ansible_core_floor).toBe("1:2.16.16-2.el10_2.1");
+    expect(vars.tb_ansible_core).toBe("ansible-core >= {{ tb_ansible_core_floor }}");
+    expect(await read(`${ANSIBLE}/requirements.txt`)).toContain("2.16.16-2.el10_2.1");
+    expect(vars.tb_packages).toContain("git");
+    expect(vars.tb_production_update_excludes).toContain("ansible-core");
+    const tasks = await rootTasks();
+    const facts = tasks.findIndex(({ module }) => module === "ansible.builtin.package_facts");
+    const dnf = tasks.filter(({ module }) => module === "ansible.builtin.dnf");
+    expect(dnf.map(({ args }) => args.name)).toEqual([
+      "{{ tb_packages }}",
+      "{{ tb_ansible_core }}",
+      "{{ tb_epel_packages }}",
+    ]);
+    // Every one after the installed packages were read, only when they show something to do
+    // (ansible-core 2.16's dnf module loads the repositories on every call), from the
+    // repositories already enabled.
+    for (const entry of dnf) {
+      const { task, args } = entry;
+      const name = String(task.name);
+      expect(tasks.indexOf(entry), name).toBeGreaterThan(facts);
+      expect(whenOf(task), name).toContain("ansible_facts.packages");
+      expect(args, name).toMatchObject({ state: "present", lock_timeout: 300 });
+      for (const key of ["enablerepo", "disablerepo", "disable_gpg_check", "update_only"])
+        expect(args[key], name).toBeUndefined();
+    }
+    const [host, core, epel] = dnf;
+    expect(host?.task.when).toBe(
+      "tb_packages | reject('in', ansible_facts.packages) | list | length > 0",
+    );
+    expect(core?.task.when).toBe(
+      "'ansible-core' not in ansible_facts.packages or tb_ansible_core_check.stdout | trim in ['low', 'missing']",
+    );
+    expect(epel?.task.when).toEqual([
+      "tb_epel_packages | reject('in', ansible_facts.packages) | list | length > 0",
+      "not (ansible_check_mode and tb_epel_repo is changed)",
+    ]);
+    // The comparison: RPM's own ordering, reading the database only, before the install.
+    const compare = tasks.find(({ task }) => task.register === "tb_ansible_core_check");
+    expect(compare?.task).toMatchObject({ changed_when: false, check_mode: false });
+    expect(compare?.task.when).toBe("'ansible-core' in ansible_facts.packages");
+    expect(compare?.task.failed_when).toBe(
+      "tb_ansible_core_check.rc != 0 or tb_ansible_core_check.stdout | trim not in ['ok', 'low', 'missing']",
+    );
+    const words = argvWords(compare?.args ?? {});
+    expect(words.slice(0, 3)).toEqual(["/usr/bin/python3", "-I", "-c"]);
+    expect(words.slice(4)).toEqual(["{{ tb_ansible_core_floor }}"]);
+    expect(words[3]).toContain('rpm.TransactionSet().dbMatch("name", "ansible-core")');
+    expect(words[3]).toContain("rpm.labelCompare(evr, floor) < 0");
+    expect(tasks.indexOf(compare as Task)).toBeLessThan(tasks.indexOf(core as Task));
+    // Production's dnf-automatic leaves ansible-core to the floor.
+    expect(await read(`${ANSIBLE}/templates/dnf-automatic.conf.j2`)).toContain(
+      "excludepkgs = {{ tb_production_update_excludes | join(' ') }}",
+    );
+  });
+
+  test("host.example.yml holds exactly the settings, the signers included, and names the run variables as not settings", async () => {
+    const example = mapping(
+      YAML.parse(await read(`${ANSIBLE}/host.example.yml`)),
+      "host.example.yml",
+    );
+    // The settings layout.yml reads, less the variables of a single run. host-config.test.ts
+    // keeps these keys equal to the pull unit's SETTINGS_KEYS, so a new host setting reaches the
+    // installed script's allowlist in the release that first reads it; that release gives it a
+    // default, and only a later one may require it (docs/HOSTING.md "Files and settings on a host").
+    const runOnly = [
+      "tarubot_start_version",
+      "tarubot_start_digest",
+      "tarubot_host_lock_held",
+      "tarubot_source",
+      "tarubot_commit",
+      "tarubot_run",
+      "tarubot_pull_role",
+      "tarubot_pull_signers",
+    ];
+    const read_ = [
+      ...(await read(`${ANSIBLE}/vars/layout.yml`)).matchAll(/\{\{ (tarubot_[a-z_]+) /gu),
+    ]
+      .map((m) => m[1] ?? "")
+      .filter((name) => !runOnly.includes(name));
+    expect(Object.keys(example).sort()).toEqual([...new Set(read_)].sort());
+    expect(example.tarubot_allowed_signers).toEqual([]);
+    const text = await read(`${ANSIBLE}/host.example.yml`);
+    for (const name of runOnly) expect(text, name).toMatch(new RegExp(`^#.* -e ${name}=`, "mu"));
   });
 });
 

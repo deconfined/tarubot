@@ -21,6 +21,188 @@ Live registration, gateway connection/restart, complete member enumeration, hier
 
 ## Automated suites
 
+**2.34.0 review fixes (2026-09-28, the same branch).** A review of the integrated branch found four major problems and sixteen minor ones. All are fixed; none is deferred.
+- **Root boundary:**
+  - **`.gitattributes` could change what root runs** (major). The signature rule checks git's objects, but a checkout passes files through the in-tree attributes, and a `.gitattributes` outside `ops/ansible/` rides in on an unsigned runtime-only merge. `g` now reads attributes from the empty tree (`attr.tree`, plus `GIT_ATTR_NOSYSTEM` and `core.autocrlf=false`). After every checkout the script compares each file under `ops/ansible/` with its blob (`hash-object --no-filters`); a mismatch is repaired once, by dropping those index entries and checking out again, and otherwise stops the run at `git-local checkout`. HOSTING.md's recovery has the manual repair.
+  - **A hand run's rendered signers decided signatures** (major). The script now reads `tarubot_allowed_signers` from `host.yml` itself at every run (a strict block-list parse), writes its own signers file into the run's temporary directory and checks against that. It passes `tarubot_pull_signers`, the sha256 of the keys joined by commas, and the playbook's run-source assert requires it to equal its own `tb_signer_digest`. `/etc/tarubot/allowed_signers` is now for people only.
+  - `host.yml` and `host-config.env` must be printable ASCII and LF only, which refuses YAML's NEL, LS and PS line breaks. A value line under a key that has an inline value is refused too.
+  - An approval mismatch behind a newer approved candidate now pages once (the run is cached as `skip:mismatch-reported`); one newer than every candidate still stops the host at every poll.
+  - The docs no longer say the signature closes the threat "either way": a stolen session can't sign, but it can merge an already-signed, unreviewed agent pull request, so those stay in draft until reviewed.
+- **Failure modes:**
+  - **A GitHub error after discovery paged as `git-local`** (major). The transient match now also covers `RPC failed`, `remote end hung up`, `early EOF`, `expected flush`, `unexpected disconnect` and truncated bodies, unless a local cause (disk, permissions, memory, a lock, fsck) shows. A scenario uses a loopback server that answers the discovery GET and returns 502 to the POSTs.
+  - `busy_since` is cleared by every result other than `waiting`, so an old stretch of busy polls can't page a later short deploy.
+  - `waiting deploy-running` resends an open failure's `/fail` instead of a success ping.
+  - The runs window is 31 days, past GitHub's 30 for a waiting approval; the curl stub now filters by `created`.
+  - A new `host.yml` key follows a release rule (allowlist and playbook default in one release, required only later), written next to `SETTINGS_KEYS` and in HOSTING.md, CONFIGURATION.md and REQUIREMENTS.md.
+  - HOSTING.md shows the emergency apply and `bootstrap` run detached with `systemd-run --collect --wait`, output in the journal.
+- **Operations** (docs and records): the broken-script recovery merges the fix to `main` first and stays paused until `main`'s head (production: the approved target) carries it; a pause pages by design, and healthchecks.io's manual resume is described with its catch; the flat `host.yml` replaces the inventory's `tarubot_*` host variables; CONFIGURATION.md and `site.yml` say the marker holds three values; CLAUDE.md and DEV_GUILD.md say every DevBot step runs on the new VM and never restart the old VM's containers; the Protect Main ruleset's merge methods (still `merge` and `squash` on an anonymous read, 2026-09-28) are an owner step; the FIDO2 path is proven before question 20's key removal; the intro no longer says no root credential exists off the host; and the owner-steps preamble matches the agent rule.
+- **Found by the rehearsal and fixed:** a failure record could outlive the settings it failed with. A `host.yml` edit that failed in `pre_tasks` and was then undone ended the next poll `current`, but the stale failure stayed in `state.json`, and with the new deploy-running rule it would have paged a later short deploy. A poll that ends `current` or `recorded` now drops it.
+- **Checks:** typecheck, lint, format and build are clean; `test:unit` passes 1,817 with 2 skipped (`host-config.test.ts` 127 of 127) and `test:contract` 34. ShellCheck 0.11.0 at `-S warning` is clean on every script under `ops/`, the skeleton files and the test fixtures, and actionlint 1.7.12 on `ci.yml`. The syntax check and `ansible-lint --offline` pass as CI runs them (ansible-core 2.16.19, ansible-lint 26.6.0), and the site builds (35 pages).
+- **Mutations**, each restored after its test failed: `attr.tree` removed (the `.gitattributes` scenario), the checkout repair removed (the stale-index scenario), the new fetch patterns removed (the 502 scenario), the `busy_since` reset, the failure's deploy-running page, `WINDOW_DAYS=14`, the old tab/CR/NUL check instead of the ASCII check (four settings cases), the page-once for a mismatch behind a candidate (two scenarios), the signers file pointed at the rendered one (the hand-run scenario), and the stale-failure drop (its scenario).
+- **Rehearsal** on two fresh throwaway AlmaLinux 10.2 VMs in @deconfined's lab (git 2.52.0, ansible-core `2.16.16-2.el10_2.1`, SELinux enforcing), set up as before: a bundle of `main` and the branch, a lab-only anchor merge pointing the script at an on-VM remote and a stand-in API, and throwaway signing keys made on the VMs. Polls were started as the timer starts them.
+  - The first hand apply took 64 to 66 s (`changed=43` and `45`), and rendered `allowed_signers` through the new `tb_signer_keys` filters. `bootstrap` ran detached with `systemd-run`: on one VM the SSH session was cut 8 s in, and the unit finished anyway (`applied … reason=bootstrap`, `state.json`, the timer enabled). On the other, `--wait` returned 0 after 25.8 s.
+  - An unsigned merge adding a top-level `.gitattributes` (`working-tree-encoding=UTF-7`) and `ops/.gitattributes` (`text eol=crlf ident`) was `recorded runtime-only`. The next signed host change was `applied newer changed=3`, with all 27 files under `ops/ansible/` equal to their blobs and the installed script equal to its blob. Plain git in the clone listed the four attributes; with `attr.tree` it listed none.
+  - A file re-encoded behind git's index (CRLF, with a refreshed index) was repaired at `apply-now` (`warning clone-repaired ops/ansible/`, then `applied`), and the file was its blob again.
+  - A paused hand run from a stale settings copy rendered two signers. After `resume`, a merge signed by the stale key stopped at `needs-you unsigned-host-change` (`signature-U`). An emergency apply of it, run detached, finished although its SSH session was cut 6 s in, paged `/fail emergency-apply`, and the rendered file was back to one key.
+  - Real Ansible refused a `pull`-source check run with a wrong `tarubot_pull_signers` at "Refuse a malformed run source", and accepted the right digest.
+  - `host.yml` with an LS line break was `needs-you settings` with `/fail`. A `host.yml` edit that failed in `pre_tasks`, retried after the hour while a simulated deploy held the lock, gave `waiting deploy-running` with `/fail apply-failed` again, not a success ping; the stale-failure fix above came from this step. Once it was delivered by a signed merge, the same sequence ended `current` with the failure dropped, and a later deploy-delayed host change pinged success.
+  - git 2.52 reports a 502 after discovery as `RPC failed; HTTP 502` and `expected flush after ref listing`, both matched.
+  - The production role, with the stand-in API: an approved run applied the delivered script; a mismatch behind a newer approved run paged once (`behind=…`), was cached as `skip:mismatch-reported`, and the next poll made one listing request and recorded the candidate. A mismatch newer than every approved run paged on each poll, uncached, until a newer approved run arrived; that poll paged once more and the next recorded it. (A burst of polls tripped systemd's start limit once, as HOSTING.md warns; `reset-failed` cleared it.)
+  - No AVC denials on either VM since boot, and `PrivateTmp=no`. Both VMs were destroyed and only the template remains.
+- **Staging, check mode only:** `--check --diff --skip-tags start` from the branch gave `ok=100 changed=6 failed=0` in 54 s, the same six changes as before, and "Refuse a malformed run source" passed for the hand run. Nothing was applied.
+
+**2.34.0 documentation checks (2026-09-28, the same branch).** After the docs and records were written:
+- the site build (`pnpm run build`, 35 pages) found every internal link valid; the site's pages didn't change, since self-hosters run Compose and never the pull unit;
+- `test:unit` passes 1,795 tests with 2 skipped;
+- `format:check` and `lint` are clean;
+- `docs-site.test.ts`, `deploy-workflow.test.ts`, `host-config.test.ts` and `playbook.test.ts` pass together (233 tests).
+
+Mutations, each restored after its test failed: one clause of AGENTS.md's quoted agent rule reworded, and a HOSTING.md paragraph naming the agent rule as pending. In both cases the agent-rule test ("AGENTS.md carries REQUIREMENTS.md's wording verbatim, every part confirmed") failed, and it passes on the restored files.
+
+**2.34.0 local checks (2026-09-27, branch `feat/pull-unit-2.34.0` from `b911b96`, #50 part 2b).** On the integrated tree:
+- typecheck, lint, format and build are clean;
+- `test:unit` passes 1,795 tests with 2 skipped, and `test:contract` 34. `host-config.test.ts` passes 105 of 105. The 2 skips are deploy-script end-to-end tests that were skipped before this branch.
+- ShellCheck 0.11.0 at `-S warning` is clean on `ops/*.sh`, `ops/*/*.sh`, the new script, `tarubot-ipv6-online`, the skeleton files and the test fixtures. At info level it reports only SC2016 (jq filters in single quotes) and SC2317.
+- actionlint 1.7.12 is clean on `ci.yml`.
+- The playbook's syntax check and `ansible-lint --offline`, run as CI runs them (ansible-core 2.16.19, ansible-lint 26.6.0, `LC_ALL=C.UTF-8`, the `production` profile), pass with no failures or warnings.
+
+Mutations, each restored after its test failed:
+- the tree-equality check removed from the merge check (the tree-mismatch scenario fails);
+- the hand-run guard's condition dropped (the guard test fails);
+- `ANSIBLE_REMOTE_TMP` removed from the playbook call (9 tests fail; see the rehearsal below).
+
+**2.34.0 on the staging host, check mode only (2026-09-27).** `--check --diff --skip-tags start` from the branch, with ansible-core 2.16.16 and the operator's out-of-repository inventory: `ok=100 changed=6 failed=0` in 51 s. The six changes were exactly the expected set:
+- the pull unit's two directories;
+- ansible-core, which staging doesn't have yet, so the version comparison was skipped;
+- the script, the service and the timer;
+- `allowed_signers`, header only, since the inventory lists no signers.
+
+There was no marker write. The host-packages and EPEL dnf tasks were skipped, as was the timer's enable. Nothing was applied, and nothing is installed or enabled on staging: that waits for @deconfined's go-ahead after the merge.
+
+**2.34.0 rehearsal on throwaway AlmaLinux hosts (2026-09-27 and 28).** The rehearsal used two throwaway VMs in @deconfined's lab, one per role, cloned from a verified AlmaLinux 10.2 GenericCloud image (SELinux enforcing, 2 GB, IPv6 first). The setup:
+- **The repository.** Each VM had a bare repository built from a bundle of `main` and the branch. On top of `main` sat a lab-only anchor commit, merged with `--no-ff`, that pointed the script at that repository and at a local stand-in for GitHub's API and healthchecks.io. The static test refuses such a commit, so it can never merge.
+- **The stand-in.** A small stdlib-Python server served runs, jobs and approvals and recorded every request and ping.
+- **Signatures.** Pull request heads were signed with a throwaway ed25519 key generated on each VM. Merge commits were left unsigned, like GitHub's.
+- **Polls.** Scripted polls ran with `systemctl start tarubot-host-config.service`, exactly as the timer starts it. A lab-only drop-in parked the timer meanwhile, and was removed for the timer and reboot checks.
+
+- **One fix came out of it.** Bootstrap, driven by the script, created `/root/.ansible/tmp`: on the local connection Ansible 2.16 expands its default remote temporary directory as `~root` and ignores `HOME`.
+  - The fix: `playbook()` now sets `ANSIBLE_REMOTE_TMP` in the unit's own home. `host-config.test.ts` pins it, and the stub refuses a call without it.
+  - The fixed script went to each VM as a signed host-change merge, which also exercised the script replacing itself during a run.
+  - Afterwards `/root/.ansible` stayed absent after full runs on both VMs.
+- **The first apply and the bootstrap:**
+  - The first apply was by hand (`-c local`, `source=manual`), with the older `ansible-core-1:2.16.16-2.el10` installed first on purpose. It ended rc 0, with 44 changes on staging and 46 on production, in about 64 s, and upgraded ansible-core to `2.16.16-2.el10_2.1` mid-run.
+  - The labels came out as expected: the script `bin_t`, the units `systemd_unit_file_t`, `allowed_signers` `etc_t` and the state directory `var_lib_t`. The timer stayed off, and the marker read `manual`.
+  - A second apply reported `changed=0` in 27 to 28 s, with all three dnf tasks skipped, so no repository metadata was loaded.
+  - Bootstrap refused `b911b96` (2.33.0) as `needs-you missing-pull-unit` (exit 1, `/fail`), and a commit off `main` as `bad-commit` (64).
+  - Bootstrap at the anchor commit gave `applied reason=bootstrap changed=0` in 24 to 26 s, with the `/start` and success pings. `state.json` was at 0600, and the timer was enabled at 5 minutes on staging and 10 on production.
+  - `systemd-analyze verify` passed on both units, and `PrivateTmp`, `ProtectSystem` and `NoNewPrivileges` were all off. The first timer poll gave `current`.
+- **The staging role:**
+
+  | Scenario | Result |
+  | --- | --- |
+  | A docs-only merge with an unsigned head | `recorded runtime-only`: no playbook, no `/start` |
+  | The same head again | `current` |
+  | A signed journald change | `applied newer changed=3`; journald restarted; the `tarubot` account exists |
+  | A no-op `apply-now`, 2 CPUs | `changed=0`, 24 s |
+  | A no-op `apply-now` on 1 CPU (`chcpu -d 1`), three times | 25.6 s, 25.1 s and 25.1 s (the target was under 120 s; `ops/deploy.sh` waits 300 s) |
+  | A simulated deploy holds the lock when a host change arrives | `waiting deploy-running`, the unit's exit 75, a success ping, the unit not failed; `applied` once the lock was free |
+  | The lock held with `busy_since` set 4 hours back | `waiting lock-held` and `/fail lock-held 4h` |
+  | A pull run first, then a simulated deploy (`flock -w 300`) | the deploy got the lock 9 ms after the pull run's result line; no overlap. Only the script had the lock file open during the run |
+  | `pause lab2` during an `apply-now` | returned 0 about 11 ms after the run's result line; the next poll was `paused` with `/fail paused lab2` |
+  | A hand run with no pause | refused by the "pause first" guard |
+  | A hand run while paused, adding a comment to a deployed file | succeeded, marker `manual`; after `resume`, `applied hand-run`, and the comment was gone |
+  | SIGKILL during a run, plus stale `index.lock` and `origin/main.lock` files | the unit showed failed (`Result=signal`); the next poll logged two `warning stale-git-lock` lines, then `applied interrupted` |
+  | A merge adding a failing task | `failed apply-failed task=Lab failure on purpose`; applied state unchanged; `/fail`; the unit listed as failed; `retry-later` without the playbook within the hour; with `last_at` moved back 61 minutes, a real retry (attempts 2) |
+  | The fix-forward merge | applied at once; the unit no longer failed |
+  | An unsigned head that touches `ops/ansible/` | `needs-you unsigned-host-change` (signature `N`) |
+  | A signed merge on top of it | still blocked on the unsigned merge |
+  | Pause, `apply <signed merge> --emergency`, resume | `applied emergency` with `/fail emergency-apply`; the next poll `current`; the same commit again `bad-commit` (64) |
+  | A single-parent commit, a merge whose tree differs from its head, a head behind `main` | `needs-you unsigned-host-change` each, logged as `not-a-merge`, `tree-differs` and `head-behind` |
+  | A symlink under `ops/ansible/` | `needs-you host-config-link` |
+  | `main` rewound past the applied commit | `needs-you history-rewritten`; after restoring `main`, `current` |
+  | A head signed by an unlisted key | refused (signature `U`) |
+  | `host.yml` rotated to that key | `applied settings-changed` at the old commit, and `allowed_signers` showed the new key; the next poll applied the merge, and a later merge signed by the old key was refused |
+  | An empty signer list | a `settings-changed` apply, then `needs-you no-signers`; adding the signer back gave `settings-changed`, then `applied` |
+  | `last_full.at` set to yesterday 04:00 UTC | `applied drift changed=0`, then `current` |
+  | An operator key added to `host.yml` | `applied settings-changed`; `/etc/ssh/authorized_keys/tarubot` updated |
+  | Files `tarubot` controls: a failing task in `~/tarubot`'s `site.yml`, a hostile `~/.gitconfig` and `~/.ansible.cfg` | `apply-now` unaffected |
+  | The clone chowned to `tarubot` | `needs-you layout`, exit 78, `/fail` |
+  | A rootless sleeper container across 3 pull runs, one with `changed=3` | its ID, start time and PID unchanged |
+  | SELinux during a run | the script, `timeout` and `ansible-playbook` all `unconfined_service_t`; no denials |
+
+- **A reboot with nobody logged in, for 16 minutes (the staging role):**
+  - The timer came back and ran three polls: `current`, then `applied` for a merge a lab timer pushed 5 minutes after boot (`changed=3`), then `current`.
+  - The only sessions were `tarubot`'s lingering manager and the later SSH login.
+  - Podman's pause process started during that pull run, in `tarubot`'s user manager (a `podman-pause-*.scope`), not in the service's cgroup. Its mounts had no `systemd-private` `/tmp` or `/var/tmp`, and as `tarubot`, `podman unshare touch /var/tmp/…` and a `podman pull` both worked.
+  - tmpfiles recreated the lock file as root's at 0644, and there were no AVC denials since boot.
+- **The production role:**
+
+  | Scenario | Result |
+  | --- | --- |
+  | No runs | `current` |
+  | An approved automatic run whose Deploy job succeeded | `applied` (this also delivered the fixed script) |
+  | An older-created dispatch `Deploy <version>` and a newer automatic run for an older commit | the dispatch's version commit was chosen |
+  | A Deploy job that failed, was cancelled or skipped; only "Deploy staging" succeeding; a staging title; a rollback title; `run_attempt` 2; a wrong path | each skipped and cached (`deploy-*`, `staging`, `rollback`, `shape`); the target unchanged; a success ping |
+  | The same listing again | exactly one listing request |
+  | A Deploy success with no approval, another login, a wrong id, or the `staging` environment | `needs-you approval-mismatch` with `/fail`, never cached, checked again every poll |
+  | A newer approved run after a mismatch | applied, and the mismatch cleared |
+  | Two first-parent commits with the same version | `needs-you ambiguous-version` |
+  | An approved failing commit whose run then left the listing, retried an hour later | retried from the saved target; the approved fix applied, and the target cleared |
+  | A changed `host.yml` | the `settings-changed` poll made no API call |
+  | `x-ratelimit-remaining` 19, then a 403 | `waiting rate-limited` after one listing request; nothing cached |
+  | The API stopped | `waiting github-unreachable`, exit 75, no ping |
+  | A listing body of `{}` | the same, and nothing cached |
+  | An approved release blocked by an unsigned host change | `needs-you unsigned-host-change` |
+  | `apply-now` while paused | `paused <reason>`, exit 75, no `now` file written |
+  | The lock held, an emergency apply without `--ignore-lock` | waited exactly 300 s, then `waiting deploy-running` |
+  | The same with `--ignore-lock` | applied, and logged the holder |
+  | An emergency apply of an older commit, or of a pull request head | `bad-commit` (64) |
+  | dnf-automatic | `excludepkgs` includes ansible-core |
+  | The timer | every 10 minutes |
+
+- **Not exercised:**
+  - a real 05:00 UTC crossing: the lab ran around midnight UTC, so editing `last_full.at` stood in, and the unit tests cover the 05:01 and 04:59 edges;
+  - the real GitHub remote and API, which come after the merge;
+  - hand runs over SSH from the operator machine: the hand runs were `-c local` as root on the VM;
+  - anything on staging or production.
+- **Found, for later** ([OPEN_ITEMS.md](OPEN_ITEMS.md#staging-follow-ups-50)):
+  - The emergency apply's holder log reads `/proc/locks`, whose PID is the `flock` command that took the lock and has since exited, so it logged `holder pid=<gone> uid= comm=`.
+  - A SIGKILLed run leaves its `home/run.*` temporary directory behind: root-only and harmless.
+  - The playbook never removes a package dropped from `tb_packages`, so a planned slow run by removing one was an ordinary 24 s run.
+  - Owner step (a) as first drafted used a flow list (`["…"]`) for the signers, which the script refuses; HOSTING.md shows the block form.
+- **Cleanup.** Both VMs were destroyed and only the lab's template remains; the scratchpad's lab files were removed. The rehearsal made no GitHub API call. Nothing touched GitHub, Discord, staging or production, and no repository commit was made.
+
+**Staging owner steps before the move (2026-09-27 and 28).** @deconfined made HOSTING.md's "Owner steps before the move" 1 to 10. The agent checked each read-only where it could, or applied the playbook on his go-ahead where the step needed it:
+1. **2.33.0** merged and deployed with `STAGING_DEPLOY_ENABLED` unset (below).
+2. **The database and role** (about 22:10 UTC, as the admin role). The role is `tarubot_staging` with a connection limit, and the admin holds it with `SET TRUE` but not `INHERIT`; the database `tarubot_staging` is owned by it.
+   - Both databases' access lists now name their owner (`CTc`), `akmadmin` (`c`) and the provider's monitoring role `_akmadmin_monitor` (`Tc`), with PUBLIC revoked. The monitoring role had relied on PUBLIC's CONNECT, so HOSTING.md's SQL now grants it first.
+   - `tarubot` is refused on `tarubot_staging` (42501), production's readiness stayed 200 with the writer lease, and a fresh `tarubot` connection works.
+3. **The access list:** staging's IPv6 /128 and IPv4 address were added, and staging reaches the database port over both (a TCP probe, no credentials).
+4. **Staging's own services.** None reuses production's:
+   - a private bucket with the lifecycle rules applied, and a key confined to it (403 on production's bucket);
+   - separate heartbeat and backup checks;
+   - a fine-grained reports token for the reports repository's issues only.
+5. **The `staging` environment:** it exists with no required reviewers, the branch rule `main` only and no administrator bypass (a read-only API read on 2026-09-28; its variables weren't read). The host key given for its `DEPLOY_KNOWN_HOSTS` matched the key staging serves, the pinned `known_hosts` line and the DNSSEC-validated SSHFP records.
+6. **The deploy key.** @deconfined generated a new Ed25519 key, and its private half went only into the environment's `DEPLOY_SSH_KEY`. Its public line went into staging's host settings, and the playbook, from `main` at `b911b96`, wrote it: check mode showed one change, the apply `changed=1`, a rerun `changed=0`.
+   - `/etc/ssh/authorized_keys/tarubot` holds one line, `restrict,command="/home/tarubot/tarubot/ops/deploy.sh quadlet staging"` (root, 0644, `etc_t`), and sshd's effective settings for `tarubot` include `DisableForwarding yes` and `PermitUserRC no`.
+   - The key itself gets probed at the first staging dispatch, after the move.
+7. **`.env`** (about 23:29 UTC). @deconfined's operator key was added to the settings (the apply `changed=1`, then 0), and SSH as `tarubot` works.
+   - `~/tarubot/.env` was written from `staging.env.example` through a pipe, as `tarubot`'s at mode 600. It holds staging's own database, bucket, check and token values, and `DISCORD_TOKEN` stays at its placeholder.
+   - `check-env.sh --syntax` is clean, and the database login works while `tarubot`'s own is refused. An encrypted settings copy was taken, and the playbook's check mode with `.env` present is clean.
+8. **The break-glass key** (23:52 UTC). The FIDO2 key went into `tarubot_root_keys` (the apply `changed=1`, then 0), and root's `authorized_keys` block marks it `verify-required`. @deconfined logged in as root with it.
+   - Afterwards his three personal keys were removed from root's `authorized_keys`, outside the block, with a dated backup kept. Root now accepts the staging-only Ansible key and the FIDO2 key; the personal key is refused as root and still works as `tarubot`.
+   - The playbook's check mode reports `changed=0`.
+9. **Stale host keys** (about 00:00 UTC on 2026-09-28): the RSA and ECDSA SSHFP records are gone. Both the validating resolver and the authoritative servers answer only the Ed25519 records, with the AD flag.
+10. **Merge settings:** squash and rebase merging are off, and merge commits stay on. A read-only GraphQL read on 2026-09-28 returned `squashMergeAllowed: false`, `rebaseMergeAllowed: false` and `mergeCommitAllowed: true`.
+
+**2.33.0 merge, publish, provenance and deploy (2026-09-27).** @deconfined merged [PR #58](https://github.com/deconfined/tarubot/pull/58) as `b911b96` at 21:01 UTC, and publish run 36350160989 succeeded.
+- **Deploy run 36350719753** (`workflow_run`, `Deploy b911b96…`) was the first whose plan ran `gh attestation verify`. Its **Plan** job succeeded, which it can't do without a verified attestation.
+- **Deploy staging** was skipped, since `STAGING_DEPLOY_ENABLED` is unset.
+- **The approval.** GitHub's anonymous approvals record shows @deconfined (login and id 71469756) approving `production`.
+- **The Deploy job** ran from 21:13:00 to 21:14:16 UTC. The host logged `step up` at 21:13:06, then `result outcome=deployed version=2.33.0 previous=2.32.0 path=plain downtime=7 commands=registered backup=- restore_point=- reason=-`.
+- **On the host,** a read-only check afterwards found the 2.33.0 container healthy and still hardened, readiness 200 with the writer lease, and the clone at `b911b96`.
+- **Staging** wasn't touched by the deploy.
+
 **2.33.0 review fixes (2026-09-27, the same branch).** A review of the integrated branch found one major and nine minor problems; all ten are fixed:
 - **Notify and the pause** (minor). Notify's condition read `DEPLOY_ENABLED` when notify started, after the Deploy job, so pausing production while a request waited or a deploy ran would have silenced the `paused` refusal and any NEEDS YOU. The plan now decides at its first line, before anything can fail, whether the run is reported (its `notify` output), and notify reads that; only a plan that never wrote it falls back to the switch. With `DEPLOY_ENABLED=True` (case differs) the plan pauses production, and notify now says the switch must be exactly `true` instead of "no runtime change" or "gate" (a new `production_reason` output tells paused from gate).
 - **The `quadlet` contract list** (minor). `ops/deploy.sh`'s header, HOSTING.md and AGENTS.md now also list what the generator must make of the links, the hardening read-back and health check, and the in-container registration with staging's `TEST_GUILD_ID`. A static test reads `q_hardened`'s inspect fields and `q_quadlet_config`'s and `q_register`'s expectations and requires each in the header.

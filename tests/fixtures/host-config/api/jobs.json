@@ -1,0 +1,45 @@
+{
+  "total_count": 4,
+  "jobs": [
+    {
+      "id": 108708747876,
+      "run_id": 36350719753,
+      "name": "Plan",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1,
+      "head_sha": "b911b960b67fbfb2155e9d41120f908c4cdf10c9",
+      "head_branch": "main"
+    },
+    {
+      "id": 108708793551,
+      "run_id": 36350719753,
+      "name": "Deploy",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1,
+      "head_sha": "b911b960b67fbfb2155e9d41120f908c4cdf10c9",
+      "head_branch": "main"
+    },
+    {
+      "id": 108708794651,
+      "run_id": 36350719753,
+      "name": "Deploy staging",
+      "status": "completed",
+      "conclusion": "skipped",
+      "run_attempt": 1,
+      "head_sha": "b911b960b67fbfb2155e9d41120f908c4cdf10c9",
+      "head_branch": "main"
+    },
+    {
+      "id": 108709436669,
+      "run_id": 36350719753,
+      "name": "Notify",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1,
+      "head_sha": "b911b960b67fbfb2155e9d41120f908c4cdf10c9",
+      "head_branch": "main"
+    }
+  ]
+}

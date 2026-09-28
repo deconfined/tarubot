@@ -4,7 +4,7 @@ Production TaruBot has run on a **Linode Docker host with Linode managed Postgre
 
 The cutover first went live on DigitalOcean App Platform, then moved the same evening, with about 90 seconds of downtime, because **the Lodestone refuses DigitalOcean's addresses**: HTTP 403 at the edge, within milliseconds. From App Platform, Nodestone could not refresh profiles, verify claims or read the roster. Linode's addresses get HTTP 200. [MIGRATION.md](MIGRATION.md#record-of-the-2026-09-24-cutover) has the record. [APP_PLATFORM.md](APP_PLATFORM.md) records the App Platform setup, retired in 2.21.0; the owner has since deleted the app and its cluster (recorded 2026-09-26).
 
-A second Linode, the [staging host](#staging-host-50) (#50), is being built beside it on AlmaLinux with rootless Podman, from the Ansible playbook production will be rebuilt from. Since 2.33.0 the same Deploy workflow can deploy to it, with no approval, once the owner turns staging deploys on after the DevBot move ([Staging deploys](#staging-deploys-2330)).
+A second Linode, the [staging host](#staging-host-50) (#50), is being built beside it on AlmaLinux with rootless Podman, from the Ansible playbook production will be rebuilt from. Since 2.33.0 the same Deploy workflow can deploy to it, with no approval, once the owner turns staging deploys on after the DevBot move ([Staging deploys](#staging-deploys-2330)). Since 2.34.0 a Podman host can also keep its own host configuration current with the [pull unit](#the-pull-unit-2340), once @deconfined installs it there.
 
 ## Layout
 
@@ -164,7 +164,7 @@ Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-0
 
 1. Merge the release as today. Trying it on DevBot stays manual (GitHub can't reach the dev VM).
 2. When "Publish containers" finishes, a Deploy run plans the release, and GitHub asks you to review its `production` deployment. A merge that changes only documentation, tests, CI, the version, the settings templates or the Ansible pip pins (`ops/ansible/requirements*.txt`, used only by CI and the operator's venv) asks nothing; a quiet Pushover message says so. The plan first verifies the image's signed provenance, and an image that fails it is never planned ([Provenance check](#provenance-check-2330)).
-3. Open the run and read its summary: the targets (production, and staging beside it once staging deploys are on), the version, commit and image digest, the "Provenance verified" line, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file, `production.env.example` and `staging.env.example`: on this Docker host they run as a docker-group user, which is root-equivalent here; on the staging host as the unprivileged `tarubot` user under rootless Podman; `ops/ansible/` runs as root when the playbook is applied), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
+3. Open the run and read its summary: the targets (production, and staging beside it once staging deploys are on), the version, commit and image digest, the "Provenance verified" line, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file, `production.env.example` and `staging.env.example`: on this Docker host they run as a docker-group user, which is root-equivalent here; on the staging host as the unprivileged `tarubot` user under rootless Podman; `ops/ansible/` runs as root when the playbook is applied, which a host with the [pull unit](#the-pull-unit-2340) does by itself: staging within minutes of the merge, and production, once it runs the unit after its rebuild, about 10 minutes after the deploy you approve), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
 4. **Review deployments** → tick `production` → **Approve and deploy**, or **Reject**. Approval comments are public, like the summary.
 5. One Pushover message reports the outcome.
 
@@ -412,7 +412,7 @@ pg_restore --no-owner --no-privileges --exit-on-error -d "NEW_DATABASE_URL" db.d
 
 Compare the result with `check-restore.js`, then stop the bot and point `DATABASE_URL` at it. Settings copies in `env/` decrypt the same way.
 
-**Before a manual migration** keep taking an independent `pg_dump` on the operator machine, as in the migration procedure above. Running `~/tarubot/ops/backup.sh` on the host right before also puts a fresh copy off-site. An automated deploy runs `ops/backup.sh` on the host after it stops the bot and names the object (`daily/tarubot-<UTC time>.dump.age`) in its result; that extra run also resets the "TaruBot backups" check's daily timer, which the 04:30 run then keeps as usual. The 2026-09-24 cutover left `pre-activation.dump` and `move-to-linode.dump` in `~/tarubot-cutover/work/backups/`.
+**Before a manual migration** keep taking an independent `pg_dump` on the operator machine, as in the migration procedure above. Running `~/tarubot/ops/backup.sh` on the host right before also puts a fresh copy off-site. An automated deploy runs `ops/backup.sh` on the host after it stops the bot and names the object (`daily/tarubot-<UTC time>.dump.age`) in its result; that extra run also resets the "TaruBot backups" check's daily timer, which the 04:30 run then keeps as usual. The 2026-09-24 cutover left `pre-activation.dump` and `move-to-linode.dump` in `~/tarubot-cutover/work/backups/`; @deconfined had them and the other plaintext pre-deploy dumps there deleted on 2026-09-27, since the encrypted daily copies supersede them.
 
 **Restore checks:** `check-restore.js` compares a restored copy with the source. The production profile accepts `tarubot` on another host, such as a new cluster, or `tarubot_restore` on the same host.
 
@@ -497,9 +497,9 @@ You need the latest settings copy and the `age` key (above), access to Linode, t
 
 ## Staging host (#50)
 
-The staging host is a second Linode. It will run DevBot the way production will run after its rebuild: AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under `tarubot`'s systemd, no Docker, and its own database and role on the same managed cluster. @deconfined's decisions are in REQUIREMENTS.md "Approved staging amendments (2026-09-26)". The host is online on AlmaLinux 10.2, reached as `root@<staging host>` with a staging-only Ansible key from the operator machine, and the playbook configured it on 2026-09-26 ([VERIFICATION.md](VERIFICATION.md)).
+The staging host is a second Linode. It will run DevBot the way production will run after its rebuild: AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under `tarubot`'s systemd, no Docker, and its own database and role on the same managed cluster. @deconfined's decisions are in REQUIREMENTS.md "Approved staging amendments (2026-09-26)". The host is online on AlmaLinux 10.2, reached as `root@<staging host>` with a staging-only Ansible key from the operator machine (and @deconfined's FIDO2 break-glass key since 2026-09-27), and the playbook configured it on 2026-09-26 ([VERIFICATION.md](VERIFICATION.md)). Its owner steps before the DevBot move are done ([below](#owner-steps-before-the-move)).
 
-**No bot runs there yet.** The staging host holds no DevBot token and no `.env`. 2.33.0 brings everything a bot there needs (the deploy path, the staging target, Podman secrets, the backup timer and the first start), but nobody starts it before the DevBot move: the move comes after 2.34.0's pull unit and the rebuild from cloud-init and OpenTofu, with a new token, and until then DevBot stays on the development machine ([DEV_GUILD.md](DEV_GUILD.md)). One Discord application must never run in two places.
+**No bot runs there yet.** The staging host holds no DevBot token: its `.env`, written on 2026-09-27, keeps `DISCORD_TOKEN` at its placeholder. 2.33.0 brings everything a bot there needs (the deploy path, the staging target, Podman secrets, the backup timer and the first start), but nobody starts it before the DevBot move: the move comes after 2.34.0's pull unit and the rebuild from cloud-init and OpenTofu, with a new token, and until then DevBot stays on the development machine ([DEV_GUILD.md](DEV_GUILD.md)). One Discord application must never run in two places.
 
 ### What 2.32.0 delivers (#50 part 1)
 
@@ -513,7 +513,7 @@ The staging host is a second Linode. It will run DevBot the way production will 
 
 ### What 2.33.0 delivers (#50 part 2a)
 
-#50's second part was split: 2.33.0 is the runtime half, and the pull unit follows in 2.34.0 ([Not yet automated](#not-yet-automated)). Production's Compose path, its forced command and `ops/backup.sh` without an argument don't change.
+#50's second part was split: 2.33.0 is the runtime half, and the pull unit followed in 2.34.0 ([below](#what-2340-delivers-50-part-2b)). Production's Compose path, its forced command and `ops/backup.sh` without an argument don't change.
 
 | Piece | What it is |
 | --- | --- |
@@ -523,8 +523,23 @@ The staging host is a second Linode. It will run DevBot the way production will 
 | Podman secrets | `.env` stays the only place the secrets are kept. `ops/quadlet/secrets.sh` copies the six secrets into Podman secrets before every start, the unit mounts them read-only as files, and the bot and its tools read `NAME_FILE` ([CONFIGURATION.md](CONFIGURATION.md#secrets-from-files); [Quadlet README](../ops/quadlet/README.md#secrets)). The unit's `[Service]` unsets them, so they never reach Podman, conmon or pasta. |
 | One-off tools | `ops/quadlet/run-tool.sh` runs a maintenance tool, such as a deploy's `migrate.js`, in a one-off container with the target's own settings, secrets and hardening ([Quadlet README](../ops/quadlet/README.md#run-toolsh)). |
 | The backup | `ops/backup.sh quadlet`, run by the release's systemd user timer `ops/systemd/tarubot-backup.timer` ([Backups on a Quadlet host](#backups-on-a-quadlet-host-2330)). |
-| The host lock | `/run/tarubot/host.lock`, root-owned, from a tmpfiles line the playbook installs; deploys and the playbook's user-manager commands hold it, and the 2.34.0 pull unit will ([The host lock](#the-host-lock)). |
+| The host lock | `/run/tarubot/host.lock`, root-owned, from a tmpfiles line the playbook installs; deploys and the playbook's user-manager commands hold it, and since 2.34.0 the pull unit does ([The host lock](#the-host-lock)). |
 | The `start` tag | The playbook's first start of the bot on a host, from a release and digest verified on the workstation ([The first start](#the-first-start-the-start-tag)). It exists and is tested, but nobody runs it in this release. |
+
+### What 2.34.0 delivers (#50 part 2b)
+
+The pull unit, and what the playbook needs for it. `ops/deploy.sh`, the Deploy workflow and production's Compose path don't change, and no bot code changes.
+
+| Piece | What it is |
+| --- | --- |
+| The pull unit | `ops/ansible/files/host-config/`: the root-owned script `tarubot-host-config`, its oneshot service and timer, and production's 10-minute drop-in. The playbook installs them; the timer runs only once `bootstrap` has run on the host ([The pull unit](#the-pull-unit-2340)). |
+| Allowed signers | `tarubot_allowed_signers` in the host settings, for the signature rule on merged heads that change `ops/ansible/` (question 14). The pull unit reads the list from `host.yml` itself at every run; `templates/allowed_signers.j2` also renders it to `/etc/tarubot/allowed_signers` for people, and the playbook checks that its reading and the unit's agree. |
+| ansible-core on the hosts | From AlmaLinux's AppStream, at least `1:2.16.16-2.el10_2.1`, the build with the CVE-2026-11332 backport. The playbook compares the installed build with that floor by RPM's own ordering and installs only when it is missing or older. Production's automatic updates skip it (since 2.33.0), so it moves there only when a commit raises the floor (question 18). |
+| Quiet no-op runs | The three dnf tasks run only when `package_facts` shows a package missing or too old, so a run with nothing to do never loads repository metadata (ansible-core 2.16's dnf module loads it on every call). |
+| The run marker | Every real run writes `/var/lib/tarubot-config/last-run.json`: who ran the playbook (`manual`, `pull`, `bootstrap` or `emergency`), the commit and the run id. The pull unit compares it with its own record to notice a hand run, or one of its own runs that died. |
+| The hand-run guard | On a host with pull state (`/var/lib/tarubot-config/state.json`), a real hand run, the start tag's included, is refused unless the pull unit is paused. Check mode is allowed. |
+| Other playbook changes | `force_handlers: true` on the root play, so a later failure doesn't skip the reloads of what already changed; the pull unit's run variables checked before anything changes, including that the role and the signers the script read equal the playbook's own reading; the host settings files checked as root-only. |
+| CI | ShellCheck on the script in the **Host playbook** job, and `tests/unit/host-config.test.ts` in the Checks job ([CI_CD.md](CI_CD.md)). |
 
 ### What the playbook does
 
@@ -532,7 +547,9 @@ It runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, and stops on an
 
 - **Base system.** It sets the hostname and UTC, and tells cloud-init to keep the hostname (`preserve_hostname`), since cloud-init would otherwise reset it at every boot.
   - It installs Podman, crun, passt, container-selinux, acl, chrony, dnf-automatic, git, gnupg2, jq and sudo from AlmaLinux's repositories.
+  - Since 2.34.0 it also installs ansible-core from AppStream, which the pull unit runs, at least the build with the CVE-2026-11332 backport (`tb_ansible_core_floor`, compared by RPM's own ordering).
   - `age` comes from EPEL, limited to that one package. EPEL's key ships with the playbook and is trusted only at its pinned fingerprint.
+  - Each install runs only when `package_facts` shows something missing (or ansible-core below its floor), so a run with nothing to install never loads repository metadata.
   - It refuses Docker and the Docker shims (`podman-docker`, `podman-compose`) before it installs anything, so a host that has them is left as it was. After installing, it refuses a Podman older than 5.8.2, the version the unit was checked with.
 - **Updates.** dnf-automatic applies security updates daily, at 06:00 UTC plus up to an hour. Staging reboots itself when an update needs it (`shutdown -r +5`). Production never does, and its automatic updates skip the container stack and ansible-core.
 - **Kernel and services.**
@@ -546,6 +563,7 @@ It runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, and stops on an
   - Every boot reaches `network-online.target`. `tarubot-ipv6-online.service` holds that target until the host has a global IPv6 address and a default route, so the bot's first start sees IPv6. It waits at most 60 seconds and never fails.
   - logind's `KillUserProcesses` must stay off (EL's default).
 - **The host lock (2.33.0).** It installs `files/tmpfiles-tarubot.conf` as `/etc/tmpfiles.d/tarubot.conf` and runs `systemd-tmpfiles --create` on it, then checks that `/run/tarubot` is root's directory (0755) and `host.lock` root's plain file (0644), neither a link ([The host lock](#the-host-lock)). A check run before the first real one skips those checks, since nothing is there yet.
+- **The pull unit (2.34.0).** Before anything changes, it checks the run variables the pull unit passes (a hand run passes none), and refuses a real hand run on a host with pull state unless the unit is paused. Right after the lock checks it creates `/var/lib/tarubot-config` and its `home/` (root, 0700) and writes the run marker: never in check mode, and never counted as a change, so a second real run still reports `changed=0`. Among the run variables it checks that the role and the signers the pull unit read from `host.yml` equal its own reading. Later it installs the script (after `bash -n` accepts it), the service and the timer, production's drop-in (removed on other hosts), and `/etc/tarubot/allowed_signers` from the host settings (for people: the pull unit reads `host.yml` itself), and checks that `/etc/tarubot/host.yml` and `/etc/tarubot/host-config.env`, when present, are root's regular files at mode 600. Once `state.json` exists it keeps the timer enabled and started. It never starts, stops, restarts, disables or masks the pull unit's service or timer, and never writes the unit's clone, state or flags ([The pull unit](#the-pull-unit-2340)).
 - **The `tarubot` account.**
   - No groups, no sudo (each run checks `sudo -l -U tarubot`) and a locked password.
   - Umask 0022, through the `umask=` field in its GECOS.
@@ -571,7 +589,7 @@ Outside the start tag it never links, starts, stops or restarts the bot; its han
 - The first play runs as root and writes only system paths. It looks at `tarubot`'s home without following links, so a planted link stops the run.
 - The second and last play runs every task as `tarubot`, so no root task reads what a `tarubot` task returned. That rule is the boundary. Code running as `tarubot` can change what a `tarubot` task does, and even with pipelining a module run as `tarubot` unpacks itself into a directory `tarubot` owns. `PYTHONNOUSERSITE=1`, `ptrace_scope=1` and `legacy_tiocsti=0` are defence in depth.
 - Facts are gathered once and stay under `ansible_facts`, and settings arrive only as extra vars. `ops/ansible/` has no `group_vars`, `host_vars`, roles, `library` or plugin directories, which Ansible would load from beside the playbook.
-- `ansible.cfg` loads nothing but `ansible.builtin`, and the playbook uses no lookups or delegation and reads nothing from outside `ops/ansible/`. It assumes nothing about the machine that runs it, so a host can apply it to itself (`-c local`), as the pull unit will from 2.33.0, but only from a checkout `tarubot` can't write (below).
+- `ansible.cfg` loads nothing but `ansible.builtin`, and the playbook uses no lookups or delegation and reads nothing from outside `ops/ansible/`. It assumes nothing about the machine that runs it, so a host can apply it to itself (`-c local`), as the pull unit does since 2.34.0, but only from a checkout `tarubot` can't write (below).
 
 ### Running it from the operator machine
 
@@ -603,21 +621,25 @@ settings=/path/outside/any/checkout/host.yml
 - **Then apply.** A second real run must report `changed=0`. Anything else is drift to explain.
 - **`--skip-tags start`** keeps the start tag out, even by mistake. Its tasks also need the start variables, so a run without them skips them anyway, but the flag stays in every normal command. That tag links the release's unit, which from then on starts at every boot, and starts it for the first time, so it runs only at the DevBot move on staging and at the rebuild on production ([The first start](#the-first-start-the-start-tag)).
 - **Configuration and locale.** Ansible reads `ansible.cfg` from the working directory only when that directory isn't world-writable, so the example sets `ANSIBLE_CONFIG`. ansible-core 2.16 refuses to start under `LC_ALL=C`.
+- **On a host with the pull unit** (2.34.0), pause it first: `tarubot-host-config pause "<reason>"` as root on the host, wait for it to return 0, run the playbook, then `tarubot-host-config resume`. The playbook refuses a real run there otherwise ("Refuse a hand run while the pull unit is active"); check mode needs no pause. Use the same settings as the host's `/etc/tarubot/host.yml`, or the next poll after `resume` undoes the difference ([Operating it](#operating-it)).
 - **For Claude sessions:**
   - Ansible refuses non-blocking standard streams in Claude Code's shell, so run every ansible command as `<command> < /dev/null 2>&1 | cat`.
   - Claude may run check mode against staging freely, and apply to staging under @deconfined's standing go-ahead for the build phase (question 5 of the amendments).
   - Starting the bot (the start tag), stopping DevBot, reboots and the move each need @deconfined's go-ahead. The start tag never runs on staging before the DevBot move.
   - A real apply that the session's permission check refuses isn't retried in any form; it goes to @deconfined (2.33.0's apply of the host lock was one: it went ahead only after @deconfined's go-ahead in chat, [VERIFICATION.md](VERIFICATION.md)).
+  - The pull unit (2.34.0): a session may run `tarubot-host-config status` on staging and read its journal. Installing it on staging (the owner steps under [Installing it](#installing-it-owner)), `bootstrap`, `pause`, `resume`, `apply-now` and the emergency apply each need @deconfined's go-ahead, and nothing touches it on production.
   - Production runs are @deconfined's alone, and the production inventory and root key stay off the operator machine.
 
-**Applying it on the host itself** (`-c local`) is how the pull unit will run it from 2.34.0, holding the host lock around the whole run:
+**Applying it on the host itself** (`-c local`) is how the pull unit runs it since 2.34.0. The script takes the host lock first and holds it around the whole run, then runs, under a clean environment with its own `HOME` and umask 022 (`playbook()` in the script):
 
 ```sh
-flock -w 300 /run/tarubot/host.lock ansible-playbook -c local -i localhost, site.yml \
-  -e @/etc/tarubot/host.yml --skip-tags start -e tarubot_host_lock_held=true
+ansible-playbook -c local -i localhost, site.yml -e @/etc/tarubot/host.yml \
+  -e tarubot_host_lock_held=true -e tarubot_source=pull -e tarubot_commit=<commit> \
+  -e tarubot_run=<run id> -e tarubot_pull_role=<role> -e tarubot_pull_signers=<digest> \
+  --skip-tags start --diff
 ```
 
-Run that only from a root-owned checkout that `tarubot` can't write, such as the pull unit's own clone in `/var/lib/tarubot-config/repo` (2.34.0). Never run it from `~tarubot/tarubot`, or from anything else under `/home`. Ansible runs the playbook, reads `ansible.cfg` from its directory, and loads the files beside it, so running from a checkout `tarubot` can write hands root to `tarubot`. The playbook can't check this itself, because a changed copy would leave the check out. Until 2.34.0 brings that clone, apply from the operator machine as above, without the lock flag.
+Run that only from a root-owned checkout that `tarubot` can't write, such as the pull unit's own clone in `/var/lib/tarubot-config/repo`. Never run it from `~tarubot/tarubot`, or from anything else under `/home`. Ansible runs the playbook, reads `ansible.cfg` from its directory, and loads the files beside it, so running from a checkout `tarubot` can write hands root to `tarubot`. The playbook can't check this itself, because a changed copy would leave the check out. In practice the pull unit is the only local runner; people apply from the operator machine as above, without the lock flag, and with the unit paused where it is installed.
 
 ### After the first apply
 
@@ -630,12 +652,13 @@ Run that only from a root-owned checkout that `tarubot` can't write, such as the
 
 ### The host lock
 
-On a Quadlet host one lock keeps deploys, the playbook's user-manager commands and, from 2.34.0, the pull unit from overlapping: `/run/tarubot/host.lock`.
+On a Quadlet host one lock keeps deploys, the playbook's user-manager commands and, since 2.34.0, the pull unit from overlapping: `/run/tarubot/host.lock`.
 
-- **Root's file.** The playbook's tmpfiles line creates `/run/tarubot` (root, 0755) and `host.lock` (root, 0644) at every boot and on every apply. The pull unit will run as root, and root must never open a file `tarubot` could replace, so the lock isn't under `tarubot`'s home. Everyone opens it read-only: `flock` needs no write access.
+- **Root's file.** The playbook's tmpfiles line creates `/run/tarubot` (root, 0755) and `host.lock` (root, 0644) at every boot and on every apply. The pull unit runs as root, and root must never open a file `tarubot` could replace, so the lock isn't under `tarubot`'s home. Everyone opens it read-only: `flock` needs no write access.
 - **`ops/deploy.sh`** refuses `host` unless the lock is a plain file owned by root, not a link, then waits up to 5 minutes for it (`busy`). It closes the lock on the calls that can leave a process behind (`backup.sh quadlet` and `run-tool.sh`, whose containers leave a conmon), so a stray process never holds it.
 - **The playbook** runs each `systemctl --user daemon-reload`, `enable` and `start` of the `tarubot` play under `flock -w 300`, so a deploy never sees a reload half way. Link and file tasks aren't locked.
-- **The held-lock protocol.** A `flock` lock belongs to one open file, so a task that opened the file again would wait on its own caller. A caller that already holds the lock, as the pull unit will, passes `-e tarubot_host_lock_held=true`, and the play's commands then don't lock again. The first play then checks with `flock --nonblock --conflict-exit-code 75` that something really holds the lock, so the flag can never skip a lock nobody holds, and the start tag refuses the flag. Manual runs never pass it.
+- **The held-lock protocol.** A `flock` lock belongs to one open file, so a task that opened the file again would wait on its own caller. A caller that already holds the lock, as the pull unit does, passes `-e tarubot_host_lock_held=true`, and the play's commands then don't lock again. The first play then checks with `flock --nonblock --conflict-exit-code 75` that something really holds the lock, so the flag can never skip a lock nobody holds, and the start tag refuses the flag. Manual runs never pass it.
+- **The pull unit** (2.34.0) takes it without waiting, only for a full run, and never waits for a deploy; a deploy waits up to 5 minutes for a pull run ([The host lock and deploys](#the-host-lock-and-deploys)).
 - **Compose** (production today) keeps its own lock in `~/.local/state/tarubot-deploy/lock`.
 
 The lock's path, owner and protocol are part of `ops/deploy.sh`'s `quadlet` contract ([below](#the-quadlet-mode-of-opsdeploysh)).
@@ -663,7 +686,7 @@ The `start` tag links the release's unit on a host and starts the bot for the fi
      -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:<digest>
    ```
 
-   Never keep the start variables in the host settings file: every run reads it, and the pull unit's will.
+   Never keep the start variables in the host settings file: every run reads it, the pull unit's included. On a host with the pull unit, pause it before the start and resume it afterwards: the start is a hand run, and the playbook refuses it otherwise.
 
 After the whole host layer, the lock included, the start runs as `tarubot`:
 
@@ -722,7 +745,7 @@ The Deploy workflow deploys staging beside production, from the same plan, with 
 - **What the release must declare.** The plan reads the target commit's `ops/deploy.sh` and requires `quadlet` and `staging` on its `CAPABILITIES` line. Without them staging is left out of the run, and a staging-only run fails `below-floor`. Only 2.33.0 and later declare them.
 - **The job.** **Deploy staging** has a 30-minute limit and reconnects for 5 minutes, the accepted plan's limits, so a dead staging host never holds a runner for 90 minutes. The trade-off: a long migration trial, or a connection lost for more than 5 minutes, outlives the job. The host run then goes on by itself, the job ends cancelled or `outcome-unknown`, `~/.local/state/tarubot-deploy/runs/<run>/result` on the staging host keeps the result, and the next staging run waits up to 5 minutes for the host lock.
 - **No Pushover message.** The messages are about production only. A failed staging job shows as a failed job in the run.
-- **Production's result is its own job's.** The two deploy jobs run side by side, and production never waits for staging, so a run can fail on its staging job while production deployed. Whether production deployed a run is the **Deploy** job's conclusion together with the production approval, never the run's conclusion. Notify reads it that way, and the 2.34.0 pull unit must too.
+- **Production's result is its own job's.** The two deploy jobs run side by side, and production never waits for staging, so a run can fail on its staging job while production deployed. Whether production deployed a run is the **Deploy** job's conclusion together with the production approval, never the run's conclusion. Notify reads it that way, and so does the pull unit (2.34.0).
 - **The host's checks.** In staging mode `ops/deploy.sh` requires the **Deploy staging** job running, the ` to staging` title for a dispatch, and @deconfined as the dispatcher. It queries no approval. It accepts the run status `waiting` as well as `in_progress`: production's job may wait for its approval while staging's runs, and how GitHub then reports the whole run is confirmed only by the first real staging run. The job, path, branch, repository, attempt and title checks decide. Production refuses every staging title, a `waiting` run, and a run where only **Deploy staging** runs, even with a production approval.
 - **Commands** are registered in the test guild (`register.js --guild` with the target's `TEST_GUILD_ID`) and read back, on every run that starts or verifies a release.
 
@@ -755,23 +778,286 @@ The forced command's words choose the mode; nothing is detected. `ops/deploy.sh 
 - **The one difference in recovery.** A restart pinned the target before it started, so a target left for you stays pinned. When Podman's log gives no clear account of the target, nothing is restored, and `needs-you` `lease-evidence-incomplete` leaves `.env` naming the target (on Compose it still names the previous release). Read `journalctl --user -u tarubot.service` and `podman ps -a`, then pin what should run.
 - **The hardening read-back,** at preflight and after every start: a read-only root, no added or effective capabilities, `no-new-privileges`, no bind or volume mount at all, and none of the unset names in the container's environment. It catches a `containers.conf` default that the generator's output can't show. Podman lists the secrets only under `.Config.Secrets`, never as mounts, so any mount, even one at `/run/secrets/<name>`, is refused: a host file or volume there could stand in for a secret's value.
 
+### The pull unit (2.34.0)
+
+Since 2.34.0 (#50 part 2b; REQUIREMENTS.md "Approved staging amendments (2026-09-26)", questions 14 to 18 and 20, and its "Implementation notes (2.34.0)"), a Podman host keeps its own host configuration current. A root-owned systemd timer runs `tarubot-host-config`, a script the playbook installs outside any clone. The script keeps its own root-owned clone of `main` and applies `ops/ansible/site.yml` to its host (`-c local`) while it holds the host lock. It never reads or runs anything the `tarubot` user can write. The pull unit itself needs no off-host credential; the root keys that exist off the host are the operator's staging-only Ansible key, until question 20's step removes it ([Installing it](#installing-it-owner), step 4), and the FIDO2 break-glass key.
+
+**It runs nowhere yet.** Staging gets it after the merge, on @deconfined's go-ahead ([Installing it](#installing-it-owner)), and production at its rebuild. Production's Docker host never runs it.
+
+The script and its units live in `ops/ansible/files/host-config/`: `tarubot-host-config`, `tarubot-host-config.service`, `tarubot-host-config.timer` and `timer-production.conf`. They sit under `ops/ansible/` on purpose. The playbook reads nothing outside that tree, and the signature rule below then covers the code root runs, the script included. `tests/unit/host-config.test.ts` runs every path of the script against a sandbox with real git, `ssh-keygen`, `jq` and `flock`, and `tests/unit/playbook.test.ts` pins the playbook's side.
+
+#### What each host applies
+
+- **Staging** takes the head of `main`. It polls every 5 minutes, plus up to a minute of random delay.
+- **Production** takes the newest commit named by a Deploy run that production actually deployed, and polls every 10 minutes. It reads GitHub's public API anonymously. A run counts only when all of these hold:
+  - it is `.github/workflows/deploy.yml` on `main` in `deconfined/tarubot`, first attempt, completed;
+  - its title (`display_title`) is `Deploy <commit>` (an automatic run) or `Deploy <version>` (a dispatch, which maps to the one first-parent commit that carries that version). Titles that end in ` to staging`, and rollbacks (` rollback from `), never count;
+  - exactly one job named `Deploy` concluded `success`. "Deploy staging" never counts, and neither does the run's own conclusion, which a staging job can fail;
+  - @deconfined approved it for `production`, by login and account id (71469756), as `ops/deploy.sh` judges the same run.
+
+  So approving a release also approves its host configuration, which production applies about 10 minutes after the deploy (question 15). Some details:
+  - A Deploy job that succeeded without that approval should be impossible, because `ops/deploy.sh` checks the approval itself, so the unit always pages it as `needs-you approval-mismatch`. When its commit is newer than every approved candidate, the host stops there at every poll, checked again each time, until a newer approved release or an emergency apply passes it. When an approved candidate is newer, the first poll that sees the mismatch still ends `needs-you` and pages, and records the run as reported; the next poll goes on to the candidate.
+  - The listing covers runs created in the last 31 days: a request can wait up to 30 days for @deconfined's approval, and a release approved late is still listed. The newest approved commit is kept in the unit's state until it is applied, so a host that stays paused or failed for longer doesn't lose it either.
+  - Nothing `tarubot` wrote is read.
+- **Forward only,** along `main`'s first-parent history. A commit before the applied one is never a target. A `main` that no longer contains the applied commit stops the host (`needs-you history-rewritten`).
+- **Runtime-only commits** are only recorded (`recorded runtime-only`): nothing under `ops/ansible/` changed since the last full run, so there is no lock and no playbook.
+- **A full run** applies the target when `ops/ansible/` changed since the last full run (`newer`). The current commit is also re-applied:
+  - once a day, at the first poll after 05:00 UTC (`drift`): after the 04:30 backup and before dnf-automatic's 06:00 to 07:00 window. After downtime that spans 05:00, it comes at the first poll back;
+  - after a hand run (`hand-run`), or after one of the unit's own runs was killed or failed (`interrupted`). The playbook writes a run marker on every real run, and the unit compares it with its record of the last full run. So after a failed commit, a fix whose `ops/ansible/` equals the last good commit's also applies, as `interrupted`;
+  - when someone runs `apply-now` (reason `apply-now`);
+  - hourly while a failed commit is retried (`retry`).
+- **Host settings first.** When `/etc/tarubot/host.yml` changed since the last full run, the poll re-applies the commit it already runs (`settings-changed`). It picks no target and makes no API call or signature check, and it looks for a newer commit at the next poll. So a settings edit applies even while a newer commit is blocked, and a rotated or newly added signer counts from the next poll: the signature check reads the list from `host.yml` itself.
+
+#### The signature rule (question 14)
+
+The rule applies when `ops/ansible/` differs between the applied commit and the target. Every first-parent merge in between that changes `ops/ansible/` must meet four conditions:
+1. it has exactly two parents: a merge commit, not a squash or a single commit;
+2. its tree equals its pull request head's tree, so the merge adds nothing of its own;
+3. its head already contains the previous `main`, so the branch was up to date;
+4. its head carries a good SSH signature (`G`, trust `fully`) by a key listed in `tarubot_allowed_signers`.
+
+The signers come from the host's own settings, never from the repository. The unit reads them from `/etc/tarubot/host.yml` at every run, in its plain form ([below](#files-and-settings-on-a-host)), into a file of its own for that run, so no file a playbook run rendered, from whatever copy of the settings, ever decides a signature. The playbook renders the same list to `/etc/tarubot/allowed_signers` for people, and refuses a pull run whose reading of the list differs from the unit's (the unit passes a digest, `tarubot_pull_signers`). At the first merge that fails, the host stops (`needs-you unsigned-host-change`, or `no-signers` when the list is empty). It pages on every poll and applies nothing, and a later signed merge can't carry the change past that merge. There are two ways past: an emergency apply by @deconfined as root, or, for `no-signers` and a rotated key, a `host.yml` edit. Merges that don't touch `ops/ansible/` pass unsigned, whatever made their head: Dependabot, a web edit or "Update branch". A change that a later merge reverts to no net difference is only recorded.
+
+- **Why squash and rebase merging are off.** A squash or rebase merge is a commit GitHub writes and signs with its own key. It has no signed head to check, so every such merge that touches `ops/ansible/` would stop the hosts. @deconfined turned both off in the repository's settings on 2026-09-28, leaving merge commits only. The **Protect Main** ruleset still lists `merge` and `squash` as allowed merge methods (read on 2026-09-28), so today the repository toggle is the only guard: re-enabling squash there would pass the ruleset. Setting the ruleset to `merge` only makes both enforce it ([Installing it](#installing-it-owner), step 1). Keep "Require branches to be up to date before merging" on. Don't enable a merge queue or "Require linear history": both break the merge shape the hosts check.
+- **"Update branch" and web edits.** On a pull request that changes `ops/ansible/`, GitHub's "Update branch" button and web edits make the head a commit GitHub signed, which reads `N` here. Push a signed commit on top before merging. Otherwise the hosts stop at that merge until an emergency apply.
+- **What the signature proves.** The key listed today is the `id_git` key (ed25519 `SHA256:Y7SmEUtV87C2xwDvDSYNS/f/BV3gT3yt2tkxCKkJTcc`). It signs @deconfined's commits and the agents' on the operator machine, so the check proves that a head was signed there, not that @deconfined approved it. It stops content an attacker wrote: a stolen GitHub session can't sign, so it can't bring its own change to `ops/ansible/` to root through a merge (question 14's threat). It doesn't stop the early merge of a head that is already signed and contains the current `main`. A stolen session, or anyone with merge rights, could merge a pending, unreviewed agent pull request that changes `ops/ansible/`, and staging would apply it as root within about 5 minutes (production after its next approved deploy). Until an owner-only key is the only allowed signer, keep agent pull requests that change `ops/ansible/` unpushed or in draft until they are reviewed. For the check to mean @deconfined's own approval, list only a key he alone holds, such as a hardware `sk-ssh-ed25519` key, which the playbook accepts; agent pull requests that change `ops/ansible/` would then need a signed commit of his on top. A CI warning for heads without one of his GitHub-registered signing keys is deferred ([OPEN_ITEMS.md](OPEN_ITEMS.md#staging-follow-ups-50)).
+- **What it doesn't cover.** Runtime code reaches the bot through deploys, never root, so nothing outside `ops/ansible/` is checked. The emergency apply and `bootstrap` check no signature: @deconfined naming the commit as root is the trust anchor.
+- **Rotation.** Edit `tarubot_allowed_signers` in `/etc/tarubot/host.yml` as root on each host. The next poll re-applies the current commit with the edited settings, and a merge signed with the new key applies at the poll after that; a key removed from the list counts for no check after the edit. No commit is needed.
+
+#### Files and settings on a host
+
+| Path | Owner, mode | What |
+| --- | --- | --- |
+| `/usr/local/sbin/tarubot-host-config` | root, 0755 (`bin_t`) | The script, copied by the playbook once `bash -n` accepts it. It runs as `unconfined_service_t`. A new version arrives only this way, from a commit the checks accepted. The running copy isn't disturbed: bash has read the whole file before it runs, and the copy's rename keeps the old file open. |
+| `/etc/systemd/system/tarubot-host-config.service` and `.timer` | root, 0644 | A oneshot that runs `tarubot-host-config run`, and its timer (`*:0/5`, `RandomizedDelaySec=60`). Only the timer has an `[Install]` section. |
+| `/etc/systemd/system/tarubot-host-config.timer.d/10-production.conf` | root, 0644 | Production only: every 10 minutes. The playbook removes it on other hosts. |
+| `/etc/tarubot/host.yml` | root, 0600 | The playbook's settings (`-e @`), written by @deconfined as root. cloud-init will write it in a later release. |
+| `/etc/tarubot/host-config.env` | root, 0600 | One setting line, `HEALTHCHECKS_HOST_CONFIG_URL=<ping URL>`, besides comments and blank lines, written by @deconfined only. It is matched, never sourced. When it is missing or the value is empty, no pings go out (logged as a warning). |
+| `/etc/tarubot/allowed_signers` | root, 0644 | Rendered from `host.yml` as `deconfined namespaces="git" <type> <key>` lines, for people and tools on the host. The unit never reads it: it builds the same lines from `host.yml` at each run. Never edit it by hand. |
+| `/var/lib/tarubot-config/` | root, 0700 | The unit's own directory. It holds `repo/` (the clone), `home/` (`HOME` and `TMPDIR` for git, curl, jq and Ansible, so nothing goes to `/root`, and each run's own temporary directory with its signers file), `state.json` (the unit's record), `last-run.json` (the run marker the playbook writes), and the flags `pause` and `now`. The files are 0600. |
+| `/run/tarubot/host.lock` | root, 0644 | The host lock ([above](#the-host-lock)). |
+
+- **The layout.** Every directory from `/` down to the unit's directory, `/etc/tarubot` and `/run/tarubot` must be root's and writable by nobody else, or nothing runs (`needs-you layout`).
+- **The clone.** It fetches `main` only, from a fixed HTTPS URL. Hooks, fsmonitor, submodules, redirects, credential helpers, and the system and global git settings are all off, and no remote is configured. The script runs nothing from the clone. The playbook runs from it after a checkout, as root, and that is what the signature rule protects.
+  - The signature rule checks git's objects, so the files on disk must be exactly those objects. A `.gitattributes` anywhere in a commit, which a runtime-only merge could add unsigned, could otherwise re-encode or rewrite `ops/ansible/` at checkout (`working-tree-encoding`, `eol`, `ident`). git reads attributes from the empty tree instead (`attr.tree`, git 2.43 and later; the hosts have 2.52), and after every checkout the unit compares each file under `ops/ansible/` with its blob, byte for byte (`hash-object --no-filters`).
+  - A file that differs anyway, for example one git's index still records as current after it changed on disk, is repaired once: the unit drops the index entries under `ops/ansible/`, checks out again and compares again, logging `warning clone-repaired`. If the files still differ, the run stops at `failed git-local checkout` before the playbook ([Recovery by hand](#recovery-by-hand)).
+- **`host.yml`'s plain form.** The script reads `host.yml` without a YAML library, before Ansible does, to learn the role and the signers and to notice changes. Keep it in the form `host.example.yml` shows, or the unit stops (`needs-you settings`):
+  - printable ASCII and line feeds only: no tabs, carriage returns or other bytes, so none of the other line breaks YAML knows (NEL, LS, PS) can hide a line from the script that Ansible would read;
+  - only its keys, each once, in one document;
+  - after a key's colon: nothing (a list follows), `[]`, a quoted string or one word, then an optional comment. Quote values with spaces, and never continue a value on the next line;
+  - lists in block form, one `- "…"` line each, never `["…"]`. Each signer is a quoted `ssh-ed25519` or `sk-ssh-ed25519@openssh.com` key line, with one space between type and key and an optional comment;
+  - no anchors, aliases, tags, merge keys, block scalars or flow mappings.
+
+  The playbook also checks that the role and the signers the script read equal its own reading (`tarubot_pull_role`, and `tarubot_pull_signers`, the sha256 of the signers' `<type> <key>` joined by commas), and refuses the run otherwise.
+- **A new setting.** The installed script judges the `host.yml` its successor's playbook needs, and refuses keys it doesn't know. So a release that adds a `host.yml` key, or a line to `host-config.env`, adds it to the script's allowlist and gives it a default in the playbook in that same release; only a later release may require it. Write the new key into `host.yml` only once the host runs the release that knows it, or the unit stops at `needs-you settings` until the key is removed. (A release that required a new key at once would leave the old script refusing `host.yml` as soon as the key was added, with the emergency apply refused too, and only a hand run could get out.) `tests/unit/playbook.test.ts` and `host-config.test.ts` keep the playbook's settings, `host.example.yml` and the script's allowlist equal.
+- **No sandboxing options.** The service has no `PrivateTmp` and no other mount-namespace or sandboxing option. The `tarubot` play runs `podman info` on every full run, and when no rootless pause process exists, that call starts one. Inside a private `/tmp` and `/var/tmp` the pause process would keep them; systemd would delete them when the unit stops; and every later rootless Podman call, the bot's and `ops/deploy.sh`'s included, would join that namespace. The playbook also needs sudo, dnf's own SELinux domain, and writes to `/etc` and `/usr`. The unit runs at `Nice=10` with low CPU and IO weights, and `UMask=0022` gives its runs the modes a hand run gets.
+
+#### Commands
+
+All of them run as root on the host.
+
+| Command | What it does |
+| --- | --- |
+| `tarubot-host-config status` | Read-only, with no lock. It prints `key=value` lines: the role; the applied commit with its version, source and time; the last full run; any failure; `busy_since`; production's saved target; the last result; the pause; a waiting `apply-now`; the service and the timer; the next poll; the number of signers; and `ping=yes` or `no`. It never prints the URL. |
+| `tarubot-host-config pause REASON` | Writes the pause flag (printable text, up to 200 characters), then waits up to an hour for a run in progress to end. It prints `active=none` and exits 0 when no run is left, or `active=still-running` and exits 75. With `--no-wait` it returns at once. Later polls end `paused` before fetching. |
+| `tarubot-host-config resume` | Removes the flag. The next poll carries on, and after a hand run it re-applies (`hand-run`). |
+| `tarubot-host-config apply-now` | A full run of the current target now, past the hourly backoff. It starts the service (joining a run already in progress), then prints `status`. It is refused while paused (`paused <reason>`, exit 75). If a deploy holds the lock, the request waits for the next poll that can run the playbook, and the command says so. |
+| `tarubot-host-config apply COMMIT --emergency [--ignore-lock]` | The emergency apply. COMMIT is 40 hex digits, strictly after the applied commit on `main`'s first-parent chain. It skips the approval and signature checks and the backoff, and it also runs while paused (the pause stays). It waits up to 5 minutes for the host lock; `--ignore-lock` goes on without the lock and logs who holds it. It always pages `/fail emergency-apply`. Run it detached from the SSH session ([below](#operating-it)). |
+| `tarubot-host-config bootstrap COMMIT` | Once per host. It creates the clone and applies COMMIT, which must be on `main`'s first-parent chain and carry the script. Then it writes the first state and enables the timer. It checks no signature, because naming the commit as root is the trust anchor. It is refused once state exists. Run it detached from the SSH session too. |
+| `tarubot-host-config run` | One poll: the service's `ExecStart`. |
+
+- **The private lock.** `run`, `apply` and `bootstrap` take the unit's private lock. A second `run` ends `waiting already-running`, and `apply` and `bootstrap` wait up to 60 seconds for it. `status`, `pause`, `resume` and `apply-now` never take it, so a pause works while a run is in progress.
+- **The result line.** `run`, `apply` and `bootstrap` each end with one line on standard output, `result outcome=<outcome> commit=<12 hex> version=<X.Y.Z> changed=<n> reason=<reason>`, which the journal keeps.
+
+#### Results and pages
+
+Each host has one healthchecks.io check. Its ping URL is in `/etc/tarubot/host-config.env`: root-only, never in the repository, and not in the `.env` settings copy.
+- A routine result pings success.
+- A `/start` ping goes out before every playbook run.
+- A result that needs someone pings `/fail` on every poll while it lasts. healthchecks.io notifies only when the state changes.
+- Silence past the check's grace means the unit didn't run or didn't reach GitHub: the timer stopped, the host is down, or GitHub stayed unreachable for over an hour.
+
+| Result | Exit | Ping | Meaning |
+| --- | --- | --- | --- |
+| `applied` (`newer`, `settings-changed`, `retry`, `interrupted`, `hand-run`, `drift`, `apply-now`, `bootstrap`) | 0 | success | The playbook ran; `changed=` counts its changes. |
+| `applied emergency` | 0 | `/fail emergency-apply` | An emergency apply went through. It pages on purpose. |
+| `recorded runtime-only` | 0 | success | A newer commit changed nothing under `ops/ansible/`. |
+| `current` | 0 | success | Nothing to do. |
+| `paused` | 0 | `/fail paused <reason>` | Paused. The check goes down at the next poll and stays down until `resume`. |
+| `waiting deploy-running` | 75 | success, or while a failure is open its `/fail apply-failed` again | A deploy holds the host lock; the next poll tries again. A failed commit's retry delayed this way keeps the check down instead of flapping it up. |
+| `waiting lock-held` | 75 | `/fail lock-held <n>h` | The lock has been busy for 3 hours or more ([below](#the-host-lock-and-deploys)). |
+| `waiting github-unreachable`, `rate-limited`, `bootstrap`, `already-running` | 75 | none | Temporary, or not bootstrapped yet. A long outage shows as missed pings. |
+| `failed apply-failed`, `retry-later`, `marker-mismatch` | 1 | `/fail apply-failed <commit> task=<task>` | The playbook failed; the record stays on the last good commit. It is retried hourly, and a newer commit or changed settings at once. |
+| `failed git-local` | 1 | `/fail git-local <step>` | A local git step failed: the disk, a corrupt object or permissions. |
+| `needs-you` `history-rewritten`, `unsigned-host-change`, `no-signers`, `host-config-link`, `missing-pull-unit`, `ambiguous-version`, `approval-mismatch` | 1 | `/fail needs-you <reason> <commit>` | The host stops before the named commit ([Recovery by hand](#recovery-by-hand)). An `approval-mismatch` behind a newer approved release pages for one poll only ([What each host applies](#what-each-host-applies)). |
+| `needs-you` `layout`, `settings`, `state-schema` | 78 | `/fail`, if the ping file could be read | The host's own files are wrong. |
+| `needs-you` `not-root`, `already-bootstrapped`, `bad-commit` | 78 or 64 | none | Refused at the command line. |
+
+`SuccessExitStatus=75` keeps a waiting poll from counting as a failure. Exit 1 or 78 leaves the service `failed` in `systemctl --failed` until the next successful poll.
+
+The check's suggested settings are a period equal to the timer's (5 minutes on staging, 10 on production), 60 minutes of grace, and Pushover when it goes down.
+
+#### Operating it
+
+```sh
+tarubot-host-config status
+journalctl -u tarubot-host-config --since -1d      # the script's lines, Ansible's --diff output, the result lines
+systemctl list-timers tarubot-host-config.timer
+```
+
+- **Hand runs.** Before any hand run, the start tag's included, run `tarubot-host-config pause "<reason>"` and wait for it to return 0. Then run the playbook, and `tarubot-host-config resume` afterwards. A hand run from the operator machine holds no lock on the host, so the pause is what keeps a pull run from interleaving with it. The playbook refuses a real hand run on a host with pull state unless the pause flag is there; check mode needs no pause.
+- **The host's own settings.** Hand runs pass the same file the host has, with `-e @host.yml` from one flat copy outside any checkout ([Installing it](#installing-it-owner), step 3.1), never settings kept as inventory host variables. A run with a different copy is undone at the first poll after `resume`, which re-applies the unit's commit (`hand-run`). Whatever a hand run rendered, the unit's signature checks read the signers from `/etc/tarubot/host.yml` itself, never from `/etc/tarubot/allowed_signers`.
+- **A pause pages, by design.** Each poll while paused sends `/fail paused <reason>`, so a planned pause, every hand run's included, sends a Pushover message, and `resume` brings the check back up at the next poll. Pausing the check in healthchecks.io doesn't prevent that: a paused check leaves its paused state at the next ping, and the next `/fail` marks it down. The one way to keep a planned pause quiet is a check with healthchecks.io's "manual resume" on, which ignores every ping while paused: pause the check in the dashboard before `tarubot-host-config pause`, and resume it in the dashboard after `tarubot-host-config resume`. Forget that last step and the unit runs unmonitored, since even its success pings are ignored; so the default here is the plain check, and the page.
+- **Pause, never disable.** Don't stop, disable or mask the timer. The playbook enables and starts it again on every run while pull state exists, so `pause` is the switch.
+- **An emergency.** Pause, then the emergency apply, then resume. The commit must be newer than the applied one. To re-apply the applied commit instead, resume and run `apply-now`. Run the apply, like `bootstrap`, detached from your SSH session, with its output in the journal: a dropped connection would otherwise kill it partway (SIGHUP, or a failed write to the gone terminal), leaving the host half-applied at the emergency commit while the unit's record stays on the old one, and the very merge that needed the emergency would keep every later poll at `needs-you`:
+
+  ```sh
+  systemd-run --unit=tarubot-host-config-manual --collect --wait -p SyslogIdentifier=tarubot-host-config \
+    /usr/local/sbin/tarubot-host-config apply <commit> --emergency
+  journalctl -u tarubot-host-config-manual      # its output and its result line, also after a disconnect
+  ```
+
+  The unit keeps running if the session drops; `systemctl status tarubot-host-config-manual` shows whether it still is. For `bootstrap`, put `bootstrap <commit>` in place of `apply <commit> --emergency`.
+- **systemd's start limit.** systemd refuses a sixth start of the service within 10 seconds, which starting polls or `apply-now` by hand in quick succession can reach. `systemctl reset-failed tarubot-host-config.service` clears it. The timer isn't affected.
+- **Network.** The clone fetches over HTTPS, and the API calls are anonymous HTTPS. `github.com` and `api.github.com` have no AAAA records, so the hosts need IPv4 egress to GitHub. GitHub allows 60 anonymous API calls an hour per address, shared with `ops/deploy.sh`'s approval checks (five per run). Production's unit makes one listing per poll, 6 an hour, plus at most two calls for each new run. It stops calling when fewer than 20 remain (`waiting rate-limited`), leaving room for the deploys. Staging's unit calls no API.
+
+#### The host lock and deploys
+
+- **Never at once.** The pull unit and `ops/deploy.sh`'s Quadlet modes share `/run/tarubot/host.lock` ([The host lock](#the-host-lock)), so they never run at the same time.
+  - The unit takes the lock only for a full run. It holds it around the checkout, the playbook and the record, and passes `-e tarubot_host_lock_held=true` so the play's own commands don't take it again.
+  - It never waits for a deploy. A poll that finds the lock busy ends `waiting deploy-running` (with a success ping) and tries again at the next poll. After 3 hours of that it pages `lock-held`.
+  - No command it starts inherits the lock, so nothing it leaves behind can keep holding it. In the 2.34.0 rehearsal, only the script had the lock file open during its runs.
+- **The busy collision.** A deploy waits up to 5 minutes for a pull run, then refuses `busy`, and nothing retries that on its own. On production a new dispatch and a new approval follow, and on staging a new dispatch by @deconfined. Three things keep it rare:
+  - a full run with nothing to change loads no package metadata: about 25 seconds on one vCPU in the 2.34.0 rehearsal;
+  - the daily re-apply sits at 05:00 UTC, clear of the 04:30 backup and dnf-automatic's 06:00 to 07:00 window;
+  - host changes land away from deploys. Staging applies within about 5 minutes of the merge, while the publish run that starts staging's deploy takes about 9. Production applies only after its deploy has finished, since the finished deploy is what makes the commit a target.
+
+  A run that installs packages takes longer. If a deploy refuses `busy`, dispatch again once `status` shows `service=inactive`.
+- **Holding the lock.** `tarubot` can open the lock read-only and hold it too. That blocks host configuration, not dnf-automatic's security updates, and pages `lock-held` after 3 hours.
+  - To find who has it open, as root: `find /proc/[0-9]*/fd -lname /run/tarubot/host.lock 2>/dev/null`.
+  - The emergency apply's `--ignore-lock` log names the process that took the lock, which may have exited since.
+- **The backup** still doesn't take the lock ([OPEN_ITEMS.md](OPEN_ITEMS.md#staging-follow-ups-50)).
+
+#### Recovery by hand
+
+- **A failed apply** (`failed apply-failed task=<task>`). The record stays on the last good commit, and the unit retries hourly. A newer commit or a changed `host.yml` is tried at once, and the journal has the task and its error.
+  - The check stays down until an apply succeeds: a poll that a deploy's lock delays (`waiting deploy-running`) sends the failure's `/fail` again rather than a success ping.
+  - A failure whose commit or settings are no longer wanted, such as a failed `host.yml` edit you then undid before the playbook changed anything, is dropped at the next poll that ends `current` or `recorded`, and `status` shows `failure=none` again. An edit that failed after the playbook started changing things is re-applied instead (`interrupted`), because its run marker no longer matches.
+  - Ansible isn't transactional: tasks before the failed one stay applied, and `force_handlers` still runs their reloads.
+  - Fix forward: a new merge on staging, an approved release on production, or an emergency apply.
+  - The playbook never stops or restarts the bot, so the bot is untouched either way.
+- **`unsigned-host-change` or `no-signers`.** The result names the merge. Check who pushed its head and why it isn't signed; usually it is an "Update branch" or a web edit. If the change is legitimate, pause, emergency-apply the target, and resume. For `no-signers` or a new key, fix `host.yml` instead.
+- **`approval-mismatch`** (production). GitHub reports a Deploy job that succeeded without @deconfined's approval for `production`. Treat it as a security event: read that run's approvals and the production host's deploy logs, even when it paged only once because a newer approved release was already waiting. When it stops the host, a newer approved release, or an emergency apply at or past that commit, clears it.
+- **`host-config-link` or `missing-pull-unit`.** A link or submodule under `ops/ansible/`, or a target without the script. Neither is ever legitimate; fix it in a new merge.
+- **`layout`.** Something on the unit's paths is owned by someone other than root, writable by group or others, or a link. Treat it as tampering until explained, and `stat` each directory from `/` down.
+- **`settings`.** `host.yml` isn't in the plain form, or `host-config.env` isn't a root-only file with one URL line. A bad ping file sends no ping.
+- **`git-local`.** git's message is in the journal. Stale lock files that a killed run left in the clone are removed at the next poll (`warning stale-git-lock`).
+  - **`git-local checkout`** with no git message means the files under `ops/ansible/` still differ from their blobs after the unit's own repair ([Files and settings](#files-and-settings-on-a-host)). Treat it as tampering with root's clone until explained. To repair it by hand, as root, pause, then drop the index entries and check out the applied commit again, and resume; the next poll compares the files again:
+
+    ```sh
+    tarubot-host-config pause "clone repair"
+    g() { git -C /var/lib/tarubot-config/repo -c core.hooksPath=/dev/null -c attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904 "$@"; }
+    g rm -r -q --cached -- ops/ansible
+    g checkout -q --force --detach <applied commit>      # tarubot-host-config status names it
+    tarubot-host-config resume
+    ```
+
+    If it recurs, reset the unit (below).
+- **A broken script** that blocks every later update: the installed script judges its successor, as `ops/deploy.sh`'s live copy does.
+  1. Pause it. If the script won't run at all, write the flag by hand as root: `sh -c 'umask 077; printf "%s %s\n" "$(date +%s)" "script broken" > /var/lib/tarubot-config/pause'`.
+  2. Merge the fix to `main` first; on production, also get its Deploy approved and completed. Then, from the operator machine, hand-run exactly that merged commit, with the host's own settings, to install the fixed script.
+  3. Resume only once `main`'s head (on production, the newest approved Deploy target) carries the fix. Until then stay paused: otherwise the first poll re-applies the applied commit (`hand-run`), whose playbook puts the broken script back. A fix hand-run from a branch is undone the same way.
+- **Resetting the unit** for rewritten history, an unreadable `state.json` (`state-schema`, for example from a newer schema after an older script came back) or a clone beyond repair. As root:
+
+  ```sh
+  tarubot-host-config pause "reset"      # waits for a run in progress
+  mv /var/lib/tarubot-config "/var/lib/tarubot-config.old-$(date -u +%Y%m%dT%H%M%SZ)"
+  systemd-run --unit=tarubot-host-config-manual --collect --wait -p SyslogIdentifier=tarubot-host-config \
+    /usr/local/sbin/tarubot-host-config bootstrap <commit>      # detached, as under "Operating it"
+  ```
+
+  - Polls wait silently while the directory is gone (`waiting bootstrap`), and the old one stays for inspection.
+  - Choose the commit as for a first bootstrap: one on `main`'s first-parent chain that you have checked, such as the applied commit if `main` still has it.
+  - The pause went with the old directory, so polling starts again at once.
+
+#### Installing it (owner)
+
+In this order, each @deconfined's step or one he gives the go-ahead for. Agents never install, bootstrap, pause, resume or emergency-apply the unit without that go-ahead, and never touch it on production.
+
+1. **Merge settings (question 14).** Done on 2026-09-28 in the repository's settings: squash and rebase merging are off, and merge commits stay on. Keep "Require branches to be up to date before merging" on, and add no merge queue or "Require linear history".
+   - **Still to do:** the **Protect Main** ruleset's pull-request rule still allows `merge` and `squash` (read on 2026-09-28). Set its allowed merge methods to `merge` only (Settings → Rules → Rulesets → Protect Main → "Require a pull request before merging" → Allowed merge methods), so the ruleset enforces merge commits as well as the repository toggle. Until then the toggle is the only guard, and re-enabling squash would stop every host at the next squash that touches `ops/ansible/` (`needs-you unsigned-host-change`).
+2. **A healthchecks.io check** for staging's pull unit: period 5 minutes, grace 60 minutes, Pushover when it goes down, and "manual resume" off (the default; [Operating it](#operating-it) says why a pause pages). Keep its ping URL with the others in `~/tarubot-cutover/` (mode 600).
+3. **After 2.34.0 merges, on staging:**
+   1. **`/etc/tarubot/host.yml`**, as root, mode 600: one flat file that feeds both the host and your hand runs.
+      - Staging's operator settings live today as `tarubot_*` host variables in your out-of-repository inventory (the 2.34.0 check run rendered no signers for that reason). Copy them into one flat `host.yml` outside any checkout, in `host.example.yml`'s plain form: every key at the top level, lists in block form, values with spaces quoted. Add the signing key's public line (`~/.ssh/id_git.pub`) in block form; a flow list (`["…"]`) is refused:
+
+        ```yaml
+        tarubot_allowed_signers:
+          - "ssh-ed25519 AAAA… <comment>"
+        ```
+
+      - Send that file to the host over SSH stdin:
+
+        ```sh
+        ssh root@<staging host> 'set -e; umask 077; t=$(mktemp /etc/tarubot/.host.yml.XXXXXX)
+          cat > "$t"; chmod 600 "$t"; mv "$t" /etc/tarubot/host.yml' < /path/outside/any/checkout/host.yml
+        ```
+
+      - Then remove the `tarubot_*` variables from the inventory, leaving only how to reach the host, as `inventory.example.yml` shows, and pass `-e @/path/outside/any/checkout/host.yml` on every later hand run ([Running it](#running-it-from-the-operator-machine)). One file then feeds both, and a hand run can't render different keys than the host's.
+
+   2. **`/etc/tarubot/host-config.env`**, as root, mode 600, with the check's ping URL, which never passes through a terminal:
+
+      ```sh
+      tr -d '\r\n' < ~/tarubot-cutover/<the check's URL file> | ssh root@<staging host> \
+        'set -e; umask 077; read -r u || true; [ -n "$u" ]; t=$(mktemp /etc/tarubot/.host-config.env.XXXXXX)
+         printf "HEALTHCHECKS_HOST_CONFIG_URL=%s\n" "$u" > "$t"; chmod 600 "$t"; mv "$t" /etc/tarubot/host-config.env'
+      ```
+
+   3. **Apply 2.34.0 from the operator machine** with `--skip-tags start`, check mode first ([Running it](#running-it-from-the-operator-machine)). It installs ansible-core (`1:2.16.16-2.el10_2.1` or later), the script, the units and the signers file. The timer stays off until the bootstrap.
+   4. **Bootstrap,** as root on staging, with the full commit of the 2.34.0 merge on `main`, detached from the SSH session so a dropped connection can't kill it partway ([Operating it](#operating-it)):
+
+      ```sh
+      systemd-run --unit=tarubot-host-config-manual --collect --wait -p SyslogIdentifier=tarubot-host-config \
+        /usr/local/sbin/tarubot-host-config bootstrap <commit>
+      journalctl -u tarubot-host-config-manual
+      ```
+
+      Expect `result outcome=applied … reason=bootstrap`, a `/start` and a success ping, and the timer enabled. Then check `tarubot-host-config status` and `journalctl -u tarubot-host-config`.
+   5. **Watch the next merges.** A runtime-only one should read `recorded`, and one whose signed head changes `ops/ansible/` should read `applied`.
+4. **Staging's Ansible root key (question 20).** Once the unit has proven itself, remove the staging-only Ansible key from the operator machine and from root's `authorized_keys` on staging, outside the playbook's block.
+   - A reasonable bar: one runtime-only merge recorded, one `ops/ansible/` merge applied, one reboot with the timer running again afterwards, and one pause and resume.
+   - **Before removing it, prove the way out without it.** After the removal, hand runs are the only way past a broken script ([Recovery by hand](#recovery-by-hand)). From the machine the FIDO2 key is plugged into, with the pinned virtual environment and an inventory that points at that key alone (`IdentitiesOnly=yes`; each SSH connection asks for the PIN and a touch), run a check-mode apply against staging (`--check --diff --skip-tags start`) and confirm it completes. Linode's Lish console, with a password reset, stays the fallback.
+   - After that, root on staging means the FIDO2 break-glass key: pause, the emergency apply and hand runs are @deconfined's.
+   - Agents lose root there too, including check-mode runs and `status`.
+5. **Production, at its rebuild** (not in 2.34.0): its own check (period 10 minutes), `host.yml` with the signers, `host-config.env`, then `bootstrap` at the commit of the approved release it runs.
+
+#### Limits
+
+- **Order.** Staging applies host configuration before its bot deploy, and production after, so staging never rehearses production's order. A host change and a runtime change that depend on each other must work in either order: expand first, contract later.
+- **Resources.** A playbook run shares the host's one vCPU and 2 GB with the bot.
+- **Hand edits don't last.** The next full run reverts an emergency edit made by hand on the host, by the next day at the latest, unless the unit is paused.
+- **The ping URL on a rebuild.** It lives outside the settings copy. A host rebuilt without it stays silent, and its check then pages as down, which is the safe direction.
+- **Not yet:**
+  - a public `status.json` and `ops/deploy.sh`'s host-level gate;
+  - the Deploy plan's wording for production approvals that also move host configuration;
+  - reporting `reboot_required` ([OPEN_ITEMS.md](OPEN_ITEMS.md#staging-follow-ups-50)).
+
 ### Not yet automated
 
 | When | What |
 | --- | --- |
-| 2.34.0 | The pull unit, `tarubot-host-config`: a root-owned timer with its own root-owned clone, fetched from `main` only and moving forward only, which applies the playbook to its host while it holds the host lock (`--skip-tags start -e tarubot_host_lock_held=true`, never the start variables). Staging takes the head of `main`. Production takes the newest run whose **Deploy** job succeeded after @deconfined's approval, never judged by the run's conclusion, which a staging job can fail. It requires @deconfined's SSH signature on merged heads that touch `ops/ansible/`, re-applies daily with its own health check, and can be paused or run for an emergency. Squash merging must be off first (question 14). |
-| Next | cloud-init user data and OpenTofu (the Linodes, their firewalls, the database access list and DNS), proven by rebuilding staging from scratch. The hand-built host is deleted after that. |
-| The move | DevBot moves: stop local DevBot, dump and restore into `tarubot_staging`, reset DevBot's token into staging's `.env` only, run the start tag, turn staging deploys on, then retire the local copy in a patch. |
+| Next | cloud-init user data and OpenTofu (the Linodes, their firewalls, the database access list and DNS), proven by rebuilding staging from scratch; user data then writes `host.yml` and bootstraps the pull unit. The hand-built host is deleted after that. |
+| The move | DevBot moves: stop local DevBot, dump and restore into `tarubot_staging`, reset DevBot's token into staging's `.env` only, pause the pull unit, run the start tag, resume, turn staging deploys on, then retire the local copy in a patch. |
 | Numbered when it lands | PR images on staging, dispatched by @deconfined: `preview.yml`, a separate `tarubot-pr` package, a `pr` input and `ops/deploy.sh`'s `preview` word. |
-| Numbered when it lands | Production rebuilt onto AlmaLinux, rootless Podman and Quadlet, by overlap: its forced command becomes `ops/deploy.sh quadlet`, the start tag runs at the handover (which also links the backup units and enables their timer), and the old host is fenced. Production's workflow rollbacks then reach 2.33.0 and later only. Before it, the playbook needs the path that moves production's container stack, which its automatic updates skip, after a week on staging (REQUIREMENTS.md question 2): pinned versions, or a deliberate update run. The packages are `state: present`, so on a rebuilt production host nothing would upgrade them yet. |
+| Numbered when it lands | Production rebuilt onto AlmaLinux, rootless Podman and Quadlet, by overlap: its forced command becomes `ops/deploy.sh quadlet`, the start tag runs at the handover (which also links the backup units and enables their timer), and the old host is fenced. The new host bootstraps the pull unit with its own check. Production's workflow rollbacks then reach 2.33.0 and later only. Before it, the playbook needs the path that moves production's container stack, which its automatic updates skip, after a week on staging (REQUIREMENTS.md question 2): pinned versions, or a deliberate update run. The packages are `state: present`, so on a rebuilt production host nothing would upgrade them yet. |
 | After that | The Compose-path cleanup: the Compose twins leave `ops/deploy.sh` and `ops/backup.sh`, and `docker-compose.production.yml` goes (question 12). |
 
 ### Owner steps before the move
 
-In this order. None had run on 2026-09-27; agents never create, read or change the GitHub environments, their secrets or variables, or either switch, and never hold a deploy key.
+In this order. **Status (2026-09-28):** steps 1 to 10 are done, on 2026-09-27 and the early hours of 2026-09-28, each checked read-only by the agent where it could be ([VERIFICATION.md](VERIFICATION.md)); steps 11 and 12 wait for the move. Agents never create or change the GitHub environments, never read their secrets or variables, never touch either switch, and never hold a deploy key (the agent rule @deconfined confirmed on 2026-09-26, in AGENTS.md, and question 5); a read-only look at an environment's protection rules, as in step 5's check, is allowed.
 
 1. **Merge 2.33.0 with `STAGING_DEPLOY_ENABLED` unset.** Production's Deploy run for it asks for your approval as usual, and approving restarts production onto 2.33.0 under Compose. Its plan is the first to run `gh attestation verify`: check the summary's "Provenance verified" line.
-2. **The database and role,** before any staging credential exists. As the admin role, in `defaultdb`, first read `SHOW max_connections` and the current use, and check whether any provider role relies on PUBLIC's CONNECT. Then:
+2. **The database and role,** before any staging credential exists. As the admin role, in `defaultdb`, first read `SHOW max_connections` and the current use, and check whether any provider role relies on PUBLIC's CONNECT. On this cluster the provider's monitoring role, `_akmadmin_monitor`, did, so it gets its own grant before PUBLIC loses it. Connect with `sslmode=verify-full` and the cluster CA from `production.env`'s `DATABASE_CA_CERT`: `~/tarubot-cutover/work/ca-certificate.crt` is an older, different CA and fails verification. On this cluster (`max_connections` 50, 3 reserved) `<n>` was 16: staging's pool of 12, the writer lease and a few tools. Then:
 
    ```sql
    CREATE ROLE tarubot_staging LOGIN CONNECTION LIMIT <n>;
@@ -779,14 +1065,17 @@ In this order. None had run on 2026-09-27; agents never create, read or change t
    GRANT tarubot_staging TO akmadmin WITH INHERIT FALSE, SET TRUE;
    CREATE DATABASE tarubot_staging OWNER tarubot_staging TEMPLATE template0;
    SET ROLE tarubot_staging;
+   GRANT CONNECT, TEMPORARY ON DATABASE tarubot_staging TO _akmadmin_monitor;
+   GRANT CONNECT ON DATABASE tarubot_staging TO akmadmin;
    REVOKE CONNECT, TEMPORARY ON DATABASE tarubot_staging FROM PUBLIC;
    RESET ROLE;
    -- Production's database, as its owning role (SET ROLE tarubot if the admin can, or connect as tarubot):
-   REVOKE CONNECT, TEMPORARY ON DATABASE tarubot FROM PUBLIC;
+   GRANT CONNECT, TEMPORARY ON DATABASE tarubot TO _akmadmin_monitor;
    GRANT CONNECT ON DATABASE tarubot TO akmadmin;
+   REVOKE CONNECT, TEMPORARY ON DATABASE tarubot FROM PUBLIC;
    ```
 
-   `\password` keeps the password out of the statement text. Check production's readiness right after the second part. Then confirm with `has_database_privilege` that `tarubot_staging` can't connect to `tarubot`, that `tarubot` can't connect to `tarubot_staging`, and that PUBLIC holds neither. The staging tool profile accepts exactly these names.
+   Afterwards each database's access list names only its owner (`CTc`), `akmadmin` (`c`) and `_akmadmin_monitor` (`Tc`). `\password` keeps the password out of the statement text. Check production's readiness right after the second part. Then confirm with `has_database_privilege` that `tarubot_staging` can't connect to `tarubot`, that `tarubot` can't connect to `tarubot_staging`, and that PUBLIC holds neither. The staging tool profile accepts exactly these names.
 
    **The same rule for every later database on the cluster:** revoke PUBLIC's `CONNECT` and `TEMPORARY` as soon as it is created, and grant `CONNECT` only to the roles that need it. That includes `tarubot_restore` ("Restoring a dump" above). The tool guard checks only the maintenance tools. The bot process itself, which on staging runs pull-request code, is held back only by these grants: a database it can connect to is one where it can take the writer-lease lock (advisory locks belong to one database), and a staging bot holding it in a database production is repointed at would keep production unready.
 3. **The access list:** add the staging host's IPv6 /128 and IPv4 address to the managed database's access list, IPv6 first, before its first start.
@@ -806,13 +1095,13 @@ In this order. None had run on 2026-09-27; agents never create, read or change t
 
    **Probe it** with the new key alone (`IdentitiesOnly=yes`, `IdentityAgent=none`): until the first start moves the clone to 2.33.0 or later, 2.30.4's `deploy.sh` exits 64 without a word on the mode words; after it, any command but a request prints the usage line and exits 64. None may give a shell or a file listing, and sshd's `DisableForwarding` refuses every forward.
 7. **`.env`:** add your operator key to `tarubot_operator_keys` and apply. Then write `~/tarubot/.env` from `staging.env.example` over SSH stdin (mode 600), with staging's own bucket, key and check values, and `DISCORD_TOKEN` left as its placeholder until the move. Take a settings copy. `.env` stays the only place the secrets are kept; the unit refreshes the Podman secrets from it at every start. It holds no `NAME_FILE` line and no `TARUBOT_IMAGE_DIGEST`: the unit sets the files, and the first start writes the digest.
-8. **The break-glass key:** add the FIDO2 key's public line to `tarubot_root_keys` and apply. Try it on staging; it asks for the PIN on every use. Then remove your personal keys from root's `authorized_keys`, outside the playbook's block, as the plan asks. The staging-only Ansible key stays until the pull unit is proven.
+8. **The break-glass key:** add the FIDO2 key's public line to `tarubot_root_keys` and apply. Try it on staging; it asks for the PIN on every use. Then remove your personal keys from root's `authorized_keys`, outside the playbook's block, as the plan asks. The staging-only Ansible key stays until the pull unit is proven ([Installing it](#installing-it-owner), step 4).
 9. **Stale host keys:** remove staging's RSA and ECDSA SSHFP records and `known_hosts` lines whenever convenient (above); they are left over from part 1.
-10. **Before 2.34.0's pull unit:** turn off squash merging (question 14).
+10. **Before 2.34.0's pull unit:** turn off squash merging, and rebase merging with it (question 14; done on 2026-09-28, merge commits only). The pull unit's own install follows the 2.34.0 merge ([Installing it](#installing-it-owner)).
 11. **At the DevBot move** (not in this release):
     1. update local DevBot to the release you will start (2.33.0 or later; its update procedure applies any migration), stop it, then dump its database and restore the dump into `tarubot_staging`. The start never migrates, so the restored database must be at that release's schema: start exactly the version DevBot ran when it was dumped ([The first start](#the-first-start-the-start-tag), which also says how to recover from a failed start);
     2. reset DevBot's token in the Developer Portal and put the new one only in staging's `.env`;
     3. verify the release's index digest with `gh attestation verify` ([The first start](#the-first-start-the-start-tag)); an agent may do this for staging;
-    4. run, or give the go-ahead for, the playbook with `-e tarubot_start_version=<version> -e tarubot_start_digest=<digest>`, without `--skip-tags start` and without `tarubot_host_lock_held`. It applies the host layer (the lock included), resets the clone to the verified commit, links the unit and the backup units from it, starts the bot and enables the backup timer.
+    4. pause the pull unit (`tarubot-host-config pause "DevBot move"` as root, waiting for it to return 0), then run, or give the go-ahead for, the playbook with `-e tarubot_start_version=<version> -e tarubot_start_digest=<digest>`, without `--skip-tags start` and without `tarubot_host_lock_held`. It applies the host layer (the lock included), resets the clone to the verified commit, links the unit and the backup units from it, starts the bot and enables the backup timer. Then `tarubot-host-config resume`.
 12. **Then staging deploys.** Set the repository variable `STAGING_DEPLOY_ENABLED` to `true`, at repository level, never in an environment. Then run the Deploy workflow yourself with `target=staging` and the live version: expect `already-live`, which checks the live release and registers its commands in the test guild. If it fails, deleting the switch pauses staging again without touching production. The dispatcher rule refuses a dispatch by a GitHub App or `GITHUB_TOKEN`, so an agent could start one only with a credential of your own account that can dispatch, which you would have to grant, and only when you ask in that session.
 13. **Older rollback targets on production:** the plan now refuses releases before 2.32.0, so a rollback to one of them follows [the manual procedure](#rolling-back-to-a-release-without-provenance-before-2320).

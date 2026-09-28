@@ -1,0 +1,1591 @@
+#!/usr/bin/bash
+# TaruBot's pull unit (2.34.0, #50): tarubot-host-config applies the host playbook (ops/ansible/) to
+# the host it runs on, from its own root-owned clone of main. REQUIREMENTS.md "Approved staging
+# amendments (2026-09-26)" records the owner's decisions (questions 14 to 18 and 20) and their
+# implementation notes; docs/HOSTING.md "The pull unit" says how to operate it, what each result
+# means and how to recover by hand.
+#
+# The playbook installs this file as /usr/local/sbin/tarubot-host-config (root, 0755), and
+# tarubot-host-config.timer starts tarubot-host-config.service, a oneshot that runs `run`, every 5
+# minutes on staging and every 10 on production (timer-production.conf). Nothing is ever run out of
+# the clone: a new version of this script arrives only as the playbook's copy from a commit the
+# checks below accepted, and bash has read this whole file before that (the guard at the end).
+#
+# Trust. Root runs this, so it reads and runs nothing the tarubot user can write:
+#   - its state lives in /var/lib/tarubot-config (root, 0700): the clone repo/, the tools' HOME
+#     home/, state.json, the playbook's run marker last-run.json, and the pause and now flags. Every
+#     directory from / down to it, to /etc/tarubot and to /run/tarubot must be root's and writable
+#     by nobody else, or nothing runs (needs-you layout);
+#   - the clone fetches main only, from a constant URL over HTTPS, with hooks, fsmonitor,
+#     submodules, redirects, credential helpers, the in-tree .gitattributes and the system and
+#     global git configuration off, and no remote configured. git, curl and jq run under env -i
+#     with that HOME. After each checkout every file under ops/ansible/ must equal its blob, byte
+#     for byte, before the playbook reads it;
+#   - the host's settings are root's own files: /etc/tarubot/host.yml, the playbook's settings,
+#     which this script reads only in a plain subset (settings_read), and
+#     /etc/tarubot/host-config.env, the health check's ping URL, matched and never sourced;
+#   - the allowed signers come from host.yml's tarubot_allowed_signers, which this script reads
+#     itself at every run into its own file, never from the repository and never from what a
+#     playbook run rendered (/etc/tarubot/allowed_signers is for people; the playbook checks that
+#     its reading of the list equals this script's).
+#
+# What a poll (`run`) applies:
+#   - staging takes the head of main. Production takes the newest commit named by a Deploy run
+#     whose job "Deploy" succeeded after @deconfined approved it for `production`, as GitHub's
+#     public API answers anonymously; a success without that approval pages (approval-mismatch).
+#   - forward only, along main's first-parent chain; a rewritten history stops the host.
+#   - question 14: when ops/ansible/ differs between the applied commit and the target, every
+#     first-parent merge in between that changes it must have two parents, the same tree as its PR
+#     head, a head that contains the previous main, and a good SSH signature on that head by an
+#     allowed signer. Squash merging must be off for that to hold.
+#   - a changed host.yml re-applies the applied commit first, so a settings edit applies even while
+#     a newer commit is blocked.
+#   - a commit that changes nothing under ops/ansible/ since the last full run is only recorded.
+#     The current commit is re-applied at the first poll after 05:00 UTC, after a hand run or one
+#     of this unit's own runs that was interrupted, on apply-now, and hourly while a failed commit
+#     is retried.
+#
+# The playbook runs with -c local, --skip-tags start and -e tarubot_host_lock_held=true while this
+# script holds /run/tarubot/host.lock, the lock ops/deploy.sh's Quadlet modes hold around every
+# change (their QUADLET_LOCK), so the two never run at once; a poll that finds a deploy holding it
+# waits for the next poll and never waits itself. No command started while a lock is held gets its
+# file descriptor (8<&- 9<&-), so nothing outlives this script holding a lock.
+#
+# Commands, root only:
+#   run                                       one poll (the service's ExecStart)
+#   apply-now                                 a full run of the current target, now
+#   status                                    the state, read-only
+#   pause REASON [--no-wait]                  polls stop applying; waits for an active run to end
+#   resume                                    undoes pause
+#   bootstrap COMMIT                          once per host: apply COMMIT and enable the timer
+#   apply COMMIT --emergency [--ignore-lock]  apply a newer commit past the gates, and page
+#
+# run, bootstrap and apply end with exactly one result line on stdout (RESULT_FORM) and its exit
+# status: 0 for applied, recorded, current and paused; 75 for waiting (the unit's
+# SuccessExitStatus); 1 for failed and needs-you; 78 for needs-you about the host's own files and
+# 64 for usage or a bad commit. Everything else goes to stderr, which systemd keeps in the journal.
+# tests/unit/host-config.test.ts runs every path against a sandbox.
+set -Eeuo pipefail
+
+# Where the clone fetches from, and over which protocol only. Constants, not settings: tests set
+# main's copies instead, and a static test pins these production values.
+readonly REPO_URL=https://github.com/deconfined/tarubot.git
+readonly REPO_PROTOCOL=https
+readonly REPO=deconfined/tarubot
+# GitHub's public API, and the protocols curl may use for it and for the health-check pings.
+readonly API=https://api.github.com
+readonly API_PROTOCOLS='=https'
+readonly PING_PROTOCOLS='=https'
+# The one account whose approval of `production` counts, by login and numeric id, as ops/deploy.sh
+# judges the same runs (tests/unit/host-config.test.ts keeps them equal), and the principal of
+# every allowed signer line (the run's own file, and the playbook's copy for people).
+readonly REVIEWER=deconfined
+readonly REVIEWER_ID=71469756
+readonly WORKFLOW=.github/workflows/deploy.yml
+# The production job of deploy.yml; "Deploy staging" never counts.
+readonly DEPLOY_JOB=Deploy
+# Host configuration is exactly this tree: the playbook reads nothing outside it.
+readonly HOST_PATHS=ops/ansible/
+# This script's own path in the repository; every commit a host applies must carry it, because a
+# playbook without it would leave the host with no pull unit and write no run marker.
+readonly SELF=ops/ansible/files/host-config/tarubot-host-config
+readonly VERSION='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
+# The host lock, ops/deploy.sh's QUADLET_LOCK: a root-owned file tmpfiles creates.
+readonly HOST_LOCK=/run/tarubot/host.lock
+readonly SAFE_PATH=/usr/sbin:/usr/bin
+# The daily re-apply: the first poll at or after this hour (UTC), after the 04:30 backup and before
+# dnf-automatic's 06:00 to 07:00 window.
+readonly DRIFT_HOUR=05
+readonly RESULT_FORM='^result outcome=(applied|recorded|current|waiting|paused|failed|needs-you) commit=([0-9a-f]{12}|-) version=((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})|-) changed=([0-9]{1,5}|-) reason=([a-z0-9-]{1,40}|-)$'
+# host.yml's keys; each may appear once. Everything else in the file is refused. The installed
+# script judges the host.yml its successor's playbook needs, so a release that adds a key adds it
+# here and gives it a default in the playbook in the same release, and requires it only in a later
+# one; the owner writes it into host.yml only once the hosts run that release (docs/HOSTING.md
+# "Files and settings on a host"). host-config.env's one variable follows the same rule.
+readonly SETTINGS_KEYS='tarubot_role tarubot_hostname tarubot_deploy_key_public tarubot_operator_keys tarubot_root_keys tarubot_allowed_signers'
+# What may follow a key's colon: nothing (a block follows), [], a simple quoted string or one plain
+# word, then an optional comment.
+readonly KEY_REST="^([[:space:]]+(\\[\\]|\"[^\"\\\\]*\"|'[^']*'|[A-Za-z0-9][A-Za-z0-9._:/@+=-]*))?([[:space:]]+#.*)?\$"
+readonly ROLE_LINE="^tarubot_role:[[:space:]]+(staging|production|\"staging\"|\"production\"|'staging'|'production')([[:space:]]+#.*)?[[:space:]]*\$"
+# One allowed signer in tarubot_allowed_signers' block list, double- or single-quoted: an Ed25519
+# key line (the playbook's tb_signer_pattern) whose type and key (groups 1 and 2) this script
+# checks signatures against, dropping the comment, as the playbook's template does.
+readonly SIGNER_DQ='^[[:space:]]+-[[:space:]]+"(ssh-ed25519|sk-ssh-ed25519@openssh\.com) (AAAA[0-9A-Za-z+/]+={0,3})( [^"\]*)?"([[:space:]]+#.*)?$'
+readonly SIGNER_SQ="^[[:space:]]+-[[:space:]]+'(ssh-ed25519|sk-ssh-ed25519@openssh\\.com) (AAAA[0-9A-Za-z+/]+={0,3})( [^']*)?'([[:space:]]+#.*)?\$"
+# git's empty tree: attributes are read from it, never from a .gitattributes in the checkout.
+readonly EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+# A failed commit is retried after an hour; a host lock busy this long pages; how far back and how
+# much of the Deploy runs a production poll reads. The window is past GitHub's 30 days for a
+# required reviewer to approve, so a release approved late is still listed.
+readonly RETRY_AFTER=3600
+readonly BUSY_PAGE=10800
+readonly WINDOW_DAYS=31
+readonly MAX_NEW_RUNS=5
+
+# ---------------------------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------------------------
+
+# A line for the journal. The script's own lines are `poll ...`, `check <sha12> <token>`,
+# `apply <sha12> reason=<token>` and `warning <token> ...`.
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+usage() {
+  printf '%s\n' 'usage: tarubot-host-config run | apply-now | status | pause REASON [--no-wait] | resume | bootstrap COMMIT | apply COMMIT --emergency [--ignore-lock]' >&2
+  exit 64
+}
+
+# The exit status of an outcome ($1) and reason ($2), as section 4's table has it.
+exit_code() {
+  case $1 in
+    applied | recorded | current | paused) printf 0 ;;
+    waiting) printf 75 ;;
+    needs-you)
+      case $2 in
+        layout | settings | state-schema | not-root | already-bootstrapped) printf 78 ;;
+        bad-commit) printf 64 ;;
+        *) printf 1 ;;
+      esac
+      ;;
+    *) printf 1 ;;
+  esac
+}
+
+# End run, bootstrap or apply: the one result line on stdout, the ping that goes with it and the
+# exit status. $1 outcome, $2 commit (40 hex or -), $3 version, $4 changed, $5 reason, and $6 the
+# ping's detail where the table names one (the failed task, the git step, the hours the lock has
+# been busy, or the pause reason). A field that doesn't fit its form prints as "-".
+result() {
+  local outcome=$1 commit=${2:--} version=${3:--} changed=${4:--} reason=${5:--} detail=${6-}
+  local short=- line code filter open=''
+  trap - ERR
+  if [[ $commit =~ ^[0-9a-f]{40}$ ]]; then short=${commit:0:12}; fi
+  [[ $version =~ $VERSION ]] || version=-
+  [[ $changed =~ ^[0-9]{1,5}$ ]] || changed=-
+  line="result outcome=$outcome commit=$short version=$version changed=$changed reason=$reason"
+  if [[ ! $line =~ $RESULT_FORM ]]; then
+    log "warning bad-result"
+    outcome=failed reason=-
+    line='result outcome=failed commit=- version=- changed=- reason=-'
+  fi
+  code=$(exit_code "$outcome" "$reason")
+  # The state keeps the last result only while this run owns it (the private lock, a valid state),
+  # and two things with it:
+  #   - busy_since times one stretch of polls that found the host lock busy. Any poll that ends
+  #     other than waiting closes it, so a later short deploy never pages for hours that were never
+  #     busy; a waiting poll (GitHub unreachable, rate-limited) says nothing about the lock.
+  #   - a poll that ends current or recorded found no retry due (the backoff comes first), so a
+  #     failure still on record belongs to a commit or settings no longer wanted, such as a
+  #     host.yml edit that failed before the playbook changed anything and was then undone. It is
+  #     dropped, and never pages again.
+  if ((STATE_LOADED)); then
+    filter='.last_result = $l'
+    [[ $outcome == waiting ]] || filter+=' | .busy_since = null'
+    [[ $outcome != current && $outcome != recorded ]] || filter+=' | .failure = null'
+    if state_set --arg l "$line" "$filter"; then state_write || log "warning state-write"; fi
+    open=$(state_get '.failure.commit') || open=''
+  fi
+  printf '%s\n' "$line"
+  case $outcome:$reason in
+    applied:bootstrap) ping '' "bootstrap $short $version changed=$changed" ;;
+    applied:emergency) ping /fail "emergency-apply $short $version" ;;
+    applied:*) ping '' "applied $short $version changed=$changed $reason" ;;
+    recorded:*) ping '' "recorded $short $version" ;;
+    current:*) ping '' "current $short $version" ;;
+    paused:*) ping /fail "paused $detail" ;;
+    # A deploy delaying the retry of a failed commit doesn't resolve the failure: the check stays
+    # down rather than flap up and down again.
+    waiting:deploy-running)
+      if [[ $open =~ ^[0-9a-f]{40}$ ]]; then
+        ping /fail "apply-failed ${open:0:12} task=$(state_get '.failure.task')"
+      else
+        ping '' 'waiting deploy-running'
+      fi
+      ;;
+    waiting:lock-held) ping /fail "lock-held ${detail}h" ;;
+    failed:git-local) ping /fail "git-local $detail" ;;
+    failed:*)
+      if ((EMERGENCY)); then
+        ping /fail "emergency-apply $short $version"
+      else
+        ping /fail "apply-failed $short task=$detail"
+      fi
+      ;;
+    needs-you:not-root | needs-you:already-bootstrapped | needs-you:bad-commit | waiting:*) ;;
+    needs-you:*) ping /fail "needs-you $reason $short" ;;
+  esac
+  exit "$code"
+}
+
+# A command failed where the script didn't expect it: a local failure, reported like one. In a
+# subshell (a command substitution) only leave it; the caller sees the failure.
+unexpected() {
+  [[ $BASHPID == "${MAIN_PID-}" ]] || exit "$1"
+  log "warning unexpected status=$1 line=$2"
+  result failed "${CUR-}" - - git-local unexpected
+}
+
+# ---------------------------------------------------------------------------------------------
+# The tools, each under a clean environment with the lock descriptors closed
+# ---------------------------------------------------------------------------------------------
+
+# Every git call. The URL is always explicit and no remote is configured; `--limit N` first bounds
+# the call with timeout(1). Attributes come from the empty tree (attr.tree, git 2.43 and later), so
+# no .gitattributes in a commit, which a runtime-only merge could add unsigned anywhere, can
+# re-encode or rewrite what a checkout writes; ALLOWED is the run's own signers file (signers_write).
+g() {
+  local -a bound=()
+  if [[ ${1-} == --limit ]]; then
+    bound=(timeout "$2")
+    shift 2
+  fi
+  env -i PATH="$PATH" HOME="$HOME_DIR" TMPDIR="$HOME_DIR/tmp" LC_ALL=C GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_OPTIONAL_LOCKS=0 "${bound[@]}" git -C "$CLONE" \
+    -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false \
+    -c core.pager=cat -c "attr.tree=$EMPTY_TREE" -c core.autocrlf=false \
+    -c protocol.allow=never -c "protocol.$REMOTE_PROTOCOL.allow=always" \
+    -c http.followRedirects=false \
+    -c submodule.recurse=false -c fetch.recurseSubmodules=false -c transfer.fsckObjects=true \
+    -c gc.autoDetach=false -c maintenance.auto=false -c credential.helper= \
+    -c gpg.format=ssh -c gpg.ssh.program=/usr/bin/ssh-keygen \
+    -c gpg.ssh.allowedSignersFile="${ALLOWED:-/dev/null}" -c gpg.openpgp.program=/bin/false \
+    -c gpg.x509.program=/bin/false -c gpg.minTrustLevel=fully "$@" 8<&- 9<&-
+}
+
+# Every jq call; no ~/.jq is loaded.
+j() {
+  env -i PATH="$PATH" HOME="$HOME_DIR" LC_ALL=C jq "$@" 8<&- 9<&-
+}
+
+# One anonymous GitHub API call for path $1 (after the base), into $TMP/b and $TMP/h. Returns 0
+# for a 200 answer, 3 when GitHub is unreachable (a transport error, another status, or the API
+# phase's deadline passed) and 4 when it is rate-limited (403, 429, or fewer than 20 requests left).
+# There is no token and no ETag: an anonymous 304 still costs a request.
+api() {
+  local code line remaining=
+  if ((SECONDS - API_START >= API_DEADLINE)); then
+    log "warning api-deadline"
+    return 3
+  fi
+  if ! code=$(env -i PATH="$PATH" HOME="$HOME_DIR" LC_ALL=C curl -q --proto "$API_PROTO" --tlsv1.2 -sS --connect-timeout 10 --max-time 20 \
+    --retry 2 --retry-max-time 60 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -D "$TMP/h" -o "$TMP/b" -w '%{http_code}' "$API_BASE/$1" 8<&- 9<&-); then
+    log "warning api-unreachable"
+    return 3
+  fi
+  if [[ -f $TMP/h ]]; then
+    while IFS= read -r line; do
+      line=${line%$'\r'}
+      if [[ ${line,,} =~ ^x-ratelimit-remaining:[[:space:]]*([0-9]{1,9})[[:space:]]*$ ]]; then
+        remaining=${BASH_REMATCH[1]}
+      fi
+    done <"$TMP/h"
+  fi
+  case $code in
+    200) ;;
+    403 | 429)
+      log "warning api-rate-limited status=$code"
+      return 4
+      ;;
+    *)
+      log "warning api-status status=${code//[^0-9]/}"
+      return 3
+      ;;
+  esac
+  if [[ -n $remaining ]] && ((10#$remaining < 20)); then
+    log "warning api-rate-limited remaining=$remaining"
+    return 4
+  fi
+}
+
+# One health-check ping: $1 the suffix ('' for success, /start or /fail), $2 the body, public data
+# only. The URL reaches curl on stdin, never in its argv. A failed ping is logged and changes
+# nothing.
+ping() {
+  [[ -n ${PING_URL-} ]] || return 0
+  printf 'url = "%s%s"\n' "$PING_URL" "$1" |
+    env -i PATH="$PATH" HOME="$HOME_DIR" LC_ALL=C curl -q --config - --proto "$PING_PROTO" -fsS --connect-timeout 5 --max-time 10 --retry 3 --data-raw "$2" -o /dev/null 8<&- 9<&- ||
+    log "warning ping-failed"
+}
+
+# The playbook, applied to this host (section 13), with source $1, commit $2 and run id $3, and
+# what this script read from host.yml: the role and the digest of the signers, which the playbook
+# compares with its own reading. Its output goes to the journal and to $TMP/play.log; PLAY_RC is
+# its exit status (124 or 137 when timeout(1) stopped it). Ansible gets a UTF-8 locale, which ansible-core 2.16 requires, and umask
+# 022, so pull, bootstrap, emergency and hand runs produce the same modes. Its remote temporary
+# directory is named too: Ansible expands the default ~/.ansible/tmp as ~root, not from HOME, and
+# a copy or template task on the local connection would otherwise write under /root. Tasks run as
+# tarubot still use /var/tmp, as before.
+playbook() {
+  local rc=0
+  (
+    umask 022
+    cd -- "$CLONE/ops/ansible" &&
+      exec env -i PATH="$PATH" HOME="$HOME_DIR" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+        ANSIBLE_CONFIG="$CLONE/ops/ansible/ansible.cfg" ANSIBLE_HOME="$HOME_DIR/.ansible" \
+        ANSIBLE_LOCAL_TEMP="$HOME_DIR/.ansible/tmp" ANSIBLE_REMOTE_TMP="$HOME_DIR/.ansible/tmp" \
+        ANSIBLE_NOCOLOR=1 ANSIBLE_FORCE_COLOR=0 \
+        ANSIBLE_RETRY_FILES_ENABLED=False PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+        timeout --kill-after=60 40m ansible-playbook -c local -i localhost, "$CLONE/ops/ansible/site.yml" \
+        -e "@$SETTINGS" -e tarubot_host_lock_held=true -e "tarubot_source=$1" \
+        -e "tarubot_commit=$2" -e "tarubot_run=$3" -e "tarubot_pull_role=$ROLE" \
+        -e "tarubot_pull_signers=$SIGNERS_DIGEST" --skip-tags start --diff 8<&- 9<&-
+  ) </dev/null 2>&1 | tee "$TMP/play.log" >&2 8<&- 9<&- || rc=${PIPESTATUS[0]}
+  PLAY_RC=$rc
+}
+
+# systemctl, bounded (apply-now's own start is bounded by the unit instead).
+sc() {
+  timeout 60 systemctl "$@" 8<&- 9<&-
+}
+
+# ---------------------------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------------------------
+
+# The time, in seconds since the epoch. Tests replace it.
+now() {
+  date +%s 8<&- 9<&-
+}
+
+# The most recent DRIFT_HOUR:00 UTC at or before now (UTC days are 86400 seconds of epoch time).
+drift_due() {
+  local t
+  t=$(now)
+  printf '%s' "$(((t - 10#$DRIFT_HOUR * 3600) / 86400 * 86400 + 10#$DRIFT_HOUR * 3600))"
+}
+
+# A UTC timestamp for epoch $1, for status.
+utc() {
+  date -u -d "@$1" +%FT%TZ 8<&- 9<&- || printf '%s' "$1"
+}
+
+# Owner uid, octal mode and type of $1, without following a link: "<uid> <mode> <type>".
+meta() {
+  stat -c '%u %a %F' -- "$1" 8<&- 9<&-
+}
+
+# True when $1 exists (or is a dangling link).
+present() {
+  [[ -e $1 || -L $1 ]]
+}
+
+# True when $1 is a regular file, not a link, owned by OWNER_UID with mode $2.
+owned_file() {
+  local m uid mode type
+  [[ -f $1 && ! -L $1 ]] || return 1
+  m=$(meta "$1") || return 1
+  read -r uid mode type <<<"$m"
+  [[ $uid == "$OWNER_UID" && $mode == "$2" && $type == regular* ]]
+}
+
+# True when $1 is a regular file, not a link, owned by OWNER_UID and writable by nobody else.
+owned_regular() {
+  local m uid mode type
+  [[ -f $1 && ! -L $1 ]] || return 1
+  m=$(meta "$1") || return 1
+  read -r uid mode type <<<"$m"
+  [[ $uid == "$OWNER_UID" && $type == regular* ]] && (((8#$mode & 8#022) == 0))
+}
+
+# True when $1 is a directory, not a link, owned by OWNER_UID and writable by nobody else; with $2,
+# its mode must be exactly $2.
+owned_dir() {
+  local m uid mode type
+  m=$(meta "$1") || return 1
+  read -r uid mode type <<<"$m"
+  [[ $type == directory && $uid == "$OWNER_UID" ]] || return 1
+  (((8#$mode & 8#022) == 0)) || return 1
+  [[ -z ${2-} || $mode == "$2" ]]
+}
+
+# True when every directory from LAYOUT_TOP down to $1 is owned_dir.
+chain_ok() {
+  local dir=$1 top=${LAYOUT_TOP%/}
+  [[ $dir == "$LAYOUT_TOP" || $dir == "$top"/* ]] || return 1
+  while :; do
+    owned_dir "$dir" || return 1
+    [[ $dir != "$LAYOUT_TOP" ]] || return 0
+    dir=${dir%/*}
+    [[ -n $dir ]] || dir=/
+  done
+}
+
+# The layout checks (section 4): nothing below may be writable by anyone but OWNER_UID.
+layout_ok() {
+  local dir file
+  for dir in "$STATE_DIR" "${SETTINGS%/*}" "${PING_FILE%/*}" "${LOCK%/*}"; do
+    chain_ok "$dir" || return 1
+  done
+  owned_dir "$STATE_DIR" 700 && owned_dir "$HOME_DIR" 700 || return 1
+  for dir in "$HOME_DIR/tmp" "$CLONE"; do
+    if present "$dir"; then owned_dir "$dir" 700 || return 1; fi
+  done
+  if present "$CLONE/.git"; then
+    owned_dir "$CLONE/.git" || return 1
+    owned_regular "$CLONE/.git/config" || return 1
+  fi
+  for file in state.json last-run.json pause now; do
+    if present "$STATE_DIR/$file"; then owned_file "$STATE_DIR/$file" 600 || return 1; fi
+  done
+  if present "$SETTINGS"; then owned_file "$SETTINGS" 600 || return 1; fi
+  owned_dir "${LOCK%/*}" 755 && owned_file "$LOCK" 644
+}
+
+# True when file $1 holds printable ASCII (0x20 to 0x7E) and LF only: no tab, CR or NUL, and none
+# of the other line breaks YAML knows (NEL, LS and PS), which would make one line here two lines
+# for Ansible.
+plain_text() {
+  local other
+  other=$(LC_ALL=C tr -d '\n\040-\176' <"$1" 8<&- 9<&- | wc -c 8<&- 9<&-) || return 1
+  ((other == 0))
+}
+
+# host.yml in the plain subset the script reads (section 2): sets ROLE, SETTINGS_HASH, SIGNER_KEYS
+# (the allowed signers' "<type> <key>", in order) and SIGNERS_DIGEST (the sha256 of those joined
+# by commas), false for anything else. Ansible stays the authority on the rest; the playbook checks
+# that ROLE and SIGNERS_DIGEST (passed as tarubot_pull_role and tarubot_pull_signers) equal its own
+# reading of tarubot_role and tarubot_allowed_signers.
+settings_read() {
+  local size line key rest value cur='' inline=0 seen=' ' keys=0 roles=0 top=0 hash joined
+  ROLE='' SETTINGS_HASH='' SIGNERS_DIGEST=''
+  SIGNER_KEYS=()
+  [[ -f $SETTINGS && ! -L $SETTINGS ]] || return 1
+  size=$(stat -c %s -- "$SETTINGS" 8<&- 9<&-) || return 1
+  ((size <= 65536)) || return 1
+  plain_text "$SETTINGS" || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ ^[[:space:]]*$ || $line == '#'* ]]; then continue; fi
+    if [[ $line == ' '* ]]; then
+      # A value line under a key, or an indented comment.
+      ((keys > 0)) || return 1
+      value=${line#"${line%%[! ]*}"}
+      [[ $value != '#'* ]] || continue
+      # Nothing continues a key whose value is on its own line (YAML would join a plain value
+      # over several lines).
+      ((!inline)) || return 1
+      # The signers: exactly the quoted key lines of SIGNER_DQ or SIGNER_SQ.
+      if [[ $cur == tarubot_allowed_signers ]]; then
+        [[ $line =~ $SIGNER_DQ || $line =~ $SIGNER_SQ ]] || return 1
+        SIGNER_KEYS+=("${BASH_REMATCH[1]} ${BASH_REMATCH[2]}")
+        continue
+      fi
+      # Elsewhere no anchor, alias, tag, block scalar, flow mapping, complex key or merge key,
+      # after an optional "- ".
+      if [[ $value == '- '* ]]; then
+        value=${value#- }
+        value=${value#"${value%%[! ]*}"}
+      fi
+      if [[ $value == [\&\*\!\|\>\{\?]* || $value == '<<'* ]]; then return 1; fi
+      continue
+    fi
+    top=$((top + 1))
+    if [[ $line == --- ]]; then
+      ((top == 1)) || return 1
+      continue
+    fi
+    [[ $line =~ ^([a-z_]+):(.*)$ ]] || return 1
+    key=${BASH_REMATCH[1]} rest=${BASH_REMATCH[2]}
+    [[ " $SETTINGS_KEYS " == *" $key "* && $seen != *" $key "* ]] || return 1
+    [[ $rest =~ $KEY_REST ]] || return 1
+    inline=0
+    if [[ -n ${BASH_REMATCH[1]} ]]; then inline=1; fi
+    # The signers are a block list or [], never a single value.
+    if [[ $key == tarubot_allowed_signers ]]; then
+      [[ $rest =~ ^([[:space:]]+\[\])?([[:space:]]+#.*)?$ ]] || return 1
+    fi
+    cur=$key
+    seen+="$key "
+    keys=$((keys + 1))
+    if [[ $line =~ $ROLE_LINE ]]; then
+      roles=$((roles + 1))
+      value=${BASH_REMATCH[1]}
+      ROLE=${value//[\"\']/}
+    fi
+  done <"$SETTINGS"
+  ((roles == 1)) || return 1
+  hash=$(sha256sum -- "$SETTINGS" 8<&- 9<&-) || return 1
+  hash=${hash%% *}
+  [[ $hash =~ ^[0-9a-f]{64}$ ]] || return 1
+  joined=$(
+    IFS=,
+    printf '%s' "${SIGNER_KEYS[*]}"
+  )
+  SIGNERS_DIGEST=$(printf '%s' "$joined" | sha256sum 8<&- 9<&-) || return 1
+  SIGNERS_DIGEST=${SIGNERS_DIGEST%% *}
+  [[ $SIGNERS_DIGEST =~ ^[0-9a-f]{64}$ ]] || return 1
+  SETTINGS_HASH=$hash
+}
+
+# The run's own allowed signers file, from SIGNER_KEYS: what every signature check reads (ALLOWED
+# in g). Written into the run's temporary directory, so no file a playbook run rendered, from
+# whatever copy of the settings, ever decides a signature.
+signers_write() {
+  local keyline
+  ALLOWED=$TMP/allowed_signers
+  : >"$ALLOWED"
+  for keyline in "${SIGNER_KEYS[@]}"; do
+    printf '%s namespaces="git" %s\n' "$REVIEWER" "$keyline" >>"$ALLOWED"
+  done
+}
+
+# host-config.env: PING_URL, or empty for no pings. False (needs-you settings) for a file that
+# isn't a root-only regular file or isn't exactly comments, blank lines and one URL line.
+ping_read() {
+  local size line found=0 url='' scheme pattern
+  PING_URL=''
+  if ! present "$PING_FILE"; then
+    log "warning no-ping-file"
+    return 0
+  fi
+  owned_file "$PING_FILE" 600 || return 1
+  size=$(stat -c %s -- "$PING_FILE" 8<&- 9<&-) || return 1
+  ((size <= 4096)) || return 1
+  plain_text "$PING_FILE" || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ ^[[:space:]]*$ || $line == '#'* ]]; then continue; fi
+    [[ $line =~ ^HEALTHCHECKS_HOST_CONFIG_URL=(.*)$ ]] || return 1
+    url=${BASH_REMATCH[1]}
+    found=$((found + 1))
+  done <"$PING_FILE"
+  ((found == 1)) || return 1
+  if [[ -z $url ]]; then
+    log "warning no-ping-url"
+    return 0
+  fi
+  scheme=${PING_PROTO#=}
+  pattern="^${scheme}://[^[:space:]\"\\\\]+\$"
+  [[ $url =~ $pattern ]] || return 1
+  PING_URL=$url
+}
+
+# state.json into STATE, validated against schema 1 (section 12). 1 when it is missing, 2 when it
+# is unreadable or invalid.
+state_read() {
+  local file=$STATE_DIR/state.json
+  present "$file" || return 1
+  STATE=$(j -ce '
+    def hex(n): type == "string" and test("^[0-9a-f]{" + (n | tostring) + "}$");
+    def epoch: type == "number" and . >= 0 and . == floor;
+    def src: . == "bootstrap" or . == "pull" or . == "emergency";
+    def ver: type == "string" and (. == "-" or test("^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$"));
+    if type == "object"
+      and ([ "schema", "applied", "last_full", "failure", "busy_since", "target", "runs", "last_result" ] - keys == [])
+      and (.schema | type == "number") and .schema == 1
+      and (.applied | type == "object") and (.applied.commit | hex(40)) and (.applied.version | ver)
+      and (.applied.source | src) and (.applied.at | epoch)
+      and (.last_full | type == "object") and (.last_full.commit | hex(40)) and (.last_full.source | src)
+      and (.last_full.run | hex(16)) and (.last_full.at | epoch) and (.last_full.settings | hex(64))
+      and (.last_full.changed | epoch)
+      and (.failure == null or ((.failure | type == "object") and (.failure.commit | hex(40))
+        and (.failure.settings | hex(64)) and (.failure.attempts | epoch) and (.failure.first_at | epoch)
+        and (.failure.last_at | epoch)
+        and (.failure.task | type == "string" and test("^[A-Za-z0-9 ._()/,:=-]{1,120}$"))))
+      and (.busy_since == null or (.busy_since | epoch))
+      and (.target == null or ((.target | type == "object") and (.target.commit | hex(40))
+        and (.target.run | type == "string" and test("^[1-9][0-9]{0,19}$"))))
+      and (.runs | type == "object")
+      and all(.runs | to_entries[]; (.key | test("^[1-9][0-9]{0,19}$"))
+        and (.value | type == "string" and test("^(skip:[a-z0-9-]{1,40}|candidate:[0-9a-f]{40})$")))
+      and (.last_result | type == "string")
+    then . else empty end' "$file" 2>/dev/null) || return 2
+  [[ -n $STATE ]] || return 2
+}
+
+# One value of STATE by jq filter $1 ("" for null).
+state_get() {
+  j -r "$1 // empty" <<<"$STATE"
+}
+
+# Change STATE with jq: the arguments are jq's, the filter last.
+state_set() {
+  local next
+  next=$(j -c "$@" <<<"$STATE") || return 1
+  [[ -n $next ]] || return 1
+  STATE=$next
+}
+
+# Write STATE to state.json atomically: a temporary file beside it, synced, renamed over it, and
+# the directory synced, so a crash leaves either the old or the new file.
+state_write() {
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.state.XXXXXX" 8<&- 9<&-)
+  printf '%s\n' "$STATE" >"$tmp"
+  sync -- "$tmp" 8<&- 9<&-
+  mv -f -- "$tmp" "$STATE_DIR/state.json" 8<&- 9<&-
+  sync -- "$STATE_DIR" 8<&- 9<&-
+}
+
+# Write flag $1 (pause or now) with content $2 atomically: a temporary file, then a rename.
+flag_write() {
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.$1.XXXXXX" 8<&- 9<&-)
+  printf '%s' "$2" >"$tmp"
+  mv -f -- "$tmp" "$STATE_DIR/$1" 8<&- 9<&-
+}
+
+# The pause file's reason, printable ASCII only.
+pause_reason() {
+  local line=''
+  IFS= read -r line <"$STATE_DIR/pause" || true
+  line=${line#* }
+  line=${line//[^[:print:]]/}
+  printf '%s' "${line:0:200}"
+}
+
+# The run marker the playbook wrote (section 1) into MARKER_SOURCE, MARKER_COMMIT and MARKER_RUN;
+# false when it is missing or unreadable.
+marker_read() {
+  local out
+  MARKER_SOURCE='' MARKER_COMMIT='' MARKER_RUN=''
+  owned_file "$STATE_DIR/last-run.json" 600 || return 1
+  out=$(j -r 'if (.source | type) == "string" and (.commit | type) == "string" and (.run | type) == "string"
+    then [.source, .commit, .run] | join(" ") else empty end' "$STATE_DIR/last-run.json" 2>/dev/null) || return 1
+  [[ $out =~ ^([a-z]+)\ ([0-9a-f]{40})?\ ([0-9a-f]{16})?$ ]] || return 1
+  MARKER_SOURCE=${BASH_REMATCH[1]} MARKER_COMMIT=${BASH_REMATCH[2]} MARKER_RUN=${BASH_REMATCH[3]}
+}
+
+# A fresh run id: 8 bytes from /dev/urandom as 16 lowercase hex digits.
+run_id() {
+  local id
+  id=$(od -An -N8 -tx1 /dev/urandom 8<&- 9<&-)
+  id=${id//[[:space:]]/}
+  [[ $id =~ ^[0-9a-f]{16}$ ]] || return 1
+  printf '%s' "$id"
+}
+
+# package.json's version at commit $1, or "-".
+version_of() {
+  local v
+  v=$(g cat-file blob "$1:package.json" 2>/dev/null | j -r '.version // empty' 2>/dev/null) || v=''
+  [[ $v =~ $VERSION ]] || v=-
+  printf '%s' "$v"
+}
+
+# A local git step failed.
+git_fail() {
+  log "warning git-local step=$1"
+  result failed "${CUR-}" - - git-local "$1"
+}
+
+# True when ops/ansible/ differs between commits $1 and $2 (a local git failure ends the run).
+host_changed() {
+  local rc=0
+  g diff --quiet --no-ext-diff "$1" "$2" -- "$HOST_PATHS" || rc=$?
+  case $rc in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) git_fail diff ;;
+  esac
+}
+
+# The holders of the host lock, from /proc/locks (the lock's device and inode), for the log.
+holders() {
+  local m dev ino id line value pid uid comm found=0
+  local -a f
+  m=$(stat -L -c '%d %i' -- "$LOCK" 8<&- 9<&-) || return 0
+  dev=${m% *} ino=${m#* }
+  printf -v id '%02x:%02x:%s' "$(((dev >> 8) & 0xfff | ((dev >> 32) & ~0xfff)))" \
+    "$(((dev & 0xff) | ((dev >> 12) & ~0xff)))" "$ino"
+  while read -r -a f; do
+    if [[ ${f[1]-} == '->' ]]; then f=("${f[0]}" "${f[@]:2}"); fi
+    [[ ${f[5]-} == "$id" ]] || continue
+    pid=${f[4]} uid='?' comm='?'
+    if [[ -r /proc/$pid/status ]]; then
+      while IFS=$' \t' read -r line value _; do
+        if [[ $line == Uid: ]]; then
+          uid=$value
+          break
+        fi
+      done <"/proc/$pid/status"
+    fi
+    if [[ -r /proc/$pid/comm ]]; then IFS= read -r comm <"/proc/$pid/comm" || true; fi
+    log "warning lock-ignored holder pid=$pid uid=${uid//[^0-9]/} comm=${comm//[^A-Za-z0-9._-]/}"
+    found=1
+  done </proc/locks
+  ((found)) || log "warning lock-ignored holder=unknown"
+}
+
+# ---------------------------------------------------------------------------------------------
+# Locks and git
+# ---------------------------------------------------------------------------------------------
+
+# Open the host lock read-only on fd 9 (the layout checks have trusted it; tarubot can't replace it).
+lock_open() {
+  exec 9<"$LOCK"
+}
+
+# Take the host lock without waiting (`poll`) or within 300 s (`wait`), false when it stays busy.
+# `ignore` (the emergency apply's --ignore-lock) takes it if it is free and otherwise goes on without
+# it, logging who holds it.
+lock_try() {
+  lock_open || return 1
+  case $1 in
+    poll) flock -n 9 ;;
+    wait) flock -w 300 9 ;;
+    ignore)
+      if ! flock -n 9; then holders; fi
+      ;;
+  esac
+}
+
+# The stale lock files a killed run can leave in the clone: a fixed list, removed while the private
+# lock is held, so no other git process is running there.
+git_unlock() {
+  local lock
+  for lock in "$CLONE/.git/index.lock" "$CLONE/.git/HEAD.lock" "$CLONE/.git/config.lock" \
+    "$CLONE/.git/packed-refs.lock" "$CLONE/.git/shallow.lock" "$CLONE/.git/refs/remotes/origin/main.lock"; do
+    if present "$lock"; then
+      rm -f -- "$lock" 8<&- 9<&-
+      log "warning stale-git-lock ${lock#"$CLONE"/}"
+    fi
+  done
+}
+
+# Fetch main into refs/remotes/origin/main. The time limit, or a network or GitHub failure, is
+# waiting github-unreachable (no ping; a long outage shows as missed pings), whether it came at the
+# discovery request ("unable to access") or in protocol v2's later requests, where git reports an
+# HTTP error, a reset or a cut-off answer in other words. A local cause (the disk, permissions,
+# memory, a lock, an object that fails fsck) is git-local, even beside one of those.
+fetch() {
+  local err rc=0 remote=0
+  err=$(g --limit 120 fetch -q --no-tags --no-write-fetch-head "$REMOTE" '+refs/heads/main:refs/remotes/origin/main' 2>&1 >/dev/null) || rc=$?
+  ((rc != 0)) || return 0
+  log "fetch: ${err//[^[:print:]]/ }"
+  case $err in
+    *"unable to access '"* | *'RPC failed'* | *'remote end hung up'* | *'early EOF'* | *'expected flush'* | \
+      *'unexpected disconnect'* | *'bytes of body are still expected'*)
+      remote=1
+      ;;
+  esac
+  case $err in
+    *'No space left'* | *'Permission denied'* | *'insufficient permission'* | *'Read-only file system'* | \
+      *'Disk quota exceeded'* | *'Cannot allocate memory'* | *'Out of memory'* | *'nable to create'* | *'fsck error'*)
+      remote=0
+      ;;
+  esac
+  if ((rc == 124 || remote)); then
+    result waiting - - - github-unreachable
+  fi
+  git_fail fetch
+}
+
+# MAIN (origin/main's commit) and FP, the set of commits on main's first-parent chain.
+load_main() {
+  local out sha
+  MAIN=$(g rev-parse --verify -q 'refs/remotes/origin/main^{commit}') || git_fail rev-parse
+  out=$(g rev-list --first-parent "$MAIN") || git_fail rev-list
+  declare -gA FP=()
+  while IFS= read -r sha; do
+    if [[ -n $sha ]]; then FP[$sha]=1; fi
+  done <<<"$out"
+}
+
+# P, the first-parent path from $1 (exclusive) to $2 (inclusive); false unless it is a non-empty
+# path that starts right after $1 and ends on main's first-parent chain.
+check_path() {
+  local out parent
+  P=()
+  out=$(g rev-list --first-parent --reverse "$1..$2") || git_fail rev-list
+  [[ -n $out ]] || return 1
+  read -r -d '' -a P <<<"$out" || true
+  parent=$(g rev-parse --verify -q "${P[0]}^1") || return 1
+  [[ $parent == "$1" && -n ${FP[$2]-} ]]
+}
+
+# ops and ops/ansible at commit $1 are trees, and nothing under ops/ansible/ is a link or a
+# submodule.
+check_links() {
+  local out line
+  [[ $(g cat-file -t "$1:ops" 2>/dev/null) == tree && $(g cat-file -t "$1:ops/ansible" 2>/dev/null) == tree ]] || return 1
+  out=$(g ls-tree -r "$1" -- "$HOST_PATHS") || git_fail ls-tree
+  while IFS= read -r line; do
+    if [[ $line == '120000 '* || $line == '160000 '* ]]; then return 1; fi
+  done <<<"$out"
+}
+
+# Commit $1 carries this script as a regular file.
+check_self() {
+  local out pattern
+  out=$(g ls-tree "$1" -- "$SELF") || git_fail ls-tree
+  pattern="^(100644|100755) blob [0-9a-f]{40}"$'\t'"$SELF\$"
+  [[ $out =~ $pattern ]]
+}
+
+# The merge $1 meets question 14's rule: two parents, the tree of its PR head, a head containing
+# the previous main, and a good SSH signature on the head from an allowed signer. Logs why not.
+check_merge() {
+  local out tree head rc=0
+  local -a parents
+  out=$(g rev-list --parents -n 1 "$1") || git_fail rev-list
+  read -r -a parents <<<"$out"
+  if ((${#parents[@]} != 3)); then
+    log "check ${1:0:12} not-a-merge"
+    return 1
+  fi
+  tree=$(g rev-parse --verify -q "$1^{tree}") || git_fail rev-parse
+  head=$(g rev-parse --verify -q "$1^2^{tree}") || git_fail rev-parse
+  if [[ $tree != "$head" ]]; then
+    log "check ${1:0:12} tree-differs"
+    return 1
+  fi
+  g merge-base --is-ancestor "$1^1" "$1^2" || rc=$?
+  if ((rc == 1)); then
+    log "check ${1:0:12} head-behind"
+    return 1
+  fi
+  ((rc == 0)) || git_fail merge-base
+  out=$(g log -1 --format='%G?%x1f%GT' "$1^2") || git_fail log
+  if [[ $out != G$'\x1f'fully ]]; then
+    log "check ${1:0:12} signature-${out:0:1}"
+    return 1
+  fi
+  log "check ${1:0:12} signed"
+}
+
+# The checks on a new target $2 from applied commit $1 (sections 9 and 10), ending the run on a
+# failure. The signature rule applies only when ops/ansible/ differs between the two.
+check_target() {
+  local m
+  check_path "$1" "$2" || result needs-you "$2" - - history-rewritten
+  check_links "$2" || result needs-you "$2" - - host-config-link
+  check_self "$2" || result needs-you "$2" - - missing-pull-unit
+  host_changed "$1" "$2" || return 0
+  for m in "${P[@]}"; do
+    host_changed "$m^1" "$m" || continue
+    if ((${#SIGNER_KEYS[@]} == 0)); then
+      log "check ${m:0:12} no-signers"
+      result needs-you "$m" - - no-signers
+    fi
+    check_merge "$m" || result needs-you "$m" - - unsigned-host-change
+  done
+}
+
+# ---------------------------------------------------------------------------------------------
+# Choosing the target
+# ---------------------------------------------------------------------------------------------
+
+# Staging: the head of main.
+select_staging() {
+  TARGET=$MAIN
+}
+
+# Save RUNS into the state, pruned to the latest listing once every listed run has been seen (a
+# poll that stops earlier keeps them all).
+runs_store() {
+  local id
+  local -a args=()
+  for id in "${!RUNS[@]}"; do
+    if ((LISTING_OK)) && [[ -z ${LISTED[$id]-} ]]; then continue; fi
+    args+=("$id" "${RUNS[$id]}")
+  done
+  state_set --args '.runs = ($ARGS.positional | . as $a | reduce range(0; length; 2) as $i ({}; .[$a[$i]] = $a[$i + 1]))' "${args[@]}" ||
+    git_fail state
+  state_write
+}
+
+# The API answered $1 (api's status): end the poll unless it was a 200.
+api_or_wait() {
+  case $1 in
+    0) return 0 ;;
+    4)
+      runs_store
+      result waiting - - - rate-limited
+      ;;
+    *)
+      runs_store
+      result waiting - - - github-unreachable
+      ;;
+  esac
+}
+
+# Production (section 7): TARGET is the newest of state.target and the verified candidates in
+# (A, main], or A. Each listed run is decided once and cached, cheapest checks first; a Deploy that
+# succeeded without @deconfined's approval for production always pages (below).
+select_production() {
+  local a=$1 out sha i n rc since listing total rows id path repo branch attempt status event title
+  local deploy mismatch='' mismatch_run='' budget=0 dispatch run best best_run t fields
+  local -A rank=() versions=()
+  local -a newer mismatches=()
+  declare -gA RUNS=() LISTED=()
+  LISTING_OK=0 API_START=$SECONDS
+  out=$(g rev-list --first-parent "$a..$MAIN") || git_fail rev-list
+  read -r -d '' -a newer <<<"$out" || true
+  n=${#newer[@]}
+  for ((i = 0; i < n; i++)); do rank[${newer[i]}]=$((n - i)); done
+  while IFS=$'\t' read -r id run; do
+    if [[ -n $id ]]; then RUNS[$id]=$run; fi
+  done < <(state_get '.runs | to_entries[] | "\(.key)\t\(.value)"')
+  since=$(date -u -d "@$(($(now) - WINDOW_DAYS * 86400))" +%F 8<&- 9<&-)
+  # One line per run, its fields joined by US (0x1f), which unlike a tab keeps empty fields; control
+  # characters in a value become spaces. The title is always .display_title, never .name.
+  fields='.workflow_runs[] | [.id, .path, .head_repository.full_name, .head_branch, .run_attempt, .status, .event, .display_title]
+    | map(tostring | gsub("[\u0000-\u001f]"; " ")) | join("\u001f")'
+  listing="repos/$REPO/actions/workflows/${WORKFLOW##*/}/runs?branch=main&status=completed&per_page=100&created=%3E%3D$since"
+  rc=0
+  api "$listing" || rc=$?
+  api_or_wait "$rc"
+  j -e '(.workflow_runs | type) == "array" and (.total_count | type) == "number"' "$TMP/b" >/dev/null 2>&1 ||
+    api_or_wait 3
+  total=$(j -r '.total_count | floor' "$TMP/b")
+  rows=$(j -r "$fields" "$TMP/b") || api_or_wait 3
+  if ((total > 100)); then
+    rc=0
+    api "$listing&page=2" || rc=$?
+    api_or_wait "$rc"
+    j -e '(.workflow_runs | type) == "array"' "$TMP/b" >/dev/null 2>&1 || api_or_wait 3
+    rows+=$'\n'$(j -r "$fields" "$TMP/b") || api_or_wait 3
+    if ((total > 200)); then log "warning runs-truncated"; fi
+  fi
+  dispatch="^Deploy (${VERSION:1:-1})\$"
+  while IFS=$'\x1f' read -r id path repo branch attempt status event title; do
+    [[ $id =~ ^[1-9][0-9]{0,19}$ ]] || continue
+    LISTED[$id]=1
+    [[ -z ${RUNS[$id]-} ]] || continue
+    # 1. The run's shape.
+    if [[ $path != "$WORKFLOW" || $repo != "$REPO" || $branch != main || $attempt != 1 || $status != completed ]]; then
+      RUNS[$id]=skip:shape
+      continue
+    fi
+    # 2. Its title, always .display_title.
+    sha=''
+    if [[ $title == *' to staging' ]]; then
+      RUNS[$id]=skip:staging
+    elif [[ $title == *' rollback from '* ]]; then
+      RUNS[$id]=skip:rollback
+    elif [[ $event == workflow_run && $title =~ ^Deploy\ ([0-9a-f]{40})$ ]]; then
+      sha=${BASH_REMATCH[1]}
+    elif [[ $event == workflow_dispatch && $title =~ $dispatch ]]; then
+      # The unique first-parent commit in (A, main] carrying that version.
+      t=${BASH_REMATCH[1]}
+      for ((i = 0; i < n; i++)); do
+        [[ -n ${versions[${newer[i]}]-} ]] || versions[${newer[i]}]=$(version_of "${newer[i]}")
+        if [[ ${versions[${newer[i]}]} == "$t" ]]; then
+          if [[ -n $sha ]]; then
+            runs_store
+            result needs-you - "$t" - ambiguous-version
+          fi
+          sha=${newer[i]}
+        fi
+      done
+      [[ -n $sha ]] || RUNS[$id]=skip:not-newer
+    else
+      RUNS[$id]=skip:title
+    fi
+    [[ -n $sha ]] || continue
+    # 3. The commit: not yet fetched is tried again next poll; off (A, main] is final.
+    if [[ -z ${rank[$sha]-} ]]; then
+      if g cat-file -e "$sha^{commit}" 2>/dev/null; then
+        RUNS[$id]=skip:not-newer
+      else
+        log "check ${sha:0:12} not-fetched run=$id"
+      fi
+      continue
+    fi
+    # 4. At most MAX_NEW_RUNS new runs reach GitHub per poll.
+    ((budget < MAX_NEW_RUNS)) || continue
+    budget=$((budget + 1))
+    # 5. Exactly one job named Deploy, and it succeeded.
+    rc=0
+    api "repos/$REPO/actions/runs/$id/jobs" || rc=$?
+    api_or_wait "$rc"
+    j -e '(.jobs | type) == "array" and .total_count == (.jobs | length)' "$TMP/b" >/dev/null 2>&1 || api_or_wait 3
+    deploy=$(j -r --arg job "$DEPLOY_JOB" '[.jobs[] | select(.name == $job)]
+      | if length == 1 then (.[0].conclusion // "missing" | tostring) elif length == 0 then "missing" else "duplicate" end' "$TMP/b") ||
+      api_or_wait 3
+    if [[ $deploy != success ]]; then
+      deploy=${deploy//_/-}
+      [[ $deploy =~ ^[a-z-]{1,30}$ ]] || deploy=other
+      RUNS[$id]=skip:deploy-$deploy
+      log "check ${sha:0:12} skip:deploy-$deploy run=$id"
+      continue
+    fi
+    # 6. @deconfined approved it for production, by login and numeric id.
+    rc=0
+    api "repos/$REPO/actions/runs/$id/approvals" || rc=$?
+    api_or_wait "$rc"
+    j -e 'type == "array"' "$TMP/b" >/dev/null 2>&1 || api_or_wait 3
+    if j -e --arg who "$REVIEWER" --argjson uid "$REVIEWER_ID" '
+        any(.[]; .state == "approved" and .user.login == $who and .user.id == $uid
+          and any(.environments[]?; .name == "production"))' "$TMP/b" >/dev/null 2>&1; then
+      RUNS[$id]=candidate:$sha
+      log "check ${sha:0:12} candidate run=$id"
+    else
+      log "check ${sha:0:12} approval-mismatch run=$id"
+      mismatches+=("$id")
+      if [[ -z $mismatch ]] || ((${rank[$sha]} > ${rank[$mismatch]})); then mismatch=$sha mismatch_run=$id; fi
+    fi
+  done <<<"$rows"
+  # Every listed run has been seen: runs_store may now drop the cached runs the listing left out.
+  LISTING_OK=1
+  # The newest candidate still ahead of A, the persisted target included.
+  best=$a best_run=''
+  rank[$a]=0
+  for id in "${!RUNS[@]}"; do
+    sha=${RUNS[$id]#candidate:}
+    [[ ${RUNS[$id]} == candidate:* && -n ${rank[$sha]-} ]] || continue
+    if ((${rank[$sha]} > ${rank[$best]})); then best=$sha best_run=$id; fi
+  done
+  t=$(state_get '.target.commit')
+  if [[ -n $t && -n ${rank[$t]-} ]] && ((${rank[$t]} > ${rank[$best]})); then
+    best=$t best_run=$(state_get '.target.run')
+  fi
+  if [[ $best != "$a" ]]; then
+    state_set --arg c "$best" --arg r "$best_run" '.target = {commit: $c, run: $r}' || git_fail state
+  else
+    state_set '.target = null' || git_fail state
+  fi
+  # A Deploy that succeeded without the approval is never passed over silently. Newer than every
+  # approved candidate, it stops the host at every poll, checked again each time, until a newer
+  # candidate or an emergency apply passes it. Behind one, it pages the first time it is seen: this
+  # poll ends needs-you, and the run is cached as reported so later polls go on to the candidate.
+  if [[ -n $mismatch ]]; then
+    if [[ $best == "$a" ]] || ((${rank[$mismatch]} > ${rank[$best]})); then
+      runs_store
+      log "warning approval-mismatch run=$mismatch_run"
+      result needs-you "$mismatch" "$(version_of "$mismatch")" - approval-mismatch
+    fi
+    for id in "${mismatches[@]}"; do RUNS[$id]=skip:mismatch-reported; done
+    runs_store
+    log "warning approval-mismatch run=$mismatch_run behind=${best:0:12}"
+    result needs-you "$mismatch" "$(version_of "$mismatch")" - approval-mismatch
+  fi
+  runs_store
+  TARGET=$best
+}
+
+# ---------------------------------------------------------------------------------------------
+# Full runs and recording
+# ---------------------------------------------------------------------------------------------
+
+# The failure record matches commit $1 at the current settings.
+failure_matches() {
+  [[ $(state_get '.failure.commit') == "$1" && $(state_get '.failure.settings') == "$SETTINGS_HASH" ]]
+}
+
+# The hourly backoff for commit $1 (section 11): failed retry-later while a failure at this commit
+# and these settings is less than an hour old, unless apply-now asked. Sets RETRY when the hour has
+# passed.
+backoff() {
+  local last
+  RETRY=0
+  failure_matches "$1" || return 0
+  last=$(state_get '.failure.last_at')
+  if ! present "$STATE_DIR/now" && (($(now) - last < RETRY_AFTER)); then
+    result failed "$1" "$(version_of "$1")" - retry-later "$(state_get '.failure.task')"
+  fi
+  RETRY=1
+}
+
+# Move the clone to commit $1 exactly, then check that what the playbook will read is what the
+# checks accepted: every file under ops/ansible/ equal to its blob, byte for byte. git's own index
+# trusts a file whose size and times it recorded, so a file changed behind it (by a filter a
+# .gitattributes once applied, or by hand) would survive a checkout; such a clone is repaired once
+# by dropping those index entries and checking out again, and otherwise the run stops (git-local).
+checkout() {
+  local err
+  if ! err=$(g checkout -q --force --detach "$1" 2>&1); then
+    log "checkout: ${err//[^[:print:]]/ }"
+    git_fail checkout
+  fi
+  [[ $(g rev-parse --verify -q HEAD) == "$1" ]] || git_fail checkout
+  g clean -q -ffdx >/dev/null 2>&1 || git_fail clean
+  host_files_match "$1" && return 0
+  log "warning clone-repaired ${HOST_PATHS}"
+  g rm -r -q --cached --ignore-unmatch -- "$HOST_PATHS" >/dev/null 2>&1 || git_fail checkout
+  g checkout -q --force --detach "$1" >/dev/null 2>&1 || git_fail checkout
+  host_files_match "$1" || git_fail checkout
+}
+
+# True when every file of commit $1 under ops/ansible/ is in the clone as a regular file, not a
+# link, whose raw bytes hash to the commit's blob (hash-object --no-filters applies no attribute).
+host_files_match() {
+  local out line blob path i pattern
+  local -a blobs=() paths=() hashes=()
+  [[ -d $CLONE/ops && ! -L $CLONE/ops && -d $CLONE/ops/ansible && ! -L $CLONE/ops/ansible ]] || return 1
+  out=$(g ls-tree -r "$1" -- "$HOST_PATHS") || git_fail ls-tree
+  # git quotes a path with unusual characters; nothing like that belongs under ops/ansible/.
+  pattern='^(100644|100755) blob ([0-9a-f]{40})'$'\t''([^"]+)$'
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    [[ $line =~ $pattern ]] || return 1
+    blob=${BASH_REMATCH[2]} path=${BASH_REMATCH[3]}
+    [[ -f $CLONE/$path && ! -L $CLONE/$path ]] || return 1
+    blobs+=("$blob")
+    paths+=("$path")
+  done <<<"$out"
+  ((${#paths[@]} > 0)) || return 1
+  out=$(printf '%s\n' "${paths[@]}" | g hash-object --no-filters --stdin-paths 2>/dev/null) || return 1
+  read -r -d '' -a hashes <<<"$out" || true
+  ((${#hashes[@]} == ${#blobs[@]})) || return 1
+  for ((i = 0; i < ${#blobs[@]}; i++)); do
+    [[ ${hashes[i]} == "${blobs[i]}" ]] || return 1
+  done
+}
+
+# Apply commit $1 with source $2 (pull, bootstrap or emergency) and reason $3, holding the host
+# lock taken by the caller: /start, the playbook, the marker, and the record (section 13).
+apply_commit() {
+  local c=$1 source=$2 reason=$3 ver run line task=unknown current='' changed=0 recap=0 at
+  CUR=$c
+  ver=$(version_of "$c")
+  run=$(run_id) || git_fail run-id
+  checkout "$c"
+  log "apply ${c:0:12} reason=$reason"
+  ping /start "$source ${c:0:12} $reason"
+  playbook "$source" "$c" "$run"
+  at=$(now)
+  if ((PLAY_RC == 0)); then
+    if ! marker_read || [[ $MARKER_SOURCE != "$source" || $MARKER_COMMIT != "$c" || $MARKER_RUN != "$run" ]]; then
+      log "warning marker-mismatch"
+      record_failure "$c" marker "$at"
+      result failed "$c" "$ver" - marker-mismatch marker
+    fi
+    # changed= from the PLAY RECAP, summed over its lines.
+    while IFS= read -r line; do
+      if [[ $line == 'PLAY RECAP'* ]]; then
+        recap=1
+      elif ((recap)) && [[ $line =~ changed=([0-9]{1,9}) ]]; then
+        changed=$((changed + 10#${BASH_REMATCH[1]}))
+      fi
+    done <"$TMP/play.log"
+    ((changed <= 99999)) || changed=99999
+    if ((STATE_LOADED)); then
+      state_set --arg c "$c" --arg v "$ver" --arg s "$source" --arg r "$run" --arg h "$SETTINGS_HASH" \
+        --argjson at "$at" --argjson n "$changed" '
+        .applied = {commit: $c, version: $v, source: $s, at: $at}
+        | .last_full = {commit: $c, source: $s, run: $r, at: $at, settings: $h, changed: $n}
+        | .failure = null' || git_fail state
+      target_prune "$c"
+      state_write
+    else
+      # bootstrap: the first state.
+      STATE=$(j -cn --arg c "$c" --arg v "$ver" --arg s "$source" --arg r "$run" --arg h "$SETTINGS_HASH" \
+        --argjson at "$at" --argjson n "$changed" '{schema: 1,
+          applied: {commit: $c, version: $v, source: $s, at: $at},
+          last_full: {commit: $c, source: $s, run: $r, at: $at, settings: $h, changed: $n},
+          failure: null, busy_since: null, target: null, runs: {}, last_result: ""}') || git_fail state
+      state_write
+      STATE_LOADED=1
+    fi
+    APPLIED_CHANGED=$changed
+    return 0
+  fi
+  if ((PLAY_RC == 124 || PLAY_RC == 137)); then
+    task=timeout
+  else
+    while IFS= read -r line; do
+      if [[ $line =~ ^TASK\ \[(.*)\] ]]; then current=${BASH_REMATCH[1]}; fi
+      if [[ $line == fatal:* || $line == *'FAILED!'* ]] && [[ -n $current ]]; then task=$current; fi
+    done <"$TMP/play.log"
+  fi
+  task=${task//[^A-Za-z0-9 ._()\/,:=-]/-}
+  task=${task:0:120}
+  log "warning apply-failed rc=$PLAY_RC"
+  record_failure "$c" "$task" "$at"
+  result failed "$c" "$ver" - apply-failed "$task"
+}
+
+# Keep the failure of commit $1 (task $2, at $3) in the state; a bootstrap has no state to keep it.
+record_failure() {
+  local attempts=1 first=$3
+  ((STATE_LOADED)) || return 0
+  if failure_matches "$1"; then
+    attempts=$(($(state_get '.failure.attempts') + 1))
+    first=$(state_get '.failure.first_at')
+  fi
+  state_set --arg c "$1" --arg h "$SETTINGS_HASH" --arg t "$2" --argjson a "$attempts" \
+    --argjson f "$first" --argjson l "$3" \
+    '.failure = {commit: $c, settings: $h, attempts: $a, first_at: $f, last_at: $l, task: $t}' || git_fail state
+  state_write
+}
+
+# Clear state.target once the applied commit $1 has reached or passed it.
+target_prune() {
+  local t rc=0
+  t=$(state_get '.target.commit')
+  [[ -n $t ]] || return 0
+  g merge-base --is-ancestor "$t" "$1" || rc=$?
+  if ((rc == 0)); then state_set '.target = null' || git_fail state; fi
+}
+
+# A full run of commit $1 for reason $2 from a poll (section 6 step 10): the host lock without
+# waiting, the pause re-check, then the apply. Ends the run.
+full_run() {
+  local c=$1 reason=$2 ver busy t
+  ver=$(version_of "$c")
+  if ! lock_try poll; then
+    busy=$(state_get '.busy_since')
+    t=$(now)
+    if [[ -z $busy ]]; then
+      busy=$t
+      state_set --argjson b "$busy" '.busy_since = $b' || git_fail state
+      state_write
+    fi
+    if ((t - busy >= BUSY_PAGE)); then
+      result waiting "$c" "$ver" - lock-held "$(((t - busy) / 3600))"
+    fi
+    result waiting "$c" "$ver" - deploy-running
+  fi
+  if [[ -n $(state_get '.busy_since') ]]; then
+    state_set '.busy_since = null' || git_fail state
+    state_write
+  fi
+  if present "$STATE_DIR/pause"; then result paused - - - paused "$(pause_reason)"; fi
+  if present "$STATE_DIR/now"; then rm -f -- "$STATE_DIR/now" 8<&- 9<&-; fi
+  apply_commit "$c" pull "$reason"
+  result applied "$c" "$ver" "$APPLIED_CHANGED" "$reason"
+}
+
+# ---------------------------------------------------------------------------------------------
+# The checks every run, bootstrap and apply starts with
+# ---------------------------------------------------------------------------------------------
+
+# Root only: result-line commands answer needs-you not-root, the others a plain line.
+require_root() {
+  [[ $EUID == "$OWNER_UID" ]] && return 0
+  if [[ $1 == result ]]; then result needs-you - - - not-root; fi
+  printf '%s\n' 'needs-you not-root' >&2
+  exit 78
+}
+
+# Take the private lock on the state directory (fd 8): without waiting for `run`, up to 60 s for
+# bootstrap and apply.
+private_lock() {
+  exec 8<"$STATE_DIR" || result needs-you - - - layout
+  if [[ $1 == poll ]]; then
+    flock -n 8 || result waiting - - - already-running
+  else
+    flock -w 60 8 || result waiting - - - already-running
+  fi
+}
+
+# The host's own files, in section 4's order after the lock: the ping file, the layout, the
+# settings. A failure after the ping file pings /fail when that file was usable.
+host_checks() {
+  ping_read || result needs-you - - - settings
+  layout_ok || result needs-you - - - layout
+  settings_read || result needs-you - - - settings
+}
+
+# The error and exit traps of run, bootstrap and apply, set right after their arguments are checked.
+traps() {
+  MAIN_PID=$BASHPID TMP=''
+  trap cleanup EXIT
+  trap 'unexpected "$?" "$LINENO"' ERR
+}
+
+# The run's own temporary directory, once HOME_DIR has passed the layout checks, and in it the
+# run's allowed signers from the host.yml the checks read.
+tmp_dir() {
+  TMP=$(mktemp -d "$HOME_DIR/run.XXXXXX" 8<&- 9<&-)
+  signers_write
+}
+
+cleanup() {
+  if [[ -n ${TMP-} ]]; then rm -rf -- "${TMP:?}" 8<&- 9<&-; fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------------------------
+
+# One poll (section 6).
+cmd_run() {
+  local a f_commit f_source f_run f_at reason='' ver marker_same=0 rc
+  (($# == 0)) || usage
+  STATE_LOADED=0 EMERGENCY=0 CUR=''
+  require_root result
+  traps
+  [[ -d $STATE_DIR ]] || result waiting - - - bootstrap
+  private_lock poll
+  host_checks
+  rc=0
+  state_read || rc=$?
+  ((rc != 1)) || result waiting - - - bootstrap
+  ((rc == 0)) || result needs-you - - - state-schema
+  present "$CLONE/.git" || result needs-you - - - layout
+  if ! present "$HOME_DIR/tmp"; then mkdir -m 700 -- "$HOME_DIR/tmp" 8<&- 9<&-; fi
+  STATE_LOADED=1
+  tmp_dir
+  if present "$STATE_DIR/pause"; then result paused - - - paused "$(pause_reason)"; fi
+  git_unlock
+  fetch
+  load_main
+  a=$(state_get '.applied.commit')
+  [[ -n ${FP[$a]-} ]] || result needs-you "$a" - - history-rewritten
+  # Host settings first: a changed host.yml re-applies A, with no target, API call or signature
+  # check, so the signers the checks read are the ones the settings name.
+  if [[ $SETTINGS_HASH != "$(state_get '.last_full.settings')" ]]; then
+    log "poll role=$ROLE applied=${a:0:12} main=${MAIN:0:12} target=${a:0:12} settings=changed"
+    backoff "$a"
+    full_run "$a" settings-changed
+  fi
+  "select_$ROLE" "$a"
+  log "poll role=$ROLE applied=${a:0:12} main=${MAIN:0:12} target=${TARGET:0:12}"
+  if [[ $TARGET != "$a" ]]; then check_target "$a" "$TARGET"; fi
+  CUR=$TARGET
+  ver=$(version_of "$TARGET")
+  backoff "$TARGET"
+  f_commit=$(state_get '.last_full.commit')
+  f_source=$(state_get '.last_full.source')
+  f_run=$(state_get '.last_full.run')
+  f_at=$(state_get '.last_full.at')
+  if marker_read && [[ $MARKER_SOURCE == "$f_source" && $MARKER_COMMIT == "$f_commit" && $MARKER_RUN == "$f_run" ]]; then
+    marker_same=1
+  fi
+  if present "$STATE_DIR/now"; then
+    reason=apply-now
+  elif ((RETRY)); then
+    reason=retry
+  elif host_changed "$f_commit" "$TARGET"; then
+    reason=newer
+  elif ((!marker_same)) && [[ $MARKER_SOURCE == pull || $MARKER_SOURCE == bootstrap || $MARKER_SOURCE == emergency ]]; then
+    reason=interrupted
+  elif ((!marker_same)); then
+    reason=hand-run
+  elif ((f_at < $(drift_due))); then
+    reason=drift
+  fi
+  if [[ -n $reason ]]; then full_run "$TARGET" "$reason"; fi
+  if [[ $TARGET == "$a" ]]; then result current "$a" "$ver" - -; fi
+  state_set --arg c "$TARGET" --arg v "$ver" --argjson at "$(now)" \
+    '.applied = {commit: $c, version: $v, source: "pull", at: $at}' || git_fail state
+  target_prune "$TARGET"
+  state_write
+  result recorded "$TARGET" "$ver" - runtime-only
+}
+
+# Once per host (section 3): apply COMMIT and start the timer. No signature check: the owner naming
+# the commit as root is the trust anchor.
+cmd_bootstrap() {
+  local c dir
+  (($# == 1)) || usage
+  STATE_LOADED=0 EMERGENCY=0 CUR=''
+  require_root result
+  traps
+  c=$1
+  if present "$STATE_DIR/state.json"; then result needs-you - - - already-bootstrapped; fi
+  [[ $c =~ ^[0-9a-f]{40}$ ]] || result needs-you - - - bad-commit
+  CUR=$c
+  if ! present "$STATE_DIR"; then mkdir -m 700 -- "$STATE_DIR" 8<&- 9<&-; fi
+  private_lock wait
+  if present "$STATE_DIR/state.json"; then result needs-you - - - already-bootstrapped; fi
+  for dir in "$HOME_DIR" "$HOME_DIR/tmp" "$CLONE"; do
+    if ! present "$dir"; then mkdir -m 700 -- "$dir" 8<&- 9<&-; fi
+  done
+  host_checks
+  tmp_dir
+  if ! present "$CLONE/.git"; then
+    g init -q -b main --template= >/dev/null || git_fail init
+  fi
+  git_unlock
+  fetch
+  load_main
+  [[ -n ${FP[$c]-} ]] || result needs-you "$c" - - bad-commit
+  check_links "$c" || result needs-you "$c" - - host-config-link
+  check_self "$c" || result needs-you "$c" - - missing-pull-unit
+  lock_try wait || result waiting "$c" "$(version_of "$c")" - deploy-running
+  apply_commit "$c" bootstrap bootstrap
+  if ! sc enable --now tarubot-host-config.timer >&2; then log "warning timer-enable-failed"; fi
+  result applied "$c" "$(version_of "$c")" "$APPLIED_CHANGED" bootstrap
+}
+
+# The emergency apply (section 3): a commit strictly after A on main's first-parent chain, past
+# the approval and signature checks and the backoff, also while paused. It always pages.
+cmd_apply() {
+  local c a ignore=0 rc
+  if (($# == 2)) && [[ $2 == --emergency ]]; then
+    :
+  elif (($# == 3)) && [[ $2 == --emergency && $3 == --ignore-lock ]]; then
+    ignore=1
+  else
+    usage
+  fi
+  STATE_LOADED=0 EMERGENCY=1 CUR=''
+  require_root result
+  traps
+  c=$1
+  [[ $c =~ ^[0-9a-f]{40}$ ]] || result needs-you - - - bad-commit
+  [[ -d $STATE_DIR ]] || result waiting - - - bootstrap
+  private_lock wait
+  host_checks
+  rc=0
+  state_read || rc=$?
+  ((rc != 1)) || result waiting - - - bootstrap
+  ((rc == 0)) || result needs-you - - - state-schema
+  present "$CLONE/.git" || result needs-you - - - layout
+  if ! present "$HOME_DIR/tmp"; then mkdir -m 700 -- "$HOME_DIR/tmp" 8<&- 9<&-; fi
+  STATE_LOADED=1
+  tmp_dir
+  CUR=$c
+  git_unlock
+  fetch
+  load_main
+  a=$(state_get '.applied.commit')
+  [[ -n ${FP[$a]-} ]] || result needs-you "$a" - - history-rewritten
+  if [[ -z ${FP[$c]-} || $c == "$a" ]] || ! check_path "$a" "$c"; then
+    result needs-you "$c" - - bad-commit
+  fi
+  check_links "$c" || result needs-you "$c" - - host-config-link
+  check_self "$c" || result needs-you "$c" - - missing-pull-unit
+  if ((ignore)); then
+    lock_try ignore
+  else
+    lock_try wait || result waiting "$c" "$(version_of "$c")" - deploy-running
+  fi
+  apply_commit "$c" emergency emergency
+  result applied "$c" "$(version_of "$c")" "$APPLIED_CHANGED" emergency
+}
+
+# Ask for a full run now: write the flag, start the unit (joining a run already active) and report.
+cmd_apply_now() {
+  local line code start_failed=0
+  (($# == 0)) || usage
+  require_root plain
+  if present "$STATE_DIR/pause"; then
+    printf 'paused %s\n' "$(pause_reason)"
+    exit 75
+  fi
+  flag_write now ''
+  systemctl start tarubot-host-config.service 8<&- 9<&- || start_failed=1
+  if present "$STATE_DIR/now"; then
+    systemctl start tarubot-host-config.service 8<&- 9<&- || start_failed=1
+  fi
+  status_print
+  if present "$STATE_DIR/now"; then
+    printf '%s\n' 'apply-now: the run could not start the playbook; the next poll that can takes the request' >&2
+  fi
+  line=''
+  if state_read; then line=$(state_get '.last_result'); fi
+  if [[ $line =~ ^result\ outcome=([a-z-]+)\ .*\ reason=([a-z0-9-]+)$ ]]; then
+    code=$(exit_code "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")
+  elif [[ -z $line ]]; then
+    code=75
+  else
+    code=1
+  fi
+  # A run that failed before it could record its result leaves an older line in the state.
+  if ((start_failed && (code == 0 || code == 75))); then code=1; fi
+  exit "$code"
+}
+
+# The state, read-only and without a lock (key=value lines; never the ping URL).
+status_print() {
+  local role='?' signers='?' v
+  if settings_read 2>/dev/null; then role=$ROLE signers=${#SIGNER_KEYS[@]}; fi
+  printf 'role=%s\n' "$role"
+  if state_read 2>/dev/null; then
+    printf 'applied=%s %s %s %s\n' "$(state_get '.applied.commit')" "$(state_get '.applied.version')" \
+      "$(state_get '.applied.source')" "$(utc "$(state_get '.applied.at')")"
+    printf 'last_full=%s %s %s changed=%s\n' "$(state_get '.last_full.commit')" "$(state_get '.last_full.source')" \
+      "$(utc "$(state_get '.last_full.at')")" "$(state_get '.last_full.changed')"
+    v=$(state_get '.failure.commit')
+    if [[ -n $v ]]; then
+      printf 'failure=%s attempts=%s since=%s task=%s\n' "$v" "$(state_get '.failure.attempts')" \
+        "$(utc "$(state_get '.failure.first_at')")" "$(state_get '.failure.task')"
+    else
+      printf 'failure=none\n'
+    fi
+    v=$(state_get '.busy_since')
+    printf 'busy_since=%s\n' "$(if [[ -n $v ]]; then utc "$v"; else printf none; fi)"
+    v=$(state_get '.target.commit')
+    printf 'target=%s\n' "${v:-none}"
+    printf 'last_result=%s\n' "$(state_get '.last_result')"
+  elif present "$STATE_DIR/state.json"; then
+    printf 'state=unreadable\n'
+  else
+    printf 'state=none\n'
+  fi
+  if present "$STATE_DIR/pause"; then printf 'paused=%s\n' "$(pause_reason)"; else printf 'paused=no\n'; fi
+  if present "$STATE_DIR/now"; then printf 'apply_now=pending\n'; else printf 'apply_now=no\n'; fi
+  printf 'service=%s\n' "$(sc is-active tarubot-host-config.service 2>/dev/null || true)"
+  printf 'timer=%s\n' "$(sc is-enabled tarubot-host-config.timer 2>/dev/null || true)"
+  printf 'next=%s\n' "$(sc show -p NextElapseUSecRealtime --value tarubot-host-config.timer 2>/dev/null || true)"
+  printf 'signers=%s\n' "$signers"
+  if ping_read 2>/dev/null && [[ -n $PING_URL ]]; then printf 'ping=yes\n'; else printf 'ping=no\n'; fi
+}
+
+cmd_status() {
+  (($# == 0)) || usage
+  require_root plain
+  status_print
+  exit 0
+}
+
+# Stop polls from applying: write the flag without the private lock, then (unless --no-wait) wait
+# until no run holds that lock, so an active run has ended when this returns 0.
+cmd_pause() {
+  local reason=${1-}
+  if (($# == 2)) && [[ $2 == --no-wait ]]; then
+    :
+  elif (($# != 1)); then
+    usage
+  fi
+  [[ $reason != --no-wait && $reason =~ ^[[:print:]]{1,200}$ ]] || usage
+  require_root plain
+  if ! owned_dir "$STATE_DIR" 700; then
+    printf '%s\n' "pause: $STATE_DIR is missing or not private" >&2
+    exit 1
+  fi
+  flag_write pause "$(now) $reason"$'\n'
+  printf 'paused=%s\n' "$reason"
+  (($# == 1)) || exit 0
+  if flock -w "$PAUSE_WAIT" "$STATE_DIR" true; then
+    printf '%s\n' 'active=none'
+    exit 0
+  fi
+  printf '%s\n' 'active=still-running (the pause is set; the run ends at its next check)'
+  exit 75
+}
+
+cmd_resume() {
+  (($# == 0)) || usage
+  require_root plain
+  rm -f -- "$STATE_DIR/pause" 8<&- 9<&-
+  printf '%s\n' 'paused=no'
+  exit 0
+}
+
+main() {
+  # First: the state and everything git writes stay private; the playbook gets 022 of its own.
+  umask 077
+  export PATH=$SAFE_PATH LC_ALL=C
+  # The mutable copies of the constants and the host's fixed paths (tests set sandbox values
+  # instead; a static test pins these).
+  REMOTE=$REPO_URL
+  REMOTE_PROTOCOL=$REPO_PROTOCOL
+  API_BASE=$API
+  API_PROTO=$API_PROTOCOLS
+  PING_PROTO=$PING_PROTOCOLS
+  STATE_DIR=/var/lib/tarubot-config
+  CLONE=/var/lib/tarubot-config/repo
+  HOME_DIR=/var/lib/tarubot-config/home
+  SETTINGS=/etc/tarubot/host.yml
+  PING_FILE=/etc/tarubot/host-config.env
+  LOCK=$HOST_LOCK
+  LAYOUT_TOP=/
+  OWNER_UID=0
+  API_DEADLINE=180
+  PAUSE_WAIT=3600
+  case ${1-} in
+    run) cmd_run "${@:2}" ;;
+    apply-now) cmd_apply_now "${@:2}" ;;
+    status) cmd_status "${@:2}" ;;
+    pause) cmd_pause "${@:2}" ;;
+    resume) cmd_resume "${@:2}" ;;
+    bootstrap) cmd_bootstrap "${@:2}" ;;
+    apply) cmd_apply "${@:2}" ;;
+    *) usage ;;
+  esac
+}
+
+# Only a direct run starts main; tests source the file for its functions. Bash reads this whole
+# compound command before running it, so the playbook replacing this file can't change what runs.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+  exit
+fi

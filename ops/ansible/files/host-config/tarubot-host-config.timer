@@ -1,0 +1,16 @@
+# Installed by TaruBot's host playbook (#50, 2.34.0) as /etc/systemd/system/tarubot-host-config.timer.
+# Polls every 5 minutes (staging); production's drop-in, timer-production.conf, makes it every 10.
+# The playbook enables and starts it only on a host with pull state
+# (/var/lib/tarubot-config/state.json, which `tarubot-host-config bootstrap` writes) and never
+# disables it: pause the pull unit instead (docs/HOSTING.md "The pull unit"). The service it starts
+# has no PrivateTmp or other namespace option; its header says why.
+[Unit]
+Description=Poll main for TaruBot's host configuration (pull unit)
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=60
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
