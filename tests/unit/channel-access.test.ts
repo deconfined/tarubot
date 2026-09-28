@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType, OverwriteType, PermissionFlagsBits as P } from "discord.js";
 import { isObfuscated, OBFUSCATED_CHANNEL_NAME } from "../../src/discord/obfuscation.js";
+import { DENY_MASK, VOICE_DENY_MASK } from "../../src/domain/permissions.js";
 import {
   accessRoles,
   channelAccessOverwrites,
@@ -1094,4 +1095,173 @@ test("privacy classification separates newly closed defaults from explicit priva
       leader_role_id: "3",
     }),
   ).toThrow("distinct");
+});
+
+describe("after /setup overrides (2.35.0, #46)", () => {
+  test("onboarding lifts only the bits its writes need from TaruBot's own entry, keeping the rest", () => {
+    const bindings = { member: "201", guest: "202", officer: "203", leader: "204" };
+    const current = [
+      // TaruBot's entry as /setup overrides masks a voice channel, plus a bit an admin added.
+      {
+        id: "900",
+        type: OverwriteType.Member,
+        allow: String(P.ViewChannel | P.PrioritySpeaker),
+        deny: String(VOICE_DENY_MASK | P.MentionEveryone),
+      },
+      // The same bits on anyone else's entry are theirs, and stay.
+      { id: "500", type: OverwriteType.Role, allow: "0", deny: String(DENY_MASK) },
+      { id: "403", type: OverwriteType.Member, allow: "0", deny: String(P.ManageChannels) },
+      // An entry left with nothing once View Channel is normalized is dropped, as before.
+      { id: "405", type: OverwriteType.Member, allow: "0", deny: String(P.ViewChannel) },
+    ];
+    const planned = channelAccessOverwrites(current, "100", "900", bindings, "members");
+    const entry = (id: string) => planned.find((overwrite) => overwrite.id === id);
+    expect(entry("900")).toEqual({
+      id: "900",
+      type: OverwriteType.Member,
+      allow: String(
+        P.ViewChannel |
+          P.SendMessages |
+          P.ReadMessageHistory |
+          P.EmbedLinks |
+          P.AttachFiles |
+          P.PrioritySpeaker,
+      ),
+      // Manage Permissions, Manage Channels and Connect are lifted and History is allowed above;
+      // the mask's Create Invite deny stays, like the admin's own bit.
+      deny: String(P.CreateInstantInvite | P.MentionEveryone),
+    });
+    expect(entry("500")?.deny).toBe(String(DENY_MASK));
+    expect(entry("403")?.deny).toBe(String(P.ManageChannels));
+    expect(entry("405")).toBeUndefined();
+    // An entry without mask bits (DevBot's, written by onboarding itself) plans exactly as before.
+    expect(
+      sameOverwrites(channelAccessOverwrites(planned, "100", "900", bindings, "members"), planned),
+    ).toBe(true);
+  });
+
+  /** A text channel whose TaruBot member entry carries the mask /setup overrides writes. */
+  const masked = (fixture: ReturnType<typeof discordAccessFixture>) =>
+    fixture.add("masked", ChannelType.GuildText, [
+      {
+        id: "900",
+        type: OverwriteType.Member,
+        allow: String(P.ViewChannel),
+        deny: String(DENY_MASK),
+      },
+    ]);
+
+  test("without Administrator, a masked channel gets the member-entry refusal (text 22)", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const channel = masked(fixture);
+      await fixture.client.guilds.fetch("100");
+      await expect(fixture.port.snapshot("100", fixture.bindings)).rejects.toMatchObject({
+        code: "blocked",
+        message: `TaruBot's member entry in <#${channel.id}> denies Manage Channels and Manage Permissions; remove that deny (on the member, not its role), or turn Administrator on for TaruBot until onboarding's first channel pass has run, which clears it. Onboarding needs View Channel, Manage Channels and Manage Permissions there.`,
+        detail: { kind: "resource", resource: "channel", id: channel.id, fix: "member_entry" },
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("a masked voice channel names Connect too: its deny also denies Manage Channels there", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      // What /setup overrides writes in a voice channel, and the same entry with only the two
+      // denies text 22 used to name removed: Connect's deny alone still makes the write fail.
+      const voice = fixture.add("masked-voice", ChannelType.GuildVoice, [
+        { id: "900", type: OverwriteType.Member, allow: "0", deny: String(VOICE_DENY_MASK) },
+      ]);
+      await fixture.client.guilds.fetch("100");
+      await expect(fixture.port.snapshot("100", fixture.bindings)).rejects.toMatchObject({
+        code: "blocked",
+        message: `TaruBot's member entry in <#${voice.id}> denies Manage Channels, Manage Permissions and Connect; remove that deny (on the member, not its role), or turn Administrator on for TaruBot until onboarding's first channel pass has run, which clears it. Onboarding needs View Channel, Manage Channels, Manage Permissions and Connect there.`,
+        detail: { kind: "resource", resource: "channel", id: voice.id, fix: "member_entry" },
+      });
+      voice.permission_overwrites = [
+        {
+          id: "900",
+          type: OverwriteType.Member,
+          allow: "0",
+          deny: String(P.ReadMessageHistory | P.CreateInstantInvite | P.Connect),
+        },
+      ];
+      await fixture.client.guilds.fetch({ guild: "100", force: true });
+      await expect(fixture.port.snapshot("100", fixture.bindings)).rejects.toMatchObject({
+        message: expect.stringContaining(
+          `TaruBot's member entry in <#${voice.id}> denies Connect; remove that deny`,
+        ),
+        detail: { fix: "member_entry" },
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("a Connect deny on TaruBot's entry in a text channel means nothing, and isn't asked for", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const text = fixture.add("text-connect", ChannelType.GuildText, [
+        { id: "900", type: OverwriteType.Member, allow: "0", deny: String(P.Connect) },
+      ]);
+      await fixture.client.guilds.fetch("100");
+      const snapshot = await fixture.port.snapshot("100", fixture.bindings);
+      expect(snapshot.channels.map((channel) => channel.id)).toContain(text.id);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("the same bits denied on TaruBot's role keep the role refusal", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const channel = fixture.add("role-denied", ChannelType.GuildText, [
+        {
+          id: "600",
+          type: OverwriteType.Role,
+          allow: "0",
+          deny: String(P.ManageChannels | P.ManageRoles),
+        },
+      ]);
+      await fixture.client.guilds.fetch("100");
+      await expect(fixture.port.snapshot("100", fixture.bindings)).rejects.toMatchObject({
+        code: "blocked",
+        message: `TaruBot needs View Channel, Manage Channels and Manage Roles in <#${channel.id}>.`,
+        detail: {
+          kind: "resource",
+          resource: "channel",
+          id: channel.id,
+          fix: "channel_permissions",
+        },
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("with Administrator the masked channel passes, and onboarding's write lifts the mask", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const channel = masked(fixture);
+      fixture.botAdministrator(true);
+      await fixture.client.guilds.fetch("100");
+      const snapshot = await fixture.port.snapshot("100", fixture.bindings);
+      expect(snapshot.channels.map((entry) => entry.id)).toContain(channel.id);
+      const planned = channelAccessOverwrites(
+        snapshot.channels.find((entry) => entry.id === channel.id)?.overwrites ?? [],
+        "100",
+        "900",
+        fixture.bindings,
+        "members",
+      );
+      // The lift leaves only the mask's Create Invite deny, which onboarding never needs.
+      expect(BigInt(planned.find((entry) => entry.id === "900")?.deny ?? "0")).toBe(
+        P.CreateInstantInvite,
+      );
+    } finally {
+      await fixture.close();
+    }
+  });
 });

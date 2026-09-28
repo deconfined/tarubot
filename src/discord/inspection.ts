@@ -4,9 +4,33 @@
  * over plain GET requests while the legacy bot still owns the gateway. Nothing here performs I/O.
  */
 import { PermissionFlagsBits, PermissionsBitField } from "discord.js";
+import {
+  type ApiOverwrite,
+  type ApiRole,
+  ascendingRoles,
+  CORE_PERMISSIONS,
+  channelPermissions,
+  guildPermissions,
+  POSTING_PERMISSIONS,
+} from "../domain/permissions.js";
 import { rolePositionChanges } from "../domain/role-layout.js";
 import { Failure } from "../domain/values.js";
 import { MISSING_ACCESS, UNKNOWN_CHANNEL } from "./obfuscation.js";
+
+// The permission arithmetic moved to src/domain/permissions.ts in 2.35.0 (#46), where /config
+// validate, the officer alert and /setup overrides share it; the inspection tool, its fixtures and
+// tests keep importing it from here.
+export {
+  type ApiOverwrite,
+  type ApiRole,
+  ascendingRoles,
+  channelPermissions,
+  guildPermissions,
+  type PermissionOptions,
+} from "../domain/permissions.js";
+
+/** Administrator's bit, which the target report shows separately from the other grants. */
+const ADMINISTRATOR = PermissionFlagsBits.Administrator;
 
 /** The structural subset of a command option that decides its invocable paths. */
 export interface CommandOption {
@@ -53,24 +77,6 @@ export function memberIntent(flags: number | undefined): "enabled" | "limited" |
   return "disabled";
 }
 
-/** A guild role as GET /guilds/{id}/roles returns it (the fields inspection uses). */
-export interface ApiRole {
-  id: string;
-  name: string;
-  position: number;
-  permissions: string;
-  hoist: boolean;
-  managed: boolean;
-}
-
-/** A channel permission overwrite: type 0 targets a role, type 1 a member. */
-export interface ApiOverwrite {
-  id: string;
-  type: number;
-  allow: string;
-  deny: string;
-}
-
 /**
  * A guild channel as GET /guilds/{id}/channels returns it. From 2026-11-16 that list leaves out
  * every channel the bot can't view (#47), so a channel missing from it may be hidden, not deleted.
@@ -83,99 +89,15 @@ export interface ApiChannel {
 }
 
 /**
- * Lowest role first, in the order Discord displays. Equal raw positions (common for new roles) are
- * resolved like discord.js's RoleManager.comparePositions: the higher ID sits lower. The live
- * gateway sorts through the SDK; this is the same order for raw payloads.
+ * The core seven TaruBot keeps without Administrator (CORE_PERMISSIONS, 2.35.0). The documentation
+ * site's add-to-server page lists them plus ONBOARDING_PERMISSIONS as the one recommended set, and
+ * tests/unit/docs-site.test.ts checks the page against both. The inspection reports which of these
+ * the bot lacks, with and without Administrator.
  */
-export function ascendingRoles<T extends { id: string; position: number }>(
-  roles: readonly T[],
-): T[] {
-  return [...roles].sort((left, right) => {
-    if (left.position !== right.position) return left.position - right.position;
-    const leftId = BigInt(left.id);
-    const rightId = BigInt(right.id);
-    return leftId === rightId ? 0 : leftId > rightId ? -1 : 1;
-  });
-}
-
-/** `ignoreAdministrator` previews the bot with Administrator removed (the OPS-12 target). */
-export interface PermissionOptions {
-  ignoreAdministrator?: boolean;
-}
-
-const ADMINISTRATOR = PermissionFlagsBits.Administrator;
-
-/**
- * Guild-level permissions of a member: @everyone (the role whose ID is the guild ID) plus every
- * role the member holds. Administrator implies every permission unless it is being ignored, in
- * which case the bit itself is dropped too, so the result is what remains without it.
- */
-export function guildPermissions(
-  guildId: string,
-  roles: readonly ApiRole[],
-  memberRoles: readonly string[],
-  options: PermissionOptions = {},
-): bigint {
-  const held = new Set([guildId, ...memberRoles]);
-  let bits = roles
-    .filter((role) => held.has(role.id))
-    .reduce((total, role) => total | BigInt(role.permissions), 0n);
-  if (options.ignoreAdministrator) bits &= ~ADMINISTRATOR;
-  else if (bits & ADMINISTRATOR) return PermissionsBitField.All;
-  return bits;
-}
-
-/**
- * Discord's channel overwrite algorithm for one member: start from guild permissions, apply the
- * @everyone overwrite, then the union of the member's role overwrites (denies before allows), then
- * the member's own overwrite. Administrator bypasses overwrites unless it is being ignored.
- */
-export function channelPermissions(
-  guildId: string,
-  base: bigint,
-  overwrites: readonly ApiOverwrite[],
-  member: { id: string; roles: readonly string[] },
-  options: PermissionOptions = {},
-): bigint {
-  let bits = base;
-  if (options.ignoreAdministrator) bits &= ~ADMINISTRATOR;
-  else if (bits & ADMINISTRATOR) return PermissionsBitField.All;
-  const everyone = overwrites.find((entry) => entry.id === guildId);
-  if (everyone) bits = (bits & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
-  const roles = overwrites.filter(
-    (entry) => entry.type === 0 && entry.id !== guildId && member.roles.includes(entry.id),
-  );
-  const roleDeny = roles.reduce((total, entry) => total | BigInt(entry.deny), 0n);
-  const roleAllow = roles.reduce((total, entry) => total | BigInt(entry.allow), 0n);
-  bits = (bits & ~roleDeny) | roleAllow;
-  const own = overwrites.find((entry) => entry.type === 1 && entry.id === member.id);
-  if (own) bits = (bits & ~BigInt(own.deny)) | BigInt(own.allow);
-  return bits;
-}
-
-/**
- * The bot permissions for a launch without onboarding, as the documentation site lists them
- * (site/src/content/docs/admin/add-to-server.md, whose invite adds Manage Channels). Manage
- * Channels is omitted here: it is needed only when lobby onboarding is enabled, which the
- * production launch leaves off. tests/unit/docs-site.test.ts checks the invite against this.
- */
-export const requiredBotPermissions = {
-  ManageRoles: PermissionFlagsBits.ManageRoles,
-  ManageNicknames: PermissionFlagsBits.ManageNicknames,
-  ViewChannel: PermissionFlagsBits.ViewChannel,
-  SendMessages: PermissionFlagsBits.SendMessages,
-  EmbedLinks: PermissionFlagsBits.EmbedLinks,
-  AttachFiles: PermissionFlagsBits.AttachFiles,
-  ReadMessageHistory: PermissionFlagsBits.ReadMessageHistory,
-} as const;
+export const requiredBotPermissions = CORE_PERMISSIONS;
 
 /** The channel permissions DiscordGateway.validateChannel requires of a configured destination. */
-export const destinationPermissions = {
-  ViewChannel: PermissionFlagsBits.ViewChannel,
-  SendMessages: PermissionFlagsBits.SendMessages,
-  EmbedLinks: PermissionFlagsBits.EmbedLinks,
-  ReadMessageHistory: PermissionFlagsBits.ReadMessageHistory,
-} as const;
+export const destinationPermissions = POSTING_PERMISSIONS;
 
 /** Names of required permissions the bits lack, in declaration order. */
 export function missingPermissions(bits: bigint, required: Readonly<Record<string, bigint>>) {

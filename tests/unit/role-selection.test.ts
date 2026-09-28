@@ -198,7 +198,7 @@ test("a configured role that was deleted says so, instead of asking for an ordin
   expect(error).toMatchObject({
     code: "blocked",
     message:
-      "That role no longer exists in this server. Choose another with /config roles, or run /setup to recreate it.",
+      "That role no longer exists in this server. Choose another with /config roles, or run /setup onboarding to recreate it.",
     detail: { kind: "resource", resource: "role", id: "201" },
   });
   // The officer card names the role, with no hierarchy remedy that can't apply to a deleted role.

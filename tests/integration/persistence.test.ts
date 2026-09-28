@@ -63,6 +63,7 @@ import { dispatcher } from "../../src/jobs/dispatch.js";
 import { announceChangelog } from "../../src/jobs/queue.js";
 import { notesSince } from "../../src/domain/changelog.js";
 import { GuildAccess } from "../../src/application/guild-access.js";
+import { NEW_GUILD_ROW } from "../../src/application/guild-defaults.js";
 import { FakeGuildAccess } from "../fixtures/guild-access.js";
 import { discordAccessFixture } from "../fixtures/discord-access.js";
 import { interactionFixture } from "../fixtures/interactions.js";
@@ -1786,16 +1787,17 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       .parse(await administration.setup(manager, "DevBot", fc, "Officer"));
     const configured = await service.guild(manager);
     expect(configured.access_policy_enabled).toBe(true);
-    // A guild first created by /setup takes the column default: layout on, roles created hoisted.
-    expect(configured.role_layout_enabled).toBe(true);
-    expect(first.roleLayout).toStartWith("FC Leader > Officer > Member > Guest");
-    expect(hoists).toEqual([true, true, true, true]);
+    // A guild first created by /setup onboarding starts with the layout off (NEW_GUILD_ROW,
+    // CFG-07 as of 2.35.0): roles are created unhoisted and no layout pass is queued.
+    expect(configured.role_layout_enabled).toBe(false);
+    expect(first.roleLayout).toStartWith("disabled");
+    expect(hoists).toEqual([false, false, false, false]);
     expect(
       await db.orm
         .select({ id: t.jobs.id })
         .from(t.jobs)
         .where(and(eq(t.jobs.guild_id, setupGuild), eq(t.jobs.kind, "roles.layout"))),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(configured.officer_notifications_channel_id).toBe(configured.officer_channel_id);
     expect(configured.guest_application_channel_id).toBe(configured.officer_channel_id);
     // /setup opens /apply: the switch goes on with the review channel.
@@ -2432,6 +2434,118 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       .from(t.jobs)
       .where(eq(t.jobs.guild_id, setupGuild));
     expect(kinds.map((row) => row.kind).sort()).toEqual(["channels.access", "reconcile.guild"]);
+  });
+
+  /** A guild's roles.layout jobs, by ID: the work a layout-on switch queues. */
+  const layoutJobIds = (guildId: string) =>
+    db.orm
+      .select({ id: t.jobs.id })
+      .from(t.jobs)
+      .where(and(eq(t.jobs.guild_id, guildId), eq(t.jobs.kind, "roles.layout")));
+
+  test("a server first configured by /config starts with the role layout off until a manager opts in", async () => {
+    // CFG-07 as of 2.35.0: the first save inserts NEW_GUILD_ROW, whichever setting it saves, and
+    // never relies on the column default (still on, schema 010). Before 2.35.0 the role save
+    // below would also have queued a layout pass.
+    const byChannel: Actor = { ...actor, guildId: "666666666666666650" };
+    expect(await service.configure(byChannel, "ledger_channel_id", "76501")).toMatchObject({
+      status: "saved",
+    });
+    const byRole: Actor = { ...actor, guildId: "666666666666666651" };
+    expect(await service.configure(byRole, "member_role_id", "76502")).toMatchObject({
+      status: "saved",
+    });
+    for (const first of [byChannel, byRole]) {
+      expect(await service.guild(first)).toMatchObject({
+        effects_enabled: true,
+        role_layout_enabled: false,
+      });
+      expect(await layoutJobIds(first.guildId)).toEqual([]);
+    }
+    // Opting in is unchanged: /config role_layout enabled:true turns it on and queues one pass.
+    const manager: Actor = { ...byRole, serverManager: true };
+    const enabled = z
+      .object({ status: z.literal("saved"), layoutJob: z.string() })
+      .parse(await service.configureRoleLayout(manager, true));
+    expect((await service.guild(manager)).role_layout_enabled).toBe(true);
+    expect(await layoutJobIds(manager.guildId)).toEqual([{ id: enabled.layoutJob }]);
+  });
+
+  test("a server first configured by /config guest_applications starts with the role layout off", async () => {
+    // The guest-application save has its own insert; it spreads the same NEW_GUILD_ROW.
+    const first: Actor = { ...actor, guildId: "666666666666666652" };
+    expect(
+      await service.configureGuestApplications(first, { channel: "76503", enabled: true }),
+    ).toMatchObject({ status: "saved" });
+    expect(await service.guild(first)).toMatchObject({
+      effects_enabled: true,
+      role_layout_enabled: false,
+      guest_application_channel_id: "76503",
+      guest_applications_enabled: true,
+    });
+    expect(await layoutJobIds(first.guildId)).toEqual([]);
+  });
+
+  test("a server with the role layout on keeps it through /config saves and /setup onboarding", async () => {
+    // A server configured before 2.35.0 took the column default, so its layout is on; the new
+    // default applies only where a row is created, never to an existing one.
+    const guildId = "666666666666666653";
+    await db.orm
+      .insert(t.guilds)
+      .values({ id: guildId, effects_enabled: true, role_layout_enabled: true });
+    const manager: Actor = { ...actor, guildId, serverManager: true };
+    await service.configure(manager, "ledger_channel_id", "76504");
+    await service.configure(manager, "member_role_id", "76505");
+    await service.configureGuestApplications(manager, { channel: "76506", enabled: true });
+    expect((await service.guild(manager)).role_layout_enabled).toBe(true);
+    // The role save queued the coalesced layout pass, as a layout-on server always has.
+    const [queued] = await layoutJobIds(guildId);
+    if (!queued) throw new Error("Missing layout pass");
+    const hoists: boolean[] = [];
+    let serial = 76510;
+    const provisioner: RoleProvisioner = {
+      ...discord,
+      async members() {
+        return [];
+      },
+      async ensureRole(_guild, _name, _actor, configured, _canonical, hoist) {
+        hoists.push(hoist);
+        return configured
+          ? { id: configured, created: false }
+          : { id: String(++serial), created: true };
+      },
+    };
+    const administration = new RoleAdministration(service, provisioner, access);
+    const result = z
+      .object({ roleLayoutEnabled: z.boolean(), layoutJob: z.string() })
+      .parse(await administration.setup(manager, "Kept", null, null));
+    // Setup keeps the switch: roles are provisioned hoisted, and its pass merges into the one queued.
+    expect(result.roleLayoutEnabled).toBe(true);
+    expect(hoists).toEqual([true, true, true, true]);
+    expect((await service.guild(manager)).role_layout_enabled).toBe(true);
+    expect(await layoutJobIds(guildId)).toEqual([{ id: queued.id }]);
+    expect(result.layoutJob).toBe(queued.id);
+  });
+
+  test("an imported server keeps its role layout off through /config saves", async () => {
+    // As the importer writes the row: the layout off explicitly, effects held until activation.
+    const guildId = "666666666666666654";
+    await db.orm.insert(t.guilds).values({
+      id: guildId,
+      effects_enabled: false,
+      role_layout_enabled: false,
+      guest_grandfather: "pending",
+    });
+    const manager: Actor = { ...actor, guildId, serverManager: true };
+    await service.configure(manager, "ledger_channel_id", "76507");
+    await service.configure(manager, "member_role_id", "76508");
+    await service.configureGuestApplications(manager, { channel: "76509", enabled: true });
+    expect(await service.guild(manager)).toMatchObject({
+      effects_enabled: false,
+      role_layout_enabled: false,
+      guest_grandfather: "pending",
+    });
+    expect(await layoutJobIds(guildId)).toEqual([]);
   });
 
   test("/config roles officer adopts current holders by default and nobody with adopt_holders:false", async () => {
@@ -6116,7 +6230,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
   test("setup, officer overrides and refresh report what they did", async () => {
     const guildId = "888888888888888806";
     const manager: Actor = { ...actor, guildId, serverManager: true };
-    await db.orm.insert(t.guilds).values({ id: guildId, effects_enabled: true });
+    // A row as the application creates it since 2.35.0: effects on, role layout off (CFG-07).
+    await db.orm.insert(t.guilds).values({ id: guildId, ...NEW_GUILD_ROW });
     let serial = 98300;
     const provisioner: RoleProvisioner = {
       ...discord,
@@ -6133,8 +6248,9 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       company: { id: "9230000000000098007", name: "Setup FC", tag: "TEST", world: "Diabolos" },
       officerRank: "Council",
       effectsMode: "live",
-      roleLayoutEnabled: true,
-      layoutJob: expect.any(String),
+      // /setup onboarding keeps the saved switch, which is off, so it queues no layout pass.
+      roleLayoutEnabled: false,
+      layoutJob: null,
       adopted: 0,
       ledgerChannelId: null,
       officerNotifications: { defaulted: true },

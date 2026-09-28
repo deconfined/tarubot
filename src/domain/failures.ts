@@ -162,6 +162,11 @@ export type ForbiddenScope =
   | "manage_roles"
   /** /setup's channel provisioning: Manage Server, Manage Roles and Manage Channels together. */
   | "manage_channels"
+  /**
+   * /setup overrides confirm:true (2.35.0, #46): Administrator itself, or the server owner, since
+   * the run needs TaruBot to hold Administrator and changes TaruBot's access in every channel.
+   */
+  | "administrator"
   | "hierarchy"
   | "membership"
   | "human"
@@ -217,8 +222,10 @@ export type FailureDetail =
        * The remedy, set only where the throw site's message is about TaruBot's own role position
        * or channel permissions; the presenter shows a How to fix step only when it is named, so a
        * refusal about the chosen role itself (an integration role, admin permissions) never gets one.
+       * `member_entry` (2.35.0): TaruBot's own member entry in the channel denies what it needs,
+       * which no role permission can lift.
        */
-      readonly fix?: "hierarchy" | "channel_permissions";
+      readonly fix?: "hierarchy" | "channel_permissions" | "member_entry";
     }
   /** The character is already linked to another Discord user, identified by `owner`. */
   | { readonly kind: "ownership"; readonly character: FailureCharacter; readonly owner: string }

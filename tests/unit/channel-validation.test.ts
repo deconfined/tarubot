@@ -1,9 +1,11 @@
 /**
- * validateChannel's two refusals: a channel TaruBot can't use (including one Discord hides from it,
+ * validateChannel's refusals: a channel TaruBot can't use (including one Discord hides from it,
  * 50001 Missing Access, or a 10003 for a text channel the gateway still holds as hidden) gets the
  * permissions refusal with its How to fix step, while a deleted, non-text or other-server channel
- * is "unavailable" with no permissions remedy. The SDK's guild and channel managers are stubbed, so
- * no Discord credentials are needed.
+ * is "unavailable" with no permissions remedy. Since 2.35.0 (#46) a channel whose own TaruBot
+ * member entry denies a posting permission it lacks gets the member-entry refusal: a member deny
+ * beats any role allow, so the role fix couldn't work. The SDK's guild and channel managers are
+ * stubbed, so no Discord credentials are needed.
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
@@ -12,13 +14,16 @@ import {
   ChannelType,
   Collection,
   DiscordAPIError,
+  OverwriteType,
   PermissionFlagsBits as P,
   PermissionsBitField,
 } from "discord.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import { failureReply } from "../../src/discord/presenters/failure.js";
+import { receiptReply } from "../../src/discord/presenters/ledger.js";
 import { Failure } from "../../src/domain/values.js";
 import { onlyEmbed } from "../fixtures/replies.js";
+import { LEDGER_RESULTS } from "../fixtures/replies/ledger.js";
 import { REF, VIEWERS } from "../fixtures/results.js";
 
 /** The configured channel the checks below validate. */
@@ -98,11 +103,45 @@ async function refusal(gateway: DiscordGateway): Promise<unknown> {
   );
 }
 
-/** The officer card's field names for a refusal, as /config validate would show it. */
-const officerFields = (error: unknown) =>
-  onlyEmbed(
-    failureReply(error, { ref: REF, viewer: VIEWERS.officer, scope: "/config validate" }),
-  ).fields?.map((field) => field.name);
+/** The officer card for a refusal, as /config validate would show it. */
+const officerCard = (error: unknown) =>
+  onlyEmbed(failureReply(error, { ref: REF, viewer: VIEWERS.officer, scope: "/config validate" }));
+/** The officer card's field names for a refusal. */
+const officerFields = (error: unknown) => officerCard(error).fields?.map((field) => field.name);
+
+/**
+ * A fetched text channel in guild 100 where TaruBot's permissions come to `granted` (as
+ * permissionsFor resolves them, Administrator included), with these overwrites in its cache.
+ */
+const fetchedText = (
+  granted: bigint,
+  overwrites: readonly { id: string; type: OverwriteType; deny: bigint }[] = [],
+) => ({
+  id: CHANNEL,
+  type: ChannelType.GuildText,
+  guildId: "100",
+  permissionsFor: (member: unknown) => {
+    if (member !== BOT) throw new Error("permissionsFor must be asked about TaruBot's member");
+    return new PermissionsBitField(granted);
+  },
+  permissionOverwrites: {
+    cache: new Collection(
+      overwrites.map((entry) => [
+        entry.id,
+        {
+          id: entry.id,
+          type: entry.type,
+          allow: new PermissionsBitField(0n),
+          deny: new PermissionsBitField(entry.deny),
+        },
+      ]),
+    ),
+  },
+});
+
+/** Every posting permission but `lacking`. */
+const allBut = (lacking: bigint) =>
+  (P.ViewChannel | P.SendMessages | P.EmbedLinks | P.ReadMessageHistory) & ~lacking;
 
 /** The permissions refusal's approved wording and typed detail. */
 const PERMISSIONS = {
@@ -171,15 +210,91 @@ test("50001 for a channel this server doesn't list (another server's) is unavail
 });
 
 test("a visible text channel missing a permission keeps the permissions refusal", async () => {
-  const channel = {
-    id: CHANNEL,
-    type: ChannelType.GuildText,
-    guildId: "100",
-    permissionsFor: () => ({ has: () => false }),
-  };
+  const channel = fetchedText(allBut(P.EmbedLinks));
   const error = await refusal(gatewayWith({ [CHANNEL]: ChannelType.GuildText }, channel));
   expect(error).toMatchObject(PERMISSIONS);
   expect(officerFields(error)).toEqual(["Affected", "How to fix", "Then"]);
+});
+
+/** Text 19: TaruBot's own member entry denies what it lacks (2.35.0, #46). */
+const MEMBER_ENTRY = {
+  code: "blocked",
+  message: `TaruBot's member entry in <#${CHANNEL}> denies Read Message History; remove that deny (on the member, not its role). TaruBot needs View Channel, Send Messages, Embed Links and Read Message History there. Or turn Administrator on for TaruBot, set the channel in /config, and run /setup overrides confirm:true, then remove Administrator once /config validate says it is no longer needed.`,
+  detail: { kind: "resource", resource: "channel", id: CHANNEL, fix: "member_entry" },
+};
+
+test("TaruBot's own member entry denying history gets the member-entry refusal and fix", async () => {
+  // The deny mask an earlier /setup overrides run wrote while no setting named this channel.
+  const masked = fetchedText(allBut(P.ReadMessageHistory), [
+    {
+      id: BOT.id,
+      type: OverwriteType.Member,
+      deny: P.ReadMessageHistory | P.ManageRoles | P.ManageChannels | P.CreateInstantInvite,
+    },
+  ]);
+  const error = await refusal(gatewayWith({ [CHANNEL]: ChannelType.GuildText }, masked));
+  expect(error).toBeInstanceOf(Failure);
+  expect(error).toMatchObject(MEMBER_ENTRY);
+  // Text 20: the member entry, not the role, then the usual re-check.
+  const card = officerCard(error);
+  expect(card.fields?.map((field) => [field.name, field.value])).toEqual([
+    ["Affected", `<#${CHANNEL}> (\`${CHANNEL}\`)`],
+    [
+      "How to fix",
+      "Channel settings → Permissions → TaruBot (the member entry, not the role): remove the denies named above.",
+    ],
+    ["Then", "Run `/config validate` to re-check every role and channel."],
+  ]);
+  // Several denied bits are listed in the channel's own words, in catalog order.
+  const two = fetchedText(allBut(P.EmbedLinks | P.ReadMessageHistory), [
+    { id: BOT.id, type: OverwriteType.Member, deny: P.ReadMessageHistory | P.EmbedLinks },
+  ]);
+  expect(await refusal(gatewayWith({ [CHANNEL]: ChannelType.GuildText }, two))).toMatchObject({
+    message: expect.stringContaining(
+      `TaruBot's member entry in <#${CHANNEL}> denies Embed Links and Read Message History;`,
+    ),
+  });
+});
+
+test("a role-level deny, or a member deny on a bit TaruBot has, keeps the permissions refusal", async () => {
+  const roleDeny = fetchedText(allBut(P.ReadMessageHistory), [
+    { id: "600", type: OverwriteType.Role, deny: P.ReadMessageHistory },
+  ]);
+  expect(await refusal(gatewayWith({ [CHANNEL]: ChannelType.GuildText }, roleDeny))).toMatchObject(
+    PERMISSIONS,
+  );
+  // Its own entry denies Manage Permissions only; what it lacks (Embed Links) comes from elsewhere.
+  const unrelated = fetchedText(allBut(P.EmbedLinks), [
+    { id: BOT.id, type: OverwriteType.Member, deny: P.ManageRoles },
+  ]);
+  expect(await refusal(gatewayWith({ [CHANNEL]: ChannelType.GuildText }, unrelated))).toMatchObject(
+    PERMISSIONS,
+  );
+});
+
+test("with Administrator the same channel passes: permissionsFor answers everything", async () => {
+  const masked = fetchedText(PermissionsBitField.All, [
+    { id: BOT.id, type: OverwriteType.Member, deny: P.ReadMessageHistory },
+  ]);
+  const gateway = gatewayWith({ [CHANNEL]: ChannelType.GuildText }, masked);
+  expect(await gateway.validateChannel("100", CHANNEL)).toBeUndefined();
+});
+
+test("a ledger post blocked by the member-entry refusal reads 'missing channel permissions'", () => {
+  const presented = receiptReply(
+    {
+      ...LEDGER_RESULTS.alreadyRecorded,
+      post: {
+        status: "blocked",
+        message_id: null,
+        last_error: `blocked: ${MEMBER_ENTRY.message}`,
+        channel_id: null,
+      },
+    },
+    VIEWERS.officer,
+  );
+  const post = onlyEmbed(presented).fields?.find((field) => field.name === "Channel post");
+  expect(post?.value).toContain("(missing channel permissions)");
 });
 
 test("other Discord errors from the channel fetch are not turned into a refusal", async () => {

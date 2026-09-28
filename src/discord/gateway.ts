@@ -8,10 +8,13 @@ import {
   DiscordjsErrorCodes,
   GatewayIntentBits,
   GatewayRateLimitError,
+  OverwriteType,
   PermissionFlagsBits,
 } from "discord.js";
 import type { Collection, GuildMember, Role } from "discord.js";
+import { permissionKeys, permissionLabel, POSTING_PERMISSIONS } from "../domain/permissions.js";
 import { Failure, normalized } from "../domain/values.js";
+import type { VisibilityGuild } from "../domain/visibility.js";
 import type { Actor } from "../domain/policy.js";
 import type {
   ApplicationRecord,
@@ -28,6 +31,7 @@ import { decisionDm, guestReviewPost } from "./presenters/guests.js";
 import { ledgerPost } from "./presenters/ledger.js";
 import { statusPost } from "./presenters/officer.js";
 import type { Presented } from "./presenters/reply.js";
+import { readVisibility } from "./visibility.js";
 
 /**
  * Lowest role first. Discord can give new roles identical raw positions; the SDK comparison
@@ -40,7 +44,9 @@ function ascendingRoles(roles: Collection<string, Role>): Role[] {
 
 /** Exposes a reusable Discord client plus application-owned projections of SDK state. */
 export class DiscordGateway implements DiscordPort {
-  // Add intents here deliberately when new event modules require them; enable privileged ones in the portal.
+  // Exactly Guilds and GuildMembers. The message intents (GuildMessages, MessageContent,
+  // DirectMessages) are banned permanently, and tests/unit/intents.test.ts pins the set; enable
+  // privileged ones in the portal.
   readonly client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
     allowedMentions: { parse: [] },
@@ -164,7 +170,7 @@ export class DiscordGateway implements DiscordPort {
     if (!role || role.guild.id !== guildId)
       throw new Failure(
         "blocked",
-        "That role no longer exists in this server. Choose another with /config roles, or run /setup to recreate it.",
+        "That role no longer exists in this server. Choose another with /config roles, or run /setup onboarding to recreate it.",
         0,
         affected,
       );
@@ -324,7 +330,10 @@ export class DiscordGateway implements DiscordPort {
    * remedy; a channel TaruBot can't use (or, 50001 Missing Access, can't even view) gets the
    * permissions refusal with its channel-permissions fix. Discord doesn't document its answer for
    * a hidden channel from 2026-11-16 (#47), so a 10003 for a text channel the gateway still holds
-   * as hidden from TaruBot gets the permissions refusal too.
+   * as hidden from TaruBot gets the permissions refusal too. When TaruBot's own member entry in
+   * the channel denies a posting permission it lacks (the deny mask /setup overrides writes where
+   * no setting named the channel, 2.35.0), it gets the member-entry refusal instead: a member
+   * entry's deny beats any role allow, so the role fix can't work there.
    */
   async validateChannel(guildId: string, channelId: string): Promise<void> {
     const guild = await this.client.guilds.fetch(guildId);
@@ -376,17 +385,42 @@ export class DiscordGateway implements DiscordPort {
         0,
         affected,
       );
+    const permissions = channel.permissionsFor(bot);
     if (
-      !channel
-        .permissionsFor(bot)
-        ?.has([
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.EmbedLinks,
-          PermissionFlagsBits.ReadMessageHistory,
-        ])
-    )
+      !permissions?.has([
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.ReadMessageHistory,
+      ])
+    ) {
+      // Which posting bits TaruBot lacks there that its own member entry (never its role's)
+      // denies; with Administrator permissionsFor already answered everything, so it never
+      // reaches here.
+      const posting = Object.values(POSTING_PERMISSIONS).reduce((all, bit) => all | bit, 0n);
+      const lacking = posting & ~(permissions?.bitfield ?? 0n);
+      const own = channel.permissionOverwrites.cache.get(bot.id);
+      const denied = own?.type === OverwriteType.Member ? own.deny.bitfield & lacking : 0n;
+      if (denied !== 0n) {
+        const names = permissionKeys(denied, POSTING_PERMISSIONS).map((key) =>
+          permissionLabel(key, "channel"),
+        );
+        const labels =
+          names.length <= 1
+            ? names.join("")
+            : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+        // The channel, the denied bits and where the deny sits come first, so a stored diagnostic cut
+        // at 150 characters keeps them. It keeps 'View Channel', which ledger post states read as
+        // "missing channel permissions".
+        throw new Failure(
+          "blocked",
+          `TaruBot's member entry in <#${channelId}> denies ${labels}; remove that deny (on the member, not its role). TaruBot needs View Channel, Send Messages, Embed Links and Read Message History there. Or turn Administrator on for TaruBot, set the channel in /config, and run /setup overrides confirm:true, then remove Administrator once /config validate says it is no longer needed.`,
+          0,
+          { ...affected, fix: "member_entry" },
+        );
+      }
       throw permissionsRefusal();
+    }
   }
   /** REST deltas touch only requested role IDs; retry observes any partially applied transition. */
   async roles(guildId: string, userId: string, add: string[], remove: string[]): Promise<void> {
@@ -513,6 +547,13 @@ export class DiscordGateway implements DiscordPort {
       { kind: "review", application },
       `review:${application.id}`,
     );
+  }
+  /**
+   * TaruBot's view of the guild from the gateway caches, for /config validate, the officer alert
+   * and /setup overrides (2.35.0, #46). It never lists channels over REST; see readVisibility.
+   */
+  visibility(guildId: string, fresh: boolean): Promise<VisibilityGuild | null> {
+    return readVisibility(this.client, guildId, fresh);
   }
   /**
    * A disabled inbox is a terminal delivery result, never a rollback of the guest decision. The

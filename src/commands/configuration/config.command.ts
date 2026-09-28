@@ -146,7 +146,7 @@ export default defineCommand({
   data,
   access: "officer",
   requires: [applicationKey],
-  async execute({ actor, viewer, interaction, services }) {
+  async execute({ actor, viewer, interaction, services, report }) {
     authorize(actor, actor.guildId, "officer");
     const app = services.get(applicationKey);
     const options = interaction.options;
@@ -158,9 +158,11 @@ export default defineCommand({
       // The typed ID names the FC when the result can't (its record was never read).
       return fcUnlinkReply(await app.unlinkCompany(actor, fc), viewer, { fcId: fc });
     }
-    // Both read the same report; show summarizes it, validate lists every check.
-    if (sub === "show") return showReply(await app.validate(actor), viewer);
-    if (sub === "validate") return healthReply(await app.validate(actor), viewer);
+    // Both read the same report; show summarizes it, validate lists every check. An unexpected
+    // error in TaruBot's channel view is reported and shown as unknown (2.35.0, #46).
+    const visibilityError = (error: unknown) => report(error, "config visibility");
+    if (sub === "show") return showReply(await app.validate(actor, visibilityError), viewer);
+    if (sub === "validate") return healthReply(await app.validate(actor, visibilityError), viewer);
     if (sub === "officer_rank") {
       const rank = options.getString("rank");
       const unset = options.getBoolean("unset_rank") === true;

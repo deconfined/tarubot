@@ -1,6 +1,6 @@
 ---
 title: Officer notices and update posts
-description: What TaruBot tells officers about Lodestone trouble, unlinked characters and members' status changes, and the update posts it shares with members.
+description: What TaruBot tells officers about Lodestone trouble, unlinked characters, missing channel overrides and members' status changes, and the update posts it shares with members.
 sidebar:
   order: 9
 ---
@@ -14,6 +14,7 @@ Choose a staff-only text channel with [`/config officer_notifications`](/tarubot
 - **Lodestone trouble.** "Lodestone synchronization is degraded. Existing accepted membership evidence is retained; inspect /sync status." TaruBot keeps using the last roster it accepted, so nobody loses a role over an outage.
 - **Recovery.** "Lodestone synchronization recovered: the FC roster was accepted again." It follows only an outage that officers were told about.
 - **Characters unlinked automatically.** One notice per link TaruBot ended because the character's Lodestone page was gone on two checks at least an hour apart. See [Links TaruBot ends by itself](/tarubot/admin/member-links/#links-tarubot-ends-by-itself).
+- **Missing channel overrides**, and a recovery line once they're complete. See [below](#missing-channel-overrides).
 
 Routine roster reads post no notice here; departures they confirm appear in the [member status post](#member-status-changes).
 
@@ -29,6 +30,21 @@ The trouble notice waits before it posts, and repeats slowly, so a short blip do
 - **Unlinking the FC** with `/config fc unlink` cancels a trouble notice that hasn't posted yet, so nothing posts later about an FC the server no longer uses.
 
 While a notice waits to post, the officer view of [`/sync status`](/tarubot/reference/commands/#sync-status) lists it as an `officer.notify` job. A notice cancelled before it posted simply leaves the list; that's expected.
+
+### Missing channel overrides
+
+On a server without lobby onboarding, TaruBot checks every 30 seconds whether it would still see every channel, and post where a setting names the channel, without Administrator: the same count as `/config validate`'s Visibility section ([Health checks](/tarubot/admin/health-checks/#tarubots-role-and-channel-view)). When channels are missing TaruBot's own entry, it posts one alert:
+
+> Some channels are missing TaruBot's channel override, so without Administrator TaruBot can't see them or can't post where it should. /config validate lists them and what to do; /setup overrides adds missing overrides while TaruBot holds Administrator.
+
+When every channel is covered again, and only if the alert posted, it follows with:
+
+> TaruBot's channel overrides are complete again: /config validate shows every channel visible.
+
+- **It counts as if Administrator were off,** so the alert posts even while TaruBot still holds Administrator: it tells you what [the setup window](/tarubot/admin/add-to-server/#the-setup-window) still has to fix. A server that has just started using TaruBot usually gets one, about six minutes after its private channels are first counted, or five minutes after the officer notifications channel is set if that comes later.
+- **No spam.** A change has to show on two checks in a row, so a blip posts nothing. The alert then waits five minutes, and a fix in that time cancels it without a recovery line. A new alert posts at most once in 24 hours: one that comes due sooner waits until 24 hours after the last one posted, and is cancelled if the channels are covered by then. A recovery line that hasn't been sent yet when channels go missing again is cancelled too.
+- **A server with onboarding** gets no alert, because onboarding's own pass gives TaruBot its channel access. `/config validate` and `/sync status` show a pass that hasn't reached a channel.
+- **Without an officer notifications channel** the alert isn't posted; `/config validate` still lists the channels. Once you set the channel, an alert still owed follows five minutes later.
 
 ## Member status changes
 
@@ -75,7 +91,7 @@ While a post waits, the officer view of [`/sync status`](/tarubot/reference/comm
 
 These stay quiet on purpose:
 
-- Role changes that follow a role binding change with [`/config roles`](/tarubot/admin/roles/) or `/setup` (setting up, replacing or removing a role). The exception: when a new Officer role replaces one already set, officers adopted with `adopt_holders` show as "Officer added".
+- Role changes that follow a role binding change with [`/config roles`](/tarubot/admin/roles/) or `/setup onboarding confirm:true` (setting up, replacing or removing a role). The exception: when a new Officer role replaces one already set, officers adopted with `adopt_holders` show as "Officer added".
 - Decisions TaruBot makes while its evidence is unconfirmed (an out-of-date roster, a new link it hasn't checked yet, an unknown rank), and hand edits of roles it keeps in those times. Once a fresh roster confirms them, anything that still differs from the last post is announced.
 - Roles given on joining or rejoining the server, people who left it, nicknames, FC rank changes that change neither Officer nor FC Leader, characters nobody linked, and FC joins that change no access.
 - Each member's first check, which only records where they stand: after TaruBot is installed or updated to a release with these posts, after a server is activated, or when a member first appears.

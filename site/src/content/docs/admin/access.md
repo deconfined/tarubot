@@ -31,7 +31,8 @@ A **server manager** has both **Manage Server** and **Manage Roles**. Bot office
 - choose the Officer and FC Leader roles ([`/config roles officer`](/tarubot/reference/commands/#config-roles-officer), [`/config roles leader`](/tarubot/reference/commands/#config-roles-leader));
 - set the officer rank and the role layout ([`/config officer_rank`](/tarubot/reference/commands/#config-officer_rank), [`/config role_layout`](/tarubot/reference/commands/#config-role_layout));
 - grant, revoke and reset officer access ([`/officer`](/tarubot/reference/commands/#officer-grant));
-- run [`/setup`](/tarubot/reference/commands/#setup), which also needs **Manage Channels**.
+- run [`/setup onboarding`](/tarubot/reference/commands/#setup-onboarding), which also needs **Manage Channels**;
+- run [`/setup overrides`](/tarubot/reference/commands/#setup-overrides); its `confirm:true` also needs **Administrator**, or owning the server.
 
 Some officer commands need more once a feature is on:
 
@@ -50,7 +51,7 @@ Discord's role order applies on top of these levels:
 
 Discord can't hide a command from members based on a role TaruBot manages, so most officer commands appear in everyone's command list and TaruBot refuses non-officers with **Officers only**. Two commands ask Discord to hide them by default:
 
-- `/setup`, from members without Manage Server, Manage Roles and Manage Channels;
+- `/setup` (`onboarding` and `overrides`), from members without Manage Server, Manage Roles and Manage Channels;
 - `/officer`, from members without Manage Server and Manage Roles.
 
 A server admin can change who sees a command under **Server Settings → Integrations → TaruBot**. That changes only visibility: TaruBot checks access again whenever a command runs, and whenever someone clicks one of its buttons.

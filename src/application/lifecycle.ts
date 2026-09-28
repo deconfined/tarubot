@@ -26,6 +26,11 @@ import {
 import type { Service } from "./service.js";
 import type { Synchronization } from "./synchronization.js";
 import { capabilityMetrics } from "./metrics.js";
+import {
+  VisibilityAlerts,
+  type VisibilityMonitor,
+  type VisibilityStatus,
+} from "./visibility-alerts.js";
 
 /** The writer-lease key; defined beside migrate(), which also takes it, and re-exported here. */
 export { WRITER_LEASE_LOCK };
@@ -63,6 +68,13 @@ export interface LifecycleOptions {
    * audit row the next writer's limits count. Must never reject.
    */
   readonly drain: () => Promise<void>;
+  /**
+   * The officer alert about missing channel overrides and readiness's visibility counts (2.35.0,
+   * #46), checked after each scheduler pass. Absent in production, where the constructor builds
+   * VisibilityAlerts over the Service; tests supply a stand-in. Its errors are reported, never
+   * fatal, and its counts never change readiness.
+   */
+  readonly visibility?: VisibilityMonitor;
 }
 const LIFECYCLE_DEFAULTS: LifecycleOptions = {
   leaseRetryMs: 5000,
@@ -98,6 +110,8 @@ export class ApplicationLifecycle {
   private readonly halted = Promise.withResolvers<void>();
   private readonly health: Bun.Server<undefined>;
   private readonly options: LifecycleOptions;
+  /** The channel-override monitor (options.visibility, or VisibilityAlerts by default). */
+  private readonly visibility: VisibilityMonitor;
   private monitor: ReturnType<typeof setInterval> | undefined;
   private stopPromise: Promise<void> | undefined;
   /** The writer-lease acquisition that prepare() awaits; close() lets it settle before releasing. */
@@ -130,6 +144,13 @@ export class ApplicationLifecycle {
     options: Partial<LifecycleOptions> = {},
   ) {
     this.options = { ...LIFECYCLE_DEFAULTS, ...options };
+    // Construction stores collaborators only; the first pass runs after start(), under the lease.
+    this.visibility =
+      this.options.visibility ??
+      new VisibilityAlerts(app, (guild) => this.allowsGuild(guild), {
+        log: (level, fields, message) => this.log[level](fields, message),
+        report: (error, operation) => this.report(error, operation),
+      });
     // Probes depend on local readiness, never on a live Lodestone acquisition.
     this.health = Bun.serve<undefined>({
       port: config.HEALTH_PORT,
@@ -431,6 +452,11 @@ export class ApplicationLifecycle {
     }
     // Reporting trouble must never make the scheduler itself look failed.
     await this.options.tick().catch((error: unknown) => this.report(error, "issue reports"));
+    // The officer alert about missing channel overrides (2.35.0, #46): after the issue reporter,
+    // so a failure here is reported like any other, and never fatal to the scheduler.
+    await this.visibility
+      .check()
+      .catch((error: unknown) => this.report(error, "visibility alerts"));
   }
 
   /** What /health/ready reports, for issue reports' context as well as the probe. */
@@ -444,6 +470,7 @@ export class ApplicationLifecycle {
     publicTestResponses: boolean;
     capabilities: unknown;
     lodestone: LodestoneStatus;
+    visibility: VisibilityStatus;
   } {
     const available =
       !this.stopping &&
@@ -464,7 +491,23 @@ export class ApplicationLifecycle {
       capabilities: this.capabilities,
       // Informational (the sidecar's /health until 2.21.0): a Lodestone outage never fails readiness.
       lodestone: this.app.lodestone.status(),
+      // Informational (2.35.0, #46): channels missing TaruBot's override, counted as if
+      // Administrator were off, and onboarding's pending channels. Never part of `ready`.
+      visibility: this.visibilityStatus(),
     };
+  }
+
+  /**
+   * The monitor's last pass, or all nulls if reading it throws: a probe never fails over an
+   * informational count (and isn't reported, since probes run every few seconds).
+   */
+  private visibilityStatus(): VisibilityStatus {
+    try {
+      const { missing, onboardingPending, checked, checkedAt } = this.visibility.status();
+      return { missing, onboardingPending, checked, checkedAt };
+    } catch {
+      return { missing: null, onboardingPending: null, checked: null, checkedAt: null };
+    }
   }
 
   /** Report application readiness without turning a Lodestone outage into a process failure. */

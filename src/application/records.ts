@@ -8,6 +8,7 @@ import type {
 import type { AccessRoles, AccessSnapshot, ChannelAudience } from "../domain/channel-access.js";
 import type { ReleaseNote } from "../domain/changelog.js";
 import type { StatusEntry } from "../domain/status.js";
+import type { VisibilityGuild } from "../domain/visibility.js";
 
 /** Configuration revision fences queued effects; activation is separate from bot membership. */
 export type GuildRecord = Omit<typeof guilds.$inferSelect, "created_at">;
@@ -139,4 +140,11 @@ export interface DiscordPort {
   editReview(application: ApplicationRecord): Promise<string>;
   /** Best-effort delivery is tracked independently from approval/denial. */
   dm(user: string, message: DirectMessage): Promise<void>;
+  /**
+   * TaruBot's view of the guild from the gateway caches (2.35.0, #46), for /config validate, the
+   * officer alert and /setup overrides; null when the gateway can't say yet. `fresh` refetches
+   * roles and TaruBot's member first; channels always come from the cache. Optional, so test
+   * fakes may omit it (callers then report the view as unknown).
+   */
+  visibility?(guild: string, fresh: boolean): Promise<VisibilityGuild | null>;
 }

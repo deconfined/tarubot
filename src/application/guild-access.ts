@@ -15,12 +15,29 @@ import { and, eq } from "drizzle-orm";
 import * as t from "../infrastructure/postgres/schema.js";
 import type { GuildAccessPort } from "./records.js";
 import type { Service } from "./service.js";
+import type { SetupPlanningPort } from "./setup-plan.js";
 
 export class GuildAccess {
   constructor(
     private readonly app: Service,
-    readonly discord: GuildAccessPort,
+    /** The channel-policy port, with the read-only methods /setup onboarding's dry run uses. */
+    readonly discord: GuildAccessPort & SetupPlanningPort,
   ) {}
+
+  /**
+   * The stored staff-only decisions by channel, read without a lock: what remember() keeps for
+   * channels it has seen before. /setup onboarding's dry run classifies audiences from it.
+   */
+  async policies(guild: string): Promise<Map<string, boolean>> {
+    const rows = await this.app.db.orm
+      .select({
+        channel_id: t.channelAccessPolicies.channel_id,
+        staff_only: t.channelAccessPolicies.staff_only,
+      })
+      .from(t.channelAccessPolicies)
+      .where(eq(t.channelAccessPolicies.guild_id, guild));
+    return new Map(rows.map((row) => [row.channel_id, row.staff_only]));
+  }
 
   /** Capture privacy before enforcement, retaining the first observation across repeated setup. */
   async remember(
@@ -109,7 +126,10 @@ export class GuildAccess {
       const lobby = guild.lobby_channel_id,
         officers = guild.officer_channel_id;
       if (!lobby || !officers || lobby === officers)
-        throw new Failure("blocked", "Run /setup to configure distinct lobby and officer rooms.");
+        throw new Failure(
+          "blocked",
+          "Run /setup onboarding to configure distinct lobby and officer rooms.",
+        );
       const roles = accessRoles(guild);
       const currentGuard = async (): Promise<void> => {
         await guard();
@@ -140,7 +160,7 @@ export class GuildAccess {
         if (reserved)
           throw new Failure(
             "blocked",
-            "An onboarding binding now targets a reserved community channel. Run /setup with a separate officer-chat channel.",
+            "An onboarding binding now targets a reserved community channel. Run /setup onboarding with a separate officer-chat channel.",
             0,
             { kind: "resource", resource: "channel", id: reserved },
           );
@@ -153,7 +173,7 @@ export class GuildAccess {
         if (missing)
           throw new Failure(
             "blocked",
-            "An onboarding room is missing. Run /setup to recreate or select it.",
+            "An onboarding room is missing. Run /setup onboarding to recreate or select it.",
             0,
             { kind: "resource", resource: "channel", id: missing },
           );

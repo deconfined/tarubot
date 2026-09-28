@@ -4,13 +4,16 @@
  * exactly and #18 as far as owner decision O2 allows; the health checklist's tokens, verdicts and
  * budgets; /config show's collapses and its documented field exemption (C3); every change receipt
  * and its three effects modes (C5); /setup and /officer; the changelog channel's receipts, show
- * field and checklist lines (2.25.0); and the configuration failures render as their approved
- * concepts. The approved cards predate the changelog channel, which they show unset.
+ * field and checklist lines (2.25.0); TaruBot's role and Visibility sections and /config show's
+ * count of them (2.35.0, #46); and the configuration failures render as their approved concepts.
+ * The approved cards predate the changelog channel, which they show unset, and the #46 sections,
+ * which they show healthy.
  */
 import { describe, expect, test } from "bun:test";
 import type { EffectsMode } from "../../src/application/results.js";
 import { fcLinked } from "../../src/application/service.js";
 import {
+  administratorRemoval,
   changeReply,
   CONFIG_REPLY_KINDS,
   configurationChecks,
@@ -52,9 +55,10 @@ import {
   ROLE,
   setupResult,
   unlinked,
+  visibilityReport,
 } from "../fixtures/replies/configuration.js";
 import { catalogTests } from "../fixtures/replies/index.js";
-import { ACTORS, at, NOW, REF, VIEWERS } from "../fixtures/results.js";
+import { ACTORS, at, GUILD_ID, NOW, REF, VIEWERS } from "../fixtures/results.js";
 
 catalogTests("configuration", CONFIG_CASES);
 
@@ -136,7 +140,7 @@ describe("approved cards are reproduced exactly", () => {
     expect(onlyEmbed(presented)).toEqual({
       color: 0x57f287,
       title: "Configuration health · all checks passed",
-      description: "13 checks passed. Nothing was changed.",
+      description: "19 checks passed. Nothing was changed.",
       fields: [
         {
           name: "Free Company",
@@ -156,6 +160,13 @@ describe("approved cards are reproduced exactly", () => {
           name: "Onboarding",
           value: "[OK] Lobby <#323456789012345604>\n[OK] Officer room <#323456789012345605>",
         },
+        // 2.35.0 (#46): TaruBot's role and channel view, healthy, between Onboarding and the switches.
+        {
+          name: "TaruBot's role",
+          value:
+            "[OK] Administrator: off\n[OK] Manage Roles, Manage Nicknames, View Channel, Send Messages, Embed Links, Attach Files and Read Message History\n[OK] Onboarding permissions\n[OK] Role order: <@&223456789012345690> is above the access roles\n[OK] No permissions it never needs",
+        },
+        { name: "Visibility", value: "[OK] Onboarding manages TaruBot's channel access" },
         { name: "Discord changes", value: "[OK] Live", inline: true },
         { name: "Role layout", value: "[OK] On", inline: true },
       ],
@@ -190,6 +201,13 @@ describe("approved cards are reproduced exactly", () => {
             "[OK] Ledger <#323456789012345601>\n[FAIL] Officer notifications <#323456789012345602>: Choose a text channel in this guild where the bot can view, send, embed links, and read message history.\n[OFF] Changelog: not set, so update posts are skipped\n[OFF] Guest applications: not set, so /apply is closed",
         },
         { name: "Onboarding", value: "[OFF] Onboarding is off" },
+        // 2.35.0 (#46): TaruBot's role and channel view, healthy, between Onboarding and the switches.
+        {
+          name: "TaruBot's role",
+          value:
+            "[OK] Administrator: off\n[OK] Manage Roles, Manage Nicknames, View Channel, Send Messages, Embed Links, Attach Files and Read Message History\n[OK] Role order: <@&223456789012345690> is above the access roles\n[OK] No permissions it never needs",
+        },
+        { name: "Visibility", value: "[OK] TaruBot can see every channel" },
         {
           name: "Discord changes",
           value: "[WARN] Paused: this server has not been activated",
@@ -224,6 +242,13 @@ describe("approved cards are reproduced exactly", () => {
             "[OK] Ledger <#323456789012345601>\n[OK] Officer notifications <#323456789012345602>\n[OFF] Changelog: not set, so update posts are skipped\n[OFF] Guest applications: closed, so /apply refuses",
         },
         { name: "Onboarding", value: "[OFF] Onboarding is off" },
+        // 2.35.0 (#46): TaruBot's role and channel view, healthy, between Onboarding and the switches.
+        {
+          name: "TaruBot's role",
+          value:
+            "[OK] Administrator: off\n[OK] Manage Roles, Manage Nicknames, View Channel, Send Messages, Embed Links, Attach Files and Read Message History\n[OK] Role order: <@&223456789012345690> is above the access roles\n[OK] No permissions it never needs",
+        },
+        { name: "Visibility", value: "[OK] TaruBot can see every channel" },
         { name: "Discord changes", value: "[WAIT] Paused until activation", inline: true },
         { name: "Role layout", value: "[OFF] Off: display and order untouched", inline: true },
         {
@@ -484,6 +509,653 @@ describe("/config validate", () => {
     const checks = configurationChecks(R.healthy);
     expect(checks.filter((row) => row.resource)).toHaveLength(9);
     expect(configurationChecks(R.partial).filter((row) => row.resource)).toHaveLength(0);
+  });
+});
+
+describe("TaruBot's role and Visibility (2.35.0, #46)", () => {
+  /** A checked (onboarding off) server's report: the imported guild, which has onboarding off. */
+  const offGuild = configGuild({
+    access_policy_enabled: false,
+    lobby_channel_id: null,
+    officer_channel_id: null,
+  });
+  /** The validate embed for a visibility report on the onboarding-off guild. */
+  const validate = (visibility: ReturnType<typeof visibilityReport> | null, guild = offGuild) =>
+    onlyEmbed(healthReply(configReport({ guild, visibility }), officer, { now }));
+  /** A checked report with these changes. */
+  const checked = (overrides: Parameters<typeof visibilityReport>[0] = {}) =>
+    visibilityReport(overrides, false);
+  /** A section's rows. */
+  const rowsOf = (embed: ReturnType<typeof onlyEmbed>, name: string) =>
+    fieldOf(embed, name)?.split("\n");
+  /** Distinct decimal IDs, as many as asked, from a base. */
+  const ids = (base: string, count: number) =>
+    Array.from({ length: count }, (_, index) => `${base}${String(index).padStart(3, "0")}`);
+  /** Administrator held from these roles, `shared` the ones neither TaruBot's role nor @everyone. */
+  const holding = (roles: string[], shared: string[] = []) => ({
+    administrator: { held: true, roles, shared },
+  });
+  /** Nothing held. */
+  const NOT_HELD = { administrator: { held: false, roles: [], shared: [] } };
+  const ROLE_A = "523456789012345601";
+  const ROLE_B = "523456789012345602";
+  const ROLE_C = "523456789012345603";
+  const ROLE_D = "523456789012345604";
+  /** A missing list with these channels. */
+  const missing = (
+    lists: Partial<ReturnType<typeof visibilityReport>["missing"]>,
+  ): ReturnType<typeof visibilityReport>["missing"] => ({
+    categories: [],
+    inside: [],
+    channels: [],
+    posting: [],
+    unreadable: [],
+    ...lists,
+  });
+
+  test("Administrator: off, on and still needed, or on and no longer needed", () => {
+    expect(rowsOf(validate(checked()), "TaruBot's role")?.[0]).toBe("[OK] Administrator: off");
+    const needed = checked({
+      ...holding([ROLE.bot, GUILD_ID]),
+      administratorNeeded: true,
+      missing: missing({ channels: [CHANNEL.ledger] }),
+      missingCount: 1,
+    });
+    expect(rowsOf(validate(needed), "TaruBot's role")?.[0]).toBe(
+      `[WARN] Administrator: on (from <@&${ROLE.bot}> and @everyone); still needed until the items below are fixed`,
+    );
+    const done = checked({ ...holding([ROLE.bot]), administratorNeeded: false });
+    // Either way it is a warning to act on, never a problem.
+    expect(validate(done).title).toBe("Configuration health · 1 warning");
+  });
+
+  test("no longer needed: turn it off in TaruBot's role or @everyone, remove a shared role", () => {
+    const first = (roles: string[], shared: string[]) =>
+      rowsOf(
+        validate(checked({ ...holding(roles, shared), administratorNeeded: false })),
+        "TaruBot's role",
+      )?.[0];
+    const lead = "[WARN] Administrator: no longer needed; ";
+    // TaruBot's own bot role only.
+    expect(first([ROLE.bot], [])).toBe(`${lead}turn it off in <@&${ROLE.bot}>`);
+    // A shared role only, such as an Officer role people also hold.
+    expect(first([ROLE_A], [ROLE_A])).toBe(`${lead}remove <@&${ROLE_A}> from TaruBot`);
+    // Both.
+    expect(first([ROLE.bot, ROLE_A], [ROLE_A])).toBe(
+      `${lead}turn it off in <@&${ROLE.bot}>, and remove <@&${ROLE_A}> from TaruBot`,
+    );
+    // @everyone is turned off like TaruBot's own role, named in plain text.
+    expect(first([ROLE.bot, GUILD_ID], [])).toBe(
+      `${lead}turn it off in <@&${ROLE.bot}> and @everyone`,
+    );
+    // Three mentions per list, then the count.
+    expect(
+      first([ROLE.bot, ROLE_A, ROLE_B, ROLE_C, ROLE_D], [ROLE_A, ROLE_B, ROLE_C, ROLE_D]),
+    ).toBe(
+      `${lead}turn it off in <@&${ROLE.bot}>, and remove <@&${ROLE_A}>, <@&${ROLE_B}>, <@&${ROLE_C}> and 1 more from TaruBot`,
+    );
+    // The exported helper setup reuses, down to counts only.
+    expect(administratorRemoval([ROLE.bot, ROLE_A], [ROLE_A], GUILD_ID, 3)).toBe(
+      `turn it off in <@&${ROLE.bot}>, and remove <@&${ROLE_A}> from TaruBot`,
+    );
+    expect(administratorRemoval([ROLE.bot, ROLE_A, ROLE_B], [ROLE_A, ROLE_B], GUILD_ID, 0)).toBe(
+      "turn it off in 1 role, and remove 2 roles from TaruBot",
+    );
+  });
+
+  test("core permissions: own role, only from @everyone or other roles, and missing", () => {
+    const rows = (core: ReturnType<typeof visibilityReport>["core"], held = false) =>
+      rowsOf(
+        validate(checked({ core, ...(held ? holding([ROLE.bot]) : NOT_HELD) })),
+        "TaruBot's role",
+      );
+    const own = { source: "own_role", roles: [] } as const;
+    expect(
+      rows([
+        { permission: "ManageRoles", ...own },
+        { permission: "ManageNicknames", source: "everyone", roles: [GUILD_ID] },
+        { permission: "ViewChannel", source: "other_roles", roles: [ROLE_A, GUILD_ID] },
+        { permission: "SendMessages", ...own },
+        { permission: "EmbedLinks", source: "other_roles", roles: [ROLE_A, GUILD_ID] },
+        { permission: "AttachFiles", source: "missing", roles: [] },
+        { permission: "ReadMessageHistory", ...own },
+      ]),
+    ).toEqual([
+      "[OK] Administrator: off",
+      "[OK] Manage Roles, Send Messages and Read Message History",
+      "[WARN] Manage Nicknames: only from @everyone, so a change to that role removes it",
+      `[WARN] View Channel and Embed Links: only from <@&${ROLE_A}> and @everyone, so a change to those roles removes them`,
+      "[FAIL] Attach Files: missing",
+      `[OK] Role order: <@&${ROLE.bot}> is above the access roles`,
+      "[OK] No permissions it never needs",
+    ]);
+    // While Administrator is on, a missing permission is what it still covers.
+    expect(
+      rows(
+        [
+          { permission: "ManageRoles", source: "missing", roles: [] },
+          { permission: "ManageNicknames", source: "missing", roles: [] },
+          ...(
+            [
+              "ViewChannel",
+              "SendMessages",
+              "EmbedLinks",
+              "AttachFiles",
+              "ReadMessageHistory",
+            ] as const
+          ).map((permission) => ({ permission, ...own })),
+        ],
+        true,
+      )?.[1],
+    ).toBe(
+      "[WARN] Manage Roles and Manage Nicknames: missing without Administrator; grant them before removing Administrator",
+    );
+  });
+
+  test("onboarding permissions: one row for all five, and only on onboarding servers", () => {
+    const five = [
+      "ManageChannels",
+      "UseApplicationCommands",
+      "CreatePublicThreads",
+      "CreatePrivateThreads",
+      "Connect",
+    ] as const;
+    expect(
+      rowsOf(
+        validate(visibilityReport({ onboardingMissing: [...five] }), configGuild()),
+        "TaruBot's role",
+      )?.[2],
+    ).toBe(
+      "[FAIL] Onboarding permissions: missing Manage Channels, Use Application Commands, Create Public Threads, Create Private Threads and Connect",
+    );
+    const covered = visibilityReport({
+      onboardingMissing: ["Connect"],
+      ...holding([ROLE.bot]),
+      administratorNeeded: true,
+    });
+    expect(rowsOf(validate(covered, configGuild()), "TaruBot's role")?.[2]).toBe(
+      "[WARN] Onboarding permissions: missing Connect without Administrator; grant it before removing Administrator",
+    );
+    expect(rowsOf(validate(visibilityReport(), configGuild()), "TaruBot's role")?.[2]).toBe(
+      "[OK] Onboarding permissions",
+    );
+    // Without onboarding no row names any of the five, even while TaruBot lacks them all: the
+    // analysis reports none (onboardingMissing null), and the core seven never include them.
+    const bare = checked({
+      core: checked().core.map((row) => ({ ...row, source: "missing" as const })),
+      missing: missing({ channels: [CHANNEL.ledger] }),
+      missingCount: 1,
+    });
+    const text = visibleText(
+      healthReply(configReport({ guild: offGuild, visibility: bare }), officer, { now }),
+    );
+    for (const name of [
+      "Onboarding permissions",
+      "Manage Channels",
+      "Use Application Commands",
+      "Create Public Threads",
+      "Create Private Threads",
+    ])
+      expect({ name, found: text.includes(name) }).toEqual({ name, found: false });
+    expect(text).not.toMatch(/\bConnect\b/u);
+  });
+
+  test("role order and never-needed permissions", () => {
+    const report = visibilityReport({
+      roleOrder: { highest: ROLE.bot, notBelow: [ROLE.officer, ROLE.leader], throughShared: [] },
+      neverNeeded: [
+        { permission: "ManageGuild", roles: [ROLE.bot] },
+        { permission: "MentionEveryone", roles: [ROLE_A] },
+      ],
+    });
+    expect(rowsOf(validate(report, configGuild()), "TaruBot's role")?.slice(3)).toEqual([
+      `[FAIL] Role order: move TaruBot's highest role above <@&${ROLE.officer}> and <@&${ROLE.leader}>`,
+      `[WARN] Never needed: Manage Server and Mention Everyone (from <@&${ROLE.bot}> and <@&${ROLE_A}>)`,
+    ]);
+    const bare = checked({ roleOrder: { highest: null, notBelow: [], throughShared: [] } });
+    expect(fieldOf(validate(bare), "TaruBot's role")).toContain(
+      "[OK] Role order: no access roles to stay above",
+    );
+  });
+
+  test("role order kept only by a shared Administrator role is a warning to fix before removing it", () => {
+    const rows = (roleOrder: ReturnType<typeof visibilityReport>["roleOrder"]) =>
+      rowsOf(
+        validate(checked({ ...holding([ROLE_A], [ROLE_A]), administratorNeeded: true, roleOrder })),
+        "TaruBot's role",
+      ) ?? [];
+    const only = rows({
+      highest: ROLE.bot,
+      notBelow: [ROLE.member, ROLE.guest],
+      throughShared: [ROLE.member, ROLE.guest],
+    });
+    // Administrator stays needed, and nothing reads as a failure that doesn't exist yet.
+    expect(only[0]).toBe(
+      `[WARN] Administrator: on (from <@&${ROLE_A}>); still needed until the items below are fixed`,
+    );
+    expect(only.filter((row) => row.includes("Role order"))).toEqual([
+      `[WARN] Role order: TaruBot is above <@&${ROLE.member}> and <@&${ROLE.guest}> only through <@&${ROLE_A}>; move <@&${ROLE.bot}> above them before removing that role from TaruBot`,
+    ]);
+    // Roles it sits below whatever it holds are still a failure, in their own row.
+    const mixed = rows({
+      highest: ROLE.bot,
+      notBelow: [ROLE.member, ROLE.officer],
+      throughShared: [ROLE.member],
+    });
+    expect(mixed.filter((row) => row.includes("Role order"))).toEqual([
+      `[FAIL] Role order: move TaruBot's highest role above <@&${ROLE.officer}>`,
+      `[WARN] Role order: TaruBot is above <@&${ROLE.member}> only through <@&${ROLE_A}>; move <@&${ROLE.bot}> above it before removing that role from TaruBot`,
+    ]);
+    // Without a role of its own left, TaruBot needs one.
+    expect(
+      rows({ highest: null, notBelow: [ROLE.member], throughShared: [ROLE.member] }).filter((row) =>
+        row.includes("Role order"),
+      ),
+    ).toEqual([
+      `[WARN] Role order: TaruBot is above <@&${ROLE.member}> only through <@&${ROLE_A}>; give TaruBot a role above it before removing that role from TaruBot`,
+    ]);
+  });
+
+  test("onboarding servers: what onboarding's pass hasn't reached, and what it never manages", () => {
+    const onboarding = (held: boolean, managed: string[], unmanaged: string[] = []) =>
+      rowsOf(
+        validate(
+          visibilityReport({
+            ...(held ? holding([ROLE.bot]) : NOT_HELD),
+            administratorNeeded: held,
+            onboardingPending: { managed, unmanaged },
+          }),
+          configGuild(),
+        ),
+        "Visibility",
+      );
+    expect(onboarding(false, [])).toEqual(["[OK] Onboarding manages TaruBot's channel access"]);
+    expect(onboarding(true, [CHANNEL.ledger, CHANNEL.notices])).toEqual([
+      `[WARN] Onboarding hasn't reached 2 channels yet: <#${CHANNEL.ledger}> and <#${CHANNEL.notices}>; keep Administrator on until /sync status shows its channel pass finished`,
+    ]);
+    expect(onboarding(false, [CHANNEL.ledger])).toEqual([
+      `[FAIL] Onboarding hasn't reached 1 channel yet: <#${CHANNEL.ledger}>; /sync status shows why its channel pass is waiting`,
+    ]);
+    expect(onboarding(true, [], [CHANNEL.changelog])).toEqual([
+      `[WARN] Onboarding doesn't manage <#${CHANNEL.changelog}>, so TaruBot needs its own access there before Administrator comes off: give it View Channel, Send Messages, Embed Links and Read Message History`,
+    ]);
+    expect(onboarding(false, [CHANNEL.ledger], [CHANNEL.changelog])).toEqual([
+      `[FAIL] Onboarding hasn't reached 1 channel yet: <#${CHANNEL.ledger}>; /sync status shows why its channel pass is waiting`,
+      `[FAIL] Onboarding doesn't manage <#${CHANNEL.changelog}>, and TaruBot can't post there: give it View Channel, Send Messages, Embed Links and Read Message History`,
+    ]);
+  });
+
+  test("Visibility: every channel visible, and hidden on purpose", () => {
+    expect(fieldOf(validate(checked()), "Visibility")).toBe("[OK] TaruBot can see every channel");
+    const hidden = ids("62345678901234", 8);
+    expect(fieldOf(validate(checked({ hiddenOnPurpose: hidden })), "Visibility")).toBe(
+      `[OK] TaruBot can see every channel, except 8 hidden on purpose: ${hidden
+        .slice(0, 6)
+        .map((id) => `<#${id}>`)
+        .join(", ")} and 2 more`,
+    );
+    // Channels hidden only through their category's deny are counted apart.
+    const [first = "", second = ""] = hidden;
+    const byCategory = checked({ hiddenOnPurpose: [first, second], hiddenByCategory: [second] });
+    expect(fieldOf(validate(byCategory), "Visibility")).toBe(
+      `[OK] TaruBot can see every channel, except 2 hidden on purpose (1 inside a category hidden from TaruBot): <#${first}> and <#${second}>`,
+    );
+    const alongside = checked({
+      hiddenOnPurpose: [first],
+      hiddenByCategory: [first],
+      missing: missing({ channels: [CHANNEL.ledger] }),
+      missingCount: 1,
+    });
+    expect(rowsOf(validate(alongside), "Visibility")?.at(-1)).toBe(
+      `[OFF] Hidden on purpose: <#${first}> (1 inside a category hidden from TaruBot)`,
+    );
+  });
+
+  test("missing overrides: counts, six mentions then 'and K more', and the remedy", () => {
+    const categories = ids("72345678901234", 2);
+    const inside = ids("73345678901234", 5);
+    const channels = ids("74345678901234", 7);
+    const report = (held: boolean, unreadable: string[]) =>
+      checked({
+        ...(held ? holding([ROLE.bot]) : NOT_HELD),
+        administratorNeeded: held,
+        missing: missing({ categories, inside, channels, unreadable }),
+        hiddenOnPurpose: [CHANNEL.changelog],
+        missingCount: 14,
+      });
+    const lead = `[WARN] Missing TaruBot overrides: 2 categories (5 channels inside), 7 channels: ${[
+      ...categories,
+      ...channels,
+    ]
+      .slice(0, 6)
+      .map((id) => `<#${id}>`)
+      .join(", ")} and 3 more`;
+    const unread = [inside[0] ?? "", channels[6] ?? ""];
+    expect(rowsOf(validate(report(true, unread)), "Visibility")).toEqual([
+      `${lead}; /setup overrides confirm:true adds them while TaruBot holds Administrator (the run re-reads the 2 TaruBot can't read yet)`,
+      `[OFF] Hidden on purpose: <#${CHANNEL.changelog}>`,
+    ]);
+    expect(rowsOf(validate(report(true, [])), "Visibility")?.[0]).toBe(
+      `${lead}; /setup overrides confirm:true adds them while TaruBot holds Administrator`,
+    );
+    expect(rowsOf(validate(report(false, unread)), "Visibility")?.[0]).toBe(
+      `${lead}; turn Administrator on for TaruBot, then run /setup overrides confirm:true; TaruBot can't read 2 of them until then`,
+    );
+    expect(rowsOf(validate(report(false, [])), "Visibility")?.[0]).toBe(
+      `${lead}; turn Administrator on for TaruBot, then run /setup overrides confirm:true`,
+    );
+    // One missing channel, no categories.
+    const one = checked({ missing: missing({ channels: [CHANNEL.lobby] }), missingCount: 1 });
+    expect(fieldOf(validate(one), "Visibility")).toBe(
+      `[WARN] Missing TaruBot overrides: 1 channel: <#${CHANNEL.lobby}>; turn Administrator on for TaruBot, then run /setup overrides confirm:true`,
+    );
+  });
+
+  test("posting channels name what they lack, in the channel's own words, with the remedy", () => {
+    const report = (held: boolean) =>
+      checked({
+        ...(held ? holding([ROLE.bot]) : NOT_HELD),
+        administratorNeeded: held,
+        missing: missing({
+          channels: [CHANNEL.ledger, CHANNEL.notices],
+          posting: [
+            { id: CHANNEL.ledger, lacks: ["ViewChannel"] },
+            { id: CHANNEL.notices, lacks: ["EmbedLinks", "ReadMessageHistory"] },
+          ],
+          unreadable: [CHANNEL.ledger],
+        }),
+        missingCount: 2,
+      });
+    const lead = `[WARN] Posting channels without all four posting permissions: <#${CHANNEL.ledger}> (View Channel) and <#${CHANNEL.notices}> (Embed Links and Read Message History)`;
+    // The same remedy as the Missing row, without its unreadable clause.
+    expect(rowsOf(validate(report(true)), "Visibility")?.[1]).toBe(
+      `${lead}; /setup overrides confirm:true adds them while TaruBot holds Administrator`,
+    );
+    expect(rowsOf(validate(report(false)), "Visibility")?.[1]).toBe(
+      `${lead}; turn Administrator on for TaruBot, then run /setup overrides confirm:true`,
+    );
+  });
+
+  test("masked, and denied: a warning while Administrator is on, a problem once it is off", () => {
+    const report = (held: boolean) =>
+      checked({
+        ...(held ? holding([ROLE.bot]) : NOT_HELD),
+        administratorNeeded: held,
+        masked: [CHANNEL.reviews],
+        denied: [CHANNEL.ledger],
+        missingCount: 2,
+      });
+    expect(rowsOf(validate(report(true)), "Visibility")).toEqual([
+      `[WARN] Configured channels where TaruBot's own entry denies Read Message History: <#${CHANNEL.reviews}>; /setup overrides lifts that deny while TaruBot holds Administrator`,
+      `[WARN] Configured but denied to TaruBot on purpose: <#${CHANNEL.ledger}>; lift the deny or change the setting before removing Administrator`,
+    ]);
+    const off = validate(report(false));
+    expect(rowsOf(off, "Visibility")?.[1]).toBe(
+      `[FAIL] Configured but denied to TaruBot on purpose: <#${CHANNEL.ledger}>; lift the deny or change the setting`,
+    );
+    expect(off.title).toBe("Configuration health · 1 problem, 1 warning");
+  });
+
+  test("private categories: a warning with the three fixes, held or not", () => {
+    const categories = ids("75345678901234", 8);
+    const configured = ids("76345678901234", 3);
+    const report = (held: boolean, count: number) =>
+      checked({
+        ...(held ? holding([ROLE.bot]) : NOT_HELD),
+        administratorNeeded: held,
+        privateCategories: categories.slice(0, count).map((id, index) => ({
+          id,
+          configured: index === 0 ? configured : [configured[index % 3] ?? ""],
+          inside: index === 0 ? configured : [configured[index % 3] ?? ""],
+        })),
+        missingCount: count * 2,
+      });
+    const fixes =
+      "; /setup overrides leaves them alone: move the configured channel out, choose another channel for that setting, or give TaruBot View Channel on the category yourself";
+    const [c0, c1] = categories;
+    const [l0, l1, l2] = configured;
+    const two = `[WARN] Private categories holding a configured channel: <#${c0}> (holds <#${l0}>, <#${l1}> and 1 more) and <#${c1}> (holds <#${l1}>)${fixes}`;
+    // @deconfined: it's a warning, whether or not Administrator is held.
+    expect(rowsOf(validate(report(true, 2)), "Visibility")).toEqual([two]);
+    expect(rowsOf(validate(report(false, 2)), "Visibility")).toEqual([two]);
+    expect(validate(report(false, 2)).title).toBe("Configuration health · 1 warning");
+    // Eight categories: six named, then the count.
+    const eight = rowsOf(validate(report(true, 8)), "Visibility")?.[0] ?? "";
+    expect(eight).toContain(`<#${categories[5]}> (holds <#${l2}>) and 2 more; /setup overrides`);
+    expect(eight).not.toContain(`<#${categories[6]}>`);
+  });
+
+  test("the rows come in their pinned order", () => {
+    const report = checked({
+      ...holding([ROLE.bot]),
+      administratorNeeded: true,
+      missing: missing({
+        channels: [CHANNEL.ledger],
+        posting: [{ id: CHANNEL.ledger, lacks: ["EmbedLinks"] }],
+      }),
+      masked: [CHANNEL.reviews],
+      denied: [CHANNEL.notices],
+      privateCategories: [{ id: CHANNEL.officers, configured: [CHANNEL.lobby], inside: [] }],
+      hiddenOnPurpose: [CHANNEL.changelog],
+      missingCount: 5,
+    });
+    expect(
+      rowsOf(validate(report), "Visibility")?.map(
+        (row) => /^\[[A-Z]+\] ([A-Z][a-z]+)/u.exec(row)?.[1],
+      ),
+    ).toEqual(["Missing", "Posting", "Configured", "Configured", "Private", "Hidden"]);
+    expect(rowsOf(validate(report), "Visibility")?.[2]).toContain("denies Read Message History");
+    expect(rowsOf(validate(report), "Visibility")?.[3]).toContain("denied to TaruBot on purpose");
+  });
+
+  test("an unreadable view drops the role section and warns once", () => {
+    const embed = validate(null);
+    expect(namesOf(embed)).not.toContain("TaruBot's role");
+    expect(fieldOf(embed, "Visibility")).toBe(
+      "[WARN] Couldn't read TaruBot's channel view; try again in a minute",
+    );
+    expect(embed.title).toBe("Configuration health · 1 warning");
+  });
+
+  test("the sections sit between Onboarding and Discord changes", () => {
+    expect(namesOf(validate(checked()))).toEqual([
+      "Free Company",
+      "Access roles",
+      "Channels",
+      "Onboarding",
+      "TaruBot's role",
+      "Visibility",
+      "Discord changes",
+      "Role layout",
+    ]);
+  });
+
+  test("/config show counts the rows to review on its health line, and adds no field", () => {
+    const show = (visibility: ReturnType<typeof visibilityReport> | null) =>
+      onlyEmbed(showReply(configReport({ guild: offGuild, visibility }), officer, { now }));
+    const healthy = show(checked());
+    expect(healthy.description?.split("\n").at(-1)).toBe("Health: all 7 resource checks passed.");
+    const review = checked({
+      ...holding([ROLE.bot]),
+      administratorNeeded: false,
+      denied: [CHANNEL.ledger],
+      missingCount: 1,
+    });
+    expect(show(review).description?.split("\n").at(-1)).toBe(
+      "Health: all 7 resource checks passed. Role and visibility: 2 to review in /config validate.",
+    );
+    expect(show(null).description?.split("\n").at(-1)).toBe(
+      "Health: all 7 resource checks passed. Role and visibility: 1 to review in /config validate.",
+    );
+    // The Private categories row counts like any other warning.
+    const withPrivate = checked({
+      ...review,
+      privateCategories: [{ id: CHANNEL.officers, configured: [CHANNEL.lobby], inside: [] }],
+      missingCount: 2,
+    });
+    expect(show(withPrivate).description?.split("\n").at(-1)).toBe(
+      "Health: all 7 resource checks passed. Role and visibility: 3 to review in /config validate.",
+    );
+    expect(namesOf(show(review))).toEqual(namesOf(healthy));
+    // Beside a failing resource check.
+    const failing = onlyEmbed(
+      showReply(
+        configReport({
+          guild: offGuild,
+          visibility: review,
+          capabilities: { officer_role_id: "Pick an ordinary role." },
+        }),
+        officer,
+        { now },
+      ),
+    );
+    expect(failing.description?.split("\n").at(-1)).toBe(
+      "Health: 1 problem. Run /config validate. Role and visibility: 2 to review in /config validate.",
+    );
+  });
+
+  test("a maximal report keeps every field within 1,024 and nothing is cut", () => {
+    const big = (base: string, count: number) =>
+      Array.from({ length: count }, (_, index) => `${base}${String(index).padStart(4, "0")}`);
+    // Twenty-digit IDs, the longest mentions Discord can send.
+    const roles = big("1844674407370955", 12);
+    const channels = big("1844674407370955", 90);
+    const pick = (from: number, count: number) => roles.slice(from, from + count);
+    const maximal = (onboarding: boolean) =>
+      visibilityReport(
+        {
+          ...holding(pick(0, 5), pick(1, 4)),
+          administratorNeeded: false,
+          core: (
+            [
+              "ManageRoles",
+              "ManageNicknames",
+              "ViewChannel",
+              "SendMessages",
+              "EmbedLinks",
+              "AttachFiles",
+              "ReadMessageHistory",
+            ] as const
+          ).map((permission, index) => ({
+            permission,
+            source: "other_roles" as const,
+            roles: pick(index, 4),
+          })),
+          onboardingMissing: onboarding
+            ? [
+                "ManageChannels",
+                "UseApplicationCommands",
+                "CreatePublicThreads",
+                "CreatePrivateThreads",
+                "Connect",
+              ]
+            : null,
+          neverNeeded: (
+            [
+              "ManageGuild",
+              "ManageMessages",
+              "MentionEveryone",
+              "KickMembers",
+              "BanMembers",
+              "ModerateMembers",
+              "ManageWebhooks",
+            ] as const
+          ).map((permission, index) => ({ permission, roles: pick(index, 3) })),
+          roleOrder: { highest: roles[11] ?? null, notBelow: pick(0, 8), throughShared: [] },
+          ...(onboarding
+            ? {
+                onboardingPending: {
+                  managed: channels.slice(0, 40),
+                  unmanaged: channels.slice(40, 42),
+                },
+              }
+            : {
+                missing: {
+                  categories: channels.slice(0, 10),
+                  inside: channels.slice(10, 30),
+                  channels: channels.slice(30, 45),
+                  posting: channels.slice(30, 35).map((id) => ({
+                    id,
+                    lacks: [
+                      "ViewChannel",
+                      "SendMessages",
+                      "EmbedLinks",
+                      "ReadMessageHistory",
+                    ] as const,
+                  })),
+                  unreadable: channels.slice(10, 20),
+                },
+                masked: channels.slice(45, 48),
+                denied: channels.slice(48, 51),
+                privateCategories: channels.slice(60, 70).map((id, index) => ({
+                  id,
+                  configured: channels.slice(70 + index, 74 + index),
+                  inside: channels.slice(70 + index, 74 + index),
+                })),
+                hiddenOnPurpose: channels.slice(51, 60),
+                missingCount: 101,
+              }),
+        },
+        onboarding,
+      );
+    const capabilities: Record<string, string> = {};
+    for (const column of ["member_role_id", "officer_role_id", "ledger_channel_id"])
+      capabilities[column] = stress.text(900);
+    for (const onboarding of [true, false]) {
+      const presented = healthReply(
+        configReport({
+          guild: onboarding ? configGuild() : offGuild,
+          visibility: maximal(onboarding),
+          capabilities,
+        }),
+        officer,
+        { now },
+      );
+      const embed = expectHouseStyle(presented, { tone: "error" });
+      expect(embed.fields?.length).toBeLessThanOrEqual(HOUSE_LIMITS.fields);
+      for (const name of ["TaruBot's role", "Visibility"]) {
+        const value = fieldOf(embed, name) ?? "";
+        expect(value.length).toBeLessThanOrEqual(DISCORD_LIMITS.fieldValue);
+        // Rows are whole: every line starts with its token, and none was cut short.
+        for (const line of value.split("\n")) expect(line).toMatch(/^\[(OK|WARN|FAIL|OFF)\] /u);
+        expect(value).not.toContain("…");
+      }
+      // Every row kind is still there, only with fewer mentions.
+      const visibility = fieldOf(embed, "Visibility") ?? "";
+      for (const lead of onboarding
+        ? ["Onboarding hasn't reached", "Onboarding doesn't manage"]
+        : [
+            "Missing TaruBot overrides",
+            "Posting channels",
+            "Configured channels where",
+            "Configured but denied",
+            "Private categories",
+            "Hidden on purpose",
+          ])
+        expect({ onboarding, lead, found: visibility.includes(lead) }).toEqual({
+          onboarding,
+          lead,
+          found: true,
+        });
+      expect(fieldOf(embed, "TaruBot's role")).toContain(
+        "Administrator: no longer needed; turn it off in",
+      );
+    }
+    // The first budget already fits a server with a few of everything.
+    const modest = checked({
+      ...holding(pick(0, 2)),
+      administratorNeeded: true,
+      missing: missing({
+        categories: channels.slice(0, 2),
+        inside: channels.slice(2, 8),
+        channels: channels.slice(8, 20),
+        posting: [{ id: channels[8] ?? "", lacks: ["ViewChannel"] }],
+        unreadable: channels.slice(2, 4),
+      }),
+      hiddenOnPurpose: channels.slice(20, 30),
+      missingCount: 20,
+    });
+    expect(fieldOf(validate(modest), "Visibility")).toContain("and 8 more;");
   });
 });
 
@@ -1313,8 +1985,9 @@ describe("configuration failures render as their approved concepts", () => {
     });
   });
 
-  test("/setup busy, conflict and ambiguity", () => {
-    // Busy is the approved errors-and-style#10 wait concept, with setup's own sentence.
+  test("/setup onboarding busy, conflict and ambiguity", () => {
+    // Busy is the approved errors-and-style#10 wait concept, with setup's own sentence, which names
+    // the /setup family: both subcommands share its lock (2.35.0).
     const busy = expectFailure(
       refusal(
         failure(
@@ -1322,7 +1995,7 @@ describe("configuration failures render as their approved concepts", () => {
           "Another /setup for this server is in progress. Try again in a few seconds.",
         ),
         manager,
-        "/setup",
+        "/setup onboarding",
       ),
       { code: "busy", ref: REF, tone: "pending", title: "Please wait a moment" },
     );
@@ -1331,10 +2004,10 @@ describe("configuration failures render as their approved concepts", () => {
       refusal(
         failure(
           "conflict",
-          "Server settings changed during setup, so nothing was saved. Run /setup again; anything already created is reused.",
+          "Server settings changed during setup, so nothing was saved. Run /setup onboarding confirm:true again; anything already created is reused.",
         ),
         manager,
-        "/setup",
+        "/setup onboarding",
       ),
       { code: "conflict", ref: REF, title: "Settings changed — try again" },
     );
@@ -1348,7 +2021,7 @@ describe("configuration failures render as their approved concepts", () => {
           ids: [ROLE.officer, ROLE.previous],
         }),
         manager,
-        "/setup",
+        "/setup onboarding",
       ),
       { code: "ambiguous", ref: REF, title: "Choose which role to use" },
     );
@@ -1361,7 +2034,7 @@ describe("configuration failures render as their approved concepts", () => {
           ids: [CHANNEL.lobby, CHANNEL.officers],
         }),
         manager,
-        "/setup",
+        "/setup onboarding",
       ),
       { code: "ambiguous", ref: REF, title: "Choose which channel to use" },
     );

@@ -59,7 +59,9 @@ test("command inventory exactly matches the declared public surface", async () =
       "config roles leader",
       "config officer_rank",
       "config role_layout",
-      "setup",
+      // 2.35.0 (#46): /setup split in two, both dry runs unless confirm:true.
+      "setup onboarding",
+      "setup overrides",
       "officer grant",
       "officer revoke",
       "officer reset",

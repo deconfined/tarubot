@@ -14,7 +14,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ApplicationCommandOptionType, PermissionFlagsBits } from "discord.js";
+import { ApplicationCommandOptionType } from "discord.js";
 import { loadCommands } from "../../src/bot/discovery.js";
 import {
   commandPaths,
@@ -23,6 +23,11 @@ import {
 } from "../../src/discord/inspection.js";
 import { EXAMPLES } from "../../src/discord/presenters/failure.js";
 import { FAILURE_CATEGORY } from "../../src/domain/failures.js";
+import {
+  CORE_PERMISSIONS,
+  ONBOARDING_PERMISSIONS,
+  RECOMMENDED_PERMISSIONS,
+} from "../../src/domain/permissions.js";
 
 /** A repository path, resolved relative to this test (the same helper as deployment.test.ts). */
 const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
@@ -104,6 +109,18 @@ const permissionNames: { readonly [key in keyof typeof requiredBotPermissions]: 
   EmbedLinks: "Embed Links",
   AttachFiles: "Attach Files",
   ReadMessageHistory: "Read Message History",
+};
+
+/**
+ * The names add-to-server.md gives onboarding's five (2.35.0, #46 answer 6: the page recommends one
+ * set, the core seven plus these). Typed by the code's keys, like permissionNames above.
+ */
+const onboardingNames: { readonly [key in keyof typeof ONBOARDING_PERMISSIONS]: string } = {
+  ManageChannels: "Manage Channels",
+  UseApplicationCommands: "Use Application Commands",
+  CreatePublicThreads: "Create Public Threads",
+  CreatePrivateThreads: "Create Private Threads",
+  Connect: "Connect",
 };
 
 /** The permission names in the first column of a page's "## Permissions" table, in page order. */
@@ -285,6 +302,8 @@ const allowedNumbers = new Set([
   "714882491",
   "714882492",
   "714882494",
+  // The one permission set add-to-server.md recommends (RECOMMENDED_PERMISSIONS, 2.35.0).
+  String(RECOMMENDED_PERMISSIONS),
 ]);
 /** The only UUIDs a page may carry: the failure replies' job-ID examples (EXAMPLES). */
 const allowedUuids = new Set([
@@ -411,13 +430,23 @@ describe("the reference pages cover the code's settings, codes and permissions",
     expect(codes.filter((code) => !replies.includes(`\`${code}\``))).toEqual([]);
   });
 
-  test("add-to-server lists exactly the code's bot permissions plus Manage Channels", async () => {
-    // Manage Channels is the /setup onboarding addition, not part of the launch set.
-    expect(Object.values(requiredBotPermissions)).not.toContain(PermissionFlagsBits.ManageChannels);
-    const listed = permissionRows(await page("admin/add-to-server"));
-    const expected = [...Object.values(permissionNames), "Manage Channels"];
+  test("add-to-server lists exactly the core seven plus onboarding's five, and their integer", async () => {
+    // #46 answer 6 (2.35.0): one recommended set, the permissions TaruBot keeps without
+    // Administrator (requiredBotPermissions, the core seven) plus lobby onboarding's five, given
+    // as one bare integer and never as a link. Administrator is never part of it.
+    expect(requiredBotPermissions).toBe(CORE_PERMISSIONS);
+    const bits = (catalog: Readonly<Record<string, bigint>>) =>
+      Object.values(catalog).reduce((all, bit) => all | bit, 0n);
+    expect(bits(requiredBotPermissions) | bits(ONBOARDING_PERMISSIONS)).toBe(
+      RECOMMENDED_PERMISSIONS,
+    );
+    const text = await page("admin/add-to-server");
+    const listed = permissionRows(text);
+    const expected = [...Object.values(permissionNames), ...Object.values(onboardingNames)];
     // Each once, none missing and none extra, so the table can't drift from the code either way.
     expect([...listed].sort()).toEqual([...expected].sort());
+    expect(listed).not.toContain("Administrator");
+    expect(text).toContain(`**${RECOMMENDED_PERMISSIONS}**`);
   });
 
   test("add-to-server keeps what an owner adds the bot with, now that it has no link", async () => {
@@ -430,6 +459,14 @@ describe("the reference pages cover the code's settings, codes and permissions",
       "**Server Members Intent**",
       "**Manage Server**",
       "**Public Bot**",
+      // 2.35.0 (#46): Administrator is only for the /setup overrides window, said unmissably.
+      ":::danger[Administrator is temporary",
+      "`/setup overrides confirm:true`",
+      "no longer needed",
+      "Leave Administrator off except during `/setup overrides` (or, on a server with lobby onboarding, until onboarding's first channel pass has run).",
+      // The mask goes only where TaruBot can't see: public channels keep its role's permissions.
+      "Channels TaruBot already sees, such as public ones, are left alone and keep what its role allows, Read Message History included",
+      "**Any other channel TaruBot can't see without Administrator**",
     ];
     expect(needed.filter((phrase) => !text.includes(phrase))).toEqual([]);
   });

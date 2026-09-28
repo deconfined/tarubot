@@ -2,13 +2,18 @@
  * An ApplicationLifecycle with controlled collaborators, for writer-lease and readiness tests. Only
  * the database is supplied by the test (a fake pool in unit tests, real PostgreSQL in integration
  * tests); Discord, Lodestone, scheduling and the queue are prototype-backed stand-ins that record
- * what startup asked of them.
+ * what startup asked of them. The channel-override monitor (2.35.0) is an idle stand-in unless the
+ * test passes its own, so these tests never reach Discord or the database through it.
  */
 import { Guild } from "discord.js";
 import { pino } from "pino";
 import { ApplicationLifecycle, type LifecycleOptions } from "../../src/application/lifecycle.js";
 import { Service } from "../../src/application/service.js";
 import { Synchronization } from "../../src/application/synchronization.js";
+import type {
+  VisibilityMonitor,
+  VisibilityStatus,
+} from "../../src/application/visibility-alerts.js";
 import type { Configuration } from "../../src/config/env.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { Database } from "../../src/infrastructure/postgres/database.js";
@@ -58,6 +63,31 @@ export interface Probe {
   database: boolean;
   writerLease: boolean;
   discord: boolean;
+  visibility: VisibilityStatus;
+}
+
+/** Lifecycle options, where `visibility: "default"` asks for the lifecycle's own monitor. */
+export type HarnessOptions = Partial<Omit<LifecycleOptions, "visibility">> & {
+  readonly visibility?: VisibilityMonitor | "default";
+};
+
+/** A monitor's status before its first pass. */
+export const NO_VISIBILITY: VisibilityStatus = {
+  missing: null,
+  onboardingPending: null,
+  checked: null,
+  checkedAt: null,
+};
+
+/**
+ * A stand-in channel-override monitor: check() does nothing unless `check` is given, and status()
+ * reports `status` (all nulls by default).
+ */
+export function visibilityStub(
+  status: VisibilityStatus = NO_VISIBILITY,
+  check: () => Promise<void> = async () => {},
+): VisibilityMonitor {
+  return { check, status: () => status };
 }
 
 /**
@@ -65,10 +95,11 @@ export interface Probe {
  * the lease and startup. Timing defaults are short; the process exit is recorded, not performed.
  * `guilds` are the guild IDs the gateway's cache reports present, which start() reconciles, and
  * `overrides` replace configuration values (effects stay off unless a test turns them on).
+ * `options.visibility` replaces the idle monitor; "default" leaves the lifecycle to build its own.
  */
 export function lifecycleHarness(
   db: Database,
-  options: Partial<LifecycleOptions> = {},
+  options: HarnessOptions = {},
   guilds: readonly string[] = [],
   overrides: Partial<Configuration> = {},
 ): LifecycleHarness {
@@ -123,6 +154,7 @@ export function lifecycleHarness(
     stop: async () => {},
   });
   const log = pino({ level: "info" }, { write: (line: string) => logs.push(JSON.parse(line)) });
+  const { visibility = visibilityStub(), ...rest } = options;
   const lifecycle = new ApplicationLifecycle(
     config,
     db,
@@ -132,7 +164,13 @@ export function lifecycleHarness(
     queue,
     log,
     (_error, operation) => reports.push(operation),
-    { leaseRetryMs: 25, leaseWarnAfterMs: 60000, exit: (code) => exits.push(code), ...options },
+    {
+      leaseRetryMs: 25,
+      leaseWarnAfterMs: 60000,
+      exit: (code) => exits.push(code),
+      ...rest,
+      ...(visibility === "default" ? {} : { visibility }),
+    },
   );
   return {
     lifecycle,

@@ -115,7 +115,7 @@ describe("permissions", () => {
       "AttachFiles",
       "ReadMessageHistory",
     ]);
-    // The launch leaves onboarding off, so Manage Channels is not required.
+    // The core seven (2.35.0): Manage Channels belongs to onboarding's permissions, not these.
     expect(Object.keys(requiredBotPermissions)).not.toContain("ManageChannels");
   });
 });

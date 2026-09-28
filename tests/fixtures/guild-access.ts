@@ -6,6 +6,12 @@ import type {
   PreparedAccess,
 } from "../../src/application/records.js";
 import {
+  blockerOf,
+  type PreparePlan,
+  type SetupPlanningPort,
+} from "../../src/application/setup-plan.js";
+import type { Failure } from "../../src/domain/values.js";
+import {
   channelAccessOverwrites,
   sameOverwrites,
   type AccessChannel,
@@ -15,14 +21,45 @@ import {
 } from "../../src/domain/channel-access.js";
 
 /** Mutable remote state and effect hooks model restarts, edits and partial failures without Discord credentials. */
-export class FakeGuildAccess implements GuildAccessPort {
+export class FakeGuildAccess implements GuildAccessPort, SetupPlanningPort {
   readonly guilds = new Map<string, AccessSnapshot>();
   readonly writes: string[] = [];
+  /** Roles the dry run's roleCandidates reads, per guild (2.35.0). */
+  readonly roleLists = new Map<string, { id: string; name: string }[]>();
+  /** Refusals planPrepare reports as blockers, as DiscordGuildAccess would collect them. */
+  planningRefusals: Failure[] = [];
   beforeWrite: ((channel: string) => Promise<void>) | undefined;
   afterWrite: ((channel: string) => Promise<void>) | undefined;
   private next = 800000;
 
   async check(): Promise<void> {}
+  /** The caller half of check(); every caller passes here, as in check(). */
+  async checkCaller(): Promise<void> {}
+  async roleCandidates(guild: string): Promise<{ id: string; name: string }[]> {
+    return structuredClone(this.roleLists.get(guild) ?? []);
+  }
+  /**
+   * The dry run's prepare(): reuse a room whose ID the snapshot holds, otherwise create one, with
+   * the injected refusals as blockers. It never writes.
+   */
+  async planPrepare(
+    guild: string,
+    _roles: Partial<AccessRoles>,
+    lobbyId: string | null,
+    officerId: string | null,
+  ): Promise<PreparePlan> {
+    const snapshot = structuredClone(this.state(guild));
+    const room = (id: string | null) =>
+      snapshot.channels.some((channel) => channel.id === id)
+        ? { action: "reuse" as const, id }
+        : { action: "create" as const, id: null };
+    return {
+      blockers: this.planningRefusals.map(blockerOf),
+      lobby: room(lobbyId),
+      officerRoom: room(officerId),
+      snapshot,
+    };
+  }
   /** Existing rooms are reused by ID; snapshots retain the pre-enforcement state. */
   async prepare(
     guild: string,

@@ -181,6 +181,18 @@ export const FAILURE_CASES = {
     }),
     "/config roles member",
   ),
+  // 2.35.0 (#46): /setup overrides confirm:true needs Administrator itself, or the server owner.
+  "forbidden administrator · /setup overrides · manager": card(
+    "forbidden.administrator",
+    "manager",
+    { tone: "error", title: "Administrator or server owner only" },
+    failure(
+      "forbidden",
+      "Only someone with Administrator, or the server owner, can run /setup overrides confirm:true.",
+      { kind: "scope", scope: "administrator" },
+    ),
+    "/setup overrides",
+  ),
   "forbidden hierarchy · /config roles member · manager": card(
     "forbidden.hierarchy",
     "manager",
@@ -257,7 +269,7 @@ export const FAILURE_CASES = {
     { spec: "errors-and-style#6", tone: "info", title: "TaruBot isn't set up here yet" },
     failure(
       "setup",
-      "This server has no TaruBot configuration yet. Start with /setup, or link the Free Company with /config fc link.",
+      "This server has no TaruBot configuration yet. Start with /config fc link and /config roles, or /setup onboarding for lobby onboarding.",
       { kind: "setup", missing: "guild" },
     ),
     "/claim",
@@ -268,7 +280,7 @@ export const FAILURE_CASES = {
     { spec: "errors-and-style#7", ...FINISH_SETUP },
     failure(
       "setup",
-      "This server has no TaruBot configuration yet. Start with /setup, or link the Free Company with /config fc link.",
+      "This server has no TaruBot configuration yet. Start with /config fc link and /config roles, or /setup onboarding for lobby onboarding.",
       { kind: "setup", missing: "guild" },
     ),
     "/config show",
@@ -472,13 +484,13 @@ export const FAILURE_CASES = {
     ),
     "/claim",
   ),
-  "ambiguous roles · /setup · manager": card(
+  "ambiguous roles · /setup onboarding · manager": card(
     "ambiguous.role",
     "manager",
     { tone: "warning", title: "Choose which role to use" },
     failure(
       "ambiguous",
-      "Several roles are named Member. Choose the one to use with /config roles, then run /setup again.",
+      "Several roles are named Member. Choose the one to use with /config roles, then run /setup onboarding again.",
       {
         kind: "matches",
         resource: "role",
@@ -488,13 +500,13 @@ export const FAILURE_CASES = {
     ),
     "/setup",
   ),
-  "ambiguous channels · /setup · manager": card(
+  "ambiguous channels · /setup onboarding · manager": card(
     "ambiguous.channel",
     "manager",
     { spec: "errors-and-style#14", tone: "warning", title: "Choose which channel to use" },
     failure(
       "ambiguous",
-      "More than one channel is named #lobby, so TaruBot didn't guess. Pick the right one in /setup.",
+      "More than one channel is named #lobby, so TaruBot didn't guess. Pick the right one in /setup onboarding.",
       {
         kind: "matches",
         resource: "channel",
@@ -620,15 +632,15 @@ export const FAILURE_CASES = {
     failure("conflict", SETTINGS_CHANGED),
     "/config ledger",
   ),
-  "stale settings · /setup · manager": card(
+  "stale settings · /setup onboarding · manager": card(
     "stale.settings",
     "manager",
     { tone: "warning", title: "Settings changed — try again" },
     failure(
       "conflict",
-      "Server settings changed during setup, so nothing was saved. Run /setup again; anything already created is reused.",
+      "Server settings changed during setup, so nothing was saved. Run /setup onboarding confirm:true again; anything already created is reused.",
     ),
-    "/setup",
+    "/setup onboarding",
   ),
   "stale control · unknown button · any": card(
     "stale.control",
@@ -790,12 +802,23 @@ export const FAILURE_CASES = {
     ),
     "/claim",
   ),
-  "busy · /setup · manager": card(
+  "busy · /setup onboarding · manager": card(
     "wait.retry",
     "manager",
     WAIT,
     failure("busy", "Another /setup for this server is in progress. Try again in a few seconds."),
-    "/setup",
+    "/setup onboarding",
+  ),
+  // 2.35.0 (#46): /setup overrides shares the setup lock with onboarding's channel pass.
+  "busy · /setup overrides · manager": card(
+    "wait.retry",
+    "manager",
+    WAIT,
+    failure(
+      "busy",
+      "Another /setup or channel pass for this server is in progress. Try again in a minute.",
+    ),
+    "/setup overrides",
   ),
   "eligible · form submit · member": card(
     "eligible",
@@ -917,12 +940,12 @@ export const FAILURE_CASES = {
     ),
     "/assign",
   ),
-  "discord server error · /setup · manager": card(
+  "discord server error · /setup onboarding · manager": card(
     "upstream.discord",
     "manager",
     { tone: "warning", title: "Discord isn't responding" },
     discordError(0, 502),
-    "/setup",
+    "/setup onboarding",
   ),
 
   // 2.28.0: GitHub didn't confirm a /suggest post; it may exist, and the try counts.
@@ -977,7 +1000,7 @@ export const FAILURE_CASES = {
     ),
     "/officer grant",
   ),
-  "blocked reserved channel · /setup · manager": card(
+  "blocked reserved channel · /setup onboarding · manager": card(
     "blocked",
     "manager",
     BLOCKED_OFFICER,
@@ -986,7 +1009,31 @@ export const FAILURE_CASES = {
       "The Community Updates channel and its category are reserved. Choose a different officer channel.",
       { kind: "resource", resource: "channel", id: "323456789012345603" },
     ),
-    "/setup",
+    "/setup onboarding",
+  ),
+  // 2.35.0 (#46): a channel an earlier /setup overrides masked, without Administrator (text 22):
+  // TaruBot's own member entry denies what onboarding needs, which no role grant can lift.
+  "blocked member entry · /setup onboarding · manager": card(
+    "blocked",
+    "manager",
+    BLOCKED_OFFICER,
+    failure(
+      "blocked",
+      "TaruBot's member entry in <#323456789012345607> denies Manage Channels and Manage Permissions; remove that deny (on the member, not its role), or turn Administrator on for TaruBot until onboarding's first channel pass has run, which clears it. Onboarding needs View Channel, Manage Channels and Manage Permissions there.",
+      { kind: "resource", resource: "channel", id: "323456789012345607", fix: "member_entry" },
+    ),
+    "/setup onboarding",
+  ),
+  // 2.35.0 (#46): /setup overrides confirm:true without Administrator on TaruBot.
+  "blocked administrator · /setup overrides · manager": card(
+    "blocked",
+    "manager",
+    BLOCKED_OFFICER,
+    failure(
+      "blocked",
+      "TaruBot needs Administrator while /setup overrides confirm:true runs. Turn it on for TaruBot's role, run it again, then remove it once /config validate says it is no longer needed.",
+    ),
+    "/setup overrides",
   ),
   "blocked channel · /ledger deposit · member": card(
     "blocked",
@@ -1004,12 +1051,12 @@ export const FAILURE_CASES = {
     ),
     "/ledger deposit",
   ),
-  "blocked raw Missing Permissions · /setup · manager": card(
+  "blocked raw Missing Permissions · /setup onboarding · manager": card(
     "blocked",
     "manager",
     BLOCKED_OFFICER,
     discordError(50013, 403),
-    "/setup",
+    "/setup onboarding",
   ),
   "blocked raw Missing Access · before the actor · any": card(
     "blocked",
@@ -1018,12 +1065,12 @@ export const FAILURE_CASES = {
     discordError(50001, 403),
     "/claim",
   ),
-  "paused · /setup · manager": card(
+  "paused · /setup onboarding · manager": card(
     "paused",
     "manager",
     { tone: "pending", title: "Discord changes paused" },
     failure("disabled", "Discord effects are disabled pending activation."),
-    "/setup",
+    "/setup onboarding",
   ),
   "unexpected · /ledger deposit · member": card(
     "unexpected",

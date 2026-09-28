@@ -609,6 +609,92 @@ DevBot has no backup service (that is production's `backup`). After the producti
 - DevBot operations run on the new VM from now on, where `docker` needs no `sg`. Claude Code itself follows at the final cutover, which @deconfined runs once the 2.34.0 work is finished.
 - Until that cutover, every DevBot step runs on the new VM (reach it over SSH), never on the old VM where Claude sessions still start. Never `up`, `start` or `restart` the old VM's DevBot containers while the new one runs: its `.env` still holds DevBot's token, and a second DevBot on a stale database would break "one Discord application never runs in two places".
 
+### Machine move completed — 2026-09-28
+
+@deconfined ran the final cutover at about 06:00 UTC on 2026-09-28, so Claude Code now runs on the new development VM too, in the same checkout path, and resumed its conversation there. The first session's checks there passed: the checkout at `3bd1d0c` (2.34.0), GitHub's CLI signed in, signing with the agent's key, and DevBot healthy with readiness 200 and the writer lease.
+- DevBot steps now run in this VM's own checkout, where `docker` needs no `sg`. Its `.env` still has no image pin, so always pass `TARUBOT_IMAGE_TAG` (2.34.0 since the update below).
+- The old development VM stays for one week as an untouched fallback (to about 2026-10-05), with its DevBot containers stopped and `restart=no`, and then @deconfined retires it ([OPEN_ITEMS.md](OPEN_ITEMS.md#owner-checks-owed)). The rule above still holds until then: never `up`, `start` or `restart` those containers.
+
+### 2.34.0 update — 2026-09-28
+
+2.34.0 (#50 part 2b, the pull unit, [PR #59](https://github.com/deconfined/tarubot/pull/59), `3bd1d0c`) changes no bot code, no command and no schema. @deconfined gave the go-ahead to update DevBot on the new development VM:
+- **The image.** `gh attestation verify` verified the digest `sha256:0a5080e75d73f48ca39991604c4d342c0a244158b00b6d8275eb6d69e5ef6e84` as built from commit `3bd1d0c`, and the pull matched it.
+- **Stop and backup.** DevBot 2.30.3 stopped at 05:53:54 UTC with the writer lease free and the schema at 010. The dump `.cache/backups/tarubot_dev-before-2.34.0-3bd1d0c.dump` (161,533 bytes) was restored into `tarubot_dev_restore_test`, and `check-restore.js` from the 2.30.3 image verified every table at 010; the copy and the container's temporary dump were then dropped.
+- **No migration.** Both releases require `010_status_notices.sql`.
+- **Start.** `up` with `TARUBOT_IMAGE_TAG=2.34.0` at 05:54:10 UTC; healthy about 16 seconds later and still hardened (a read-only root filesystem, no capabilities, `no-new-privileges`), readiness 200 with the writer lease, and no warning in the logs.
+- **Commands.** `commands.js list` was clean: none global, none in the production guild, 21 in the test guild. Nothing needed registering, because 2.34.0 changes no command.
+- A read-only `docker inspect` later the same morning showed the bot on `ghcr.io/deconfined/tarubot:2.34.0` with that image ID, healthy.
+
+### 2.35.0 update procedure (#46) — pending
+
+2.35.0 ([#46](https://github.com/deconfined/tarubot/issues/46), branch `feat/setup-overrides-2.35.0` from `3bd1d0c`) splits `/setup` into `/setup onboarding` and `/setup overrides` (both dry runs unless `confirm:true`), adds `/config validate`'s "TaruBot's role" and "Visibility" sections, the officer alert about missing channel overrides and readiness's `visibility` counts, and starts new servers with the role layout off. No migration: the schema stays `010_status_notices.sql`. The update runs in this VM's own checkout, and each step that stops, starts or registers needs @deconfined's go-ahead.
+
+1. The standard steps ([CLAUDE.md](../CLAUDE.md) "Updating DevBot"), always with `TARUBOT_IMAGE_TAG=2.35.0`: stop, dump, restore into `tarubot_dev_restore_test` and `check-restore.js`. There is no migration, so skip the migrate rehearsal; a plain `migrate.js` prints only `Schema ready.`
+2. Before registering, the old `/setup fc_id:…` shows the stale-command card.
+3. Register the guild commands, then `commands.js list`: 21 roots and 47 paths, with `setup onboarding` and `setup overrides` in place of `setup`.
+4. Read-only checks in the test guild, which has onboarding on. No `confirm:true` without a go-ahead.
+   - `/setup onboarding` answers with the dry run ("Server setup · dry run").
+   - `/setup overrides` answers "Channel overrides · onboarding manages them".
+   - `/config validate` shows "TaruBot's role" and `[OK] Onboarding manages TaruBot's channel access`. A pending row would mean onboarding's pass hasn't reached a channel; check `/sync status`.
+   - `/config show`'s health line counts what the two new sections ask to review.
+5. Readiness has `visibility {missing: 0, onboardingPending: 0, checked: 1, checkedAt}`; a non-zero `onboardingPending` means onboarding's pass hasn't reached a channel (`/sync status`). "Modules loaded" and "Database writer lease acquired" are unchanged, and no officer alert posts: servers with onboarding never raise one.
+
+### 2.35.0 rehearsal procedure — throwaway server (#46)
+
+@deconfined's answer 8 on #46: before the first real `/setup overrides confirm:true` in production, rehearse it on a throwaway Discord server with DevBot. @deconfined runs it after the merge, once DevBot runs 2.35.0 (the update procedure above): the 2.35.0 image is published only from `main`. To rehearse before the merge instead, DevBot runs an image built from the branch (append `-f docker-compose.build.yml`, as for other unmerged changes), and step 16.4 then expects that build's commands. Every step that stops or starts DevBot, edits `.env` or writes to Discord is his, or needs his go-ahead; read-only checks (readiness, `commands.js list`, read-only SQL on `tarubot_dev` like the other checks here) don't. The throwaway's ID stays in DevBot's `.env` and the shell only: it never goes into the repository, a record or a commit.
+
+**The allowance.** While DevBot's `TEST_GUILD_ID` names the throwaway, the tool guard refuses DevBot's tools unless each run also sets `DEVBOT_THROWAWAY_GUILD_ID` to the same ID ([CONFIGURATION.md](CONFIGURATION.md#maintenance-tool-profiles)). Pass it per run with `-e`, never in `.env`. The bot itself follows `TEST_GUILD_ID` alone. Under the allowance the real test guild is out of the tools' reach.
+
+1. **Create the server.** @deconfined creates it with exactly one public text channel named `#chat` (the test plan's channel: public, so `/setup overrides` never masks it and the test-plan post works without Administrator) and one public channel for officer notifications. He then enables Community (**Server Settings → Enable Community**), because Discord allows the stage and forum channels of step 3 only on Community servers: he picks the existing `#chat` as the rules channel and the officer-notifications channel as the community-updates channel, never "create one for me", so no extra channel changes the counts the later steps expect. (Without onboarding, the community-updates channel gets no special treatment.) He adds DevBot with the recommended permissions (105630518288), plus Administrator on its role.
+2. **Point DevBot at it.**
+   - @deconfined sets `TEST_GUILD_ID` in DevBot's `.env` to the throwaway. If `.env` sets `TEST_PLAN_CHANNEL_ID` (the test guild's #chat), he empties it for the rehearsal and notes its value for the restore; the start then finds the throwaway's only `#chat`. Without that, every start fails `test_plan` and files an issue report. Then he recreates DevBot on 2.35.0, so Compose reads the new `.env`:
+
+     ```sh
+     TARUBOT_IMAGE_TAG=2.35.0 docker compose -f docker-compose.yml -f docker-compose.devbot.yml up -d --wait tarubot
+     ```
+
+     A `docker compose restart` would keep the old `TEST_GUILD_ID`: Compose reads `.env` only when it creates the container. DevBot's `.env` has no image pin, so every command here names `TARUBOT_IMAGE_TAG` (a pre-2.35.0 image's guard refuses the throwaway outright).
+   - Register and read back, with the allowance on each run:
+
+     ```sh
+     TARUBOT_IMAGE_TAG=2.35.0 docker compose -f docker-compose.yml -f docker-compose.devbot.yml run --rm --no-deps -T \
+       -e DEVBOT_THROWAWAY_GUILD_ID=<throwaway id> tarubot bun dist/scripts/register.js --guild <throwaway id>
+     TARUBOT_IMAGE_TAG=2.35.0 docker compose -f docker-compose.yml -f docker-compose.devbot.yml run --rm --no-deps -T \
+       -e DEVBOT_THROWAWAY_GUILD_ID=<throwaway id> tarubot bun dist/scripts/commands.js list --guild <throwaway id>
+     ```
+
+     The list is clean: global empty, the throwaway with 21 roots and 47 paths. A bare `commands.js list` also reads the real test guild, which still holds DevBot's commands, so under the allowance it exits 2 by design.
+3. **Create the test channels:** a private category with synced text, voice and stage children; an unsynced private text channel and a forum; a channel whose View Channel deny is on DevBot's role (hidden on purpose); and a private category holding a channel that will be the ledger, plus one synced sibling.
+4. **First configuration.** `/config ledger` (the channel inside the private category) and `/config officer_notifications` (the public channel). The first save creates the server's row: `/config show` shows the role layout off (CFG-07). It also starts the first alert episode: the private channels count as missing, so about a minute later (two 30-second checks) the episode opens, and the alert is due 5 minutes after that.
+5. **Turn Administrator off.**
+   - The overrides dry run shows the Administrator blocker. It lists the private channels either as hidden from TaruBot until Administrator is on, or as planned from the real overwrites still cached since the join: Discord may not re-send them obfuscated when Administrator comes off.
+   - `/config validate` shows the Missing row with the not-held remedy, and the Private categories row.
+   - **Wait here** until the first officer alert posts in the officer notifications channel with the approved text, about 6 minutes after step 4. Readiness shows `visibility.missing` above 0 and `onboardingPending` 0. If steps 5 to 8 go faster than that, the episode may end before the alert posts: it is then withdrawn, and step 9 shows no recovery line.
+6. **Turn Administrator on.** The dry run lists the writes and their permissions, and the private category under "Private categories holding a configured channel"; its title reads "Channel overrides · dry run · 1 to fix in Discord" (`overrides.plan_attention`).
+7. **`/setup overrides confirm:true`.**
+   - The reply is "Channel overrides added · 1 to fix in Discord" (`overrides.applied_attention`), with the private-category field.
+   - In the Discord client, the synced children still show as synced. Note whether Discord copied the category writes to them on its own; either way they must end synced, and the reply's count equals the dry run's (a child Discord brought to its category's entry counts as written; the `setup.overrides` audit row marks it `propagated`).
+   - The private category and its channels are untouched.
+8. **Fix the private category.** Move the ledger channel out, or give DevBot View Channel on the category. Rerun `confirm:true`: the category is gone from the report, or its channels are now visible.
+9. **Recovery.** Rerun once more: "Channel overrides · nothing to add". About a minute later (two clear checks) the approved recovery line posts, because the step 5 alert posted, and readiness `visibility.missing` returns to 0.
+10. **`/config validate`** shows "TaruBot can see every channel, except 1 hidden on purpose" and "Administrator: no longer needed; turn it off in @DevBot" (DevBot's own role).
+11. **Denied check, with Administrator still on.**
+    - Put a View Channel deny on DevBot's member entry in the ledger channel. `/config validate` shows "Configured but denied to TaruBot on purpose" as `[WARN]`, because Administrator is held.
+    - Wait at least 2 minutes. A new episode opens, but an alert posted within the last 24 hours (step 5), so nothing posts: check read-only that the new `officer:<guild>:visibility` jobs row has `due_at` at the end of that 24-hour window.
+    - Undo the deny: set View Channel back to allow on DevBot's member entry, as the run wrote it (a neutral View Channel leaves the channel missing, not visible), or clear it and rerun `/setup overrides confirm:true`. About a minute later that row closes as `{skipped: "restored before posting"}`, and no recovery line posts.
+    - Don't run this check without Administrator: under DevBot's obfuscation toggle, a channel TaruBot can't view arrives obfuscated, so a deny made without Administrator reads as missing, not denied (the documented limit; a later `hide:` option may address it).
+12. **Remove Administrator.** `/config validate`'s "TaruBot's role" and "Visibility" sections are all `[OK]` ("Administrator: off"; "TaruBot can see every channel, except 1 hidden on purpose"), so the role-hidden channel is still hidden on purpose. The FC, access-role and other `[WARN]` and `[OFF]` rows are expected on the throwaway, which links no FC and binds no roles, so the card's title counts warnings. Posting still works without Administrator: rerun `/config ledger channel:<the same channel>`, which saves again even when unchanged, so the save re-checks all four posting permissions there and is accepted. (Every `/ledger` operation needs a linked FC and an opening balance, so no ledger post is possible on the throwaway.) DevBot appears in the member lists.
+13. **Alert check.** Create a new private channel outside any category. Expect no post: after about a minute a new `officer:<guild>:visibility` row is due at the end of the same 24-hour window (read-only check), and readiness `visibility.missing` is 1.
+14. Turn Administrator back on and run `/setup overrides confirm:true`. About a minute later that row closes as `restored before posting`, no recovery line posts, and the count returns to 0.
+15. **Member-entry check.** Remove Administrator, then `/config changelog` a channel DevBot masked: the refusal says DevBot's own entry denies Read Message History, with the member-entry fix.
+16. **Restore.**
+    1. While `TEST_GUILD_ID` still names the throwaway and DevBot runs, @deconfined deletes the throwaway server, or removes DevBot from it. The guild-delete event then marks its row inactive, so the queue never claims its leftover jobs (such as a delayed alert), and deleting the server also removes DevBot's guild commands there. No `commands.js clear-guild` is needed: the allowance refuses clearing the throwaway, and after DevBot leaves a clear would have no access.
+    2. Check read-only that the throwaway's `guilds.active` is false. If it is still true (DevBot wasn't running at that moment), start DevBot once more with `TEST_GUILD_ID` still naming the throwaway (`TARUBOT_IMAGE_TAG=2.35.0 docker compose -f docker-compose.yml -f docker-compose.devbot.yml up -d --wait tarubot`): startup marks it inactive, since DevBot is no longer in it.
+    3. @deconfined sets `TEST_GUILD_ID` back to the test guild `1040379370159743139`, and `TEST_PLAN_CHANNEL_ID` back if he emptied it, and recreates DevBot with `TARUBOT_IMAGE_TAG=2.35.0 docker compose -f docker-compose.yml -f docker-compose.devbot.yml up -d --wait tarubot`. A `restart` would leave it scoped to the deleted throwaway, which step 4's checks might not catch: `commands.js list` runs in a new container that reads `.env` afresh.
+    4. Without the allowance, a bare `commands.js list` is clean again: global empty, and the test guild with 21 roots and 47 paths. Readiness is ready, with `visibility.onboardingPending` 0.
+
+Record the outcome here and in [VERIFICATION.md](VERIFICATION.md), without the throwaway's ID.
+
 ### Remaining unverified-visitor form checks (on hold until after launch)
 
 The user selected manual form review **only for unverified visitors**. Verified non-FC users keep automatic Guest eligibility and FC members keep Member eligibility. PR #6 merged at `db062bdbb9fc502d62a214f8a56692e418b8875b` on 2026-09-23 at 05:46:39 UTC with all checks passed. [Publication run 35823822742](https://github.com/deconfined/tarubot/actions/runs/35823822742) succeeded, so the 2.12.0 images are available. Migration 004 is deployed; the remaining `/apply` scenarios still require live testing. From 2.15.0, `/apply` also needs the guest-application switch on (`/config guest_applications enabled:true`); migration 006 turns it on for DevBot because a review channel is set.

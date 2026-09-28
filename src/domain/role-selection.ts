@@ -15,7 +15,7 @@ export function existingRoleId(
   if (matches.length > 1)
     throw new Failure(
       "ambiguous",
-      `Several roles are named ${canonicalName}. Choose the one to use with /config roles, then run /setup again.`,
+      `Several roles are named ${canonicalName}. Choose the one to use with /config roles, then run /setup onboarding again.`,
       0,
       {
         kind: "matches",

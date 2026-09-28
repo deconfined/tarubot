@@ -34,7 +34,7 @@ export function rolePositionChanges(
   if (slots.length !== priority.length)
     throw new Failure(
       "blocked",
-      "A managed role is missing; run /setup or repair its configuration.",
+      "A managed role is missing; run /setup onboarding or repair its configuration.",
     );
   const first = slots[0]?.position;
   if (first === undefined) return [];

@@ -65,8 +65,15 @@ import {
 } from "../jobs/queue.js";
 import { managedRoleOrder } from "../domain/role-layout.js";
 import { MISSING_CONFIRM_SECONDS } from "../domain/profiles.js";
+import {
+  analyseVisibility,
+  type VisibilityReport,
+  visibilitySettings,
+} from "../domain/visibility.js";
+import { NEW_GUILD_ROW } from "./guild-defaults.js";
 import type { DiscordPort, GuildRecord } from "./records.js";
 import { dropWaiting } from "./status-notices.js";
+import { loadVisibilityRecords } from "./visibility-records.js";
 import type {
   ApplicationChoiceRow,
   ApplicationState,
@@ -106,7 +113,7 @@ const SETTINGS_CHANGED =
 
 /** Approved wording shared by the role-binding and /setup input checks. */
 const ONBOARDING_ROLES =
-  "Onboarding is on, so all four roles are required. Choose a replacement role instead of unsetting it, or run /setup again.";
+  "Onboarding is on, so all four roles are required. Choose a replacement role instead of unsetting it, or run /setup onboarding again.";
 const DISTINCT_ROLES = "Member, Guest, Officer and FC Leader must be four different roles.";
 
 /**
@@ -248,7 +255,7 @@ export class Service {
     if (!row)
       throw new Failure(
         "setup",
-        "This server has no TaruBot configuration yet. Start with /setup, or link the Free Company with /config fc link.",
+        "This server has no TaruBot configuration yet. Start with /config fc link and /config roles, or /setup onboarding for lobby onboarding.",
         0,
         { kind: "setup", missing: "guild" },
       );
@@ -575,8 +582,12 @@ export class Service {
       effectsMode: this.effectsMode(guild),
     };
   }
-  /** Diagnose independent capabilities; validation never mutates configuration or access. */
-  async validate(actor: Actor): Promise<ConfigurationReport> {
+  /**
+   * Diagnose independent capabilities; validation never mutates configuration or access. `report`
+   * receives an unexpected error from TaruBot's channel view (see below); the command and button
+   * handlers pass their context's reporter.
+   */
+  async validate(actor: Actor, report?: (error: unknown) => void): Promise<ConfigurationReport> {
     authorize(actor, actor.guildId, "officer");
     const guild = await this.guild(actor);
     const capabilities: Record<string, string> = {};
@@ -604,8 +615,29 @@ export class Service {
       guild.access_policy_enabled && guild.changelog_channel_id
         ? await this.changelogAudience(this.db.orm, guild, guild.changelog_channel_id)
         : undefined;
+    // TaruBot's role and channel view as if Administrator were off (2.35.0, #46), from the gateway
+    // caches with roles refetched. A view that can't be read (not delivered yet, a port without
+    // the method, a transport error, which readVisibility turns into null) shows as unknown. Any
+    // other error here is a bug: with a reporter it is reported and the view shows as unknown too,
+    // so /config show, /config validate and the Re-check button keep working; without one it
+    // propagates, so nothing is ever swallowed silently.
+    let visibility: VisibilityReport | null = null;
+    try {
+      const snapshot = (await this.discord.visibility?.(guild.id, true)) ?? null;
+      visibility = snapshot
+        ? analyseVisibility(
+            snapshot,
+            visibilitySettings(guild, await loadVisibilityRecords(this.db.orm, guild.id)),
+          )
+        : null;
+    } catch (error) {
+      if (!report) throw error;
+      report(error);
+      visibility = null;
+    }
     return {
       ...(changelogAudience ? { changelogAudience } : {}),
+      visibility,
       configuration: guild,
       effectsGloballyEnabled: this.config.ENABLE_EFFECTS,
       effectsMode: this.effectsMode(guild),
@@ -841,11 +873,12 @@ export class Service {
         : [];
     return this.db.transaction(async (client) => {
       const db = orm(client);
-      // A guild first created here takes the column defaults, so its role layout starts on,
-      // exactly like a guild first created by /setup.
+      // A guild first created here starts from NEW_GUILD_ROW, so its role layout starts off
+      // (CFG-07, 2.35.0), exactly like a guild first created by /setup onboarding; an existing
+      // row keeps what it saved.
       await db
         .insert(t.guilds)
-        .values({ id: actor.guildId, effects_enabled: true })
+        .values({ id: actor.guildId, ...NEW_GUILD_ROW })
         .onConflictDoNothing();
       const [saved] = await db
         .select()
@@ -1075,10 +1108,11 @@ export class Service {
     if (validated) await this.discord.validateChannel(actor.guildId, validated);
     return this.db.transaction(async (client) => {
       const db = orm(client);
-      // A guild first created here takes the column defaults, as configure() does.
+      // A guild first created here starts from NEW_GUILD_ROW, as configure() does, so its role
+      // layout starts off (CFG-07, 2.35.0).
       await db
         .insert(t.guilds)
-        .values({ id: actor.guildId, effects_enabled: true })
+        .values({ id: actor.guildId, ...NEW_GUILD_ROW })
         .onConflictDoNothing();
       const [saved] = await db
         .select()
@@ -1214,7 +1248,7 @@ export class Service {
       if (!saved)
         throw new Failure(
           "setup",
-          "This server has no TaruBot configuration yet. Start with /setup, or link the Free Company with /config fc link.",
+          "This server has no TaruBot configuration yet. Start with /config fc link and /config roles, or /setup onboarding for lobby onboarding.",
           0,
           { kind: "setup", missing: "guild" },
         );
@@ -2756,7 +2790,7 @@ export class Service {
       if (!guild)
         throw new Failure(
           "setup",
-          "This server has no TaruBot configuration yet. Start with /setup, or link the Free Company with /config fc link.",
+          "This server has no TaruBot configuration yet. Start with /config fc link and /config roles, or /setup onboarding for lobby onboarding.",
           0,
           { kind: "setup", missing: "guild" },
         );

@@ -27,10 +27,16 @@ export default defineComponent({
   // A pure read re-rendered in place; the router still replies instead unless the view is private
   // or belongs to the presser, so a click never rewrites someone else's public test-guild view.
   acknowledge: "update",
-  async execute({ actor, viewer, interaction, services }) {
+  async execute({ actor, viewer, interaction, services, report }) {
     if (!interaction.isButton()) throw obsolete();
     // Strict parse: config:validate is the only action, with no selectors.
     parseControlFor("config", interaction.customId);
-    return healthReply(await services.get(applicationKey).validate(actor), viewer);
+    // An unexpected error in TaruBot's channel view is reported and shown as unknown (2.35.0).
+    return healthReply(
+      await services
+        .get(applicationKey)
+        .validate(actor, (error) => report(error, "config visibility")),
+      viewer,
+    );
   },
 });

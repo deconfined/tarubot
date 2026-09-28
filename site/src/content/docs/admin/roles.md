@@ -17,7 +17,7 @@ TaruBot looks at all of a member's linked characters together:
 - any such character holding the configured **officer rank** adds **Officer**, unless the link came from a delegated officer's assignment (see [Who can do what](/tarubot/admin/access/#delegated-officers-and-assign));
 - a member whose linked characters are all outside the FC gets **Guest**. With no FC linked, any trusted link is enough for Guest.
 
-This applies in every server, with or without onboarding. Onboarding only adds channel visibility on top of these roles; a server without `/setup` gets no channel changes.
+This applies in every server, with or without onboarding. Onboarding only adds channel visibility on top of these roles; a server without `/setup onboarding` gets no channel changes.
 
 Guest also comes from:
 
@@ -52,12 +52,12 @@ Rank names and leadership are stored with each accepted roster. While a departur
 
 While the server's **role layout** switch is on, TaruBot keeps the four roles displayed separately from online members (Discord's "Display role members separately"), in one consecutive block, highest first: **FC Leader → Officer → Member → Guest**, below TaruBot's own role.
 
-- **On by default.** A server set up with `/setup` or `/config` starts with it on. `/setup` never changes it. (Servers imported from a previous bot start with it off.)
-- **Off.** TaruBot changes no role's display or position. Roles `/setup` creates keep Discord's default display. Role assignment is unaffected.
-- **Changing it** takes a server manager: [`/config role_layout`](/tarubot/reference/commands/#config-role_layout) `enabled:true` or `enabled:false`. Turning it on first checks that TaruBot and you can manage every role, then queues one layout pass. Turning it off queues nothing and doesn't undo the display or order already applied. Repeating the current value changes nothing.
+- **Off by default.** A server first set up with `/config` or `/setup onboarding` starts with it off, so TaruBot never reorders or restyles your roles unasked. `/setup onboarding` never changes it. Servers imported from a previous bot start with it off too, and a server that already had the switch on keeps it.
+- **Off.** TaruBot changes no role's display or position. Roles `/setup onboarding` creates keep Discord's default display. Role assignment is unaffected.
+- **Changing it** takes a server manager: [`/config role_layout`](/tarubot/reference/commands/#config-role_layout) `enabled:true` or `enabled:false`. Turning it on first checks that TaruBot and you can manage every role, then queues one layout pass, which moves and restyles the roles at once. Turning it off queues nothing and doesn't undo the display or order already applied. Repeating the current value changes nothing.
 
-Layout checks run after `/setup`, role changes, a refresh and startup, only while the switch is on, and send only the changes needed. TaruBot moves the block to where the lowest managed role sits, keeps unrelated roles in their relative order, and verifies the result afterwards. With fewer than four roles configured, the block is smaller but keeps the same order.
+Layout checks run after `/setup onboarding confirm:true`, role changes, a refresh and startup, only while the switch is on, and send only the changes needed. TaruBot moves the block to where the lowest managed role sits, keeps unrelated roles in their relative order, and verifies the result afterwards. With fewer than four roles configured, the block is smaller but keeps the same order.
 
 Discord groups members by their highest displayed role, and hides empty groups. Grouping doesn't change who holds a role.
 
-If a layout pass is blocked, [`/sync status`](/tarubot/reference/commands/#sync-status) says why. Fix the roles or TaruBot's position, then run `/setup` or `/refresh` again.
+If a layout pass is blocked, [`/sync status`](/tarubot/reference/commands/#sync-status) says why. Fix the roles or TaruBot's position, then run `/setup onboarding confirm:true` or `/refresh` again.

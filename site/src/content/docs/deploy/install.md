@@ -87,7 +87,7 @@ Readiness must report `database`, `writerLease`, `discord` and `effects` as `tru
 
 ## 6. Add the bot to your server
 
-Add the bot with [the scopes and permissions it needs](/tarubot/admin/add-to-server/#adding-the-bot), place its role, and [set the server up](/tarubot/admin/setup/). A new server goes live with its first `/config` or `/setup`: there's no activation step.
+Add the bot with [the scopes and permissions it needs](/tarubot/admin/add-to-server/#adding-the-bot), place its role, and [set the server up](/tarubot/admin/setup/). A new server goes live with its first `/config` change or `/setup onboarding confirm:true`: there's no activation step. If TaruBot can't see every channel without Administrator, give it Administrator only for [the setup window](/tarubot/admin/add-to-server/#the-setup-window), and take it away as soon as `/config validate` says so.
 
 Next: [back up](/tarubot/deploy/operations/#backup) the database regularly, and read [Updates, backups and recovery](/tarubot/deploy/operations/) before your first update.
 
