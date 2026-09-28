@@ -17,6 +17,16 @@
  * `discord.delivered = false` models a guild the gateway hasn't delivered yet.
  * Visibility is computed with Discord's overwrite algorithm for bot 900, plus the category rule:
  * a category is viewable when any of its channels is.
+ *
+ * Since 2.35.0 (#46) it also answers PUT /channels/{id}/permissions/{target}, the one write
+ * /setup overrides makes: it upserts that single entry and nothing else, records the route in
+ * `writes`, and answers 50001 for a channel the bot can't view. `discord.putError` fails a PUT
+ * first (it may wait, for a request in flight), `discord.afterPut` runs after one lands, and
+ * `discord.propagate` models Discord copying a category's new overwrites to the children that
+ * were synced with it. It is on by default, as Discord documents ("Any further changes to a parent
+ * category will be reflected in its synced child channels", Topics › Permissions); a test turns
+ * it off to cover a write that doesn't reach them. `botAdministrator` gives bot 900 the
+ * Administrator role 701 or takes it away.
  */
 import { spyOn } from "bun:test";
 import {
@@ -130,6 +140,8 @@ export function discordAccessFixture() {
   const community: { updatesChannelId: string | null } = { updatesChannelId: null };
   const writes: string[] = [];
   const reads: string[] = [];
+  /** Every PUT as sent (2.35.0): its route, raw body and audit-log reason. */
+  const puts: { route: string; body: unknown; reason: string | undefined }[] = [];
   // Mutable settings a test changes through the returned object (see the module comment).
   const discord: {
     obfuscation: Obfuscation;
@@ -151,7 +163,30 @@ export function discordAccessFixture() {
     beforeList?: (() => void | Promise<void>) | undefined;
     /** Runs after that list is taken, e.g. to create a channel the list doesn't have. */
     afterList?: (() => void | Promise<void>) | undefined;
-  } = { obfuscation: "enforced", hiddenAnswer: "missing_access", delivered: true };
+    /**
+     * Runs first for PUT /channels/{id}/permissions/{target}; an error it returns (or resolves to)
+     * is thrown and nothing is written. It gets the request's abort signal, so a test can hold a
+     * PUT in flight until a drain aborts it.
+     */
+    putError?:
+      | ((
+          channelId: string,
+          signal: AbortSignal | undefined,
+        ) => Error | undefined | Promise<Error | undefined>)
+      | undefined;
+    /** Runs after a PUT has written its entry (and propagated), e.g. to change state mid-run. */
+    afterPut?: ((channelId: string) => void | Promise<void>) | undefined;
+    /**
+     * Whether a PUT on a category also rewrites the children whose overwrites equalled the
+     * category's before it (Discord's "synced" children). On by default, as Discord documents.
+     */
+    propagate: boolean;
+  } = {
+    obfuscation: "enforced",
+    hiddenAnswer: "missing_access",
+    delivered: true,
+    propagate: true,
+  };
   // Channels a slash-command option has patched in the cache: real name and flags, but still the
   // synthetic overwrite, until the gateway sends the channel again.
   const optionPatched = new Set<string>();
@@ -322,6 +357,61 @@ export function discordAccessFixture() {
     writes.push(route);
     return rest(add(input.name, input.type, input.permission_overwrites));
   });
+  /**
+   * The overwrite sets as Discord compares them for "synced": same entries, any order, an
+   * @everyone entry with no bits counting as none, as discord.js's GuildChannel#permissionsLocked
+   * models it (Discord doesn't document that case; `propagate: false` covers a Discord that
+   * wouldn't copy the write there).
+   */
+  const sameSet = (
+    left: readonly ChannelFixture["permission_overwrites"][number][],
+    right: typeof left,
+  ) => {
+    const real = (list: typeof left) =>
+      list.filter(
+        (entry) => !(entry.id === "100" && BigInt(entry.allow) === 0n && BigInt(entry.deny) === 0n),
+      );
+    const [a, b] = [real(left), real(right)];
+    return (
+      a.length === b.length &&
+      a.every((entry) =>
+        b.some(
+          (other) =>
+            other.id === entry.id &&
+            other.type === entry.type &&
+            BigInt(other.allow) === BigInt(entry.allow) &&
+            BigInt(other.deny) === BigInt(entry.deny),
+        ),
+      )
+    );
+  };
+  const put = spyOn(client.rest, "put").mockImplementation(async (route, options) => {
+    const match = /^\/channels\/(\d+)\/permissions\/(\d+)$/u.exec(route);
+    if (!match?.[1] || !match[2]) throw new Error(`Unexpected fixture write ${route}`);
+    const [, channelId, target] = match;
+    puts.push({ route, body: structuredClone(options?.body), reason: options?.reason });
+    const failure = await discord.putError?.(channelId, options?.signal ?? undefined);
+    if (failure) throw failure;
+    const channel = channels.find((candidate) => candidate.id === channelId);
+    if (!channel) throw discordError(10003, 404, "PUT", route);
+    // Discord refuses to edit a channel the bot can't view; nothing is written.
+    if (hidden(channel)) throw discordError(50001, 403, "PUT", route);
+    const body = z
+      .object({ type: z.nativeEnum(OverwriteType), allow: z.string(), deny: z.string() })
+      .parse(options?.body);
+    writes.push(route);
+    const before = structuredClone(channel.permission_overwrites);
+    channel.permission_overwrites = [
+      ...channel.permission_overwrites.filter((entry) => entry.id !== target),
+      { id: target, type: body.type, allow: body.allow, deny: body.deny },
+    ];
+    if (discord.propagate && channel.type === ChannelType.GuildCategory)
+      for (const child of channels)
+        if (child.parent_id === channel.id && sameSet(child.permission_overwrites, before))
+          child.permission_overwrites = structuredClone(channel.permission_overwrites);
+    await discord.afterPut?.(channelId);
+    return undefined;
+  });
   let interactions = 5000;
   /**
    * A /channel-style slash command run by user 400 in `channelId`, built by the real SDK from a raw
@@ -369,6 +459,7 @@ export function discordAccessFixture() {
     community,
     writes,
     reads,
+    puts,
     ready,
     add,
     discord,
@@ -402,10 +493,16 @@ export function discordAccessFixture() {
       );
     },
     port: new DiscordGuildAccess(client),
+    /** Give bot 900 the Administrator role 701, or take it away (2.35.0). */
+    botAdministrator(on: boolean) {
+      const held = (people.get("900") ?? []).filter((role) => role !== "701");
+      people.set("900", on ? [...held, "701"] : held);
+    },
     async close() {
       get.mockRestore();
       patch.mockRestore();
       post.mockRestore();
+      put.mockRestore();
       ready.mockRestore();
       await client.destroy();
     },

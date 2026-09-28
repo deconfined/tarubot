@@ -4,6 +4,7 @@
  * is read from existing columns or aggregates (no schema change), and fields added in 2.14.0 are
  * additive, so the officer JSON details keep every earlier key.
  */
+import type { VisibilityReport } from "../domain/visibility.js";
 import type { ApplicationRecord, EntryRecord, GuildRecord } from "./records.js";
 
 /**
@@ -326,6 +327,11 @@ export interface ConfigurationReport {
   readonly fc: readonly FcHealthRow[] | null;
   /** The changelog channel's audience; absent with onboarding off or no changelog channel set. */
   readonly changelogAudience?: ChangelogAudience;
+  /**
+   * TaruBot's role and channel view as if Administrator were off (2.35.0, #46), for the "TaruBot's
+   * role" and "Visibility" sections; null when TaruBot's view couldn't be read.
+   */
+  readonly visibility: VisibilityReport | null;
 }
 
 /** Holders an Officer-role binding adopted as manual officer grants. */

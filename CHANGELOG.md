@@ -1,6 +1,17 @@
 # Version history
 
-The current application version is **2.34.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.35.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.35.0 — Channel visibility without Administrator
+
+Issue [#46](https://github.com/deconfined/tarubot/issues/46). TaruBot must be able to see every channel to manage access, and this release lets a server grant that without leaving the Administrator permission on. There is no migration (`SCHEMA_VERSION` stays `010_status_notices.sql`), and nothing changes for members.
+
+- **`/setup overrides`** writes a View Channel override for TaruBot's own role on each channel it otherwise couldn't see, so it can read the channel list without Administrator. Like `/setup onboarding`, it is a dry run by default and writes only with `confirm:true`. It never touches @everyone or any other role, leaves a channel with a deliberate deny alone, and skips channels inside a private category (which need a category fix instead).
+- **`/config validate`** gains a visibility section: which channels TaruBot can't see, which are behind a private category, whether Administrator is still needed or can be removed, and, on onboarding servers, that onboarding manages the channels. `/config show` and `/config validate` now survive an unexpected Discord error on the visibility read instead of failing the whole card.
+- **Officers are alerted** when TaruBot loses sight of a managed or saved channel (`visibility.missing`), and told when it is restored (`visibility.restored`), debounced within a day. Onboarding servers get the readiness count and `/config validate` instead of an alert.
+- **Readiness** reports `visibility` with `missing`, `onboardingPending`, `checked` and `checkedAt`.
+- **Adding TaruBot** now asks for the core seven permissions plus the five onboarding permissions (`105630518288`), and the site is blunt that Administrator is only for the one-time `/setup` run and should be removed afterwards.
+- **New guilds** are inserted with the role layout off (`NEW_GUILD_ROW` in `src/application/guild-defaults.ts`); the column default stays on and no existing row changes.
 
 ## 2.34.0 — The pull unit: hosts apply their own configuration
 

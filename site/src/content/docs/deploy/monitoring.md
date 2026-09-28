@@ -30,6 +30,7 @@ The readiness body reports:
 | `publicTestResponses` | Development replies are public: `TEST_GUILD_ID` is set and `PUBLIC_TEST_RESPONSES` is on. Normally `false`. |
 | `capabilities` | Pending and blocked work, the age of the oldest accepted roster, and FCs whose roster reads are failing. |
 | `lodestone` | Informational; a Lodestone outage never makes the bot unready. `parsing` and `waiting` count parses running and waiting; `cooldownSeconds` above 0 means Lodestone requests are paused after a 429; `selectors` shows the [live selector set](#live-selectors). |
+| `visibility` | Informational; it never changes `ready` or the status code. `missing` counts, across servers without onboarding, the channels TaruBot couldn't see or post in without Administrator: the count behind the [missing-overrides alert](/tarubot/admin/notices-and-updates/#missing-channel-overrides). `onboardingPending` counts, on servers with onboarding, the channels onboarding's pass hasn't reached and configured community-updates channels TaruBot can't post in. `checked` is how many servers the last check covered, and `checkedAt` when it ran; all four are `null` until the first check, about 30 seconds after startup. |
 
 Probes never fetch a Lodestone page. The bot also logs a capability summary periodically: queue counts, blocked work, the oldest roster's age and failing FCs.
 
@@ -106,6 +107,8 @@ Officer notices are `officer.notify` jobs that post plain text to a server's off
 - **Recovered** (`officer:<guild>:recovered:<fc>`). One line after an accepted roster, only when a degraded notice posted (or was posting) during that outage.
 - **Character no longer on the Lodestone** (`officer:<guild>:missing:<link>`), one per link the [two-"not found" rule](#profile-refreshes) ends.
 - **FC roster accepted** (`officer:<guild>`), only on a development deployment's test server (`TEST_GUILD_ID`). Other servers get no line for a routine roster read.
+- **Missing channel overrides** (`officer:<guild>:visibility`). Queued when a server without onboarding has had channels missing TaruBot's own entry, counted as if Administrator were off, on two checks in a row, and posted 5 minutes later, or at the end of 24 hours after the last one that posted. The episode is recorded as a `visibility.missing` audit row. A server getting its first channel overrides usually gets one, even while TaruBot holds Administrator.
+- **Channel overrides restored** (`officer:<guild>:visibility:restored`). Once two checks in a row find nothing missing (a `visibility.restored` audit row), a waiting alert closes as `– SKIPPED` with `restored before posting`, and this line follows only if the alert posted. If channels go missing again before this line has been sent (a send being retried, or one paused or blocked), the new episode closes it as `– SKIPPED` with `superseded by a new episode`, so "complete again" never posts while channels are missing; one already being sent is left to finish.
 
 A degraded notice that completes `– SKIPPED` with `recovered before posting` (the roster was accepted during the hold, while it was paused or blocked, or while the bot was out of that server) or `FC unlinked` (`/config fc unlink` during an outage) is expected. The queue never claims a job of a server the bot was removed from, so an accepted roster closes such a server's waiting notice too, and posts no recovery line there. `/sync status` lists only unfinished and failed work, so it never shows these closed jobs; this query does:
 
@@ -114,6 +117,7 @@ docker compose exec -T postgres psql -U tarubot -d tarubot -c "
 SELECT dedupe_key, status, created_at, completed_at, message_id, result
 FROM jobs
 WHERE dedupe_key LIKE 'officer:%:degraded:%' OR dedupe_key LIKE 'officer:%:recovered:%'
+   OR dedupe_key LIKE 'officer:%:visibility%'
 ORDER BY created_at DESC
 LIMIT 10;"
 ```
@@ -148,7 +152,7 @@ WHERE guild_id = 'YOUR_GUILD_ID' AND (status_since IS NOT NULL OR status_posting
 ORDER BY status_since NULLS LAST;"
 ```
 
-**Lock order.** Status recording, the roster and the job lock a server's rows in one order: its `guilds` row (shared), then its `guild_users` rows in `(guild_id, user_id)` order, then `jobs` rows. `/config` role adoption, `/setup` and activation take the `guilds` row for update first, so they queue behind a status write instead of deadlocking; unsetting the officer notifications channel likewise locks the waiting `guild_users` rows in user order after its `guilds` row, before it queues any job. Member rows are locked `FOR NO KEY UPDATE`, which never blocks the foreign-key checks of inserts that reference a member. A hand-written transaction that changes these rows should take them in the same order, or run with the bot stopped.
+**Lock order.** Status recording, the roster and the job lock a server's rows in one order: its `guilds` row (shared), then its `guild_users` rows in `(guild_id, user_id)` order, then `jobs` rows. `/config` role adoption, `/setup onboarding confirm:true` and activation take the `guilds` row for update first, so they queue behind a status write instead of deadlocking; unsetting the officer notifications channel likewise locks the waiting `guild_users` rows in user order after its `guilds` row, before it queues any job. Member rows are locked `FOR NO KEY UPDATE`, which never blocks the foreign-key checks of inserts that reference a member. A hand-written transaction that changes these rows should take them in the same order, or run with the bot stopped.
 
 **Manual reversal,** to run a release from before status posts, whose schema ends at `009_changelog_channel.sql`. An older release refuses to start on schema `010_status_notices.sql`, and that migration only adds the three columns, so nothing else is lost. Stop the bot, run the [writer gate](/tarubot/deploy/operations/#single-database-writer), then run the three statements together (psql runs one `-c` string as one transaction):
 

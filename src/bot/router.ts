@@ -68,6 +68,14 @@ export function interactionScope(interaction: Answerable): string {
 }
 
 /**
+ * Whether a slash command ran with its boolean `confirm` option set to true (/setup's subcommands,
+ * whose dry run is the default). Failure wording reads it; it is never logged or echoed.
+ */
+export function confirmedOption(interaction: Answerable): boolean {
+  return interaction.isChatInputCommand() && interaction.options.get("confirm")?.value === true;
+}
+
+/**
  * A presenter reply's options with mentions forced off last, so no reply can re-enable pings. They
  * are valid for a first reply, a follow-up and an edit alike: handler results, failure cards and
  * pre-modal refusals are all presenter replies, which always carry content, embeds and components.
@@ -100,6 +108,8 @@ function presented(result: unknown, scope: string): Presented {
 /** What the catch path needs to know about how far the interaction got. */
 interface Progress {
   readonly scope: string;
+  /** confirmedOption(interaction), for the failure card's no-change sentence. */
+  readonly confirmed: boolean;
   readonly acknowledgement: ReturnType<typeof replyAcknowledgement>;
   /** Set once the actor is resolved; absent means member-safe wording. */
   viewer: Viewer | undefined;
@@ -145,6 +155,7 @@ export class InteractionRouter {
       this.commands.get(interaction.commandName)?.ephemeral !== false;
     const progress: Progress = {
       scope: interactionScope(interaction),
+      confirmed: confirmedOption(interaction),
       acknowledgement: replyAcknowledgement(
         interaction.guildId,
         ephemeral,
@@ -288,6 +299,7 @@ export class InteractionRouter {
         ref: interaction.id,
         viewer: progress.viewer,
         scope: progress.scope,
+        confirmed: progress.confirmed,
         phase: progress.phase,
       });
       if (progress.mode === "update" && interaction.deferred) {

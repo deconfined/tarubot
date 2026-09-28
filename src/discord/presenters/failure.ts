@@ -54,6 +54,7 @@ export const FAILURE_CONCEPTS = [
   "forbidden.officer",
   "forbidden.owner",
   "forbidden.manager",
+  "forbidden.administrator",
   "forbidden.hierarchy",
   "forbidden.membership",
   "forbidden.context",
@@ -118,6 +119,12 @@ export interface FailureReplyOptions {
   readonly viewer?: Viewer | undefined;
   /** The interaction path from interactionScope(): '/ledger withdraw', 'button guest'. */
   readonly scope?: string | undefined;
+  /**
+   * The slash command ran with confirm:true (only /setup's subcommands have that option, 2.35.0):
+   * without it /setup onboarding is a dry run, whose refusals say nothing was changed rather than
+   * promising reuse on a run the person may never have made. Absent means false.
+   */
+  readonly confirmed?: boolean | undefined;
   /** 'deliver' when the failure happened after execute returned, while showing its result. */
   readonly phase?: "execute" | "deliver" | undefined;
   /** The current time for retry deadlines; tests inject the mockups' clock. */
@@ -237,11 +244,13 @@ export const EXAMPLES: Readonly<Record<string, readonly string[]>> = {
     "/config guest_applications enabled:true channel:#officer-chat",
     "/config guest_applications unset_channel:true",
   ],
-  setup: [
-    "/setup fc_id:9230000000000000001",
-    "/setup prefix:EXFC",
-    "/setup officer_rank:Officer lobby:#lobby officers:#officer-chat",
+  // 2.35.0 (#46) split /setup; both subcommands are dry runs unless confirm:true.
+  "setup onboarding": [
+    "/setup onboarding fc_id:9230000000000000001",
+    "/setup onboarding prefix:EXFC",
+    "/setup onboarding officer_rank:Officer lobby:#lobby officers:#officer-chat confirm:true",
   ],
+  "setup overrides": ["/setup overrides", "/setup overrides confirm:true"],
   refresh: ["/refresh force:true"],
   "sync status": ["/sync status run_id:9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a"],
   version: ["/version commits:10"],
@@ -293,13 +302,16 @@ interface Situation {
   /** Officer wording applies: a resolved officer or manager viewer. */
   readonly officer: boolean;
   readonly scope: Scope;
+  /** The command ran with confirm:true (FailureReplyOptions.confirmed). */
+  readonly confirmed: boolean;
   readonly now: Date;
 }
 
 const NOTHING_CHANGED = "Nothing was changed.";
 const NOTHING_RECORDED = "Nothing was recorded.";
-/** /setup reuses what it already created, which is the reassurance its failures need. */
-const SETUP_REUSE = "Anything already created is reused when you run /setup again.";
+/** /setup onboarding reuses what it already created, which is the reassurance its failures need. */
+const SETUP_REUSE =
+  "Anything already created is reused when you run /setup onboarding confirm:true again.";
 /** A description that already says nothing happened, or that /setup reuses, needs no repeat. */
 const ALREADY_SAID =
   /nothing was (?:changed|saved|recorded|linked)|(?:was|were)n't changed|(?:was|were) not changed|reused/iu;
@@ -411,6 +423,26 @@ function forbiddenView(s: Situation): FailureView {
           },
         ],
       };
+    case "administrator":
+      // /setup overrides confirm:true (2.35.0): the caller already passed the server-manager
+      // check, so "Server managers only" would contradict the lead; Administrator is what's missing.
+      return {
+        concept: "forbidden.administrator",
+        tone: "error",
+        title: "Administrator or server owner only",
+        lead:
+          s.message ??
+          "Only someone with Administrator, or the server owner, can run /setup overrides confirm:true.",
+        unchanged: "changed",
+        fields: [
+          { name: "Missing permission", value: "Administrator", inline: true },
+          {
+            name: "Who can do this",
+            value: "Anyone with Administrator, or the server owner",
+            inline: true,
+          },
+        ],
+      };
     case "manager":
     case "manage_roles":
     case "manage_channels": {
@@ -504,13 +536,14 @@ const SETUP_NEXT: Readonly<
   Record<Exclude<SetupPiece, "guest_applications" | "guest_role">, string>
 > = {
   guild: [
-    "`/setup fc_id:9230000000000000001` creates the roles and rooms and links the FC.",
-    "Or use `/config fc link fc_id:9230000000000000001` to link only the FC.",
+    "`/config fc link fc_id:9230000000000000001` links the Free Company by its Lodestone ID or link.",
+    "`/config roles member role:@Member` binds an existing role; do the same for guest, officer and leader.",
+    "Or preview lobby onboarding with `/setup onboarding fc_id:9230000000000000001`; `confirm:true` creates the roles and rooms.",
   ].join("\n"),
   fc: "`/config fc link fc_id:9230000000000000001` links the Free Company by its Lodestone ID or link.",
   ledger: "`/config ledger channel:#fc-ledger` chooses the channel for ledger posts.",
   officer_role:
-    "`/config roles officer role:@Officer` binds the Officer role, or `/setup` creates one.",
+    "`/config roles officer role:@Officer` binds the Officer role, or `/setup onboarding confirm:true` creates one.",
 };
 
 /** What an officer runs to open guest applications, by the piece still missing. */
@@ -551,7 +584,7 @@ function setupView(s: Situation): FailureView {
       title: "Finish setup first",
       lead:
         piece === "guild"
-          ? "This server has no TaruBot configuration yet. Start with **/setup**, or link the Free Company with **/config fc link**."
+          ? "This server has no TaruBot configuration yet. Start with **/config fc link** and **/config roles**, or **/setup onboarding** for lobby onboarding."
           : (s.message ?? "An officer step is still missing."),
       unchanged: "none",
       fields: [
@@ -716,8 +749,8 @@ function ambiguousView(s: Situation): FailureView {
       {
         name: "Next step",
         value: role
-          ? "Pick the role with `/config roles`, then run `/setup` again."
-          : "Run `/setup` again and pick the channel in its `lobby` or `officers` option.",
+          ? "Pick the role with `/config roles`, then run `/setup onboarding` again."
+          : "Run `/setup onboarding` again and pick the channel in its `lobby` or `officers` option.",
       },
     ],
   };
@@ -1171,6 +1204,13 @@ function blockedView(s: Situation): FailureView {
           value:
             "Channel settings → Permissions: give the TaruBot role the permissions listed above.",
         },
+      // TaruBot's own member entry denies it (2.35.0): a role allow can't lift a member deny.
+      channel !== undefined &&
+        resource?.fix === "member_entry" && {
+          name: "How to fix",
+          value:
+            "Channel settings → Permissions → TaruBot (the member entry, not the role): remove the denies named above.",
+        },
       { name: "Then", value: "Run `/config validate` to re-check every role and channel." },
     ],
   };
@@ -1279,6 +1319,7 @@ function view(error: unknown, options: FailureReplyOptions): { s: Situation; v: 
     viewer: options.viewer,
     officer: options.viewer !== undefined && isOfficer(options.viewer),
     scope: parseScope(options.scope),
+    confirmed: options.confirmed === true,
     now: options.now ?? new Date(),
   };
   const deliver = options.phase === "deliver";
@@ -1293,7 +1334,11 @@ function view(error: unknown, options: FailureReplyOptions): { s: Situation; v: 
 function unchangedSentence(v: FailureView, s: Situation): string | undefined {
   if (v.unchanged === "none") return undefined;
   if (ALREADY_SAID.test(v.lead)) return undefined;
-  if (s.scope.root === "setup") return SETUP_REUSE;
+  // Only /setup onboarding confirm:true creates roles and rooms to reuse; its dry run creates
+  // nothing, and /setup overrides (2.35.0) writes only TaruBot's own channel entries, so their
+  // refusals take the ordinary sentence.
+  if (s.scope.root === "setup" && s.scope.path !== "setup overrides" && s.confirmed)
+    return SETUP_REUSE;
   if (v.unchanged === "unknown") return undefined;
   return v.unchanged === "recorded" ? NOTHING_RECORDED : NOTHING_CHANGED;
 }

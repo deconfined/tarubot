@@ -33,6 +33,7 @@ import { InteractionRouter, interactionRouterKey } from "./bot/router.js";
 import { Services } from "./bot/services.js";
 import { configuration } from "./config/env.js";
 import { DiscordGateway } from "./discord/gateway.js";
+import { DiscordOverrides } from "./discord/overrides.js";
 import { Lodestone } from "./infrastructure/lodestone/client.js";
 import { Database } from "./infrastructure/postgres/database.js";
 import { dispatcher } from "./jobs/dispatch.js";
@@ -114,6 +115,14 @@ const queue = new Queue(db, dispatcher(app, sync, access, reports), (event) => {
   if (outcome.status === "failed" && outcome.level === "error")
     void reports.jobFailed(job, outcome);
 });
+// /setup (2.35.0, #46): onboarding, and TaruBot's own channel overrides written over raw REST. It is
+// built before the lifecycle so shutdown can drain a /setup overrides run in progress.
+const roleAdministration = new RoleAdministration(
+  app,
+  gateway,
+  access,
+  new DiscordOverrides(gateway.client),
+);
 // The outside dead-man's switch (2.22.0): pings healthchecks.io while ready; off when unset.
 const heartbeat = new Heartbeat(
   config.HEALTHCHECKS_PING_URL,
@@ -126,8 +135,9 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
     await heartbeat.tick();
     await reports.tick();
   },
-  // A /suggest post still at GitHub finishes, and records its row, before the lease is released.
-  drain: () => suggestions.drain(),
+  // A /suggest post still at GitHub finishes, and records its row, before the lease is released;
+  // a /setup overrides run stops and writes its audit row (2.35.0). Neither ever rejects.
+  drain: () => Promise.all([suggestions.drain(), roleAdministration.drain()]).then(() => {}),
 });
 reports.useStatus(() => lifecycle.status());
 heartbeat.useStatus(() => lifecycle.status());
@@ -136,7 +146,7 @@ const services = new Services()
   .provide(synchronizationKey, sync)
   .provide(databaseKey, db)
   .provide(gatewayKey, gateway)
-  .provide(roleAdministrationKey, new RoleAdministration(app, gateway, access))
+  .provide(roleAdministrationKey, roleAdministration)
   .provide(versionInformationKey, new VersionInformation(new GitHubHistory()))
   .provide(guildEventsKey, new GuildEvents(db))
   .provide(issueReportsKey, reports)

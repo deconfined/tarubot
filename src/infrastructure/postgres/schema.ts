@@ -67,7 +67,8 @@ export const guilds = pgTable("guilds", {
   /**
    * Guest-application switch (migration 006, owner decision 2026-09-24), separate from the review
    * channel: /apply opens only when it is on and a review channel and a Guest role are set. Guilds
-   * start off; /setup turns it on, and imports keep it off with their legacy channel stored.
+   * start off; /setup onboarding turns it on, and imports keep it off with their legacy channel
+   * stored.
    */
   guest_applications_enabled: boolean("guest_applications_enabled").notNull().default(false),
   lobby_channel_id: externalId("lobby_channel_id"),
@@ -80,8 +81,10 @@ export const guilds = pgTable("guilds", {
   /**
    * Managed-role layout switch (CFG-07). On: keep the managed roles displayed separately in one
    * consecutive FC Leader > Officer > Member > Guest block. Off: never change any role's hoist flag
-   * or position; access roles are still assigned. /setup and /config guilds start on (the column
-   * default); imported guilds start off.
+   * or position; access roles are still assigned. Since 2.35.0 a guild first configured by /config
+   * or /setup onboarding starts off, because the application inserts it with NEW_GUILD_ROW
+   * (src/application/guild-defaults.ts); imported guilds start off too. The column default stays
+   * on (schema 010, no migration), and existing rows keep their saved value.
    */
   role_layout_enabled: boolean("role_layout_enabled").notNull().default(true),
   /**

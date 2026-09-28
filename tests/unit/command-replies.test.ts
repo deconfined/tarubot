@@ -71,6 +71,7 @@ import {
   guestReset,
 } from "../fixtures/replies/guests.js";
 import { ENTRY_IDS, LEDGER_RESULTS as L } from "../fixtures/replies/ledger.js";
+import { OVERRIDES_RESULTS, SETUP_PLANS } from "../fixtures/replies/setup.js";
 import { refreshed, RUN_ID, SYNC_RESULTS as SR } from "../fixtures/replies/sync-utility.js";
 import { CHARACTER, GUEST_ID } from "../fixtures/results.js";
 
@@ -801,8 +802,9 @@ test("/refresh passes the service's refusals through to the failure presenter", 
 // Configuration, setup and officer overrides
 
 /**
- * A prototype-backed RoleAdministration whose setup and officer return `results[method]` (or
- * throw it when it is an Error), recording each call in `calls` as the Service stub does.
+ * A prototype-backed RoleAdministration whose setup, planSetup, overrides and officer methods
+ * return `results[method]` (or throw it when it is an Error), recording each call in `calls` as
+ * the Service stub does.
  */
 function stubAdministration(
   results: Readonly<Record<string, unknown>>,
@@ -810,7 +812,7 @@ function stubAdministration(
 ): RoleAdministration {
   const admin: unknown = Object.create(RoleAdministration.prototype);
   if (!(admin instanceof RoleAdministration)) throw new Error("Invalid administration fixture");
-  for (const method of ["setup", "officer", "officerReset"] as const)
+  for (const method of ["setup", "planSetup", "overrides", "officer", "officerReset"] as const)
     Object.assign(admin, {
       [method]: async (actor: Actor, ...args: unknown[]) => {
         calls.push([method, actor.userId, ...args]);
@@ -894,7 +896,8 @@ const CONFIG_PATHS: readonly {
     actor: OFFICER,
     results: { validate: C.healthy },
     title: "Server configuration",
-    call: ["validate", "400"],
+    // 2.35.0: the command passes its reporter, so a bug in the channel view is reported.
+    call: ["validate", "400", expect.any(Function)],
   },
   {
     command: configCommand,
@@ -902,7 +905,7 @@ const CONFIG_PATHS: readonly {
     actor: OFFICER,
     results: { validate: C.troubled },
     title: "Configuration health · 2 problems, 2 warnings",
-    call: ["validate", "400"],
+    call: ["validate", "400", expect.any(Function)],
   },
   {
     command: configCommand,
@@ -1066,13 +1069,39 @@ const CONFIG_PATHS: readonly {
     title: "Role layout turned on",
     call: ["configureRoleLayout", "400", true],
   },
+  // 2.35.0 (#46): /setup onboarding writes only with confirm:true; without it, and for /setup
+  // overrides, the dry run answers.
   {
     command: setupCommand,
-    options: [],
+    options: [subcommand("onboarding", [{ type: B, name: "confirm", value: true }])],
     actor: MANAGER,
     results: { setup: C.setup },
     title: "Server setup complete",
     call: ["setup", "400", "", null, null, { lobby: null, officers: null }],
+  },
+  {
+    command: setupCommand,
+    options: [subcommand("onboarding", [text("prefix", "EXFC"), text("officer_rank", "Officer")])],
+    actor: MANAGER,
+    results: { planSetup: SETUP_PLANS.plan },
+    title: "Server setup · dry run",
+    call: ["planSetup", "400", "EXFC", null, "Officer", { lobby: null, officers: null }],
+  },
+  {
+    command: setupCommand,
+    options: [subcommand("overrides")],
+    actor: MANAGER,
+    results: { overrides: OVERRIDES_RESULTS.planBlocked },
+    title: "Channel overrides · dry run · 2 blockers",
+    call: ["overrides", "400", false],
+  },
+  {
+    command: setupCommand,
+    options: [subcommand("overrides", [{ type: B, name: "confirm", value: true }])],
+    actor: MANAGER,
+    results: { overrides: OVERRIDES_RESULTS.applied },
+    title: "Channel overrides added",
+    call: ["overrides", "400", true],
   },
   {
     command: officerCommand,
@@ -1247,8 +1276,8 @@ test("the path tables return one embed for every registered command path", async
   );
   const paths = await registeredPaths();
   // 41 in 2.14.0, plus /officer reset and /guest reset (owner decision, 2026-09-24), plus /issue
-  // (2.18.0), /config changelog (2.25.0) and /suggest (2.28.0).
-  expect(paths).toHaveLength(46);
+  // (2.18.0), /config changelog (2.25.0) and /suggest (2.28.0); 2.35.0 split /setup in two.
+  expect(paths).toHaveLength(47);
   // /apply opens a form, whose refusal and receipt the router and guest-application tests cover,
   // /version reads GitHub, which version.test stubs, and /issue and /suggest have their own tests
   // below; every other path is exercised above.

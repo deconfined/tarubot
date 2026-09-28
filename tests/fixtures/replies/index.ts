@@ -1,6 +1,6 @@
 /**
  * The reply catalog: one case per reply state, rendered from typed sample results. Each group
- * (characters, ledger, configuration, guests, sync and utilities, posts) exports its catalog as
+ * (characters, ledger, configuration, guests, sync and utilities, posts, setup) exports its catalog as
  * `satisfies ReplyCatalog<GroupReplyKind>` from a sibling module and adds it to CATALOGS, so a new
  * reply kind cannot ship without a case, and reply-consistency.test compares concepts across
  * groups. The timestamp flag of each case comes from its approved card.
@@ -16,6 +16,7 @@ import { FAILURE_CASES } from "./failures.js";
 import { GUEST_CASES } from "./guests.js";
 import { LEDGER_CASES } from "./ledger.js";
 import { POST_CASES } from "./posts.js";
+import { SETUP_CASES } from "./setup.js";
 import { SYNC_CASES, UTILITY_CASES, VERSION_CASES } from "./sync-utility.js";
 
 /** One catalogued reply state. */
@@ -70,6 +71,8 @@ export const CATALOGS: Readonly<Record<string, ReplyCatalog<string>>> = {
   utility: UTILITY_CASES,
   version: VERSION_CASES,
   posts: POST_CASES,
+  // 2.35.0 (#46): /setup onboarding's dry run and /setup overrides.
+  setup: SETUP_CASES,
 };
 
 /**

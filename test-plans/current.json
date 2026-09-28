@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.34.0 the pull unit",
-  "objective": "2.34.0 (#50) adds tarubot-host-config, the pull unit that applies the host playbook on each host from its own root clone: signed ops/ansible merges only, production only after an approved deploy. Nothing changes for members; production gets the unit at its rebuild.",
+  "title": "Session: 2.35.0 channel visibility without Administrator",
+  "objective": "2.35.0 (#46) adds /setup overrides (a dry run by default) and a visibility section in /config validate, so TaruBot can see every channel and drop Administrator. Officers are alerted when a channel goes unseen and told when it returns. There is no migration and nothing changes for members.",
   "user": [
-    "Set the Protect Main ruleset's merge methods to merge only; make the staging pull-unit healthchecks.io check.",
-    "Merge, approve the 2.34.0 Deploy run, then give the go-ahead to install the pull unit on staging."
+    "On a throwaway server (Community on, one public #chat, one public officer channel), add DevBot with 105630518288 plus Administrator, then set TEST_GUILD_ID to it.",
+    "Work the private, forum, voice and stage cases: run /setup overrides dry and then confirm:true, /config validate, a deliberate deny, and Administrator off then on."
   ],
   "assistant": [
-    "Install on staging after the go-ahead: flat host.yml with the signers, host-config.env, apply, bootstrap, status.",
-    "Watch the next runtime-only and ops/ansible merges read recorded and applied; then the cutover to the new VM."
+    "Build DevBot at 2.35.0 (no migration), register the guild commands, and confirm 21 roots and 47 paths.",
+    "Verify the officer alert about six minutes after a channel is hidden and the recovery line, readiness visibility {missing, onboardingPending}, then restore the throwaway."
   ],
   "bot": [
-    "Run 2.33.0 in production until the 2.34.0 deploy; nothing changes for members.",
+    "Post the missing-visibility officer alert when a managed or saved channel is hidden, and the restored line when it clears.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

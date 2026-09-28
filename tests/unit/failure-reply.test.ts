@@ -145,12 +145,16 @@ describe("approved cards", () => {
       {
         title: "Finish setup first",
         description:
-          "This server has no TaruBot configuration yet. Start with **/setup**, or link the Free Company with **/config fc link**.",
+          "This server has no TaruBot configuration yet. Start with **/config fc link** and **/config roles**, or **/setup onboarding** for lobby onboarding.",
         fields: [
           {
+            // 2.35.0 (#46): the bare /setup is gone, and /setup onboarding is a dry run first.
             name: "Next step",
-            value:
-              "`/setup fc_id:9230000000000000001` creates the roles and rooms and links the FC.\nOr use `/config fc link fc_id:9230000000000000001` to link only the FC.",
+            value: [
+              "`/config fc link fc_id:9230000000000000001` links the Free Company by its Lodestone ID or link.",
+              "`/config roles member role:@Member` binds an existing role; do the same for guest, officer and leader.",
+              "Or preview lobby onboarding with `/setup onboarding fc_id:9230000000000000001`; `confirm:true` creates the roles and rooms.",
+            ].join("\n"),
           },
           { name: "Then check", value: "`/config validate` lists anything still missing." },
         ],
@@ -376,7 +380,7 @@ describe("audience rules", () => {
     for (const key of [
       "blocked ordinary role · /config roles member · officer",
       "blocked admin role · /officer grant · manager",
-      "blocked reserved channel · /setup · manager",
+      "blocked reserved channel · /setup onboarding · manager",
     ] as const) {
       const embed = onlyEmbed(FAILURE_CASES[key].render());
       expect({ key, fields: embed.fields?.map((item) => item.name) }).toEqual({
@@ -384,6 +388,12 @@ describe("audience rules", () => {
         fields: ["Affected", "Then"],
       });
     }
+    // /setup overrides without Administrator on TaruBot names no role or channel (2.35.0).
+    expect(
+      onlyEmbed(
+        FAILURE_CASES["blocked administrator · /setup overrides · manager"].render(),
+      ).fields?.map((item) => item.name),
+    ).toEqual(["Then"]);
     // A channel-permission refusal names the permission remedy.
     const channel = onlyEmbed(
       render(
@@ -398,7 +408,7 @@ describe("audience rules", () => {
             fix: "channel_permissions",
           },
         ),
-        { viewer: VIEWERS.manager, scope: "/setup" },
+        { viewer: VIEWERS.manager, scope: "/setup onboarding" },
       ),
     );
     expect(channel.fields?.map((item) => item.name)).toEqual(["Affected", "How to fix", "Then"]);
@@ -492,7 +502,7 @@ describe("audience rules", () => {
       { kind: "scope", scope: "manage_channels" },
     );
     const manager: Viewer = { ...VIEWERS.officer, manageGuild: true, manageRoles: true };
-    const embed = onlyEmbed(render(refused, { viewer: manager, scope: "/setup" }));
+    const embed = onlyEmbed(render(refused, { viewer: manager, scope: "/setup onboarding" }));
     expect(embed.title).toBe("Server managers only");
     expect(embed.fields).toEqual([
       { name: "Missing permission", value: "Manage Channels", inline: true },
@@ -503,9 +513,41 @@ describe("audience rules", () => {
       },
     ]);
     // Without Manage Server, only what the viewer is known to lack is named.
-    expect(field(refused, "Missing permission", { viewer: VIEWERS.officer, scope: "/setup" })).toBe(
-      "Manage Server and Manage Roles",
+    expect(
+      field(refused, "Missing permission", { viewer: VIEWERS.officer, scope: "/setup onboarding" }),
+    ).toBe("Manage Server and Manage Roles");
+  });
+
+  test("a member-entry refusal (text 22) keeps text 20's How to fix (2.35.0)", () => {
+    const embed = onlyEmbed(
+      FAILURE_CASES["blocked member entry · /setup onboarding · manager"].render(),
     );
+    expect(embed.title).toBe("Discord permissions need attention");
+    expect(embed.fields?.map((item) => item.name)).toEqual(["Affected", "How to fix", "Then"]);
+    expect(embed.fields?.[1]?.value).toBe(
+      "Channel settings → Permissions → TaruBot (the member entry, not the role): remove the denies named above.",
+    );
+  });
+
+  test("/setup overrides confirm:true names Administrator (2.35.0)", () => {
+    const embed = onlyEmbed(
+      FAILURE_CASES["forbidden administrator · /setup overrides · manager"].render(),
+    );
+    // The caller passed the server-manager check, so the title names what they lack instead.
+    expect(embed).toMatchObject({
+      title: "Administrator or server owner only",
+      description:
+        "Only someone with Administrator, or the server owner, can run /setup overrides confirm:true. Nothing was changed.",
+      fields: [
+        { name: "Missing permission", value: "Administrator", inline: true },
+        {
+          name: "Who can do this",
+          value: "Anyone with Administrator, or the server owner",
+          inline: true,
+        },
+      ],
+      footer: { text: `Code forbidden · Ref ${REF}` },
+    });
   });
 });
 
@@ -525,12 +567,29 @@ describe("the no-change sentence follows each concept's approved copy", () => {
     expect(funds).not.toContain("Nothing was changed.");
   });
 
-  test("/setup says what it reuses instead", () => {
-    const text = description(new Failure("input", "Bad prefix."), { scope: "/setup" });
-    expect(text).toBe("Bad prefix. Anything already created is reused when you run /setup again.");
+  test("/setup onboarding confirm:true says what it reuses instead; its dry run and /setup overrides don't", () => {
+    const text = description(new Failure("input", "Bad prefix."), {
+      scope: "/setup onboarding",
+      confirmed: true,
+    });
+    expect(text).toBe(
+      "Bad prefix. Anything already created is reused when you run /setup onboarding confirm:true again.",
+    );
+    // The dry run (confirm absent or false) created nothing and may be the first run: it says so,
+    // rather than telling the person to run confirm:true "again".
+    for (const confirmed of [undefined, false])
+      expect(
+        description(new Failure("input", "Bad prefix."), { scope: "/setup onboarding", confirmed }),
+      ).toBe("Bad prefix. Nothing was changed.");
     // Its own message already says so, and is not repeated.
-    expect(onlyEmbed(FAILURE_CASES["stale settings · /setup · manager"].render()).description).toBe(
-      "Server settings changed during setup, so nothing was saved. Run /setup again; anything already created is reused.",
+    expect(
+      onlyEmbed(FAILURE_CASES["stale settings · /setup onboarding · manager"].render()).description,
+    ).toBe(
+      "Server settings changed during setup, so nothing was saved. Run /setup onboarding confirm:true again; anything already created is reused.",
+    );
+    // /setup overrides creates nothing to reuse (2.35.0): its refusals take the ordinary sentence.
+    expect(description(new Failure("busy", "Busy."), { scope: "/setup overrides" })).toBe(
+      "Busy. Nothing was changed.",
     );
   });
 
@@ -622,7 +681,7 @@ describe("details", () => {
         name: "**Officer** <@&1>",
         ids: ["223456789012345601"],
       }),
-      { viewer: VIEWERS.manager, scope: "/setup" },
+      { viewer: VIEWERS.manager, scope: "/setup onboarding" },
     );
     expect(onlyEmbed(presented).description).toStartWith(
       "Several roles are named **\\*\\*Officer\\*\\* \\<@&1>**",
@@ -648,7 +707,7 @@ describe("details", () => {
 
   test("raw Discord errors map to blocked, not-available and upstream cards (C8)", () => {
     const title = (error: unknown, viewer?: Viewer) =>
-      onlyEmbed(render(error, { viewer, scope: "/setup" })).title;
+      onlyEmbed(render(error, { viewer, scope: "/setup onboarding" })).title;
     for (const code of [50001, 50013, 10003, 10011]) {
       expect(title(discordError(code, 403), VIEWERS.manager)).toBe(
         "Discord permissions need attention",
@@ -673,12 +732,32 @@ describe("details", () => {
       scope: "user",
     });
     expect(title(limited)).toBe("Discord isn't responding");
-    // A raw error may have hit partway through /setup, so its card only promises reuse.
+    // A raw error may have hit partway through /setup onboarding confirm:true, so its card only
+    // promises reuse; in the dry run, which writes nothing, it promises nothing either way.
     const raw = onlyEmbed(
-      render(discordError(50013, 403), { viewer: VIEWERS.manager, scope: "/setup" }),
+      render(discordError(50013, 403), {
+        viewer: VIEWERS.manager,
+        scope: "/setup onboarding",
+        confirmed: true,
+      }),
     );
     expect(raw.description).toEndWith(
-      "Anything already created is reused when you run /setup again.",
+      "Anything already created is reused when you run /setup onboarding confirm:true again.",
+    );
+    expect(
+      onlyEmbed(
+        render(discordError(50013, 403), { viewer: VIEWERS.manager, scope: "/setup onboarding" }),
+      ).description,
+    ).toBe(
+      "Discord refused the change: TaruBot is missing a permission, or a role or channel it needs was deleted.",
+    );
+    // /setup overrides audits what it wrote; a raw error there promises nothing either way.
+    expect(
+      onlyEmbed(
+        render(discordError(50013, 403), { viewer: VIEWERS.manager, scope: "/setup overrides" }),
+      ).description,
+    ).toBe(
+      "Discord refused the change: TaruBot is missing a permission, or a role or channel it needs was deleted.",
     );
     expect(raw.fields?.find((item) => item.name.startsWith("Diagnostic"))?.value).toBe(
       "`blocked`: DiscordAPIError[50013]",
@@ -694,7 +773,7 @@ describe("details", () => {
     expect(limit.fields).toEqual([
       { name: "Try again", value: "<t:1790169900:R> (<t:1790169900:T>)", inline: true },
     ]);
-    const soon = render(new Failure("busy", "Busy.", 3), { scope: "/setup" });
+    const soon = render(new Failure("busy", "Busy.", 3), { scope: "/setup onboarding" });
     expect(onlyEmbed(soon).fields?.[0]?.value).toBe("in a few seconds");
     const until = render(
       new Failure("cooldown", "Declined recently.", 0, {
@@ -738,9 +817,11 @@ describe("every option has an Example (owner decision, 2026-09-24)", () => {
       (row) => !EXAMPLES[row.path]?.some((example) => example.includes(` ${row.name}:`)),
     );
     expect(missing).toEqual([]);
-    // Every example names its own command path, so a copied line can't point elsewhere.
+    // Every example names its own command path, so a copied line can't point elsewhere; a path
+    // whose only option is optional (/setup overrides, 2.35.0) may show it bare, the dry run.
     for (const [path, examples] of Object.entries(EXAMPLES))
-      for (const example of examples) expect(example).toStartWith(`/${path} `);
+      for (const example of examples)
+        expect(example === `/${path}` || example.startsWith(`/${path} `)).toBe(true);
   });
 
   test("the reply-session input cards now carry their Example", () => {

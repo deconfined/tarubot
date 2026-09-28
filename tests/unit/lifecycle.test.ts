@@ -2,22 +2,36 @@
  * Writer-lease sequencing without PostgreSQL: a fake pool client stands in for the dedicated lease
  * session, so readiness, startup refusal, log escalation, release, loss (an error event, a silent
  * session, or a missing lock found by the periodic check), a session that goes silent while waiting,
- * the shutdown deadline's exit status, and shutdown's wait for drained work (2.28.0) run in every
+ * the shutdown deadline's exit status, shutdown's wait for drained work (2.28.0), and readiness's
+ * informational channel-override counts with the scheduler's visibility check (2.35.0) run in every
  * unit pass.
  * tests/integration/lifecycle.test.ts repeats the contention and release against real advisory locks.
  */
 import { afterEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { type LifecycleOptions, WRITER_LEASE_LOCK } from "../../src/application/lifecycle.js";
+import type { PoolClient } from "pg";
+import {
+  type ApplicationLifecycle,
+  type LifecycleOptions,
+  WRITER_LEASE_LOCK,
+} from "../../src/application/lifecycle.js";
+import { Service } from "../../src/application/service.js";
+import {
+  VisibilityAlerts,
+  type VisibilityMonitor,
+} from "../../src/application/visibility-alerts.js";
 import { Failure } from "../../src/domain/values.js";
-import { Database } from "../../src/infrastructure/postgres/database.js";
+import { Database, orm } from "../../src/infrastructure/postgres/database.js";
 import {
   eventually,
+  type HarnessOptions,
   instance,
   LEVEL,
   type LifecycleHarness,
   lifecycleHarness,
+  NO_VISIBILITY,
   observe,
+  visibilityStub,
 } from "../fixtures/lifecycle.js";
 
 /** A statement as the lifecycle sends it: plain text with values, or a config with a read timeout. */
@@ -378,4 +392,179 @@ test("a writer checks the schema again once it holds the lease, and refuses a mi
   await created.lifecycle.stop();
   expect(client.statements.at(-1)).toContain("pg_advisory_unlock");
   expect(client.released).toBe(false);
+});
+
+/**
+ * A pg client for the statements start() and the scheduler pass send outside the lease session,
+ * through Drizzle: every statement answers no rows, except capabilityMetrics' aggregate, which
+ * answers one row of zeros. While `gate` is pending, every statement waits for it.
+ */
+class FakeSqlClient {
+  readonly statements: string[] = [];
+  gate: Promise<void> | undefined;
+  async query(statement: string | { text: string }) {
+    const text = typeof statement === "string" ? statement : statement.text;
+    this.statements.push(text);
+    await this.gate;
+    return {
+      rows: text.includes("oldest_roster_age_seconds") ? [[0, 0, null, 0]] : [],
+      rowCount: 0,
+    };
+  }
+}
+/** The fake client as the pg type Drizzle and Database.transaction expect. */
+const asClient = (client: FakeSqlClient): PoolClient => client as unknown as PoolClient;
+
+/**
+ * fakeDatabase plus what start() and the scheduler pass use: a transaction and an ORM over one
+ * FakeSqlClient, and the probe query.
+ */
+function readyDatabase(lease: FakeLeaseClient, order: string[]): Database {
+  const sql = new FakeSqlClient();
+  return instance(Database, {
+    healthy: true,
+    schema: async () => {},
+    pool: { connect: async () => lease },
+    close: async () => {
+      order.push(lease.released === undefined ? "close before release" : "close");
+    },
+    query: async () => [],
+    orm: orm(asClient(sql)),
+    transaction: async <T>(operation: (client: PoolClient) => Promise<T>) =>
+      operation(asClient(sql)),
+  });
+}
+
+/** The scheduler pass, which start() runs every 30 seconds, run once now. */
+const schedulerPass = (lifecycle: ApplicationLifecycle): Promise<void> =>
+  (lifecycle as unknown as { observe(): Promise<void> }).observe();
+
+/** A lifecycle over readyDatabase, registered for afterEach's stop, with the lease free. */
+function readyHarness(options: HarnessOptions) {
+  const lease = new FakeLeaseClient();
+  lease.available = true;
+  const created = lifecycleHarness(readyDatabase(lease, []), options);
+  running.push(created);
+  return { ...created, lease };
+}
+
+test("/health/ready carries the visibility counts, all null before a pass (2.35.0)", async () => {
+  // The default monitor, over the harness's Service: before its first pass it knows nothing.
+  const defaulted = readyHarness({ visibility: "default" });
+  expect((await defaulted.probe("/health/ready")).body.visibility).toEqual(NO_VISIBILITY);
+  // A monitor's stored counts appear as they are, field by field.
+  const counted = {
+    missing: 3,
+    onboardingPending: 2,
+    checked: 1,
+    checkedAt: "2026-09-28T12:00:00.000Z",
+  };
+  const reporting = readyHarness({ visibility: visibilityStub(counted) });
+  expect((await reporting.probe("/health/ready")).body.visibility).toEqual(counted);
+});
+
+test("VisibilityAlerts' constructor reaches neither the database nor Discord", () => {
+  // The lifecycle builds it before the lease is held and before login.
+  const app = instance(Service, {});
+  for (const name of ["db", "discord"])
+    Object.defineProperty(app, name, {
+      get: () => {
+        throw new Error(`The constructor read app.${name}`);
+      },
+    });
+  const monitor = new VisibilityAlerts(app, () => true, { log: () => {}, report: () => {} });
+  expect(monitor.status()).toEqual(NO_VISIBILITY);
+});
+
+test("the visibility counts never change readiness: 503 stays 503 and 200 stays 200", async () => {
+  const failing = async () => {
+    throw new Error("visibility check failed");
+  };
+  const monitors: [string, VisibilityMonitor][] = [
+    ["a failing check", visibilityStub(NO_VISIBILITY, failing)],
+    [
+      "a large count",
+      visibilityStub({
+        missing: 1_000_000,
+        onboardingPending: 1_000_000,
+        checked: 1,
+        checkedAt: "x",
+      }),
+    ],
+    [
+      "a throwing status",
+      {
+        check: async () => {},
+        status: () => {
+          throw new Error("status failed");
+        },
+      },
+    ],
+  ];
+  for (const [label, visibility] of monitors) {
+    const { lifecycle, lease, probe, reports } = readyHarness({ visibility });
+    lease.available = false;
+    const prepared = observe(lifecycle.prepare());
+    await eventually(`a contended attempt (${label})`, () => lease.attempts() >= 1);
+    // Unready while another writer holds the lease, whatever the monitor says.
+    const unready = await probe("/health/ready");
+    expect(unready.status).toBe(503);
+    expect(unready.body.ready).toBe(false);
+    lease.available = true;
+    await prepared.result;
+    await lifecycle.start();
+    await schedulerPass(lifecycle);
+    // Ready, with the database still healthy, whatever the monitor did.
+    const ready = await probe("/health/ready");
+    expect(ready.status).toBe(200);
+    expect(ready.body).toMatchObject({ ready: true, database: true, writerLease: true });
+    if (label === "a throwing status") expect(ready.body.visibility).toEqual(NO_VISIBILITY);
+    if (label === "a large count") expect(ready.body.visibility.missing).toBe(1_000_000);
+    expect(reports).toEqual(label === "a failing check" ? ["visibility alerts"] : []);
+    await lifecycle.stop();
+  }
+});
+
+test("each scheduler pass runs the reporter's tick, then the visibility check, and reports both", async () => {
+  const order: string[] = [];
+  const { lifecycle, reports, probe } = readyHarness({
+    tick: async () => {
+      order.push("tick");
+      throw new Error("tick failed");
+    },
+    visibility: visibilityStub(NO_VISIBILITY, async () => {
+      order.push("check");
+      throw new Error("check failed");
+    }),
+  });
+  await lifecycle.prepare();
+  await lifecycle.start();
+  await schedulerPass(lifecycle);
+  // A failing tick doesn't skip the check; each failure is reported under its own operation.
+  expect(order).toEqual(["tick", "check"]);
+  expect(reports).toEqual(["issue reports", "visibility alerts"]);
+  // The scheduler's own database probe succeeded, so readiness still holds.
+  expect((await probe("/health/ready")).body).toMatchObject({ ready: true, database: true });
+});
+
+test("an overlapping visibility check returns at once and leaves the running pass alone", async () => {
+  // The guild query waits on the gate, so the first pass is still running when the second starts.
+  const sql = new FakeSqlClient();
+  const release = Promise.withResolvers<void>();
+  sql.gate = release.promise;
+  const app = instance(Service, { db: { orm: orm(asClient(sql)) } });
+  const monitor = new VisibilityAlerts(app, () => true, { log: () => {}, report: () => {} });
+  const first = observe(monitor.check());
+  await eventually("the first pass's guild query", () => sql.statements.length === 1);
+  await monitor.check();
+  // The second call issued nothing and left the first pending.
+  expect(sql.statements).toHaveLength(1);
+  expect(first.settled()).toBe(false);
+  release.resolve();
+  await first.result;
+  // No servers: every count is zero, and the next call runs a pass of its own.
+  expect(monitor.status()).toMatchObject({ missing: 0, onboardingPending: 0, checked: 0 });
+  expect(typeof monitor.status().checkedAt).toBe("string");
+  await monitor.check();
+  expect(sql.statements).toHaveLength(2);
 });

@@ -48,6 +48,8 @@ For a release without a migration, steps 3 to 5 are optional: `docker compose up
 
 A new image never touches your database or restarts your bot by itself: updates happen only when you pull and recreate.
 
+From 2.35.0, a server whose channels TaruBot could see only through Administrator gets [one officer alert](/tarubot/admin/notices-and-updates/#missing-channel-overrides) about missing channel overrides about six minutes after the update, even while TaruBot still holds Administrator. Its officers follow [the setup window](/tarubot/admin/add-to-server/#the-setup-window); readiness counts the channels in `visibility.missing`. Rolling back to an earlier release leaves TaruBot's channel entries in place, which is harmless. An alert still waiting at the rollback posts anyway, naming `/setup overrides`, which the earlier release doesn't have, and its recovery line follows only after you update again. Before 2.35.0, `/setup` has no dry run: it turns lobby onboarding on at once.
+
 ## Rollback
 
 To go back, pin the previous `TARUBOT_IMAGE_TAG`, put back the Compose file that went with it (`mv docker-compose.yml.previous docker-compose.yml`, or fetch the older release's file as in step 1 of the update), and run `docker compose up -d --wait --remove-orphans` again. Going back past a release that changed the Compose file needs that older file: the newer one may lack a service or setting the older release expects.

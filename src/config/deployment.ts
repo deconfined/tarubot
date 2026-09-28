@@ -9,6 +9,16 @@
  * and the bot's startup configuration alone. It reads the file-delivered secrets (NAME_FILE,
  * 2.33.0) as the tools themselves do, through src/config/secrets.ts: in a Quadlet host's container
  * DATABASE_URL and DATABASE_CA_CERT exist only as files.
+ *
+ * The rehearsal allowance (2.35.0, #46 answer 8): DEVBOT_THROWAWAY_GUILD_ID exists for @deconfined's
+ * rehearsal of /setup overrides on a throwaway server, while DevBot's TEST_GUILD_ID points there.
+ * It is environment-only, passed per tool run and never kept in env.ts, a Compose file or an env
+ * template, so no new Discord ID enters the repository. Only the devbot profile takes it, and only
+ * when TEST_GUILD_ID names the same server: production, rehearsal, staging and unmanaged refuse it,
+ * and so does a managed deployment's guild. Under it the throwaway replaces DevBot's test guild as
+ * the profile's only guild and registration scope: that run can't use the real test guild's data,
+ * and can't register or clear commands in any managed guild (commands.js list still reads every
+ * scope back). The bot process never reads it; the running bot follows TEST_GUILD_ID alone.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -58,8 +68,8 @@ export interface ToolScope {
   /**
    * register.js only: the scope it replaces, "global" or a guild ID. A managed profile registers
    * only in its own declared registrationScope (production: global; staging and DevBot: the test
-   * guild), so a production --guild registration cannot shadow the global set with duplicate
-   * commands.
+   * guild, or the throwaway server under DevBot's rehearsal allowance), so a production --guild
+   * registration cannot shadow the global set with duplicate commands.
    */
   registerScope?: string;
   /**
@@ -72,7 +82,8 @@ export interface ToolScope {
   /**
    * Guilds whose command scope (the application's own commands) the tool clears. Any guild the
    * application belongs to is allowed, which the tool confirms after authenticating, except the
-   * profile's own registration scope; unmanaged profiles still may not touch a known guild.
+   * profile's own registration scope; unmanaged profiles, and DevBot under its rehearsal
+   * allowance, still may not touch a known guild.
    */
   commandGuilds?: readonly string[];
 }
@@ -92,6 +103,11 @@ export interface Deployment {
   guilds: readonly string[];
   /** Where this profile registers commands: "global" or a guild ID. */
   registrationScope: string;
+  /**
+   * The throwaway server of DevBot's rehearsal allowance (DEVBOT_THROWAWAY_GUILD_ID), set only on
+   * the devbot profile under it; it is then also the profile's only guild and registration scope.
+   */
+  readonly throwawayGuild?: string;
 }
 
 /**
@@ -133,6 +149,8 @@ const settingsSchema = z.object({
   RESTORE_DATABASE_URL: z.string().optional(),
   DATABASE_CA_CERT: z.string().optional(),
   RESTORE_DATABASE_CA_CERT: z.string().optional(),
+  /** The rehearsal allowance's throwaway server (see the module comment); empty means not set. */
+  DEVBOT_THROWAWAY_GUILD_ID: snowflake.optional(),
 });
 type Settings = z.infer<typeof settingsSchema>;
 /** process.env or a test double. */
@@ -157,11 +175,50 @@ function settings(env: Environment): Settings {
 const present = (value: string | undefined): value is string => (value ?? "").trim() !== "";
 
 /**
+ * The profile, with DevBot's rehearsal allowance applied. The allowance is decided here rather than
+ * per tool, so resolveDeployment refuses it exactly as assertToolScope does, and no profile other
+ * than devbot is ever built from it.
+ */
+function profile(values: Settings): Deployment {
+  const base = inferredProfile(values);
+  const throwaway = present(values.DEVBOT_THROWAWAY_GUILD_ID)
+    ? values.DEVBOT_THROWAWAY_GUILD_ID
+    : null;
+  if (throwaway === null) return base;
+  // Only the local devbot profile takes the allowance. Production, rehearsal, staging and unmanaged
+  // refuse it outright instead of ignoring it, so it can never widen them: their guilds,
+  // registration scope and database rules stay exactly the inferred ones, and an operator who
+  // passed it to the wrong environment learns so before any I/O.
+  if (base.name !== "devbot")
+    throw new Failure(
+      "configuration",
+      `DEVBOT_THROWAWAY_GUILD_ID is DevBot's throwaway-server rehearsal allowance; leave it empty under the ${base.name} profile.`,
+    );
+  // A managed deployment's guild is never a throwaway. Production's guild would hand DevBot's tools
+  // a production guild; the test guild already has its own profile without the allowance.
+  if (knownGuilds.has(throwaway))
+    throw new Failure(
+      "configuration",
+      "DEVBOT_THROWAWAY_GUILD_ID must be a throwaway server, not a managed deployment's guild.",
+    );
+  // The throwaway replaces the test guild rather than joining it: under the allowance the
+  // application and database rules stay DevBot's, and every guild whose data a tool may use, or
+  // whose command scope it may register or clear, is one no managed deployment owns.
+  return {
+    name: "devbot",
+    applicationId: deployments.devbot.applicationId,
+    guilds: [throwaway],
+    registrationScope: throwaway,
+    throwawayGuild: throwaway,
+  };
+}
+
+/**
  * Pick the profile from the explicit marker, else infer it from the application ID. Staging shares
  * DevBot's application, so only its marker selects it, and the marker is checked before the
  * inference: DevBot's application ID alone always means the local devbot profile.
  */
-function profile(values: Settings): Deployment {
+function inferredProfile(values: Settings): Deployment {
   const marker = values.TARUBOT_ENVIRONMENT || null;
   const application = values.DISCORD_APPLICATION_ID || null;
   const production = {
@@ -312,6 +369,12 @@ export function assertToolScope(
   /** Profiles that run DevBot's application: staging on its host, devbot on the workstation. */
   const devbotApp = name === "staging" || name === "devbot";
   const application = values.DISCORD_APPLICATION_ID || null;
+  /**
+   * The rehearsal allowance's throwaway server, or null. profile() sets it on the devbot profile
+   * only; reading it only there as well keeps staging's checks on the test guild whatever the
+   * Deployment object carries.
+   */
+  const throwaway = name === "devbot" ? (deployment.throwawayGuild ?? null) : null;
 
   // Launch: `bun run` children and plain `bun` reload the checkout's env files, which would fill
   // any gap in the production or staging settings with development values. Containers have none
@@ -347,8 +410,15 @@ export function assertToolScope(
       throw refuse("PUBLIC_TEST_RESPONSES must not be true.");
     if (present(values.TEST_PLAN_CHANNEL_ID)) throw refuse("TEST_PLAN_CHANNEL_ID must be empty.");
   }
-  if (devbotApp && values.TEST_GUILD_ID !== deployments.devbot.guilds[0])
-    throw refuse(`TEST_GUILD_ID must be DevBot's test guild ${deployments.devbot.guilds[0]}.`);
+  // Under the rehearsal allowance DevBot's TEST_GUILD_ID must name the same throwaway, so the tool
+  // and the bot it maintains agree on the server; that swaps the test guild for the throwaway and
+  // adds no guild. Staging (throwaway is always null there) and plain devbot keep the test guild.
+  if (devbotApp && values.TEST_GUILD_ID !== (throwaway ?? deployments.devbot.guilds[0]))
+    throw refuse(
+      throwaway === null
+        ? `TEST_GUILD_ID must be DevBot's test guild ${deployments.devbot.guilds[0]}.`
+        : `TEST_GUILD_ID must equal DEVBOT_THROWAWAY_GUILD_ID (${throwaway}) for a throwaway-server rehearsal.`,
+    );
 
   // Guilds: each managed profile touches only its own; unmanaged touches none of them.
   for (const guild of scope.guilds) {
@@ -367,6 +437,13 @@ export function assertToolScope(
     if (name === "unmanaged" && knownGuilds.has(guild))
       throw refuse(
         `guild ${guild} belongs to a managed deployment; use that deployment's profile.`,
+      );
+    // Under the rehearsal allowance the test guild is no longer this profile's own registration,
+    // so the own-registration rule no longer protects it; this one keeps every managed guild's
+    // command scope, the test guild's included, out of the rehearsal's reach.
+    if (throwaway !== null && knownGuilds.has(guild))
+      throw refuse(
+        `guild ${guild} belongs to a managed deployment; the throwaway-server rehearsal never touches it.`,
       );
   }
 

@@ -45,6 +45,7 @@ const FAILURE_PINS: Readonly<Record<string, Pin>> = {
   "forbidden.officer": { member: ["error", "Officers only"] },
   "forbidden.owner": { member: ["error", "Only your own records"] },
   "forbidden.manager": { member: ["error", "Server managers only"] },
+  "forbidden.administrator": { member: ["error", "Administrator or server owner only"] },
   "forbidden.membership": { member: ["warning", "FC membership needed"] },
   "forbidden.context": { member: ["error", "Not available here"] },
   "setup.guild": {
@@ -530,7 +531,8 @@ describe("resolved inconsistencies", () => {
       kind: "option",
       option: "fc_id",
     });
-    for (const scope of ["/config fc link", "/setup"])
+    // /setup onboarding (2.35.0) takes the same fc_id option as the pre-split /setup.
+    for (const scope of ["/config fc link", "/setup onboarding"])
       expect(render(badId, "officer", scope).title).toBe("Check your input");
   });
 
@@ -663,12 +665,14 @@ describe("resolved inconsistencies", () => {
       });
   });
 
-  test("12. every revision fence says 'Settings changed — try again', /setup with its reuse line", () => {
+  test("12. every revision fence says 'Settings changed — try again', /setup onboarding with its reuse line", () => {
     for (const code of ["conflict", "superseded"] as const)
       expect(
         render(new Failure(code, "Settings changed.", 0), "officer", "/config ledger").title,
       ).toBe("Settings changed — try again");
-    expect(embedOf("failures/stale settings · /setup · manager").description).toContain("reused");
+    expect(embedOf("failures/stale settings · /setup onboarding · manager").description).toContain(
+      "reused",
+    );
   });
 
   test("13. /apply by someone already eligible is 'No application needed'", () => {

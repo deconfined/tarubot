@@ -28,11 +28,11 @@ Applications are **open only while all three are true**: the applications switch
 - **`unset_channel:true`** stops using a review channel without checking anything, which also leaves `/apply` closed.
 - `channel` together with `unset_channel`, or no option at all, is refused as an input error.
 
-Each changed setting is audited separately and rechecks the server. A request that matches what's saved changes nothing and says so. [`/setup`](/tarubot/admin/setup/) switches applications on, and uses the officer room as the review channel when none is set.
+Each changed setting is audited separately and rechecks the server. A request that matches what's saved changes nothing and says so. [`/setup onboarding confirm:true`](/tarubot/admin/setup/) switches applications on, and uses the officer room as the review channel when none is set.
 
 `/config show` reads "Off · reviews in #channel" while the switch is off with a channel kept. `/config validate` checks the review channel only while applications are on; while they're off, it lists applications as closed.
 
-Choose a **staff-only** channel for reviews: the review message holds the applicant's answers. Changing the officer room with `/setup` doesn't move reviews.
+Choose a **staff-only** channel for reviews: the review message holds the applicant's answers. Changing the officer room with `/setup onboarding` doesn't move reviews.
 
 ## What visitors see
 

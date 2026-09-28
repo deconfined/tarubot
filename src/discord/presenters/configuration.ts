@@ -16,7 +16,9 @@
  * no Guest role) is warning; repeats that change nothing are the info '= NO CHANGE' cards (C4).
  *
  * The health checklist uses the approved bracket tokens ([OK] [WARN] [FAIL] [OFF] [WAIT]), which
- * belong to health checks only. /config show keeps the approved field-per-setting layout, which
+ * belong to health checks only. Since 2.35.0 (#46) it adds "TaruBot's role" and "Visibility",
+ * judged as if Administrator were off (src/domain/visibility.ts), and /config show's health line
+ * counts their rows to review. /config show keeps the approved field-per-setting layout, which
  * needs up to 15 fields since the changelog channel (2.25.0): its documented exemption from the
  * ten-field house limit (C3).
  */
@@ -37,6 +39,8 @@ import type {
   SetupResult,
 } from "../../application/results.js";
 import { GUEST_APPLICATIONS_CLOSED } from "../../domain/guest-application.js";
+import { type PermissionKey, permissionLabel } from "../../domain/permissions.js";
+import type { CoreRow, VisibilityReport } from "../../domain/visibility.js";
 import type { Viewer } from "./audience.js";
 import { recheckButton, syncStatusButton } from "./controls.js";
 import {
@@ -57,7 +61,7 @@ import {
 } from "./format.js";
 import { effectsField, pausedSave, whenApplied } from "./jobs.js";
 import { reply, type FieldSpec, type Presented, type ReplySpec } from "./reply.js";
-import { CHECK, HOUSE_LIMITS, marker, type Check, type Tone } from "./style.js";
+import { CHECK, DISCORD_LIMITS, HOUSE_LIMITS, marker, type Check, type Tone } from "./style.js";
 
 /**
  * Every configuration reply kind, with whether its embed carries a timestamp: the approved card's
@@ -273,7 +277,7 @@ const PAUSED_NOTE: Readonly<Record<Exclude<EffectsMode, "live">, string>> = {
  * Held work a change queued again (blocked or paused jobs): '… QUEUED' while Discord changes are
  * live, otherwise when the pause ends, because the requeued jobs are held again until then.
  */
-function heldWork(requeued: number, mode: EffectsMode): FieldSpec | null {
+export function heldWork(requeued: number, mode: EffectsMode): FieldSpec | null {
   if (requeued <= 0) return null;
   const jobs = count(requeued, "held job");
   return {
@@ -294,6 +298,8 @@ export type HealthSection =
   | "Access roles"
   | "Channels"
   | "Onboarding"
+  | "TaruBot's role"
+  | "Visibility"
   | "Discord changes"
   | "Role layout"
   | "Guest grandfathering";
@@ -313,6 +319,9 @@ const INLINE_SECTIONS: ReadonlySet<HealthSection> = new Set([
   "Role layout",
   "Guest grandfathering",
 ]);
+
+/** The two sections #46 added (2.35.0), which /config show's health line counts separately. */
+const VISIBILITY_SECTIONS: ReadonlySet<HealthSection> = new Set(["TaruBot's role", "Visibility"]);
 
 /** Roster-acquisition failure codes as the failed-attempt clause names them (configuration#8). */
 const ROSTER_ERROR: Readonly<Record<string, string>> = {
@@ -378,6 +387,363 @@ function attemptClause(fc: FcHealthRow): string {
   return `; the attempt ${when(attempt, "R")} failed (${reason})`;
 }
 
+// ---------------------------------------------------------------------------------------------
+// /config validate: TaruBot's role and Visibility (2.35.0, #46)
+
+/** One row of the two #46 sections before it is placed in a section. */
+interface Row {
+  readonly check: Check;
+  readonly text: string;
+}
+
+/** How many mentions a row shows before 'and K more'; 0 shows only the count. */
+interface MentionBudget {
+  readonly roles: number;
+  readonly channels: number;
+}
+
+/**
+ * The mention budgets a section tries in turn until its field fits 1,024 characters: three roles
+ * and six channels per row, then fewer, then counts only. A realistic server fits the first; the
+ * later ones keep a pathological one (every permission from different roles, dozens of channels
+ * in every list) whole rather than letting the embed builder cut it.
+ */
+const MENTION_BUDGETS: readonly MentionBudget[] = [
+  { roles: 3, channels: 6 },
+  { roles: 2, channels: 4 },
+  { roles: 1, channels: 2 },
+  { roles: 0, channels: 0 },
+];
+
+/** The rows of the first budget whose field fits; the last budget's otherwise. */
+function fitted(build: (budget: MentionBudget) => Row[]): Row[] {
+  let rows: Row[] = [];
+  for (const budget of MENTION_BUDGETS) {
+    rows = build(budget);
+    const field = rows.map((row) => `${CHECK[row.check]} ${row.text}`).join("\n");
+    if (field.length <= DISCORD_LIMITS.fieldValue) break;
+  }
+  return rows;
+}
+
+/**
+ * At most `max` rendered items then 'and K more', joined as prose; with `max` 0 (or nothing to
+ * show) only the count, in `noun`'s words.
+ */
+function mentions(items: readonly string[], max: number, noun: readonly [string, string]): string {
+  if (max <= 0 || items.length === 0) return count(items.length, noun[0], noun[1]);
+  const shown = items.slice(0, max);
+  const hidden = items.length - shown.length;
+  return prose(hidden > 0 ? [...shown, `${hidden} more`] : shown);
+}
+
+const ROLE_NOUN = ["role", "roles"] as const;
+const CHANNEL_NOUN = ["channel", "channels"] as const;
+
+/** Role mentions, @everyone (the guild ID) as plain text: its mention would render oddly. */
+function roleMentions(roles: readonly string[], guildId: string, max: number): string {
+  return mentions(
+    roles.map((id) => (id === guildId ? "@everyone" : mentionRole(id))),
+    max,
+    ROLE_NOUN,
+  );
+}
+
+/** Channel mentions within the budget. */
+const channelMentions = (ids: readonly string[], max: number): string =>
+  mentions(ids.map(mentionChannel), max, CHANNEL_NOUN);
+
+/** Permission labels as prose, in the server context unless given. */
+const labels = (keys: readonly PermissionKey[], context: "server" | "channel" = "server") =>
+  prose(keys.map((key) => permissionLabel(key, context)));
+
+/**
+ * How to take Administrator away from TaruBot once /config validate says it is no longer needed,
+ * for its 'no longer needed' row and /setup overrides' next step: turn it off where TaruBot's own
+ * bot role or @everyone grants it, and remove each shared role (one people also hold) from
+ * TaruBot rather than editing it, each part left out when it names no role. `roles` are the
+ * Administrator roles TaruBot holds (guildId for @everyone) and `shared` those that are neither;
+ * each list shows at most `maxRoles` mentions, or only its count at 0.
+ */
+export function administratorRemoval(
+  roles: readonly string[],
+  shared: readonly string[],
+  guildId: string,
+  maxRoles: number,
+): string {
+  const own = roles.filter((id) => !shared.includes(id));
+  return [
+    own.length > 0 && `turn it off in ${roleMentions(own, guildId, maxRoles)}`,
+    shared.length > 0 && `remove ${roleMentions(shared, guildId, maxRoles)} from TaruBot`,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(", and ");
+}
+
+/**
+ * The core seven, grouped so permissions with the same answer share a row: from TaruBot's own
+ * role [OK]; only from other roles or @everyone [WARN] (a change to that role removes them);
+ * missing [FAIL], or [WARN] while Administrator still covers the gap. With no mention room left,
+ * every other-roles row merges into one naming the union of those roles.
+ */
+function coreRows(report: VisibilityReport, guildId: string, budget: MentionBudget): Row[] {
+  const admin = report.administrator.held;
+  const groups: { key: string; rows: CoreRow[] }[] = [];
+  for (const row of report.core) {
+    const borrowed = row.source === "other_roles" || row.source === "everyone";
+    const key =
+      borrowed && budget.roles > 0
+        ? `borrowed:${row.roles.join(",")}`
+        : borrowed
+          ? "borrowed"
+          : row.source;
+    const group = groups.find((candidate) => candidate.key === key);
+    if (group) group.rows.push(row);
+    else groups.push({ key, rows: [row] });
+  }
+  return groups.map(({ rows }): Row => {
+    const [first] = rows;
+    const names = labels(rows.map((row) => row.permission));
+    const several = rows.length > 1;
+    if (first?.source === "own_role") return { check: "ok", text: names };
+    if (first?.source === "missing")
+      return admin
+        ? {
+            check: "warn",
+            text: `${names}: missing without Administrator; grant ${several ? "them" : "it"} before removing Administrator`,
+          }
+        : { check: "fail", text: `${names}: missing` };
+    const roles = [...new Set(rows.flatMap((row) => row.roles))];
+    return {
+      check: "warn",
+      text: `${names}: only from ${roleMentions(roles, guildId, budget.roles)}, so a change to ${roles.length === 1 ? "that role" : "those roles"} removes ${several ? "them" : "it"}`,
+    };
+  });
+}
+
+/**
+ * The "TaruBot's role" section, everything as if Administrator were off: Administrator itself
+ * (off; on and still needed; on and no longer needed, saying how to remove it), the core seven,
+ * onboarding's permissions on onboarding servers only (a server without onboarding never sees a
+ * row naming Manage Channels or the other four), the role order ([FAIL] for roles TaruBot sits
+ * below, and [WARN] for those it stays above only through a shared Administrator role, which keep
+ * Administrator needed), and permissions it never needs.
+ */
+function roleRows(report: VisibilityReport, guildId: string, budget: MentionBudget): Row[] {
+  const { administrator } = report;
+  const holders = roleMentions(administrator.roles, guildId, budget.roles);
+  const rows: Row[] = [
+    !administrator.held
+      ? { check: "ok", text: "Administrator: off" }
+      : report.administratorNeeded
+        ? {
+            check: "warn",
+            text: `Administrator: on (from ${holders}); still needed until the items below are fixed`,
+          }
+        : {
+            check: "warn",
+            text: `Administrator: no longer needed; ${administratorRemoval(administrator.roles, administrator.shared, guildId, budget.roles)}`,
+          },
+    ...coreRows(report, guildId, budget),
+  ];
+  const onboarding = report.onboardingMissing;
+  if (onboarding !== null)
+    rows.push(
+      onboarding.length === 0
+        ? { check: "ok", text: "Onboarding permissions" }
+        : administrator.held
+          ? {
+              check: "warn",
+              text: `Onboarding permissions: missing ${labels(onboarding)} without Administrator; grant ${onboarding.length > 1 ? "them" : "it"} before removing Administrator`,
+            }
+          : { check: "fail", text: `Onboarding permissions: missing ${labels(onboarding)}` },
+    );
+  // Roles TaruBot sits below even with every role it holds are a failure now; those it stays above
+  // only through a shared Administrator role are a warning until that role comes off.
+  const { highest, notBelow, throughShared } = report.roleOrder;
+  const below = notBelow.filter((id) => !throughShared.includes(id));
+  if (below.length > 0)
+    rows.push({
+      check: "fail",
+      text: `Role order: move TaruBot's highest role above ${roleMentions(below, guildId, budget.roles)}`,
+    });
+  if (throughShared.length > 0) {
+    const shared = administrator.shared;
+    const target = highest ? `move ${mentionRole(highest)} above` : "give TaruBot a role above";
+    rows.push({
+      check: "warn",
+      text: `Role order: TaruBot is above ${roleMentions(throughShared, guildId, budget.roles)} only through ${roleMentions(shared, guildId, budget.roles)}; ${target} ${throughShared.length > 1 ? "them" : "it"} before removing ${shared.length > 1 ? "those roles" : "that role"} from TaruBot`,
+    });
+  }
+  if (notBelow.length === 0)
+    rows.push(
+      highest
+        ? { check: "ok", text: `Role order: ${mentionRole(highest)} is above the access roles` }
+        : { check: "ok", text: "Role order: no access roles to stay above" },
+    );
+  const never = report.neverNeeded;
+  rows.push(
+    never.length > 0
+      ? {
+          check: "warn",
+          text: `Never needed: ${labels(never.map((row) => row.permission))} (from ${roleMentions([...new Set(never.flatMap((row) => row.roles))], guildId, budget.roles)})`,
+        }
+      : { check: "ok", text: "No permissions it never needs" },
+  );
+  return rows;
+}
+
+/** The four posting permissions, as the channel rows name them. */
+const POSTING_LABELS = "View Channel, Send Messages, Embed Links and Read Message History";
+
+/**
+ * The "Visibility" section on an onboarding server: onboarding's own channel pass gives TaruBot
+ * its access, so the rows say what it hasn't reached yet (keep Administrator on while it holds, or
+ * see /sync status for why the pass waits) and which configured channels it never manages (the
+ * Community Updates channel's), where TaruBot needs its own access.
+ */
+function onboardingRows(report: VisibilityReport, budget: MentionBudget): Row[] {
+  const { managed, unmanaged } = report.onboardingPending ?? { managed: [], unmanaged: [] };
+  if (managed.length + unmanaged.length === 0)
+    return [{ check: "ok", text: "Onboarding manages TaruBot's channel access" }];
+  const held = report.administrator.held;
+  const rows: Row[] = [];
+  if (managed.length > 0) {
+    const listed = budget.channels > 0 ? `: ${channelMentions(managed, budget.channels)}` : "";
+    const lead = `Onboarding hasn't reached ${count(managed.length, "channel")} yet${listed}`;
+    rows.push(
+      held
+        ? {
+            check: "warn",
+            text: `${lead}; keep Administrator on until /sync status shows its channel pass finished`,
+          }
+        : { check: "fail", text: `${lead}; /sync status shows why its channel pass is waiting` },
+    );
+  }
+  if (unmanaged.length > 0) {
+    const listed = channelMentions(unmanaged, budget.channels);
+    rows.push(
+      held
+        ? {
+            check: "warn",
+            text: `Onboarding doesn't manage ${listed}, so TaruBot needs its own access there before Administrator comes off: give it ${POSTING_LABELS}`,
+          }
+        : {
+            check: "fail",
+            text: `Onboarding doesn't manage ${listed}, and TaruBot can't post there: give it ${POSTING_LABELS}`,
+          },
+    );
+  }
+  return rows;
+}
+
+/**
+ * The "Visibility" section: onboarding's coverage (onboardingRows); every channel visible (naming
+ * any hidden on purpose); or, in order, the missing overrides (categories counted with the
+ * channels inside them), posting channels short of a posting permission, configured channels whose
+ * own TaruBot entry denies history, configured channels denied on purpose ([FAIL] once
+ * Administrator is off, since removing it then hid them), private categories (a warning the
+ * server owner fixes, with the three ways), and channels hidden on purpose. The Missing and
+ * Posting rows name their remedy: /setup overrides confirm:true while TaruBot holds Administrator,
+ * or turning it on first.
+ */
+function visibilityRows(report: VisibilityReport, budget: MentionBudget): Row[] {
+  if (report.mode === "onboarding") return onboardingRows(report, budget);
+  const hidden = report.hiddenOnPurpose;
+  // Channels hidden only through their category's deny, counted so an owner can tell them apart.
+  const byCategory = hiddenByCategoryClause(report.hiddenByCategory.length);
+  if (report.missingCount === 0)
+    return [
+      {
+        check: "ok",
+        text:
+          hidden.length > 0
+            ? `TaruBot can see every channel, except ${hidden.length} hidden on purpose${byCategory}: ${channelMentions(hidden, budget.channels)}`
+            : "TaruBot can see every channel",
+      },
+    ];
+  const rows: Row[] = [];
+  const held = report.administrator.held;
+  const remedy = held
+    ? "; /setup overrides confirm:true adds them while TaruBot holds Administrator"
+    : "; turn Administrator on for TaruBot, then run /setup overrides confirm:true";
+  const { categories, inside, channels, posting, unreadable } = report.missing;
+  if (categories.length + channels.length > 0) {
+    const counts = [
+      categories.length > 0 &&
+        `${count(categories.length, "category", "categories")}${inside.length > 0 ? ` (${count(inside.length, "channel")} inside)` : ""}`,
+      channels.length > 0 && count(channels.length, "channel"),
+    ].filter((part): part is string => Boolean(part));
+    const listed =
+      budget.channels > 0
+        ? `: ${channelMentions([...categories, ...channels], budget.channels)}`
+        : "";
+    // Entries TaruBot can't read yet: a run with Administrator reads them fresh; without it, not.
+    const u = unreadable.length;
+    const clause =
+      u === 0
+        ? ""
+        : held
+          ? ` (the run re-reads the ${u} TaruBot can't read yet)`
+          : `; TaruBot can't read ${u} of them until then`;
+    rows.push({
+      check: "warn",
+      text: `Missing TaruBot overrides: ${counts.join(", ")}${listed}${remedy}${clause}`,
+    });
+  }
+  if (posting.length > 0) {
+    const entries = posting.map(
+      (entry) => `${mentionChannel(entry.id)} (${labels(entry.lacks, "channel")})`,
+    );
+    rows.push({
+      check: "warn",
+      text: `Posting channels without all four posting permissions: ${mentions(entries, budget.channels, CHANNEL_NOUN)}${remedy}`,
+    });
+  }
+  if (report.masked.length > 0)
+    rows.push({
+      check: "warn",
+      text: `Configured channels where TaruBot's own entry denies Read Message History: ${channelMentions(report.masked, budget.channels)}; /setup overrides lifts that deny while TaruBot holds Administrator`,
+    });
+  if (report.denied.length > 0) {
+    const denied = `Configured but denied to TaruBot on purpose: ${channelMentions(report.denied, budget.channels)}; lift the deny or change the setting`;
+    rows.push(
+      held
+        ? { check: "warn", text: `${denied} before removing Administrator` }
+        : { check: "fail", text: denied },
+    );
+  }
+  if (report.privateCategories.length > 0) {
+    // Each category names at most two of the configured channels it holds (fewer on a tight
+    // budget); @deconfined's rule: a warning the server owner fixes, whether or not Administrator
+    // is held, since /setup overrides picks nothing for such a category.
+    const shown = Math.min(2, budget.channels);
+    const entries = report.privateCategories.map(
+      (category) =>
+        `${mentionChannel(category.id)} (holds ${mentions(category.configured.map(mentionChannel), shown, CHANNEL_NOUN)})`,
+    );
+    rows.push({
+      check: "warn",
+      text: `Private categories holding a configured channel: ${mentions(entries, budget.channels, ["category", "categories"])}; /setup overrides leaves them alone: move the configured channel out, choose another channel for that setting, or give TaruBot View Channel on the category yourself`,
+    });
+  }
+  if (hidden.length > 0)
+    rows.push({
+      check: "off",
+      text: `Hidden on purpose: ${channelMentions(hidden, budget.channels)}${byCategory}`,
+    });
+  return rows;
+}
+
+/**
+ * ' (N inside a category hidden from TaruBot)' for the channels hidden only through their
+ * category's deny (VisibilityReport's hiddenByCategory), or '' for none; /setup overrides' reply
+ * uses it too.
+ */
+export function hiddenByCategoryClause(n: number): string {
+  return n > 0 ? ` (${n} inside a category hidden from TaruBot)` : "";
+}
+
 /**
  * The /config validate checklist as rows, one bracket token each (approved configuration#7–#9):
  * - Free Company: linked or not, then the roster: fresh [OK], stale or never read [WARN], with
@@ -387,6 +753,8 @@ function attemptClause(fc: FcHealthRow): string {
  * - Channels: [OK], [FAIL], [OFF] when unset; a review channel without a Guest role is [WARN], and
  *   so is a changelog channel onboarding hides from members or doesn't manage (2.25.0).
  * - Onboarding: the lobby and officer room, or [OFF] when onboarding is off.
+ * - TaruBot's role and Visibility (2.35.0, #46): see roleRows and visibilityRows. Without a
+ *   readable view, the role section is left out and Visibility is one [WARN].
  * - Discord changes: [OK] Live; [WARN] when disabled for the deployment; awaiting activation is
  *   [WAIT] 'Paused until activation' (configuration#9), except beside problems, where the approved
  *   configuration#8 counts it as the warning 'Paused: this server has not been activated'.
@@ -495,9 +863,25 @@ export function configurationChecks(report: ConfigurationReport): HealthCheck[] 
         rows.push(
           resourceCheck("Onboarding", label, mentionChannel(id), capability(report, column, id)),
         );
-      else add("Onboarding", "warn", `${label}: not set; run /setup again to create it`);
+      else add("Onboarding", "warn", `${label}: not set; run /setup onboarding again to create it`);
     }
   else add("Onboarding", "off", "Onboarding is off");
+
+  // TaruBot's role and channel view (2.35.0, #46), before the verdict-dependent wording below so
+  // their problems count toward it. No role section when TaruBot's view couldn't be read.
+  const visibility = report.visibility;
+  if (visibility)
+    for (const row of fitted((budget) => roleRows(visibility, guild.id, budget)))
+      add("TaruBot's role", row.check, row.text);
+  for (const row of visibility
+    ? fitted((budget) => visibilityRows(visibility, budget))
+    : [
+        {
+          check: "warn" as const,
+          text: "Couldn't read TaruBot's channel view; try again in a minute",
+        },
+      ])
+    add("Visibility", row.check, row.text);
 
   // Wording that differs between the approved problem (#8) and ready (#9) checklists follows the
   // verdict. Fields group rows by section, so this line still lists last among the channels.
@@ -625,13 +1009,21 @@ export function healthReply(
 // ---------------------------------------------------------------------------------------------
 // /config show
 
-/** /config show's health line, from the same resource checks /config validate lists. */
+/**
+ * /config show's health line, from the same resource checks /config validate lists, plus (2.35.0)
+ * how many of the TaruBot's role and Visibility rows need review. /config show has no field left
+ * for them (C3), so the line carries the count and /config validate the rows.
+ */
 function healthLine(checks: readonly HealthCheck[]): string {
   const resources = checks.filter((row) => row.resource);
   const failed = resources.filter((row) => row.check === "fail").length;
-  if (resources.length === 0) return "Health: no roles or channels to check yet.";
-  if (failed > 0) return `Health: ${count(failed, "problem")}. Run /config validate.`;
-  return `Health: all ${count(resources.length, "resource check")} passed.`;
+  const review = checks.filter(
+    (row) => VISIBILITY_SECTIONS.has(row.section) && (row.check === "warn" || row.check === "fail"),
+  ).length;
+  const suffix = review > 0 ? ` Role and visibility: ${review} to review in /config validate.` : "";
+  if (resources.length === 0) return `Health: no roles or channels to check yet.${suffix}`;
+  if (failed > 0) return `Health: ${count(failed, "problem")}. Run /config validate.${suffix}`;
+  return `Health: all ${count(resources.length, "resource check")} passed.${suffix}`;
 }
 
 /**
@@ -714,7 +1106,7 @@ export function showReply(
         {
           name: "Access roles",
           value:
-            "Not set. Server managers can run /setup, or bind existing roles with /config roles member, guest, officer and leader.",
+            "Not set. Server managers can run /setup onboarding, or bind existing roles with /config roles member, guest, officer and leader.",
         },
       ]
     : ROLES.map(({ column, label }) => {

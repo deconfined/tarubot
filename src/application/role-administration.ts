@@ -1,4 +1,8 @@
-/** Role provisioning and explicit officer decisions, restricted to server role managers. */
+/**
+ * Role provisioning and explicit officer decisions, restricted to server role managers. Since
+ * 2.35.0 (#46) /setup has two subcommands, both dry runs unless confirm:true: /setup onboarding
+ * (setup and planSetup) and /setup overrides (overrides, delegated to ChannelOverrides).
+ */
 import type { Actor } from "../domain/policy.js";
 import { authorizeRoleManager } from "../domain/policy.js";
 import { Failure, normalized, note } from "../domain/values.js";
@@ -8,8 +12,24 @@ import * as t from "../infrastructure/postgres/schema.js";
 import type { DiscordPort } from "./records.js";
 import { enqueue, layoutGuildRoles, reconcileUser, secureGuildChannels } from "../jobs/queue.js";
 import type { GuildAccess } from "./guild-access.js";
-import type { OfficerOverrideResult, OfficerResetResult, SetupResult } from "./results.js";
+import { NEW_GUILD_ROW } from "./guild-defaults.js";
+import { ChannelOverrides, type OverridesPort, type OverridesResult } from "./overrides.js";
+import type { FcRef, OfficerOverrideResult, OfficerResetResult, SetupResult } from "./results.js";
 import { fcLinked, type Service } from "./service.js";
+import {
+  addBlocker,
+  blockerOf,
+  collected,
+  duplicateRoles,
+  onboardingChanges,
+  plannedAudiences,
+  plannedBindings,
+  roleAction,
+  SAMPLE_CHANNELS,
+  type SetupBlocker,
+  type SetupPlan,
+  type SetupRolePlan,
+} from "./setup-plan.js";
 
 /** Extra provisioning capability, separate from the reconciliation/test port. */
 export interface RoleProvisioner extends DiscordPort {
@@ -24,13 +44,183 @@ export interface RoleProvisioner extends DiscordPort {
   ): Promise<{ id: string; created: boolean }>;
 }
 
+/** The four access roles setup creates or reuses, in order, with their labels. */
+const SETUP_ROLES = [
+  ["member_role_id", "Member"],
+  ["guest_role_id", "Guest"],
+  ["officer_role_id", "Officer"],
+  ["leader_role_id", "FC Leader"],
+] as const;
+
 /** Setup is serialized per guild; Discord resource creation precedes one configuration commit. */
 export class RoleAdministration {
+  /** /setup overrides' runs; absent when no port was given (tests of the other methods). */
+  private readonly channelOverrides: ChannelOverrides | undefined;
+
   constructor(
     private readonly app: Service,
     private readonly discord: RoleProvisioner,
     private readonly access: GuildAccess,
-  ) {}
+    overrides?: OverridesPort,
+  ) {
+    this.channelOverrides = overrides ? new ChannelOverrides(app, overrides) : undefined;
+  }
+
+  /**
+   * /setup overrides (2.35.0, #46): TaruBot's own channel entries, a dry run unless `confirm`
+   * (src/application/overrides.ts).
+   */
+  overrides(actor: Actor, confirm: boolean): Promise<OverridesResult> {
+    if (!this.channelOverrides) throw new Error("/setup overrides has no Discord port");
+    return this.channelOverrides.run(actor, confirm);
+  }
+
+  /**
+   * Stop a /setup overrides run in progress at shutdown and wait (about 5 s at most) for its
+   * audit row. Never rejects.
+   */
+  async drain(): Promise<void> {
+    await this.channelOverrides?.drain().catch(() => {});
+  }
+
+  /**
+   * /setup onboarding's dry run (2.35.0, #46): what setup() would do with the same options, read
+   * without writing (no role, channel, row, job or audit, and no lock). Every refusal setup() would
+   * throw is listed as a blocker instead (src/application/setup-plan.ts), except those about the
+   * person asking: the role-manager check, the caller half of the channel check, and bad option
+   * values, which throw as they do in setup().
+   */
+  async planSetup(
+    actor: Actor,
+    prefix: string,
+    fcId: string | null,
+    officerRank: string | null,
+    channels: { lobby: string | null; officers: string | null } = { lobby: null, officers: null },
+  ): Promise<SetupPlan> {
+    authorizeRoleManager(actor);
+    prefix = prefix.trim();
+    if (prefix.length > 50)
+      throw new Failure("input", "The role prefix can be at most 50 characters.", 0, {
+        kind: "option",
+        option: "prefix",
+      });
+    if (officerRank !== null) officerRank = note(officerRank, "rank");
+    const guildId = actor.guildId;
+    const blockers: SetupBlocker[] = [];
+    const [previous] = await this.app.db.orm
+      .select()
+      .from(t.guilds)
+      .where(eq(t.guilds.id, guildId));
+    if (fcId && previous?.fc_id && previous.fc_id !== fcId)
+      addBlocker(blockers, blockerOf(fcLinked(previous.fc_id)));
+    await this.access.discord.checkCaller(guildId, actor.userId);
+    // setup() validates a kept review channel it is about to open.
+    if (previous?.guest_application_channel_id && !previous.guest_applications_enabled) {
+      const review = previous.guest_application_channel_id;
+      await collected(blockers, () => this.discord.validateChannel(guildId, review));
+    }
+    const layout = previous?.role_layout_enabled ?? NEW_GUILD_ROW.role_layout_enabled;
+    const targetFc = fcId ?? previous?.fc_id ?? null;
+    let company: FcRef | null = null;
+    if (fcId && fcId !== previous?.fc_id) {
+      const read = await collected(blockers, () => this.app.lodestone.company(fcId));
+      if (read) company = { id: read.id, name: read.name, tag: read.tag, world: read.world };
+    } else company = await this.app.company(this.app.db.orm, targetFc);
+    // The roles ensureRole would create or reuse, decided over one read-only role list.
+    const candidates = await this.access.discord.roleCandidates(guildId);
+    const roles: SetupRolePlan[] = [];
+    for (const [field, label] of SETUP_ROLES) {
+      const name = prefix ? `${prefix} ${label}` : label;
+      const decided = await collected(blockers, () =>
+        roleAction(candidates, name, label, previous?.[field] ?? null),
+      );
+      if (!decided) continue;
+      roles.push({ field, name, ...decided });
+      const id = decided.id;
+      if (id) await collected(blockers, () => this.discord.validateRole(guildId, id, actor.userId));
+    }
+    const duplicate = duplicateRoles(roles);
+    if (duplicate) addBlocker(blockers, blockerOf(duplicate));
+    for (const selected of [channels.lobby, channels.officers])
+      if (selected)
+        await collected(blockers, () => this.discord.validateChannel(guildId, selected));
+    // prepare() without creating anything; each refusal is its own blocker.
+    const reused = (field: SetupRolePlan["field"]) =>
+      roles.find((role) => role.field === field)?.id ?? undefined;
+    const lobbyId = channels.lobby ?? previous?.lobby_channel_id ?? null;
+    const officerId = channels.officers ?? previous?.officer_channel_id ?? null;
+    const prepared = await this.access.discord.planPrepare(
+      guildId,
+      Object.fromEntries(
+        (
+          [
+            ["member", reused("member_role_id")],
+            ["guest", reused("guest_role_id")],
+            ["officer", reused("officer_role_id")],
+            ["leader", reused("leader_role_id")],
+          ] as const
+        ).filter((entry): entry is [(typeof entry)[0], string] => entry[1] !== undefined),
+      ),
+      lobbyId,
+      officerId,
+    );
+    for (const blocker of prepared.blockers) addBlocker(blockers, blocker);
+    // Onboarding's first pass: every existing managed channel whose overwrites it would change.
+    let changing: readonly string[] | null = null;
+    let everyoneLosesView: boolean | null = null;
+    if (prepared.snapshot) {
+      const audiences = plannedAudiences(
+        prepared.snapshot,
+        prepared.lobby.id,
+        prepared.officerRoom.id,
+        await this.access.policies(guildId),
+        previous?.access_policy_enabled ?? false,
+      );
+      const changes = onboardingChanges(
+        prepared.snapshot,
+        plannedBindings(roles),
+        audiences,
+        guildId,
+      );
+      changing = changes.channels;
+      everyoneLosesView = changes.everyoneLosesView;
+    }
+    // Adopting an existing staff role preserves its human holders as manual grants.
+    const officerRole = roles.find((role) => role.field === "officer_role_id");
+    let adopt: number | null = null;
+    if (officerRole?.id && previous?.officer_role_id !== officerRole.id) {
+      const holder = officerRole.id;
+      const members = await collected(blockers, () => this.discord.members(guildId));
+      if (members)
+        adopt = members.filter((member) => !member.bot && member.roles.includes(holder)).length;
+    } else if (officerRole) adopt = 0;
+    const notifications = previous?.officer_notifications_channel_id ?? null;
+    return {
+      roles,
+      lobby: prepared.lobby,
+      officerRoom: prepared.officerRoom,
+      onboarding: {
+        alreadyOn: previous?.access_policy_enabled ?? false,
+        channels: changing === null ? null : changing.length,
+        sample: (changing ?? []).slice(0, SAMPLE_CHANNELS),
+        everyoneLosesView,
+      },
+      guestApplications: {
+        switchesOn: !(previous?.guest_applications_enabled ?? false),
+        channel: previous?.guest_application_channel_id ?? null,
+      },
+      officerNotifications: {
+        channel: notifications ?? prepared.officerRoom.id,
+        defaulted: notifications === null,
+      },
+      adopt,
+      fc: { id: targetFc, company },
+      officerRank: officerRank ?? previous?.officer_rank_name ?? null,
+      roleLayout: layout,
+      blockers,
+      effectsMode: this.app.effectsMode(previous ?? NEW_GUILD_ROW),
+    };
+  }
 
   /** Create/reuse four ordinary roles, optionally link an FC and select its officer rank. */
   async setup(
@@ -76,9 +266,10 @@ export class RoleAdministration {
       if (previous?.guest_application_channel_id && !previous.guest_applications_enabled)
         await this.discord.validateChannel(actor.guildId, previous.guest_application_channel_id);
       // Setup never changes the role-layout switch. An existing guild keeps its value (an imported
-      // guild stays off); a guild first created here gets the column default, which is on. A
-      // concurrent /config role_layout bumps the revision, so the check below turns it into a conflict.
-      const layout = previous?.role_layout_enabled ?? true;
+      // guild stays off); a guild first created here starts with it off (NEW_GUILD_ROW, CFG-07 since
+      // 2.35.0), so its created roles aren't hoisted. A concurrent /config role_layout bumps the
+      // revision, so the check below turns it into a conflict.
+      const layout = previous?.role_layout_enabled ?? NEW_GUILD_ROW.role_layout_enabled;
       const company =
         fcId && fcId !== previous?.fc_id ? await this.app.lodestone.company(fcId) : null;
       const specifications = [
@@ -136,9 +327,11 @@ export class RoleAdministration {
       return await this.app.db.transaction(async (client) => {
         const db = orm(client);
         if (company) await this.app.storeCompany(client, company);
+        // A server first created here starts with effects on and the role layout off (CFG-07,
+        // 2.35.0): NEW_GUILD_ROW is shared with /config's inserts.
         await db
           .insert(t.guilds)
-          .values({ id: actor.guildId, effects_enabled: true })
+          .values({ id: actor.guildId, ...NEW_GUILD_ROW })
           .onConflictDoNothing();
         const [current] = await db
           .select()
@@ -152,7 +345,7 @@ export class RoleAdministration {
         )
           throw new Failure(
             "conflict",
-            "Server settings changed during setup, so nothing was saved. Run /setup again; anything already created is reused.",
+            "Server settings changed during setup, so nothing was saved. Run /setup onboarding confirm:true again; anything already created is reused.",
           );
         const targetFc = fcId ?? current.fc_id;
         for (const role of roles) {

@@ -199,14 +199,16 @@ describe.skipIf(!url)("migration 005 launch access policy", () => {
     });
   });
 
-  test("migration 005 is a no-op on an empty database and new guilds start with the layout on", async () => {
+  test("migration 005 is a no-op on an empty database and the column default keeps the layout on", async () => {
     await rehearse("m005_empty", async (client) => {
       // A multi-statement file yields one result per statement; flat() also accepts a single result.
       const results: QueryResult[] = [await client.query(await migration(LAUNCH))].flat();
       expect(
         results.filter((result) => result.command === "UPDATE").map((result) => result.rowCount),
       ).toEqual([0, 0]);
-      // A guild created later by /setup or /config takes the column defaults: layout on, no marker.
+      // A row inserted without the switch takes the column defaults: layout on, no marker. Since
+      // 2.35.0 the application never relies on that default: /config and /setup onboarding insert
+      // new guilds with NEW_GUILD_ROW (layout off, CFG-07), and 2.35.0 has no migration.
       // Plain SQL: Drizzle's insert names every mapped column, including those later files add.
       const store = orm(client);
       await client.query("INSERT INTO guilds (id, effects_enabled) VALUES ($1, true)", [
@@ -375,9 +377,10 @@ describe.skipIf(!url)("migration 006 guest-application switch", () => {
           })
           .from(t.guestGrants),
       ).toEqual([{ ended: null, by: null, why: null }]);
-      // A guild created later takes the default: applications off until /setup or /config. Raw
-      // SQL, because a Drizzle insert names every column of today's mapping, including columns
-      // later migrations add (009's changelog columns), which this schema-006 table lacks.
+      // A guild created later takes the default: applications off until /setup onboarding or
+      // /config turns them on. Raw SQL, because a Drizzle insert names every column of today's
+      // mapping, including columns later migrations add (009's changelog columns), which this
+      // schema-006 table lacks.
       await client.query("INSERT INTO guilds (id, effects_enabled) VALUES ($1, true)", [
         guild.disabled,
       ]);

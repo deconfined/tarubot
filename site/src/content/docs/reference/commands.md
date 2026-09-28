@@ -259,7 +259,7 @@ Choose the in-game FC rank whose holders get bot officer access automatically.
 
 ### /config role_layout
 
-Turn automatic display and ordering of the managed roles on or off.
+Turn automatic display and ordering of the managed roles on or off. A server first set up with `/config` or `/setup onboarding` starts with it off. See [Role layout](/tarubot/admin/roles/#role-layout).
 
 **Who can use it:** server managers.
 
@@ -348,7 +348,7 @@ This command has no options.
 
 ### /config validate
 
-Check the setup without changing anything: roles, channels, permissions, the linked FC and its roster, onboarding and the role layout. See [Health checks](/tarubot/admin/health-checks/).
+Check the setup without changing anything: roles, channels, permissions, the linked FC and its roster, onboarding and the role layout, and TaruBot's own role and channel view, as if Administrator were off. See [Health checks](/tarubot/admin/health-checks/).
 
 **Who can use it:** officers.
 
@@ -399,9 +399,9 @@ Remove a member's grant or revocation, so the in-game rank decides again.
 /officer reset member:123456789012345678 reason:Back to the in-game rank
 ```
 
-### /setup
+### /setup onboarding
 
-Create or reuse the Member, Guest, Officer and FC Leader roles, a lobby and an officer room, and turn on lobby onboarding. Read [Setting up a server](/tarubot/admin/setup/) first: no command undoes it.
+Create or reuse the Member, Guest, Officer and FC Leader roles, a lobby and an officer room, and turn on lobby onboarding. Without `confirm:true` it is a dry run: it lists what it would create, reuse and change, and anything that would stop it, and changes nothing. Read [Setting up a server](/tarubot/admin/setup/) first: no command undoes `confirm:true`.
 
 **Who can use it:** server managers who also have Manage Channels. Discord hides it from other members by default.
 
@@ -412,11 +412,27 @@ Create or reuse the Member, Guest, Officer and FC Leader roles, a lobby and an o
 | `officer_rank` | Text | No | The in-game FC rank that grants bot officer access. |
 | `lobby` | Channel | No | An existing lobby to reuse. |
 | `officers` | Channel | No | An existing officer-only room to reuse. |
+| `confirm` | True or false | No | Make the changes; without it, only show what would change. |
 
 ```text
-/setup fc_id:9230000000000000001
-/setup prefix:EXFC
-/setup officer_rank:Officer lobby:#lobby officers:#officer-chat
+/setup onboarding fc_id:9230000000000000001
+/setup onboarding prefix:EXFC
+/setup onboarding officer_rank:Officer lobby:#lobby officers:#officer-chat confirm:true
+```
+
+### /setup overrides
+
+Add TaruBot's own permission entry to each channel it couldn't otherwise see (or, where a setting names the channel, couldn't post in) while TaruBot temporarily holds Administrator, so that once Administrator is removed it still sees every channel, and can post where a setting names the channel. Channels it already sees, such as public ones, are left as they are. A channel no setting names that it can't see gets View Channel, with Read Message History, Manage Permissions, Manage Channels and Create Invite denied (and Connect in voice and stage channels and in categories). A channel hidden from TaruBot on purpose is left alone, and so is a private category that holds a configured channel, which you fix yourself. Without `confirm:true` it is a dry run that changes nothing and works without Administrator. Servers with lobby onboarding don't need it: onboarding manages TaruBot's channel access. Take Administrator away again as soon as `/config validate` says it is no longer needed; see [The setup window](/tarubot/admin/add-to-server/#the-setup-window).
+
+**Who can use it:** server managers; `confirm:true` also needs Administrator, or the server owner. Discord hides it from members without Manage Server, Manage Roles and Manage Channels by default.
+
+| Option | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `confirm` | True or false | No | Make the changes; without it, only show what would change. |
+
+```text
+/setup overrides
+/setup overrides confirm:true
 ```
 
 ## Guests

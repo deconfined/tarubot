@@ -46,7 +46,7 @@ A character leaves the FC only when **two complete accepted rosters, at least 60
 
 Durable Guest grants record their provenance: an approved application, an officer, the previous bot, or first activation. `/guest reset` ends grants without deleting them.
 
-When a server migrates from a previous bot, its first activation writes one-time grants for existing Guest holders from a preview plan that the operator confirms by checksum, so nobody loses access at the switch. New servers skip this: they go live with their first `/config` or `/setup`.
+When a server migrates from a previous bot, its first activation writes one-time grants for existing Guest holders from a preview plan that the operator confirms by checksum, so nobody loses access at the switch. New servers skip this: they go live with their first `/config` change or `/setup onboarding confirm:true`.
 
 ## Revisions and reconciliation
 

@@ -1,11 +1,12 @@
 /**
  * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
  * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
- * and the tracked production and staging env templates, and the file-delivered secrets (2.33.0).
+ * and the tracked production and staging env templates, the file-delivered secrets (2.33.0), and
+ * DevBot's throwaway-server rehearsal allowance (2.35.0, #46).
  * Every refusal is checked to be a configuration Failure that never echoes a secret.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,7 @@ import { Failure } from "../../src/domain/values.js";
 import { SCHEMA_VERSION } from "../../src/infrastructure/postgres/database.js";
 import { activateToolScope, parseActivateArguments } from "../../scripts/activate.js";
 import { restoreArguments, restoreToolScope } from "../../scripts/check-restore.js";
+import { commandToolScope, parseArguments as commandArguments } from "../../scripts/commands.js";
 import { migrateArguments, migrateToolScope } from "../../scripts/migrate.js";
 import { parsePreviewArguments, previewToolScope } from "../../scripts/preview.js";
 import { registerToolScope, registrationScope } from "../../scripts/register.js";
@@ -947,6 +949,324 @@ describe("staging (#50)", () => {
       "is local; staging uses the managed cluster",
     );
     expect(assertToolScope(devbotEnv(), scope.register(DEV_GUILD), direct).name).toBe("devbot");
+  });
+});
+
+describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
+  /** An invented throwaway server: the real one's ID only ever comes from the environment. */
+  const THROWAWAY = "1234567890123456789";
+  /** Another invented server, neither managed nor the throwaway. */
+  const OTHER = "2345678901234567890";
+  /** DevBot's .env pointed at the throwaway, with the allowance passed for this one tool run. */
+  const throwawayEnv = (overrides: Environment = {}): Environment =>
+    devbotEnv({ TEST_GUILD_ID: THROWAWAY, DEVBOT_THROWAWAY_GUILD_ID: THROWAWAY, ...overrides });
+  /**
+   * discord-inspect's devbot-mode scope (TEST_GUILD_ID, read-only), kept by hand: the script runs
+   * at top level and can't be imported.
+   */
+  const inspect = (guild: string): ToolScope => ({
+    tool: "discord-inspect",
+    guilds: [guild],
+    discord: "read",
+    databases: [],
+  });
+  /** commands.js exactly as it declares each mode, over its real argument parser. */
+  const commands = (argv: string[]): ToolScope => commandToolScope(commandArguments(argv));
+  const clear = (guild: string): ToolScope =>
+    commands(["clear-guild", guild, "--application", DEVBOT_APP]);
+  const mismatch = `TEST_GUILD_ID must equal DEVBOT_THROWAWAY_GUILD_ID (${THROWAWAY}) for a throwaway-server rehearsal.`;
+  const notThrowaway =
+    "DEVBOT_THROWAWAY_GUILD_ID must be a throwaway server, not a managed deployment's guild.";
+  const leaveEmpty = (profile: string) =>
+    `DEVBOT_THROWAWAY_GUILD_ID is DevBot's throwaway-server rehearsal allowance; leave it empty under the ${profile} profile.`;
+
+  test("DevBot's profile narrows to the throwaway: its only guild and registration scope", () => {
+    expect(resolveDeployment(throwawayEnv())).toEqual({
+      name: "devbot",
+      applicationId: DEVBOT_APP,
+      guilds: [THROWAWAY],
+      registrationScope: THROWAWAY,
+      throwawayGuild: THROWAWAY,
+    });
+    // Without it (unset or an empty line), DevBot's profile is exactly as before and names no
+    // throwaway.
+    for (const env of [devbotEnv(), devbotEnv({ DEVBOT_THROWAWAY_GUILD_ID: "" })]) {
+      expect(resolveDeployment(env)).toEqual({
+        name: "devbot",
+        applicationId: DEVBOT_APP,
+        guilds: [DEV_GUILD],
+        registrationScope: DEV_GUILD,
+      });
+      expect(resolveDeployment(env).throwawayGuild).toBeUndefined();
+    }
+  });
+
+  test("the rehearsal's tools run in the throwaway: register, discord-inspect, commands list, migrate", () => {
+    for (const tool of [
+      scope.register(THROWAWAY),
+      inspect(THROWAWAY),
+      commands(["list"]),
+      commands(["list", "--guild", THROWAWAY]),
+      scope.migrate,
+    ])
+      for (const launch of [direct, container])
+        expect(assertToolScope(throwawayEnv(), tool, launch)).toMatchObject({
+          name: "devbot",
+          applicationId: DEVBOT_APP,
+          guilds: [THROWAWAY],
+          registrationScope: THROWAWAY,
+          throwawayGuild: THROWAWAY,
+        });
+    // docker-compose.devbot.yml's container reaches tarubot_dev as the Compose `postgres` service.
+    expect(
+      assertToolScope(
+        throwawayEnv({ DATABASE_URL: localUrl("tarubot_dev", "postgres") }),
+        scope.migrate,
+        container,
+      ).name,
+    ).toBe("devbot");
+    // The token must still belong to DevBot's application.
+    const deployment = assertToolScope(throwawayEnv(), scope.register(THROWAWAY), container);
+    expect(() => assertAuthenticatedApplication(deployment, DEVBOT_APP)).not.toThrow();
+    refused(() => assertAuthenticatedApplication(deployment, PRODUCTION_APP), DEVBOT_APP);
+  });
+
+  test("without the allowance, TEST_GUILD_ID naming another server is refused as before", () => {
+    for (const tool of [
+      scope.register(THROWAWAY),
+      inspect(THROWAWAY),
+      commands(["list"]),
+      scope.migrate,
+    ])
+      refused(
+        () => assertToolScope(devbotEnv({ TEST_GUILD_ID: THROWAWAY }), tool, container),
+        `TEST_GUILD_ID must be DevBot's test guild ${DEV_GUILD}.`,
+      );
+  });
+
+  test("the allowance needs TEST_GUILD_ID to name the same server", () => {
+    // The test guild (a .env left unchanged), another server, empty or unset.
+    for (const testGuild of [DEV_GUILD, OTHER, "", undefined])
+      for (const tool of [
+        scope.register(THROWAWAY),
+        inspect(THROWAWAY),
+        commands(["list"]),
+        scope.migrate,
+      ])
+        refused(
+          () => assertToolScope(throwawayEnv({ TEST_GUILD_ID: testGuild }), tool, container),
+          mismatch,
+        );
+  });
+
+  test("a managed deployment's guild is never a throwaway", () => {
+    for (const guild of [DEV_GUILD, PRODUCTION_GUILD]) {
+      const env = throwawayEnv({ TEST_GUILD_ID: guild, DEVBOT_THROWAWAY_GUILD_ID: guild });
+      refused(() => resolveDeployment(env), notThrowaway);
+      for (const tool of [
+        scope.register(guild),
+        scope.import(guild),
+        inspect(guild),
+        commands(["list"]),
+        scope.migrate,
+      ])
+        refused(() => assertToolScope(env, tool, container), notThrowaway);
+    }
+  });
+
+  test("every other profile refuses the allowance, and so does resolveDeployment", () => {
+    const allowance = { DEVBOT_THROWAWAY_GUILD_ID: THROWAWAY };
+    for (const [profile, env] of [
+      ["production", productionEnv(allowance)],
+      ["rehearsal", rehearsalEnv(allowance)],
+      ["staging", stagingEnv(allowance)],
+      // Staging's TEST_GUILD_ID pointed at the throwaway as well changes nothing.
+      ["staging", stagingEnv({ ...allowance, TEST_GUILD_ID: THROWAWAY })],
+      // Another application, or none at all (CI, other developers).
+      [
+        "unmanaged",
+        { DISCORD_APPLICATION_ID: "123", DATABASE_URL: localUrl("tarubot"), ...allowance },
+      ],
+      ["unmanaged", { TEST_GUILD_ID: THROWAWAY, ...allowance }],
+    ] as const) {
+      refused(() => resolveDeployment(env), leaveEmpty(profile));
+      for (const tool of [
+        scope.migrate,
+        scope.register(THROWAWAY),
+        scope.register(),
+        inspect(THROWAWAY),
+        scope.preview(THROWAWAY),
+        commands(["list"]),
+      ])
+        for (const launch of [direct, container])
+          refused(() => assertToolScope(env, tool, launch), leaveEmpty(profile));
+    }
+    // Production credentials without their marker are refused as ever, allowance or not.
+    refused(
+      () => resolveDeployment(productionEnv({ TARUBOT_ENVIRONMENT: "", ...allowance })),
+      "TARUBOT_ENVIRONMENT=production or rehearsal",
+    );
+  });
+
+  test("under the allowance the real test guild and production's guild are out of reach", () => {
+    const env = throwawayEnv();
+    const outside = (guild: string) =>
+      `guild ${guild} is not one of this profile's guilds (${THROWAWAY}).`;
+    // Registration: only the throwaway's guild scope, never a managed guild's or the global set.
+    for (const guild of [DEV_GUILD, PRODUCTION_GUILD, OTHER])
+      refused(() => assertToolScope(env, scope.register(guild), container), outside(guild));
+    refused(
+      () => assertToolScope(env, scope.register(), container),
+      "global command registration belongs to the production profile.",
+    );
+    // Guild data and inspection.
+    for (const guild of [DEV_GUILD, PRODUCTION_GUILD])
+      for (const tool of [
+        inspect(guild),
+        scope.preview(guild),
+        scope.lateJoiners(guild),
+        scope.activate(guild),
+        scope.import(guild),
+      ])
+        refused(() => assertToolScope(env, tool, container), outside(guild));
+    // Command-scope clearing: never a managed guild's, and never the throwaway's own registration.
+    for (const guild of [DEV_GUILD, PRODUCTION_GUILD])
+      refused(
+        () => assertToolScope(env, clear(guild), container),
+        `guild ${guild} belongs to a managed deployment; the throwaway-server rehearsal never touches it.`,
+      );
+    refused(
+      () => assertToolScope(env, clear(THROWAWAY), container),
+      `guild ${THROWAWAY} holds this profile's own command registration`,
+    );
+    // Another server the application belongs to may still be cleared, as without the allowance.
+    expect(assertToolScope(env, clear(OTHER), container).name).toBe("devbot");
+    // Without the allowance, DevBot's own test guild stays protected by its registration rule.
+    refused(
+      () => assertToolScope(devbotEnv(), clear(DEV_GUILD), container),
+      "own command registration",
+    );
+  });
+
+  test("the database rules stay DevBot's: exactly tarubot_dev, local, with no CA", () => {
+    for (const [url, fragment] of [
+      [managedUrl("tarubot"), "DevBot's local database"],
+      [managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE), "DevBot's local database"],
+      [localUrl("tarubot"), "tarubot_dev"],
+      [localUrl("tarubot_rehearsal"), "tarubot_dev"],
+    ] as const)
+      refused(
+        () => assertToolScope(throwawayEnv({ DATABASE_URL: url }), scope.migrate, container),
+        fragment,
+      );
+    refused(
+      () => assertToolScope(throwawayEnv({ DATABASE_CA_CERT: CA }), scope.migrate, container),
+      "DATABASE_CA_CERT must be empty",
+    );
+    // The restore-copy rehearsal of a migration stays DevBot's procedure under it too.
+    expect(
+      assertToolScope(
+        throwawayEnv({ DATABASE_URL: localUrl("tarubot_dev_restore_test", "postgres") }),
+        scope.rehearseMigration,
+        container,
+      ).name,
+    ).toBe("devbot");
+  });
+
+  test("the application must still be DevBot's", () => {
+    // DevBot's marker beside the production application, or no application: the identity check.
+    for (const application of [PRODUCTION_APP, ""])
+      refused(
+        () =>
+          assertToolScope(
+            throwawayEnv({ TARUBOT_ENVIRONMENT: "devbot", DISCORD_APPLICATION_ID: application }),
+            scope.register(THROWAWAY),
+            container,
+          ),
+        `DevBot's application ${DEVBOT_APP}`,
+      );
+    // Without a marker, production credentials need the production file's marker, as ever.
+    refused(
+      () =>
+        assertToolScope(
+          throwawayEnv({ DISCORD_APPLICATION_ID: PRODUCTION_APP }),
+          scope.register(THROWAWAY),
+          container,
+        ),
+      "TARUBOT_ENVIRONMENT=production or rehearsal",
+    );
+  });
+
+  test("an invalid value is reported by the setting's name alone", () => {
+    for (const value of ["abc", "0123", ` ${THROWAWAY}`, "123456789012345678901"]) {
+      const env = throwawayEnv({ DEVBOT_THROWAWAY_GUILD_ID: value });
+      for (const action of [
+        () => resolveDeployment(env),
+        () => assertToolScope(env, scope.migrate, container),
+      ]) {
+        let caught: unknown;
+        try {
+          action();
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Failure);
+        if (!(caught instanceof Failure)) continue;
+        expect(caught.code).toBe("configuration");
+        expect(caught.message).toBe("Invalid deployment settings: DEVBOT_THROWAWAY_GUILD_ID.");
+      }
+    }
+  });
+
+  test("the setting lives only in the guard: never in the bot, a tool, a host file or a template", () => {
+    const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
+    /** Every file under a directory, as a repository-relative path. */
+    const walk = (directory: string): string[] =>
+      readdirSync(root(directory), { recursive: true, encoding: "utf8" })
+        .map((path) => `${directory}/${path}`)
+        .filter((path) => statSync(root(path)).isFile());
+    // The root's Compose files, env templates and image recipe.
+    const topLevel = readdirSync(root(".")).filter(
+      (name) =>
+        /^docker-compose.*\.ya?ml$/.test(name) ||
+        name.endsWith(".env.example") ||
+        name.startsWith("Dockerfile"),
+    );
+    // The scan is not vacuous: it reads the files the setting must stay out of.
+    expect(topLevel).toEqual(
+      expect.arrayContaining([
+        ".env.example",
+        "production.env.example",
+        "staging.env.example",
+        "docker-compose.yml",
+        "docker-compose.devbot.yml",
+        "docker-compose.production.yml",
+        "Dockerfile",
+      ]),
+    );
+    const files = [...["src", "scripts", "ops", ".github"].flatMap(walk), ...topLevel];
+    expect(files).toEqual(
+      expect.arrayContaining(["src/config/env.ts", "ops/quadlet/units/tarubot.container"]),
+    );
+    const mentions = files.filter((path) =>
+      readFileSync(root(path), "utf8").includes("DEVBOT_THROWAWAY_GUILD_ID"),
+    );
+    expect(mentions).toEqual(["src/config/deployment.ts"]);
+  });
+
+  test("the managed deployments themselves are unchanged", () => {
+    expect(deployments).toEqual({
+      production: {
+        applicationId: "965294750741692416",
+        guilds: ["1036062273631952955"],
+        registrationScope: "global",
+      },
+      devbot: {
+        applicationId: "943291473477128243",
+        guilds: ["1040379370159743139"],
+        registrationScope: "1040379370159743139",
+      },
+    });
   });
 });
 

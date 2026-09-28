@@ -35,6 +35,8 @@ import {
 } from "../../../src/discord/presenters/configuration.js";
 import { HOUSE_LIMITS } from "../../../src/discord/presenters/style.js";
 import { guestApplicationsOpen } from "../../../src/domain/guest-application.js";
+import { CORE_PERMISSIONS, type CorePermission } from "../../../src/domain/permissions.js";
+import type { VisibilityReport } from "../../../src/domain/visibility.js";
 import { GUILD_ID, NOW, VIEWERS } from "../results.js";
 import type { ReplyCatalog } from "./index.js";
 
@@ -57,6 +59,8 @@ export const ROLE = {
   guest: "223456789012345602",
   /** A role replaced by a new binding (spec #16). */
   previous: "223456789012345699",
+  /** TaruBot's own managed bot role (2.35.0's role checks). */
+  bot: "223456789012345690",
 } as const;
 
 /** The approved cards' channels. */
@@ -136,9 +140,42 @@ const RESOURCE_COLUMNS = [
 ] as const;
 
 /**
+ * TaruBot's role and channel view as validate() reports it (2.35.0, #46): a healthy one unless
+ * overridden, with Administrator off, the core seven from TaruBot's own role, nothing it never
+ * needs, its role above the access roles, every channel visible and no private category.
+ * `onboarding` picks the mode: onboarding servers also get onboarding's permissions (all held)
+ * and nothing pending for onboarding's channel pass.
+ */
+export const visibilityReport = (
+  overrides: Partial<VisibilityReport> = {},
+  onboarding = true,
+): VisibilityReport => ({
+  mode: onboarding ? "onboarding" : "checked",
+  administrator: { held: false, roles: [], shared: [] },
+  core: (Object.keys(CORE_PERMISSIONS) as CorePermission[]).map((permission) => ({
+    permission,
+    source: "own_role",
+    roles: [],
+  })),
+  onboardingMissing: onboarding ? [] : null,
+  neverNeeded: [],
+  roleOrder: { highest: ROLE.bot, notBelow: [], throughShared: [] },
+  missing: { categories: [], inside: [], channels: [], posting: [], unreadable: [] },
+  masked: [],
+  denied: [],
+  hiddenOnPurpose: [],
+  hiddenByCategory: [],
+  privateCategories: [],
+  onboardingPending: onboarding ? { managed: [], unmanaged: [] } : null,
+  missingCount: 0,
+  administratorNeeded: false,
+  ...overrides,
+});
+
+/**
  * A /config show and validate report, as Service.validate builds it: every configured resource
- * available and every unset one unconfigured unless `capabilities` overrides it, and the effects
- * mode derived from the guild unless given.
+ * available and every unset one unconfigured unless `capabilities` overrides it, the effects
+ * mode derived from the guild unless given, and a healthy visibility report unless given.
  */
 export function configReport(
   options: {
@@ -148,6 +185,8 @@ export function configReport(
     readonly fc?: FcHealthRow;
     /** The changelog channel's audience, as validate() reports it in an onboarding guild. */
     readonly changelogAudience?: ChangelogAudience;
+    /** TaruBot's view (2.35.0); a healthy one in the guild's mode unless given, null unreadable. */
+    readonly visibility?: VisibilityReport | null;
   } = {},
 ): ConfigurationReport {
   const guild = options.guild ?? configGuild();
@@ -166,6 +205,10 @@ export function configReport(
     guestApplicationsOpen: guestApplicationsOpen(guild),
     fc: guild.fc_id ? [options.fc ?? fcRow()] : null,
     ...(options.changelogAudience ? { changelogAudience: options.changelogAudience } : {}),
+    visibility:
+      options.visibility === undefined
+        ? visibilityReport({}, guild.access_policy_enabled)
+        : options.visibility,
   };
 }
 

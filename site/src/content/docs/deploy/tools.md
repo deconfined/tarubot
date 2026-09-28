@@ -99,7 +99,7 @@ The directory must be writable by uid 1000, the image's `bun` user. Without the 
 
 ## Tools you won't need
 
-The image also carries `import.js`, `snapshot.js`, `acquire.js` and `activate.js`, which moved the upstream project's server from its previous bot to TaruBot, and `discord-inspect.js` and `discord-smoke.js`, which check the upstream project's own deployments and refuse to run under the unmanaged profile. New servers need none of them: a server goes live with its first `/config` or `/setup`.
+The image also carries `import.js`, `snapshot.js`, `acquire.js` and `activate.js`, which moved the upstream project's server from its previous bot to TaruBot, and `discord-inspect.js` and `discord-smoke.js`, which check the upstream project's own deployments and refuse to run under the unmanaged profile. New servers need none of them: a server goes live with its first `/config` change or `/setup onboarding confirm:true`.
 
 ## Tools outside the container
 

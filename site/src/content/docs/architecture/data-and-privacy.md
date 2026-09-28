@@ -42,7 +42,7 @@ Expired claim challenges are deleted a week after they expire. Links, grants, ro
 
 For each member, a server's database holds their Discord user ID, whether they're in the server and when they joined; their linked characters and each link's history; their main character and nickname state, including the nickname TaruBot replaced; guest applications with their answers, grants, revocations and officer overrides; ledger entries they recorded; audit records of changes they made or that were made to them; and their queued Discord work.
 
-It doesn't store Discord messages or online status, or Discord usernames outside a saved `/issue` report. It never sees Lodestone passwords, and it keeps a claim token only as a hash; the reply that shows the token is private.
+It doesn't store Discord messages or online status: Discord sends it no message events and no online status, because TaruBot asks for neither the message intents nor Presence. It doesn't store Discord usernames outside a saved `/issue` report. It never sees Lodestone passwords, and it keeps a claim token only as a hash; the reply that shows the token is private.
 
 ## Issue reports
 

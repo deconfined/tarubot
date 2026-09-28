@@ -75,6 +75,22 @@ const configuring = defineCommand({
   },
 });
 
+/** A /setup onboarding with a confirm option that throws `next` (2.35.0's dry-run default). */
+const settingUp = defineCommand({
+  data: new SlashCommandBuilder()
+    .setName("setup")
+    .setDescription("Setup fixture")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("onboarding")
+        .setDescription("Onboarding fixture")
+        .addBooleanOption((option) => option.setName("confirm").setDescription("Confirm fixture")),
+    ),
+  execute() {
+    throw next;
+  },
+});
+
 /** A slash command whose autocomplete suggests one choice. */
 const suggesting = defineCommand({
   data: new SlashCommandBuilder()
@@ -161,6 +177,7 @@ function harness(overrides: Partial<BotContext> = {}, actor: Actor = MEMBER) {
       [working.name, working],
       [legacy.name, legacy],
       [suggesting.name, suggesting],
+      [settingUp.name, settingUp],
     ]),
     new Map(components.map((component) => [component.prefix, component])),
   );
@@ -297,6 +314,35 @@ test("the resolved actor decides officer or member wording for the same failure"
       await router.handle(fixture.slash("boom"));
       expect(embedOf(fixture.requests.at(-1)).title).toBe(title);
       expect(reports[0]?.options).toEqual({ level: "warn", scope: "/boom" });
+    } finally {
+      await fixture.close();
+    }
+  }
+});
+
+test("only /setup onboarding confirm:true promises reuse; its dry run says nothing was changed", async () => {
+  next = new Failure("input", "Bad prefix.");
+  const run = (confirm: boolean | null) => [
+    {
+      type: ApplicationCommandOptionType.Subcommand,
+      name: "onboarding",
+      options:
+        confirm === null
+          ? []
+          : [{ type: ApplicationCommandOptionType.Boolean, name: "confirm", value: confirm }],
+    },
+  ];
+  for (const [confirm, sentence] of [
+    [true, "Anything already created is reused when you run /setup onboarding confirm:true again."],
+    [false, "Nothing was changed."],
+    [null, "Nothing was changed."],
+  ] as const) {
+    const { fixture, reports, router } = harness({}, OFFICER);
+    try {
+      await router.handle(fixture.slash("setup", run(confirm)));
+      expect(embedOf(fixture.requests.at(-1)).description).toBe(`Bad prefix. ${sentence}`);
+      // The option's value never reaches the report's scope.
+      expect(reports[0]?.options).toEqual({ level: "info", scope: "/setup onboarding" });
     } finally {
       await fixture.close();
     }
