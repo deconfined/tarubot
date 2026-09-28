@@ -95,9 +95,12 @@ function constant(text: string, name: string): string {
   return match[1].replace(/^'(.*)'$/u, "$1").replace(/^"(.*)"$/u, "$1");
 }
 
+/** Text as a literal inside a regular expression: every syntax character escaped, backslash too. */
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
 /** A command word appears in a line, at the start or after a separator, followed by a space. */
 const calls = (line: string, tool: string) =>
-  new RegExp(`(^|[\\s;|&(])${tool.replace(/\./gu, "\\.")}\\s`, "u").test(line);
+  new RegExp(`(^|[\\s;|&(])${literal(tool)}\\s`, "u").test(line);
 
 // ---------------------------------------------------------------------------------------------
 // Static properties
