@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# A simulated systemctl for tests/unit/host-config.test.ts, found from its own place (<sandbox>/bin
+# reads <sandbox>/sim). Every call goes to sim/systemctl-calls.
+#   start tarubot-host-config.service   runs the scenario's poll, as the unit would: the test's
+#                                        driver (sim/driver names it) with `run`, its stdout and
+#                                        stderr appended to sim/start.out and sim/start.err. Like
+#                                        systemctl, it fails unless the poll exits 0 or 75.
+#   is-active, is-enabled, show          print sim/knob/<verb> (inactive, disabled, "" by default)
+#   enable --now tarubot-host-config.timer   succeeds unless sim/knob/enable-fail exists
+set -euo pipefail
+sim=$(cd "$(dirname "$0")/../sim" && pwd)
+printf '%s\n' "$*" >>"$sim/systemctl-calls"
+case ${1-} in
+  start)
+    [[ ${2-} == tarubot-host-config.service ]] || exit 5
+    code=0
+    bash "$(cat "$sim/driver")" run >>"$sim/start.out" 2>>"$sim/start.err" || code=$?
+    [[ $code == 0 || $code == 75 ]]
+    ;;
+  is-active) cat "$sim/knob/is-active" 2>/dev/null || printf 'inactive\n' ;;
+  is-enabled) cat "$sim/knob/is-enabled" 2>/dev/null || printf 'disabled\n' ;;
+  show) cat "$sim/knob/show" 2>/dev/null || printf '\n' ;;
+  enable) [[ ! -f $sim/knob/enable-fail ]] ;;
+  *) exit 5 ;;
+esac

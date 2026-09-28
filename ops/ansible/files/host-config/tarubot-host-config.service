@@ -1,0 +1,30 @@
+# Installed by TaruBot's host playbook (#50, 2.34.0) as /etc/systemd/system/tarubot-host-config.service.
+# One poll of the pull unit (/usr/local/sbin/tarubot-host-config, docs/HOSTING.md "The pull unit"),
+# started by tarubot-host-config.timer, which has the only [Install] section: nothing else starts
+# this unit, and the playbook never starts, stops or restarts it. 75 is the script's "waiting" (a
+# deploy holds the host lock, GitHub is unreachable), which isn't a failure. The limit is above the
+# script's own budget: the fetch (120 s), GitHub's API (180 s) and the playbook (40 minutes, plus
+# 60 s to kill it).
+#
+# No PrivateTmp, and no other mount-namespace or sandboxing option. The tarubot play runs `podman
+# info` on every full run, and when no rootless pause process exists that call creates one: inside
+# a private /tmp and /var/tmp, it would keep them, systemd would delete them at the unit's stop, and
+# every later rootless Podman call, the bot's and ops/deploy.sh's included, would join that
+# namespace. The playbook also needs sudo, dnf's own SELinux domain and writes to /etc and /usr. The
+# script keeps its own files in /var/lib/tarubot-config (root, 0700) instead. UMask=0022 gives every
+# run the modes a hand run gets.
+[Unit]
+Description=Apply TaruBot's host configuration from main (pull unit)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tarubot-host-config run
+SuccessExitStatus=75
+TimeoutStartSec=60min
+UMask=0022
+Nice=10
+CPUWeight=20
+IOWeight=20
+SyslogIdentifier=tarubot-host-config

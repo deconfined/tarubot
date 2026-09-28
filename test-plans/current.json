@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.33.0 Quadlet deploys and provenance",
-  "objective": "2.33.0 (#50 part 2a) adds the provenance check to the Deploy plan, the staging deploy target (switch unset), Quadlet modes in deploy.sh and backup.sh, Podman secrets with _FILE settings, and the start tag (not run). Production restarts on Compose; nothing changes for members.",
+  "title": "Session: 2.34.0 the pull unit",
+  "objective": "2.34.0 (#50) adds tarubot-host-config, the pull unit that applies the host playbook on each host from its own root clone: signed ops/ansible merges only, production only after an approved deploy. Nothing changes for members; production gets the unit at its rebuild.",
   "user": [
-    "Merge, then approve the 2.33.0 Deploy run: its plan is the first to verify provenance.",
-    "Remaining staging owner steps (HOSTING.md): environment, deploy key, bucket, checks, .env; not before the DevBot move for the start."
+    "Set the Protect Main ruleset's merge methods to merge only; make the staging pull-unit healthchecks.io check.",
+    "Merge, approve the 2.34.0 Deploy run, then give the go-ahead to install the pull unit on staging."
   ],
   "assistant": [
-    "Watch the 2.33.0 plan's 'Provenance verified' line, then check production readiness and hardening.",
-    "Start 2.34.0, the pull unit, with real AlmaLinux VMs on the Proxmox lab for rehearsals."
+    "Install on staging after the go-ahead: flat host.yml with the signers, host-config.env, apply, bootstrap, status.",
+    "Watch the next runtime-only and ops/ansible merges read recorded and applied; then the cutover to the new VM."
   ],
   "bot": [
-    "Run 2.33.0 on schema 010 in production; nothing changes for members.",
+    "Run 2.33.0 in production until the 2.34.0 deploy; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

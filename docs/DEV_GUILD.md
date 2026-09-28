@@ -8,6 +8,7 @@
 - DevBot's isolated PostgreSQL database is `tarubot_dev`.
 - `docker-compose.devbot.yml` supplies the development database and requires explicit test-guild scope.
 - **The staging host** ([#50](https://github.com/deconfined/tarubot/issues/50)) will take DevBot over at the DevBot move, as a rootless Quadlet unit against its own `tarubot_staging` database under the `staging` tool profile ([HOSTING.md](HOSTING.md#staging-host-50)). The 2.32.0 playbook configured that host on 2026-09-26, but no bot runs there, and it holds no DevBot token. 2.33.0 brings what a bot there needs (the Quadlet deploy path, the Deploy workflow's staging job, Podman secrets, the backup timer and the playbook's `start` tag); the move follows 2.34.0's pull unit and the rebuild from cloud-init and OpenTofu. It is a planned stop, dump and restore, then the start tag, with DevBot's token reset so it never runs in two places ([HOSTING.md](HOSTING.md#owner-steps-before-the-move)). After it, staging takes every merge production is asked about, and each staging run registers the commands in this guild. Until then DevBot runs here as below, and its local `devbot` profile is unchanged.
+- **2.34.0 changes nothing in DevBot's procedure either:** it adds the staging host's pull unit and no bot code. At the DevBot move, the pull unit on staging is paused around the start tag ([HOSTING.md](HOSTING.md#owner-steps-before-the-move)).
 - **2.33.0 changes nothing in DevBot's procedure.** DevBot's `.env` keeps the plain settings; the `NAME_FILE` forms are for Quadlet hosts (and optional elsewhere). Updating DevBot to 2.33.0 is a restart with no migration and no command change.
 
 Use the development overlay consistently for this running instance:
@@ -598,6 +599,15 @@ DevBot has no backup service (that is production's `backup`). After the producti
 - **Changed by @deconfined** on both applications, DevBot and the production application: the **Presence** and **Message Content** intents off, and **Public Bot** off. TaruBot asks Discord only for the Guilds and Server Members intents (`src/discord/gateway.ts`, OPS-12).
 - **Read back** with a read-only `GET /applications/@me` for each application: Presence off, Message Content off, Server Members on (`limited`, Discord's flag for an application in fewer than 100 servers), `bot_public` false and `bot_require_code_grant` false. With Public Bot off, only an application's owner can add its bot to a server.
 - DevBot's Private Channel Obfuscation toggle stays on ([above](#channel-obfuscation-test-toggle--2026-09-26)).
+
+### Machine move — 2026-09-27
+
+@deconfined is moving Claude Code, and DevBot with it, from the development VM of 2026-09-24 to a new development VM of its own (AlmaLinux 10.2, SELinux enforcing). DevBot couldn't go straight to staging: the staging environment, deploy key, database role, bucket and token reset weren't ready yet. The agent moved it; this record comes from the agent's notes of the move:
+- DevBot 2.30.3 stopped on the old VM at 21:45:11 UTC. `pg_dump -Fc tarubot_dev` went to a dump in `.cache/backups/` named for the checkout's commit, `b911b96`, with the same sha256 on both machines. It was restored into a fresh PostgreSQL on the new VM, and every table's row count matched (27 tables, 3,807 rows).
+- DevBot started on the new VM at 21:46:22 UTC with `TARUBOT_IMAGE_TAG=2.30.3`, and was healthy and hardened: readiness 200 with the writer lease, and `commands.js list` clean. Its `.env` has no image pin, so always pass `TARUBOT_IMAGE_TAG`; without it Compose would take `latest`.
+- On the old VM the DevBot containers are stopped with `restart=no` (a read-only `docker ps -a` on 2026-09-28 showed both exited). Their volume stays there as a fallback, and @deconfined's `.env` there is untouched.
+- DevBot operations run on the new VM from now on, where `docker` needs no `sg`. Claude Code itself follows at the final cutover, which @deconfined runs once the 2.34.0 work is finished.
+- Until that cutover, every DevBot step runs on the new VM (reach it over SSH), never on the old VM where Claude sessions still start. Never `up`, `start` or `restart` the old VM's DevBot containers while the new one runs: its `.env` still holds DevBot's token, and a second DevBot on a stale database would break "one Discord application never runs in two places".
 
 ### Remaining unverified-visitor form checks (on hold until after launch)
 

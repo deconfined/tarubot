@@ -37,11 +37,32 @@
 # start the release the restored dump came from. docs/HOSTING.md "The first start" says how to
 # recover from a start that fails.
 #
-# The playbook assumes nothing about the machine that runs it, so a host can also apply it to
-# itself as root, as the pull unit will (2.34.0), holding the host lock around the whole run:
+# The playbook assumes nothing about the machine that runs it, so a host also applies it to itself
+# as root. From 2.34.0 the pull unit does (files/host-config/, docs/HOSTING.md): a root-owned timer
+# runs /usr/local/sbin/tarubot-host-config, which follows main in its own clone and, holding the
+# host lock around the whole run, runs
 #
-#   flock -w N /run/tarubot/host.lock ansible-playbook -c local -i localhost, site.yml \
-#     -e @/etc/tarubot/host.yml --skip-tags start -e tarubot_host_lock_held=true
+#   ansible-playbook -c local -i localhost, site.yml -e @/etc/tarubot/host.yml \
+#     -e tarubot_host_lock_held=true -e tarubot_source=pull -e tarubot_commit=COMMIT \
+#     -e tarubot_run=RUN -e tarubot_pull_role=ROLE -e tarubot_pull_signers=DIGEST \
+#     --skip-tags start --diff
+#
+# tarubot_source (pull, bootstrap or emergency), tarubot_commit and tarubot_run say who ran the
+# playbook; a hand run leaves them out and is `manual`. Every real run writes those three to the
+# run marker, /var/lib/tarubot-config/last-run.json, so the pull unit notices a hand run, or one of
+# its own runs that died, and re-applies its commit. tarubot_pull_role and tarubot_pull_signers are
+# what the script read from host.yml (the role, and the sha256 of the signers' "<type> <key>" lines
+# joined by commas), only checked to equal this playbook's own reading. The playbook also renders
+# the allowed signers from host.yml (tarubot_allowed_signers) for people, and enables the pull
+# unit's timer once the host is bootstrapped.
+#
+# On a host the pull unit manages (one with /var/lib/tarubot-config/state.json), a real hand run,
+# the start included, first needs the unit paused, and the first play refuses it otherwise; a check
+# run doesn't. Pause on the host, wait for it to return (it waits for an active run), run the
+# playbook with the host's own settings, then resume:
+#
+#   tarubot-host-config pause REASON
+#   tarubot-host-config resume
 #
 # The pull unit never passes the start variables. The host lock, /run/tarubot/host.lock, is a
 # root-owned file from tmpfiles that ops/deploy.sh's Quadlet modes hold around every change. The
@@ -51,15 +72,16 @@
 # take it again; the start refuses the flag.
 #
 # Only ever from a root-owned checkout that tarubot can't write, such as the pull unit's own clone
-# in /var/lib/tarubot-config/repo (2.34.0), and never from ~tarubot/tarubot or anything else under
-# /home. Ansible runs this file, reads ansible.cfg from its directory and loads the files beside it,
-# so a checkout tarubot can write would hand root to tarubot. No check in this file can catch
-# that, because a changed copy would simply leave the check out.
+# in /var/lib/tarubot-config/repo, and never from ~tarubot/tarubot or anything else under /home.
+# Ansible runs this file, reads ansible.cfg from its directory and loads the files beside it, so a
+# checkout tarubot can write would hand root to tarubot. No check in this file can catch that,
+# because a changed copy would simply leave the check out.
 #
 # Rules that keep code running as tarubot from steering anything root does (tests/unit/
 # playbook.test.ts enforces the checkable ones):
 # - Two plays. The first runs as root and writes only system paths: /etc, /usr/local, /root,
-#   system and global user units, lingering, sysctl and the host lock in /run/tarubot. It only
+#   system and global user units, lingering, sysctl, the host lock in /run/tarubot, and in
+#   /var/lib/tarubot-config the pull unit's directory, its HOME and the run marker. It only
 #   looks at tarubot's home. The second and last play runs every task in tarubot's context
 #   (become_user), and nothing runs as root after it, so no root task reads what a tarubot task
 #   returned. This is the boundary: code running as tarubot can change what a tarubot task does,
@@ -72,13 +94,19 @@
 #   beside this file, and vars/layout.yml only reads them.
 # - ansible.builtin only, with no lookups or delegation. Every file task sets its mode, and the
 #   playbook reads nothing from outside this directory.
-# - Handlers only reload: systemd, sshd (after sshd -t), journald's configuration and sysctl.
+# - Handlers only reload: systemd, sshd (after sshd -t), journald's configuration and sysctl. The
+#   root play forces them (force_handlers), so what changed before a later task failed still
+#   takes effect.
 # - Only tasks tagged start, all at the end of the last play, link or start the bot's unit or write
 #   the image digest; every other task is untagged.
 
 - name: Configure the host as root
   hosts: all
   become: false
+  # A task that fails after others changed a unit or a drop-in still leaves their reloads run, so
+  # the host never keeps a changed file that systemd, sshd or journald hasn't read. The pull unit
+  # retries the failed commit later from that state.
+  force_handlers: true
   gather_facts: true
   # Just what the asserts need; no local facts (/etc/ansible/facts.d) and no hardware scan.
   gather_subset:
@@ -129,11 +157,80 @@
           - tb_root_keys is sequence and tb_root_keys is not string and tb_root_keys is not mapping
           - tb_root_keys | reject('string') | list == []
           - tb_root_keys | map('trim') | reject('match', tb_pubkey_pattern) | list == []
+          # The pull unit's signers: Ed25519 public key lines only (an empty list is valid).
+          - tb_allowed_signers is sequence and tb_allowed_signers is not string and tb_allowed_signers is not mapping
+          - tb_allowed_signers | reject('string') | list == []
+          - tb_allowed_signers | map('trim') | reject('match', tb_signer_pattern) | list == []
         fail_msg: >-
           Host settings: tarubot_role must be staging or production, tarubot_hostname a lowercase
-          host name, and every key (tarubot_deploy_key_public, tarubot_operator_keys,
-          tarubot_root_keys) one public key line without options. host.example.yml shows the form.
+          host name, every key (tarubot_deploy_key_public, tarubot_operator_keys,
+          tarubot_root_keys) one public key line without options, and every signer in
+          tarubot_allowed_signers one ssh-ed25519 or sk-ssh-ed25519@openssh.com line without
+          options. host.example.yml shows the form.
         quiet: true
+
+    # Who runs the playbook: a hand run (manual, the default) or the pull unit, which holds the
+    # host lock, runs locally on its own host, and names the commit, its run id and the role it read
+    # from host.yml. Checked before anything changes, because the run marker records these values.
+    - name: Refuse a malformed run source
+      ansible.builtin.assert:
+        that:
+          - tb_source in ['manual', 'pull', 'bootstrap', 'emergency']
+          - tb_source == 'manual' or tb_commit is match('^[0-9a-f]{40}$')
+          - tb_source == 'manual' or tb_run is match('^[0-9a-f]{16}$')
+          - tb_source == 'manual' or tb_lock_held | bool
+          - tb_source == 'manual' or ansible_connection == 'local'
+          # The script's plain reading of host.yml and Ansible's own must agree on the role and on
+          # the signers the script checked signatures against.
+          - tb_source == 'manual' or tb_pull_role == tb_role
+          - tb_source == 'manual' or tb_pull_signers == tb_signer_digest
+          - tb_source != 'manual' or (tb_commit == '' and tb_run == '' and tb_pull_role == '' and tb_pull_signers == '')
+        fail_msg: >-
+          tarubot_source must be manual (the default) or, for the pull unit only, pull, bootstrap
+          or emergency, with tarubot_commit (40 hex digits), tarubot_run (16 hex digits),
+          tarubot_host_lock_held=true, a local connection, tarubot_pull_role equal to tarubot_role
+          and tarubot_pull_signers equal to the digest of tarubot_allowed_signers. A hand run passes
+          none of tarubot_source, tarubot_commit, tarubot_run, tarubot_pull_role and
+          tarubot_pull_signers.
+        quiet: true
+
+    # The pull unit's state and pause flag, looked at without following links: root alone writes
+    # them, and a link there is refused rather than trusted.
+    - name: Look for the pull unit's state
+      ansible.builtin.stat:
+        path: "{{ tb_pull_state }}"
+        follow: false
+        get_checksum: false
+      register: tb_pull_state_file
+
+    - name: Look for the pull unit's pause flag
+      ansible.builtin.stat:
+        path: "{{ tb_pull_pause }}"
+        follow: false
+        get_checksum: false
+      register: tb_pull_pause_file
+
+    - name: Refuse pull-unit state or a pause flag that is a link or not a plain file
+      ansible.builtin.assert:
+        that:
+          - not tb_pull_state_file.stat.exists or (tb_pull_state_file.stat.isreg and not tb_pull_state_file.stat.islnk)
+          - not tb_pull_pause_file.stat.exists or (tb_pull_pause_file.stat.isreg and not tb_pull_pause_file.stat.islnk)
+        fail_msg: "{{ tb_pull_state }} and {{ tb_pull_pause }} must each be a regular file, never a link, when present."
+        quiet: true
+
+    # An operator's run can't hold the host lock for a whole run from another machine, so a pull
+    # run could otherwise interleave with it, and the pull unit would undo it at its next poll.
+    # This covers the start's hand run too. A check run changes nothing, so it may go ahead.
+    - name: Refuse a hand run while the pull unit is active
+      ansible.builtin.assert:
+        that:
+          - not (tb_source == 'manual' and tb_pull_state_file.stat.exists and not tb_pull_pause_file.stat.exists)
+        fail_msg: >-
+          The pull unit manages this host ({{ tb_pull_state }} exists). Pause it first on the host
+          with `tarubot-host-config pause REASON`, wait for it to return, run the playbook with the
+          host's own settings, and resume afterwards with `tarubot-host-config resume`.
+        quiet: true
+      when: not ansible_check_mode
 
     # Before anything changes: a start needs both inputs, well formed, and the start tag, which
     # --skip-tags start would silently drop. The pull unit, which holds the host lock, never starts.
@@ -236,6 +333,36 @@
       when: tb_lock_held | bool and not (ansible_check_mode and tb_tmpfiles is changed)
 
     # ------------------------------------------------------------------------------------------
+    # The run marker (2.34.0), the first change after the lock checks: every real run, a hand run
+    # included, records who ran it, so the pull unit can tell whether the host still matches its
+    # own last run. A run that fails later keeps its marker, so a failed hand run counts as a hand
+    # run too. Root-only; the pull unit's HOME is created here too, so nothing goes to /root.
+    - name: Create the pull unit's directory and its HOME
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ tb_pull_dir }}"
+        - "{{ tb_pull_home }}"
+
+    # The values were checked in pre_tasks, so the JSON holds only known words and hex digits. A
+    # check run writes nothing, so it leaves the marker out rather than show a change it won't make.
+    # The marker is bookkeeping, not configuration, and each pull run has a new run id, so it
+    # never counts as a change: a pull run that changes nothing else reports changed=0.
+    - name: Write the run marker
+      ansible.builtin.copy:
+        content: "{{ {'source': tb_source, 'commit': tb_commit, 'run': tb_run} | to_json }}\n"
+        dest: "{{ tb_pull_marker }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      when: not ansible_check_mode
+
+    # ------------------------------------------------------------------------------------------
     # Identity and time.
     - name: Set the hostname
       ansible.builtin.hostname:
@@ -266,7 +393,11 @@
 
     # ------------------------------------------------------------------------------------------
     # Packages. Refuse Docker before installing anything, so a host that carries it is left as it
-    # was; then AlmaLinux's own packages first: they include gnupg2, which rpm_key needs.
+    # was; then AlmaLinux's own packages first: they include gnupg2, which rpm_key needs. Each dnf
+    # task runs only when the installed packages show something missing (or, for ansible-core,
+    # older than the floor): ansible-core 2.16's dnf module loads the repositories' metadata on
+    # every call, even when everything is installed, and the pull unit's routine runs must stay
+    # short, because ops/deploy.sh waits only five minutes for the host lock.
     - name: Read the packages already installed
       ansible.builtin.package_facts:
         manager: rpm
@@ -285,6 +416,44 @@
         name: "{{ tb_packages }}"
         state: present
         lock_timeout: 300
+      when: tb_packages | reject('in', ansible_facts.packages) | list | length > 0
+
+    # RPM's own ordering (epoch, version, release), which Ansible's version test doesn't know. It
+    # reads the RPM database only and prints ok, low or missing.
+    - name: Compare the installed ansible-core with the floor
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -c
+          - |
+            import sys, rpm
+            epoch, _, rest = sys.argv[1].rpartition(":")
+            version, _, release = rest.rpartition("-")
+            floor = (epoch or "0", version, release)
+            found = [(str(h["epochnum"]), h["version"], h["release"])
+                     for h in rpm.TransactionSet().dbMatch("name", "ansible-core")]
+            if not found:
+                print("missing")
+            elif any(rpm.labelCompare(evr, floor) < 0 for evr in found):
+                print("low")
+            else:
+                print("ok")
+          - "{{ tb_ansible_core_floor }}"
+      register: tb_ansible_core_check
+      changed_when: false
+      failed_when: tb_ansible_core_check.rc != 0 or tb_ansible_core_check.stdout | trim not in ['ok', 'low', 'missing']
+      check_mode: false
+      when: "'ansible-core' in ansible_facts.packages"
+
+    # From AppStream, the repository AlmaLinux's own ansible-core comes from; no other repository
+    # is enabled for it.
+    - name: Install ansible-core from AppStream, at least the build with the CVE-2026-11332 fix
+      ansible.builtin.dnf:
+        name: "{{ tb_ansible_core }}"
+        state: present
+        lock_timeout: 300
+      when: "'ansible-core' not in ansible_facts.packages or tb_ansible_core_check.stdout | trim in ['low', 'missing']"
 
     - name: Install EPEL's signing key, shipped with the playbook
       ansible.builtin.copy:
@@ -318,7 +487,9 @@
         state: present
         lock_timeout: 300
       # In check mode the repository file may not be there yet, so dnf couldn't find age.
-      when: not (ansible_check_mode and tb_epel_repo is changed)
+      when:
+        - tb_epel_packages | reject('in', ansible_facts.packages) | list | length > 0
+        - not (ansible_check_mode and tb_epel_repo is changed)
 
     - name: Read the installed packages again
       ansible.builtin.package_facts:
@@ -773,8 +944,117 @@
         state: absent
       notify: Reload sshd
 
+    # ------------------------------------------------------------------------------------------
+    # The pull unit (2.34.0; files/host-config/, docs/HOSTING.md): a script outside any clone, a
+    # oneshot service and its timer, all root's. The files live under ops/ansible/, so the
+    # signature rule the script enforces for host changes covers the code root runs. The playbook
+    # never starts, stops or restarts the service: only the timer does, and a copy replaced during
+    # a pull run leaves the running script's file in place.
+    - name: Install the pull unit's script, checked by bash first
+      ansible.builtin.copy:
+        src: host-config/tarubot-host-config
+        dest: "{{ tb_pull_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+        validate: /usr/bin/bash -n %s
+
+    - name: Install the pull unit's service
+      ansible.builtin.copy:
+        src: host-config/tarubot-host-config.service
+        dest: /etc/systemd/system/tarubot-host-config.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Install the pull unit's timer (every five minutes)
+      ansible.builtin.copy:
+        src: host-config/tarubot-host-config.timer
+        dest: /etc/systemd/system/tarubot-host-config.timer
+        owner: root
+        group: root
+        mode: "0644"
+      register: tb_pull_timer
+      notify: Reload systemd
+
+    # Production polls every ten minutes: its target moves only after an approved deploy.
+    - name: Create the timer's drop-in directory on production
+      ansible.builtin.file:
+        path: /etc/systemd/system/tarubot-host-config.timer.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: tb_role == 'production'
+
+    - name: Poll every ten minutes on production
+      ansible.builtin.copy:
+        src: host-config/timer-production.conf
+        dest: /etc/systemd/system/tarubot-host-config.timer.d/10-production.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+      when: tb_role == 'production'
+
+    - name: Keep production's poll interval off other hosts
+      ansible.builtin.file:
+        path: /etc/systemd/system/tarubot-host-config.timer.d/10-production.conf
+        state: absent
+      notify: Reload systemd
+      when: tb_role != 'production'
+
+    # From host.yml, never from the repository (question 14): a commit can't choose who may sign
+    # the next host change. This file shows people the signers; the pull unit reads host.yml itself
+    # at every run, so no copy a playbook run rendered, from whatever settings, decides a signature,
+    # and the run-source assert above checks that both readings agree. A rotation is an edit of
+    # host.yml.
+    - name: Write the pull unit's allowed signers from the host settings
+      ansible.builtin.template:
+        src: allowed_signers.j2
+        dest: /etc/tarubot/allowed_signers
+        owner: root
+        group: root
+        mode: "0644"
+
+    # host.yml holds the host's settings and host-config.env the pull unit's health-check URL. The
+    # owner writes both as root; the playbook never does, but refuses them readable by others.
+    - name: Look at the host settings files the pull unit reads
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        get_checksum: false
+      loop:
+        - /etc/tarubot/host.yml
+        - /etc/tarubot/host-config.env
+      register: tb_pull_settings
+
+    - name: Refuse a host settings file that is a link, isn't root's, or is readable by others
+      ansible.builtin.assert:
+        that:
+          - item.stat.isreg and not item.stat.islnk
+          - item.stat.uid == 0 and item.stat.mode == '0600'
+        fail_msg: "{{ item.item }} must be a regular file owned by root with mode 600, not a link."
+        quiet: true
+      loop: "{{ tb_pull_settings.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stat.exists
+
     - name: Apply pending reloads before checking their effect
       ansible.builtin.meta: flush_handlers
+
+    # Only on a bootstrapped host (tarubot-host-config bootstrap writes the state and enables the
+    # timer itself), so a hand run of this release never starts pulling on its own. Afterwards
+    # every run keeps the timer enabled: pause the unit, never disable it. In a check run before
+    # the timer file exists systemd couldn't find it.
+    - name: Keep the pull unit's timer enabled and running on a bootstrapped host
+      ansible.builtin.systemd_service:
+        name: tarubot-host-config.timer
+        enabled: true
+        state: started
+      when: tb_pull_state_file.stat.exists and not (ansible_check_mode and tb_pull_timer is changed)
 
     - name: Read sshd's effective settings for root and for tarubot
       ansible.builtin.command:

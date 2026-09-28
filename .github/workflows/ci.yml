@@ -179,10 +179,11 @@ jobs:
           ANSIBLE_INVENTORY_UNPARSED_FAILED=False ansible-lint --offline --project-dir .
       - name: Check the playbook's scripts with ShellCheck
         run: |
-          # The IPv6 wait script runs as root at every boot; the skeleton files are tarubot's shell
-          # start-up files.
+          # The IPv6 wait script runs as root at every boot, and the pull unit (2.34.0) as root on
+          # every poll; the skeleton files are tarubot's shell start-up files.
           command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck -S warning ops/ansible/files/tarubot-ipv6-online
+          shellcheck -S warning ops/ansible/files/host-config/tarubot-host-config
           shellcheck -S warning --shell=bash ops/ansible/files/skel/.bashrc ops/ansible/files/skel/.bash_profile
 
   result:

@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# A simulated curl for tests/unit/host-config.test.ts. The script runs curl under env -i, so this
+# finds the scenario's directory from its own place: <sandbox>/bin/curl reads <sandbox>/sim.
+#
+# It refuses (exit 5) unless -q comes first, and when HC_CANARY, which the test exports to the
+# script, reached it. Two kinds of call:
+#   - a health-check ping (--config -): argv goes to sim/ping-argv and stdin to sim/ping-stdin,
+#     separately, so a test can show the URL is never in argv; sim/pings gets "<suffix> <body>",
+#     the suffix being what follows sim/ping-base (the URL in the scenario's host-config.env).
+#   - a GitHub API call (-w): the URL goes to sim/api-calls. The answers are sim/api/runs.json
+#     (runs-2.json for &page=2), sim/api/jobs-<id>.json and sim/api/approvals-<id>.json, with the
+#     status through -w and the headers into -D's file; a missing file answers 404. As GitHub does,
+#     the listing leaves out runs created before its created=>=<date> filter.
+# Knobs in sim/knob: api-down (exit 7), api-sleep (seconds per API call), api-status (every API
+# call's status), api-status-jobs (the jobs calls' status only), api-301 (a 301 with GitHub's
+# JSON), api-listing-body (a file served as the listing), api-remaining (x-ratelimit-remaining, 55
+# by default), pause-during-api (writes the pause flag named in the file during the listing call),
+# ping-fail (exit 22).
+set -euo pipefail
+sim=$(cd "$(dirname "$0")/../sim" && pwd)
+knob=$sim/knob
+if [[ ${1-} != -q ]]; then
+  printf 'curl stub: -q must be the first argument\n' >&2
+  exit 5
+fi
+if [[ -n ${HC_CANARY-} ]]; then
+  printf 'curl stub: the caller environment reached curl\n' >&2
+  exit 5
+fi
+args=("$@")
+value() {
+  local i
+  for ((i = 0; i < ${#args[@]} - 1; i++)); do
+    if [[ ${args[i]} == "$1" ]]; then
+      printf '%s' "${args[i + 1]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ " $* " == *" --config - "* ]]; then
+  printf '%s\n' "$*" >>"$sim/ping-argv"
+  config=$(cat)
+  printf '%s\n' "$config" >>"$sim/ping-stdin"
+  [[ $config =~ ^url\ =\ \"(.*)\"$ ]] || exit 5
+  url=${BASH_REMATCH[1]}
+  base=$(cat "$sim/ping-base")
+  [[ $url == "$base"* ]] || exit 5
+  printf '%s %s\n' "${url#"$base"}" "$(value --data-raw)" >>"$sim/pings"
+  if [[ -f $knob/ping-fail ]]; then exit 22; fi
+  exit 0
+fi
+
+url=${*: -1}
+printf '%s\n' "$url" >>"$sim/api-calls"
+if [[ -f $knob/api-down ]]; then exit 7; fi
+if [[ -f $knob/api-sleep ]]; then sleep "$(cat "$knob/api-sleep")"; fi
+headers=$(value -D)
+body=$(value -o)
+path=${url#http://api.test/}
+status=200 answer=''
+case $path in
+  repos/deconfined/tarubot/actions/workflows/deploy.yml/runs\?*)
+    if [[ -f $knob/pause-during-api ]]; then
+      printf '%s lab\n' 1790000000 >"$(cat "$knob/pause-during-api")"
+      chmod 600 "$(cat "$knob/pause-during-api")"
+    fi
+    if [[ $path == *'&page=2' ]]; then answer=$sim/api/runs-2.json; else answer=$sim/api/runs.json; fi
+    if [[ -f $knob/api-listing-body ]]; then answer=$knob/api-listing-body; fi
+    ;;
+  repos/deconfined/tarubot/actions/runs/*/jobs) answer=$sim/api/jobs-$(basename "$(dirname "$path")").json ;;
+  repos/deconfined/tarubot/actions/runs/*/approvals) answer=$sim/api/approvals-$(basename "$(dirname "$path")").json ;;
+esac
+if [[ -z $answer || ! -f $answer ]]; then status=404; fi
+if [[ -f $knob/api-status ]]; then status=$(cat "$knob/api-status"); fi
+if [[ -f $knob/api-status-jobs && $path == */jobs ]]; then status=$(cat "$knob/api-status-jobs"); fi
+if [[ -f $knob/api-301 ]]; then status=301; fi
+remaining=55
+if [[ -f $knob/api-remaining ]]; then remaining=$(cat "$knob/api-remaining"); fi
+printf 'HTTP/2 %s\r\nx-ratelimit-limit: 60\r\nX-RateLimit-Remaining: %s\r\n\r\n' "$status" "$remaining" >"$headers"
+if [[ $status == 301 ]]; then
+  printf '%s\n' '{"message":"Moved Permanently","url":"https://api.github.com/repositories/1/actions/runs","documentation_url":"https://docs.github.com/"}' >"$body"
+elif [[ $status == 200 && $path =~ created=%3E%3D([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+  jq --arg since "${BASH_REMATCH[1]}" 'if (.workflow_runs | type) == "array" then .workflow_runs |= map(select((.created_at // "") >= $since)) else . end' "$answer" >"$body"
+elif [[ $status == 200 ]]; then
+  cat "$answer" >"$body"
+else
+  printf '%s\n' '{"message":"Not Found"}' >"$body"
+fi
+printf '%s' "$status"
