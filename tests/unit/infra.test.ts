@@ -3,20 +3,30 @@
  * (.github/workflows/infra.yml), since 2.36.0 (issue #62). Each of the workflow's steps runs one
  * phase of ops/tofu/ci/tofu-ci.sh, whose rules live in the jq programs beside it.
  *
- * Nothing here runs tofu or the network. The jq programs and the script's phases run against
- * sample plans and a stand-in tofu (tests/fixtures/infra/) where jq is installed, and are skipped
- * where it isn't (the image build); OpenTofu's own tests (ops/tofu/tests/main.tftest.hcl, in CI's
- * "Infrastructure checks") cover what the module renders and plans.
+ * Nothing here runs tofu or the network. The jq programs and the script's phases run against sample
+ * plans and a stand-in for tofu (tests/fixtures/infra/tofu) where jq is installed, and are
+ * skipped where it isn't (the image build); OpenTofu's own tests (ops/tofu/tests/main.tftest.hcl,
+ * in CI's "Infrastructure checks") cover what the module renders and plans.
  *
- * - infra.yml: dispatch from main only, the `infra` environment on both jobs, first attempts only,
- *   least permissions, one concurrency group that queues every waiting run, pinned actions, every
- *   ${{ }} through env:, each secret in the steps that need it, and both jobs running the same
- *   phases.
+ * - infra.yml: dispatch from main only, Plan in the reviewer-free `infra-plan` environment with the
+ *   read-only secrets only and Apply in the approval-gated `infra` with the write ones only
+ *   (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)", confirmed item 4), first attempts
+ *   only, least permissions, one concurrency group that queues every waiting run, pinned actions,
+ *   every ${{ }} through env:, each secret in the steps that need it, and the phases each job runs.
+ *   No job checks the environments' own rules: they are the owner's settings, read back once when
+ *   made (REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)").
+ * - The hand-off: Plan plans without a state lock and keeps its encrypted saved plan as a one-day
+ *   artifact only for an apply that passed the guards; Apply never plans, refuses a file whose
+ *   SHA-256 or change list differs from the Plan job's, or that was planned with other values than
+ *   infra's TOFU_VARS, and applies that saved plan with nothing that could change it, so OpenTofu
+ *   refuses it if the state moved since.
  * - Public logs (the repository and its Actions logs are public): every tofu command writes to a
- *   private file, the prepare phase masks every identifying value in TOFU_VARS before anything
- *   else prints, diagnostics print through a filter that no digit, '/', '@' or '=' survives, no
- *   host key is ever fetched or printed, and the guards refuse deletes, replaces and access-list
- *   removals nobody asked for. Apply refuses a missing or different change list.
+ *   private file, and so does every jq error on plan or apply output, the prepare phase masks
+ *   every identifying value in TOFU_VARS before anything else prints and reads the replace input
+ *   from the event payload (a step's env: prints unmasked), diagnostics print through a filter
+ *   that no digit, '/', '@' or '=' survives, no host key is ever fetched or printed, and the guards
+ *   refuse deletes, replaces and access-list removals nobody asked for. The state passphrase, the
+ *   only key to that public artifact, must be at least 32 characters, in the script and the module.
  * - The pinned OpenTofu: one install phase, used by ci.yml and infra.yml, whose version and
  *   checksum files agree and satisfy the module's required_version.
  * - ops/tofu: every variable sensitive, the addresses output sensitive, the validations present
@@ -66,7 +76,7 @@ const step = z
     id: z.string().optional(),
     if: z.string().optional(),
     uses: z.string().optional(),
-    with: z.record(z.string(), z.union([z.string(), z.boolean()])).optional(),
+    with: z.record(z.string(), z.union([z.string(), z.boolean(), z.number()])).optional(),
     env: z.record(z.string(), z.string()).optional(),
     run: z.string().optional(),
   })
@@ -124,15 +134,33 @@ const stepOf = (j: Job, name: string) => {
 /** A GitHub Actions expression, `${{ inner }}`, built so this source holds no placeholder. */
 const expr = (inner: string) => `\${{ ${inner} }}`;
 
-/** The steps both jobs share, in order, with the script phase each runs (none for the checkout). */
+/** The steps Plan and Apply start with, in order, with the script phase each runs (none for an action). */
 const SHARED: [string, string | null][] = [
   ["Check out source", null],
   ["Install the pinned OpenTofu", "install"],
   ["Prepare the values and the masks", "prepare"],
   ["Initialize OpenTofu", "init"],
-  ["Plan", "plan"],
-  ["Summarize the plan", "summarize"],
 ];
+/** The saved plan's artifact, which only the Plan job uploads and only the Apply job downloads. */
+const ARTIFACT = "saved-plan";
+/** The four secrets both environments hold under the same name; every other one is READ or WRITE. */
+const SHARED_SECRETS = [
+  "TOFU_STATE_BUCKET",
+  "TOFU_STATE_ENDPOINT",
+  "TOFU_STATE_PASSPHRASE",
+  "TOFU_VARS",
+];
+/** Every secrets.NAME a job's steps read, sorted and unique. */
+const secretsOfJob = (j: Job) =>
+  [
+    ...new Set(
+      j.steps.flatMap((s) =>
+        Object.values(s.env ?? {}).flatMap((v) =>
+          [...v.matchAll(/secrets\.([A-Z_]+)/gu)].map((m) => m[1] ?? ""),
+        ),
+      ),
+    ),
+  ].sort();
 /** The script every step runs, and one of its phases (a shell function) as text. */
 const SCRIPT = "ops/tofu/ci/tofu-ci.sh";
 const scriptText = read(SCRIPT);
@@ -205,47 +233,119 @@ describe("infra.yml's shape", () => {
     expect(infra.env).toEqual({ TF_IN_AUTOMATION: "1", TF_INPUT: "0" });
   });
 
-  test("both jobs wait in the infra environment, from main, on the first attempt only", () => {
+  test("Plan runs in infra-plan with no approval and Apply in infra, from main, on the first attempt only", () => {
+    // Confirmed item 4: infra-plan has no reviewer, so a plan never waits; only Apply, in the
+    // approval-gated infra, asks @deconfined. Both environments accept only main.
     const guard = "github.run_attempt == '1' && github.ref == 'refs/heads/main'";
     expect(plan.if).toBe(guard);
     expect(apply.if).toBe(
       `${guard} && inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'`,
     );
+    // Plan is the first job; nothing reads the environments' own rules through the API, which
+    // the owner sets and reads back once (REQUIREMENTS.md, "Approved pipeline amendments").
+    expect(Object.keys(infra.jobs)).toEqual(["plan", "apply"]);
+    expect(plan.needs).toBeUndefined();
     expect(apply.needs).toBe("plan");
+    expect(plan.environment).toBe("infra-plan");
+    expect(apply.environment).toBe("infra");
+    expect([...infraText.matchAll(/^ {4}environment: (.*)$/gmu)].map((m) => m[1])).toEqual([
+      "infra-plan",
+      "infra",
+    ]);
     for (const j of [plan, apply]) {
-      expect(j.environment).toBe("infra");
       expect(j.permissions).toEqual({ contents: "read" });
       expect(j["runs-on"]).toBe("ubuntu-24.04");
     }
     expect(plan.outputs).toEqual({
       changes: expr("steps.summary.outputs.changes"),
       has_changes: expr("steps.summary.outputs.has_changes"),
+      digest: expr("steps.summary.outputs.digest"),
     });
+    expect(apply.outputs).toBeUndefined();
   });
 
-  test("the only action is checkout, at ci.yml's pin, without persisted credentials", () => {
+  test("Plan reads only infra-plan's read-only secrets, and Apply only infra's write ones", () => {
+    const planSecrets = secretsOfJob(plan);
+    const applySecrets = secretsOfJob(apply);
+    expect(planSecrets).toEqual(
+      [
+        "CLOUDFLARE_READ_TOKEN",
+        "LINODE_READ_TOKEN",
+        ...SHARED_SECRETS,
+        "TOFU_STATE_READ_ACCESS_KEY",
+        "TOFU_STATE_READ_SECRET_KEY",
+      ].sort(),
+    );
+    expect(applySecrets).toEqual(
+      [
+        "CLOUDFLARE_WRITE_TOKEN",
+        "LINODE_WRITE_TOKEN",
+        ...SHARED_SECRETS,
+        "TOFU_STATE_WRITE_ACCESS_KEY",
+        "TOFU_STATE_WRITE_SECRET_KEY",
+      ].sort(),
+    );
+    // Every name but the four shared ones says which kind it is, and no job reads the other kind.
+    for (const name of [...planSecrets, ...applySecrets].filter((n) => !SHARED_SECRETS.includes(n)))
+      expect({ name, kind: /_(READ|WRITE)_/u.test(name) }).toEqual({ name, kind: true });
+    expect(planSecrets.filter((n) => n.includes("_WRITE_"))).toEqual([]);
+    expect(applySecrets.filter((n) => n.includes("_READ_"))).toEqual([]);
+    // Each job maps them onto the variables OpenTofu reads, the same names in both.
+    const tools = (kind: string) => ({
+      AWS_ACCESS_KEY_ID: expr(`secrets.TOFU_STATE_${kind}_ACCESS_KEY`),
+      AWS_SECRET_ACCESS_KEY: expr(`secrets.TOFU_STATE_${kind}_SECRET_KEY`),
+      TF_VAR_state_passphrase: expr("secrets.TOFU_STATE_PASSPHRASE"),
+      LINODE_TOKEN: expr(`secrets.LINODE_${kind}_TOKEN`),
+      CLOUDFLARE_API_TOKEN: expr(`secrets.CLOUDFLARE_${kind}_TOKEN`),
+    });
+    expect(stepOf(plan, "Plan").env).toEqual(tools("READ"));
+    expect(stepOf(apply, "Apply").env).toEqual(tools("WRITE"));
+    // The script names each environment's own secrets when one is missing.
+    expect(phaseOf("plan")).toContain(
+      'provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."',
+    );
+    expect(phaseOf("apply")).toContain(
+      'provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."',
+    );
+  });
+
+  test("the actions are checkout at ci.yml's pin, and the artifact pair that carries the saved plan", () => {
     const ciPin = /uses: (actions\/checkout@[0-9a-f]{40}) # v[\d.]+/u.exec(
       read(".github/workflows/ci.yml"),
     );
     expect(ciPin?.[1]).toBeDefined();
-    for (const j of [plan, apply]) {
+    const pinned = (action: string) => new RegExp(`^actions/${action}@[0-9a-f]{40}$`, "u");
+    for (const [j, artifact] of [
+      [plan, "upload-artifact"],
+      [apply, "download-artifact"],
+    ] as const) {
       const uses = j.steps.filter((s) => s.uses);
-      expect(uses.map((s) => s.uses)).toEqual([ciPin?.[1]]);
+      expect(uses[0]?.uses).toBe(ciPin?.[1]);
       expect(uses[0]?.with).toEqual({ "persist-credentials": false });
+      expect(uses).toHaveLength(2);
+      expect(uses[1]?.uses).toMatch(pinned(artifact));
     }
   });
 
-  test("both jobs run the script's phases in order, Apply adding compare and apply", () => {
+  test("each job runs the script's phases in order: Plan plans, and Apply applies the saved plan", () => {
     const phases = (j: Job) =>
       j.steps.map((s) => [
         s.name,
         /^bash ops\/tofu\/ci\/tofu-ci\.sh ([a-z]+)$/u.exec(s.run ?? "")?.[1] ?? null,
       ]);
     const cleanup = ["Clean up", null];
-    expect(phases(plan)).toEqual([...SHARED, cleanup]);
+    expect(phases(plan)).toEqual([
+      ...SHARED,
+      ["Plan", "plan"],
+      ["Summarize the plan", "summarize"],
+      ["Keep the saved plan for Apply", null],
+      cleanup,
+    ]);
+    // Apply never plans: it fetches the Plan job's saved plan, checks it, then applies it.
     expect(phases(apply)).toEqual([
       ...SHARED,
-      ["Compare with the approved plan", "compare"],
+      ["Fetch the saved plan", null],
+      ["Compare with the reviewed plan", "compare"],
       ["Apply", "apply"],
       cleanup,
     ]);
@@ -265,30 +365,35 @@ describe("infra.yml's shape", () => {
       Object.values(s.env ?? {})
         .flatMap((v) => [...v.matchAll(/secrets\.([A-Z_]+)/gu)].map((m) => m[1]))
         .sort();
-    const expected: Record<string, string[]> = {
-      "Prepare the values and the masks": ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_VARS"],
-      "Initialize OpenTofu": [
-        "TOFU_STATE_ACCESS_KEY",
-        "TOFU_STATE_PASSPHRASE",
-        "TOFU_STATE_SECRET_KEY",
+    const prepare = ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_VARS"];
+    const init = (kind: string) => [
+      "TOFU_STATE_PASSPHRASE",
+      `TOFU_STATE_${kind}_ACCESS_KEY`,
+      `TOFU_STATE_${kind}_SECRET_KEY`,
+    ];
+    const tokens = (kind: string) =>
+      [`CLOUDFLARE_${kind}_TOKEN`, `LINODE_${kind}_TOKEN`, ...init(kind)].sort();
+    const expected: [Job, Record<string, string[]>][] = [
+      [
+        plan,
+        {
+          "Prepare the values and the masks": prepare,
+          "Initialize OpenTofu": init("READ"),
+          Plan: tokens("READ"),
+          "Summarize the plan": ["TOFU_STATE_PASSPHRASE"],
+        },
       ],
-      Plan: [
-        "CLOUDFLARE_API_TOKEN",
-        "LINODE_TOKEN",
-        "TOFU_STATE_ACCESS_KEY",
-        "TOFU_STATE_PASSPHRASE",
-        "TOFU_STATE_SECRET_KEY",
+      [
+        apply,
+        {
+          "Prepare the values and the masks": prepare,
+          "Initialize OpenTofu": init("WRITE"),
+          "Compare with the reviewed plan": ["TOFU_STATE_PASSPHRASE"],
+          Apply: tokens("WRITE"),
+        },
       ],
-      "Summarize the plan": ["TOFU_STATE_PASSPHRASE"],
-      Apply: [
-        "CLOUDFLARE_API_TOKEN",
-        "LINODE_TOKEN",
-        "TOFU_STATE_ACCESS_KEY",
-        "TOFU_STATE_PASSPHRASE",
-        "TOFU_STATE_SECRET_KEY",
-      ],
-    };
-    for (const j of [plan, apply])
+    ];
+    for (const [j, secrets] of expected)
       for (const s of j.steps) {
         expect({ step: s.name, run: s.run?.includes("${{") ?? false }).toEqual({
           step: s.name,
@@ -303,22 +408,82 @@ describe("infra.yml's shape", () => {
           }).toMatchObject({
             ok: true,
           });
-        expect({ step: s.name, secrets: secretsOf(s) }).toEqual({
+        expect({ job: j.name, step: s.name, secrets: secretsOf(s) }).toEqual({
+          job: j.name,
           step: s.name,
-          secrets: expected[s.name] ?? [],
+          secrets: secrets[s.name] ?? [],
         });
       }
-    // Everything else anywhere in the file is an input or the Plan job's outputs.
+    // Everything else anywhere in the file is an input, the Plan job's outputs or the runner's
+    // temporary directory (the artifact's path); no step gets the job token.
     const expressions = [...infraText.matchAll(/\$\{\{\s*([^}]*?)\s*\}\}/gu)].map((m) => m[1]);
     for (const e of expressions)
       expect({
         e,
-        ok: /^(secrets\.[A-Z_]+|inputs\.[a-z_]+|steps\.summary\.outputs\.[a-z_]+|needs\.plan\.outputs\.changes)$/u.test(
+        ok: /^(secrets\.[A-Z_]+|inputs\.[a-z_]+|steps\.summary\.outputs\.[a-z_]+|needs\.plan\.outputs\.(changes|digest)|runner\.temp)$/u.test(
           e ?? "",
         ),
       }).toMatchObject({
         ok: true,
       });
+    // GitHub prints a step's env: values in the clear before it runs, so the replace input, which
+    // a mistyped host name could fill, never goes there: prepare reads it from the event payload.
+    expect(infraText).not.toContain(expr("inputs.replace"));
+  });
+
+  test("only the encrypted saved plan leaves the Plan job, for an apply that passed the guards, for one day", () => {
+    const keep = stepOf(plan, "Keep the saved plan for Apply");
+    // After the summary step, whose guards exit non-zero, so a refused plan never leaves the job.
+    expect(keep.if).toBe(
+      "inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true'",
+    );
+    expect(keep.with).toEqual({
+      name: ARTIFACT,
+      path: `${expr("runner.temp")}/tofu/plan.bin`,
+      "if-no-files-found": "error",
+      "retention-days": 1,
+      "compression-level": 0,
+    });
+    const fetch = stepOf(apply, "Fetch the saved plan");
+    expect(fetch.if).toBeUndefined();
+    expect(fetch.with).toEqual({ name: ARTIFACT, path: `${expr("runner.temp")}/tofu` });
+    // plan.bin is only ever written encrypted: ops/tofu/versions.tf enforces plan encryption
+    // (pinned in "state and plans are encrypted" below), and the plan phase writes it with -out.
+    expect(phaseOf("plan")).toContain('-out="$d/plan.bin"');
+  });
+
+  test("Plan takes no state lock, and Apply applies the Plan job's saved plan and nothing else", () => {
+    // Plan's state key is read-only, so it must never try to write a lock.
+    expect(phaseOf("plan")).toContain(
+      'args=(-chdir="$module" plan -input=false -lock=false -json -var-file="$d/values.tfvars.json" -out="$d/plan.bin")',
+    );
+    // Apply checks the file's SHA-256 and change list against the Plan job's outputs first.
+    const compare = stepOf(apply, "Compare with the reviewed plan");
+    expect(compare.env).toEqual({
+      DIGEST: expr("needs.plan.outputs.digest"),
+      APPROVED: expr("needs.plan.outputs.changes"),
+      TF_VAR_state_passphrase: expr("secrets.TOFU_STATE_PASSPHRASE"),
+    });
+    const COMPARE = phaseOf("compare");
+    expect(COMPARE).toContain(`[[ \${DIGEST-} =~ ^[0-9a-f]{64}$ ]] || fail`);
+    expect(COMPARE).toContain(`[[ -n \${APPROVED-} ]] || fail`);
+    expect(COMPARE).toContain(`digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)`);
+    expect(COMPARE).toContain(`[[ $digest == "\${DIGEST-}" ]] || fail`);
+    expect(COMPARE).toContain(`[[ $current == "\${APPROVED-}" ]] || fail`);
+    expect(COMPARE.indexOf("sha256sum")).toBeLessThan(COMPARE.indexOf("\n  changes\n"));
+    expect(SUMMARIZE).toContain(`digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)`);
+    expect(SUMMARIZE).toContain('echo "digest=$digest"');
+    // The apply names only the saved plan, with no -var, -replace or -refresh that would ask for a
+    // new plan, so OpenTofu applies exactly that file and refuses it as stale if the state changed
+    // since the Plan job read it.
+    const applyCalls = commandLines(phaseOf("apply")).filter((l) => /^tofu\s/u.test(l));
+    expect(applyCalls).toEqual([
+      'tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?',
+    ]);
+    // And the Apply job runs no plan phase of its own.
+    expect(apply.steps.some((s) => /tofu-ci\.sh (?:plan|summarize)$/u.test(s.run ?? ""))).toBe(
+      false,
+    );
   });
 });
 
@@ -334,6 +499,18 @@ describe("public-log hygiene", () => {
         />"\$d\/[a-z.]+"/u.test(line) && (/ 2>"\$d\/[a-z.]+"/u.test(line) || / 2>&1/u.test(line));
       expect({ line, ok }).toEqual({ line, ok: true });
     }
+    // jq's own errors quote the value they failed on, so every jq call that reads the plan or the
+    // apply's output sends them to a private file or nowhere: summary.jq, diag.jq (plan and
+    // apply), applied.jq and compare's check of the planned values.
+    const jqOnOutput = commandLines(scriptText).filter(
+      (l) => /\bjq\b/u.test(l) && /"\$d\/(?:plan\.jsonl?|apply\.jsonl)"/u.test(l),
+    );
+    expect(jqOnOutput.length).toBe(5);
+    for (const line of jqOnOutput)
+      expect({
+        line,
+        private: / 2>"\$d\/[a-z.]+"| 2>\/dev\/null |>\/dev\/null 2>&1 /u.test(line),
+      }).toEqual({ line, private: true });
     // Nothing reads outputs or state, which hold addresses and the hash, and nothing traces.
     for (const text of [infraText, scriptText]) {
       expect(text).not.toMatch(/\btofu(?: -chdir=\S+)? (?:output|state|console)\b/u);
@@ -371,9 +548,16 @@ describe("public-log hygiene", () => {
           private: />(?:"\$d\/[a-z.]+"|\/dev\/null 2>&1); then$|>"\$d\/[a-z.]+"$/u.test(line),
         }).toEqual({ line, private: true });
     }
-    // The shape check says nothing of the value, and the replace target is never echoed back.
+    // The shape check says nothing of the value, and the replace target, read from the event
+    // payload rather than env:, is never echoed back.
     expect(PREPARE).toContain(`jq -e -f "$here/shape.jq" >/dev/null 2>&1`);
-    expect(PREPARE).not.toMatch(/echo[^\n]*\$\{?REPLACE/u);
+    expect(PREPARE).toContain(
+      `replace=$(jq -r '.inputs.replace // ""' "\${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail`,
+    );
+    expect(
+      commandLines(PREPARE).filter((l) => /^(?:echo|printf)\b/u.test(l) && l.includes("$replace")),
+    ).toEqual([`printf '%s' "$replace" >"$d/replace"`]);
+    expect(PREPARE).not.toContain("REPLACE");
     expect(scriptText).toMatch(/^fail\(\) \{\n {2}echo "::error::\$1"\n {2}exit 1\n\}$/mu);
   });
 
@@ -472,7 +656,7 @@ describe("public-log hygiene", () => {
     expect(SUMMARIZE).toContain('exit "$refuse"');
     // A replace names exactly one configured host's instance.
     expect(PREPARE).toContain(
-      `if ! [[ \${REPLACE-} =~ ^linode_instance\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] ||`,
+      `if ! [[ $replace =~ ^linode_instance\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] ||`,
     );
     expect(PREPARE).toContain(`jq -e --arg k "\${BASH_REMATCH[1]}" '.hosts | has($k)'`);
   });
@@ -489,24 +673,12 @@ describe("public-log hygiene", () => {
     );
     expect(SUMMARIZE).toContain('echo "changes<<$delimiter"');
   });
-
-  test("Apply refuses a missing or different change list, and applies its own saved plan", () => {
-    const compare = stepOf(apply, "Compare with the approved plan");
-    expect(compare.env).toEqual({ APPROVED: expr("needs.plan.outputs.changes") });
-    expect(phaseOf("compare")).toContain(`[[ -n \${APPROVED-} ]] || fail`);
-    expect(phaseOf("compare")).toContain('current=$(<"$d/changes.txt")');
-    expect(phaseOf("compare")).toContain(`[[ $current == "\${APPROVED-}" ]] || fail`);
-    expect(phaseOf("apply")).toContain(
-      'tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?',
-    );
-    expect(phaseOf("plan")).toContain('-out="$d/plan.bin"');
-  });
 });
 
 // ---- The pinned OpenTofu ------------------------------------------------------------------------
 
 describe("the pinned OpenTofu", () => {
-  test("one install phase, which ci.yml and both of infra.yml's jobs run", () => {
+  test("one install phase, which ci.yml and infra.yml's Plan and Apply jobs run", () => {
     const installs = (text: string) =>
       [
         ...text.matchAll(
@@ -647,7 +819,7 @@ describe("ops/tofu", () => {
       'can(cidrhost(x, 0)) && strcontains(x, "/")',
     );
     expect(block(VARIABLES, "variable.state_passphrase")).toContain(
-      "length(var.state_passphrase) >= 16",
+      "length(var.state_passphrase) >= 32",
     );
     // The root hash pattern, run here as a JavaScript regex: yescrypt or SHA-512 crypt only.
     const hashPattern = /can\(regex\("(\^\(\[\$\]y[^"]+)", var\.root_password_hash\)\)/u.exec(
@@ -1171,18 +1343,27 @@ describe.skipIf(!hasJq)("the jq programs", () => {
   });
 });
 
-describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
+describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
   const scratch = mkdtempSync(join(tmpdir(), "infra-phases-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
   let boxes = 0;
 
-  /** A runner: the stand-in tofu first on PATH, RUNNER_TEMP, and the step files. */
+  /**
+   * A runner: the stand-in tofu first on PATH, RUNNER_TEMP, the step files, and a
+   * dispatch's event payload with an empty replace input.
+   */
   function runner() {
     const dir = join(scratch, `r${++boxes}`);
     for (const path of ["bin", "temp", "stub"]) mkdirSync(join(dir, path), { recursive: true });
     cpSync(root("tests/fixtures/infra/tofu"), join(dir, "bin", "tofu"));
     chmodSync(join(dir, "bin", "tofu"), 0o755);
     for (const name of ["env", "output", "summary", "path"]) writeFileSync(join(dir, name), "");
+    const event = (replace: string) =>
+      writeFileSync(
+        join(dir, "event.json"),
+        JSON.stringify({ inputs: { operation: "apply", replace, allow_destroy: "false" } }),
+      );
+    event("");
     const phase = (name: string, env: Record<string, string> = {}) => {
       const r = Bun.spawnSync(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", root(SCRIPT), name],
@@ -1196,6 +1377,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
             GITHUB_OUTPUT: join(dir, "output"),
             GITHUB_STEP_SUMMARY: join(dir, "summary"),
             GITHUB_PATH: join(dir, "path"),
+            GITHUB_EVENT_PATH: join(dir, "event.json"),
             ...env,
           },
           stdin: "ignore",
@@ -1204,19 +1386,23 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
       return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
     };
     const file = (path: string) => readFileSync(join(dir, path), "utf8");
-    return { dir, phase, file };
+    return { dir, phase, file, event };
   }
   const PREPARED = {
     TOFU_VARS: EXAMPLE,
     STATE_BUCKET: "state-bucket-example",
     STATE_ENDPOINT: "https://us-east-1.example.org",
-    REPLACE: "",
   };
   const STATE = {
     AWS_ACCESS_KEY_ID: "access-example",
     AWS_SECRET_ACCESS_KEY: "secret-example",
-    TF_VAR_state_passphrase: "a passphrase of sixteen or more",
+    TF_VAR_state_passphrase: "a throwaway passphrase of 32 or more characters",
   };
+  /** A saved plan's `variables`, as `tofu show -json` gives them: every value, the passphrase too. */
+  const planned = (values: Record<string, unknown>) => ({
+    ...Object.fromEntries(Object.entries(values).map(([k, value]) => [k, { value }])),
+    state_passphrase: { value: STATE.TF_VAR_state_passphrase },
+  });
 
   test("prepare masks every identifying value first, and writes only private files", () => {
     const r = runner();
@@ -1239,17 +1425,44 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
     expect(bad.code).toBe(1);
     expect(bad.out).toStartWith("::error::TOFU_VARS must be one JSON object");
     expect(bad.out + bad.err).not.toContain("example.org");
-    // A replace names one configured host's instance, and is never echoed back.
-    for (const replace of ['linode_instance.host["production"]', "linode_instance.host", "x; id"]) {
-      const refused = runner().phase("prepare", { ...PREPARED, REPLACE: replace });
+    // A replace, read from the event payload, names one configured host's instance, and is never
+    // echoed back, not even a host name typed in its place.
+    for (const replace of [
+      'linode_instance.host["production"]',
+      "linode_instance.host",
+      "x; id",
+      "other.example.net",
+      "192.0.2.99",
+    ]) {
+      const box = runner();
+      box.event(replace);
+      const refused = box.phase("prepare", PREPARED);
       expect({ replace, code: refused.code }).toEqual({ replace, code: 1 });
       expect(refused.out.trimEnd().split("\n").at(-1)).toBe(
         '::error::replace must be exactly linode_instance.host["<key>"], naming a host in TOFU_VARS.',
       );
+      // A host name or address typed in its place never reaches the log.
+      if (!replace.startsWith("linode_instance"))
+        expect({ replace, echoed: (refused.out + refused.err).includes(replace) }).toEqual({
+          replace,
+          echoed: false,
+        });
     }
+    const staging = runner();
+    staging.event('linode_instance.host["staging"]');
+    expect(staging.phase("prepare", PREPARED).code).toBe(0);
+    expect(staging.file("temp/tofu/replace")).toBe('linode_instance.host["staging"]');
+    expect(r.file("temp/tofu/replace")).toBe("");
+    // A replace in env: is ignored: the step never sets one.
+    const ignored = runner();
     expect(
-      runner().phase("prepare", { ...PREPARED, REPLACE: 'linode_instance.host["staging"]' }).code,
+      ignored.phase("prepare", { ...PREPARED, REPLACE: 'linode_instance.host["production"]' }).code,
     ).toBe(0);
+    expect(ignored.file("temp/tofu/replace")).toBe("");
+    // Without a readable payload, prepare stops with a fixed message.
+    expect(
+      runner().phase("prepare", { ...PREPARED, GITHUB_EVENT_PATH: join(scratch, "none.json") }).out,
+    ).toEndWith("::error::The dispatch's inputs couldn't be read from the event payload.\n");
   });
 
   test("init, plan and summarize keep tofu's output private, list the changes and apply the guards", () => {
@@ -1294,12 +1507,18 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
     const output = r.file("output");
     expect(output).toMatch(/^changes<<changes_[0-9a-f]{32}\nreplace /u);
     expect(output).toContain("has_changes=true\n");
+    // The saved plan's SHA-256, which the Apply job checks the fetched file against.
+    const saved = readFileSync(join(r.dir, "temp", "tofu", "plan.bin"));
+    expect(output).toContain(
+      `\ndigest=${new Bun.CryptoHasher("sha256").update(saved).digest("hex")}\n`,
+    );
     const allowed = runner();
     allowed.phase("prepare", PREPARED);
     writeFileSync(
       join(allowed.dir, "stub", "plan.json"),
       readFileSync(join(r.dir, "stub", "plan.json")),
     );
+    writeFileSync(join(allowed.dir, "temp", "tofu", "plan.bin"), "a saved plan");
     expect(
       allowed.phase("summarize", {
         TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
@@ -1307,11 +1526,14 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
         ALLOW_ACCESS_REMOVAL: "true",
       }).code,
     ).toBe(0);
-    // Every tofu call ran in the module, and stdout and stderr went to files under $d.
-    const calls = readdirSync(join(r.dir, "stub", "calls")).map(
-      (n) => readFileSync(join(r.dir, "stub", "calls", n), "utf8").split("\n")[0],
-    );
-    expect(calls.every((first) => first === `-chdir=${root("ops/tofu")}`)).toBe(true);
+    // Every tofu call ran in the module, and the plan took no state lock.
+    const calls = readdirSync(join(r.dir, "stub", "calls"))
+      .sort((a, b) => Number(a) - Number(b))
+      .map((n) => readFileSync(join(r.dir, "stub", "calls", n), "utf8").split("\n"));
+    expect(calls.every((args) => args[0] === `-chdir=${root("ops/tofu")}`)).toBe(true);
+    expect(calls.map((args) => args[1])).toEqual(["init", "plan", "show"]);
+    expect(calls[1]).toContain("-lock=false");
+    expect(calls[1]).toContain(`-out=${join(r.dir, "temp", "tofu", "plan.bin")}`);
     // A failed plan prints only the filtered diagnostics.
     const failed = runner();
     failed.phase("prepare", PREPARED);
@@ -1325,30 +1547,127 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
     expect(r2.out).toBe(
       "::error::plan failed (exit 1). Its diagnostics, with names, numbers and addresses left out:\nerror - No access to ... at (masked) \n",
     );
-  });
-
-  test("compare refuses a missing or different list, and apply prints counts and built hosts only", () => {
-    const r = runner();
-    r.phase("prepare", PREPARED);
-    const list =
-      'create linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -0';
-    writeFileSync(join(r.dir, "temp", "tofu", "changes.txt"), `${list}\n`);
-    expect(r.phase("compare", { APPROVED: list })).toEqual({
-      code: 0,
-      out: "The plan equals the approved one.\n",
+    // A plan summary.jq can't read (a provider that changed a schema): jq's own error, which
+    // quotes the start of the value, stays in a private file, and only fixed text prints.
+    const odd = runner();
+    odd.phase("prepare", PREPARED);
+    writeFileSync(join(odd.dir, "temp", "tofu", "plan.bin"), "a saved plan");
+    writeFileSync(
+      join(odd.dir, "stub", "plan.json"),
+      JSON.stringify({
+        resource_changes: [
+          change('linode_database_access_controls.db["primary"]', ["update"], {
+            before: { allow_list: "203.0.113.10/32" },
+            after_unknown: { allow_list: true },
+          }),
+        ],
+      }),
+    );
+    const unread = odd.phase("summarize", {
+      TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+    });
+    expect(unread).toEqual({
+      code: 1,
+      out: "::error::The change list couldn't be built from the saved plan; nothing was applied.\n",
       err: "",
     });
-    expect(r.phase("compare", { APPROVED: "" }).out).toStartWith(
-      "::error::The Plan job's change list didn't arrive",
+    expect(odd.file("temp/tofu/summary.stderr")).toContain("203.0.113.");
+  });
+
+  test("compare checks the fetched plan's digest and changes, and apply applies it, printing counts and built hosts only", () => {
+    // The Apply job: prepare, then the saved plan as the artifact left it, then compare and apply.
+    const r = runner();
+    r.phase("prepare", PREPARED);
+    const saved = "an encrypted saved plan";
+    writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), saved);
+    const digest = new Bun.CryptoHasher("sha256").update(saved).digest("hex");
+    const extra = JSON.parse(EXAMPLE).db_allow_extra as string[];
+    /** The fetched plan as `tofu show -json` reads it, planned with the given values. */
+    const savedPlan = (values: Record<string, unknown>) =>
+      writeFileSync(
+        join(r.dir, "stub", "plan.json"),
+        JSON.stringify({
+          variables: planned(values),
+          resource_changes: [
+            change('linode_instance.host["staging"]', ["create"], {
+              after_unknown: { ipv4: true, ipv6: true },
+            }),
+            change('linode_database_access_controls.db["primary"]', ["update"], {
+              before: { allow_list: extra },
+              after: {},
+              after_unknown: { allow_list: true },
+            }),
+          ],
+        }),
+      );
+    savedPlan(example());
+    const list =
+      'create linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -0';
+    const reviewed = {
+      DIGEST: digest,
+      APPROVED: list,
+      TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+    };
+    expect(r.phase("compare", reviewed)).toEqual({
+      code: 0,
+      out: "The saved plan is the reviewed one.\n",
+      err: "",
+    });
+    // The list is re-derived from the fetched file itself, through tofu show.
+    expect(r.file("temp/tofu/changes.txt")).toBe(`${list}\n`);
+    for (const [what, env, message] of [
+      ["no digest", { DIGEST: "" }, "::error::The Plan job's digest didn't arrive"],
+      ["no list", { APPROVED: "" }, "::error::The Plan job's change list didn't arrive"],
+      [
+        "another file",
+        { DIGEST: "0".repeat(64) },
+        "::error::The saved plan isn't the file the Plan job made",
+      ],
+      [
+        "other changes",
+        { APPROVED: list.replace("+2", "+3") },
+        "::error::The saved plan's changes differ from the ones the Plan job showed",
+      ],
+    ] as const) {
+      const refused = r.phase("compare", { ...reviewed, ...env });
+      expect({ what, code: refused.code, starts: refused.out.startsWith(message) }).toEqual({
+        what,
+        code: 1,
+        starts: true,
+      });
+    }
+    // The saved plan applies the values it was planned with (infra-plan's TOFU_VARS), so they must
+    // be infra's: a key, Configure key or hash set in one copy alone changes no line of the list.
+    const VARS_DIFFER =
+      "::error::TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run.\n";
+    for (const [what, values] of [
+      ["another root key", { ...example(), root_keys: ["ssh-ed25519 AAAAC3Nz other"] }],
+      ["another Configure key", { ...example(), configure_keys: { staging: "ssh-ed25519 x" } }],
+      ["another hash", { ...example(), root_password_hash: "$6$x" }],
+      ["a missing value", { ...example(), cloudflare_zone_id: undefined }],
+    ] as const) {
+      savedPlan(values);
+      expect({ what, ...r.phase("compare", reviewed) }).toEqual({
+        what,
+        code: 1,
+        out: VARS_DIFFER,
+        err: "",
+      });
+    }
+    // A plan whose values can't be read at all is refused the same way.
+    writeFileSync(
+      join(r.dir, "stub", "plan.json"),
+      JSON.stringify({ ...JSON.parse(r.file("stub/plan.json")), variables: undefined }),
     );
-    expect(r.phase("compare", { APPROVED: list.replace("+2", "+3") }).out).toStartWith(
-      "::error::This plan differs from the one approved in the Plan job",
-    );
+    expect(r.phase("compare", reviewed).out).toBe(VARS_DIFFER);
+    savedPlan(example());
+    expect(r.phase("compare", reviewed).code).toBe(0);
     writeFileSync(
       join(r.dir, "stub", "apply.jsonl"),
       `${JSON.stringify({ type: "change_summary", changes: { add: 4, change: 1, import: 0, remove: 0 } })}\n`,
     );
-    const applied = r.phase("apply", { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" });
+    const writeTokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
+    const applied = r.phase("apply", writeTokens);
     expect(applied).toEqual({
       code: 0,
       out: [
@@ -1358,10 +1677,55 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
       ].join("\n"),
       err: "",
     });
-    // Without the tokens, nothing runs.
-    expect(r.phase("apply", STATE).out).toBe(
-      "::error::LINODE_TOKEN and CLOUDFLARE_API_TOKEN must be set in the infra environment.\n",
+    // The apply named the fetched file and nothing that could make it a new plan.
+    const calls = readdirSync(join(r.dir, "stub", "calls")).sort((a, b) => Number(a) - Number(b));
+    const last = readFileSync(join(r.dir, "stub", "calls", calls.at(-1) ?? ""), "utf8");
+    expect(last).toBe(
+      [
+        `-chdir=${root("ops/tofu")}`,
+        "apply",
+        "-input=false",
+        "-json",
+        join(r.dir, "temp", "tofu", "plan.bin"),
+        "",
+      ].join("\n"),
     );
+    // A stale plan: OpenTofu refuses it, and only the filtered diagnostic prints.
+    writeFileSync(join(r.dir, "stub", "exit.apply"), "1");
+    writeFileSync(
+      join(r.dir, "stub", "apply.jsonl"),
+      `${JSON.stringify({ type: "diagnostic", diagnostic: { severity: "error", summary: "Saved plan is stale", detail: "secret" } })}\n`,
+    );
+    expect(r.phase("apply", writeTokens)).toEqual({
+      code: 1,
+      out: "::error::apply failed (exit 1); a stale plan fails here too, so dispatch a new run. Its diagnostics, with names, numbers and addresses left out:\nerror - Saved plan is stale\n",
+      err: "",
+    });
+    // Without the tokens, nothing runs; each message names that job's own secrets.
+    expect(r.phase("apply", STATE).out).toBe(
+      "::error::LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment.\n",
+    );
+    expect(r.phase("plan", STATE).out).toBe(
+      "::error::LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment.\n",
+    );
+    expect(r.phase("init", { TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase }).out).toBe(
+      "::error::The state key must be set: TOFU_STATE_READ_ACCESS_KEY and TOFU_STATE_READ_SECRET_KEY in infra-plan, TOFU_STATE_WRITE_ACCESS_KEY and TOFU_STATE_WRITE_SECRET_KEY in infra.\n",
+    );
+    // The passphrase is the only key to the saved plan, which anyone signed in to GitHub can
+    // download for a day, so init, plan and apply all refuse one shorter than 32 characters.
+    const TOO_SHORT = "::error::TOFU_STATE_PASSPHRASE must be at least 32 characters.\n";
+    const passphrase = (length: number) => ({
+      ...writeTokens,
+      TF_VAR_state_passphrase: "p".repeat(length),
+    });
+    for (const name of ["init", "plan", "apply"])
+      expect({ name, ...r.phase(name, passphrase(31)) }).toEqual({
+        name,
+        code: 1,
+        out: TOO_SHORT,
+        err: "",
+      });
+    expect(r.phase("init", passphrase(32))).toEqual({ code: 0, out: "init ok\n", err: "" });
     expect(r.phase("nothing").code).toBe(1);
   });
 });

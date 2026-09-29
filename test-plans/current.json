@@ -3,7 +3,7 @@
   "objective": "2.36.0 (#62) moves staging onto the simple pipeline: OpenTofu builds the VM, cloud-init sets its keys, Ansible from a GitHub runner configures it and deploys the bot, and GitHub environments hold the secrets. There is no bot change and no migration; production keeps its Compose path.",
   "user": [
     "Before merging: delete STAGING_DEPLOY_ENABLED and staging's old deploy key and variables; retire the old staging host.",
-    "After merging: create the infra environment, run the import-only apply, build staging, pin its host key, then configure and preflight it."
+    "After merging: create the infra-plan and infra environments, run the import-only apply, build staging, pin its host key, then configure and preflight it."
   ],
   "assistant": [
     "Build DevBot at 2.36.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",

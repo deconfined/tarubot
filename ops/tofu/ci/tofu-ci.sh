@@ -2,27 +2,37 @@
 # The steps of .github/workflows/infra.yml ("Infrastructure", 2.36.0, issue #62), one phase per
 # step, so the Plan and Apply jobs run the same code while each step's environment still holds only
 # the secrets its phase needs. ci.yml's "Infrastructure checks" job runs the install phase too.
+# The Plan job fills the state key and the tokens from the `infra-plan` environment's read-only
+# *_READ_* secrets, and the Apply job from `infra`'s *_WRITE_* ones, into the variables OpenTofu
+# reads (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, LINODE_TOKEN and CLOUDFLARE_API_TOKEN).
 #
 #   tofu-ci.sh install     the release in ../.opentofu-version, checked against ../opentofu.sha256
 #                          (copied from that release's signature-verified SHA256SUMS), on GITHUB_PATH
 #   tofu-ci.sh prepare     TOFU_VARS checked silently, every identifying value in it masked before
 #                          anything else prints, then the private working files: the values, the
 #                          backend settings and the replace target (TOFU_VARS, STATE_BUCKET,
-#                          STATE_ENDPOINT, REPLACE)
+#                          STATE_ENDPOINT, and the replace input from the event payload)
 #   tofu-ci.sh init        the backend from backend.hcl and the providers from the lock file
 #                          (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, TF_VAR_state_passphrase)
-#   tofu-ci.sh plan        a saved, encrypted plan (init's three, LINODE_TOKEN, CLOUDFLARE_API_TOKEN)
-#   tofu-ci.sh summarize   the change list to the log, the run summary and the step's outputs, then
-#                          the guards (TF_VAR_state_passphrase, ALLOW_DESTROY, ALLOW_ACCESS_REMOVAL)
-#   tofu-ci.sh compare     Apply only: this plan's change list must equal the approved one (APPROVED)
-#   tofu-ci.sh apply       Apply only: the saved plan (plan's five)
+#   tofu-ci.sh plan        Plan only: a saved, encrypted plan, without a state lock (init's three,
+#                          LINODE_TOKEN, CLOUDFLARE_API_TOKEN)
+#   tofu-ci.sh summarize   Plan only: the change list to the log, the run summary and the step's
+#                          outputs with the saved plan's SHA-256, then the guards
+#                          (TF_VAR_state_passphrase, ALLOW_DESTROY, ALLOW_ACCESS_REMOVAL)
+#   tofu-ci.sh compare     Apply only: the saved plan fetched from the Plan job must match that
+#                          job's SHA-256 and change list, and have been planned with this job's
+#                          TOFU_VARS (DIGEST, APPROVED, TF_VAR_state_passphrase)
+#   tofu-ci.sh apply       Apply only: that saved plan, which OpenTofu refuses if the state changed
+#                          since (plan's five)
 #
 # The repository and its Actions logs are public. So nothing here prints OpenTofu's own output, a
 # host name, an address, an ID or a key: prepare masks every such value inside TOFU_VARS before
 # anything else prints (GitHub masks a secret only where its whole value appears), every tofu
 # command writes to a private file under $RUNNER_TEMP/tofu, and diagnostics print only through
-# diag.jq. The jq programs beside this script (shape, masks, summary, diag, applied) hold the rules;
-# tests/unit/infra.test.ts runs them against sample plans and runs these phases with a stand-in tofu.
+# diag.jq. jq's own errors on plan or apply output go to a private file or nowhere, since they
+# quote the value they failed on. The jq programs beside this script (shape, masks, summary, diag,
+# applied) hold the rules; tests/unit/infra.test.ts runs them against sample plans and runs these
+# phases with a stand-in tofu.
 # Nothing here traces its commands, and the workflow's last step removes $RUNNER_TEMP/tofu.
 set -Eeuo pipefail
 umask 077
@@ -75,14 +85,18 @@ prepare() {
     printf 'use_path_style = false\n'
   } >"$d/backend.hcl"
 
-  # The replace input: exactly one configured host's instance, never echoed back.
-  if [[ -n ${REPLACE-} ]]; then
-    if ! [[ ${REPLACE-} =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] ||
+  # The replace input: exactly one configured host's instance, never echoed back. It is read from
+  # the event payload, not the step's env:, because the runner prints a step's env: values in the
+  # clear before the step runs, so a mistyped host name or address would reach the public log.
+  local replace
+  replace=$(jq -r '.inputs.replace // ""' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "The dispatch's inputs couldn't be read from the event payload."
+  if [[ -n $replace ]]; then
+    if ! [[ $replace =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] ||
       ! jq -e --arg k "${BASH_REMATCH[1]}" '.hosts | has($k)' "$d/values.tfvars.json" >/dev/null; then
       fail "replace must be exactly linode_instance.host[\"<key>\"], naming a host in TOFU_VARS."
     fi
   fi
-  printf '%s' "${REPLACE-}" >"$d/replace"
+  printf '%s' "$replace" >"$d/replace"
 
   # Provider downloads and the backend's settings stay under $d, which the last step removes.
   echo "TF_DATA_DIR=$d/data" >>"$GITHUB_ENV"
@@ -91,15 +105,17 @@ prepare() {
 
 # The state's credentials and passphrase, which init, plan and apply need.
 state_settings() {
-  [[ -n ${AWS_ACCESS_KEY_ID-} && -n ${AWS_SECRET_ACCESS_KEY-} ]] || fail "TOFU_STATE_ACCESS_KEY and TOFU_STATE_SECRET_KEY must be set in the infra environment."
-  # The step's env: sets it under the name OpenTofu reads (var.state_passphrase).
+  [[ -n ${AWS_ACCESS_KEY_ID-} && -n ${AWS_SECRET_ACCESS_KEY-} ]] || fail "The state key must be set: TOFU_STATE_READ_ACCESS_KEY and TOFU_STATE_READ_SECRET_KEY in infra-plan, TOFU_STATE_WRITE_ACCESS_KEY and TOFU_STATE_WRITE_SECRET_KEY in infra."
+  # The step's env: sets it under the name OpenTofu reads (var.state_passphrase). It is the only
+  # key to the saved plan, a one-day artifact anyone signed in to GitHub can download from this
+  # public repository, so it must be long (ops/tofu/variables.tf holds the same minimum).
   local passphrase=${TF_VAR_state_passphrase-}
-  ((${#passphrase} >= 16)) || fail "TOFU_STATE_PASSPHRASE must be at least 16 characters."
+  ((${#passphrase} >= 32)) || fail "TOFU_STATE_PASSPHRASE must be at least 32 characters."
 }
 
-# The provider tokens, which plan and apply need.
+# The provider tokens, which plan and apply need; $1 is the message naming their secrets.
 provider_tokens() {
-  [[ -n ${LINODE_TOKEN-} && -n ${CLOUDFLARE_API_TOKEN-} ]] || fail "LINODE_TOKEN and CLOUDFLARE_API_TOKEN must be set in the infra environment."
+  [[ -n ${LINODE_TOKEN-} && -n ${CLOUDFLARE_API_TOKEN-} ]] || fail "$1"
 }
 
 init() {
@@ -107,32 +123,43 @@ init() {
   # Its output can name the bucket and the endpoint, so it goes to a private file.
   local rc=0
   tofu -chdir="$module" init -input=false -lockfile=readonly -backend-config="$d/backend.hcl" >"$d/init.log" 2>&1 || rc=$?
-  ((rc == 0)) || fail "init failed (exit $rc): check the infra environment's TOFU_STATE_* secrets (a wrong passphrase fails here too)."
+  ((rc == 0)) || fail "init failed (exit $rc): check the environment's TOFU_STATE_* secrets (a wrong passphrase fails here too)."
   echo "init ok"
 }
 
 plan() {
   state_settings
-  provider_tokens
+  provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."
   local args replace rc=0
-  args=(-chdir="$module" plan -input=false -json -var-file="$d/values.tfvars.json" -out="$d/plan.bin")
+  # The Plan job's state key is read-only, so the plan takes no state lock (-lock=false). The
+  # backend configures none today (no use_lockfile); this keeps a later one from making Plan
+  # write. The concurrency group still serializes runs.
+  args=(-chdir="$module" plan -input=false -lock=false -json -var-file="$d/values.tfvars.json" -out="$d/plan.bin")
   replace=$(<"$d/replace")
   if [[ -n $replace ]]; then args+=("-replace=$replace"); fi
   # OpenTofu's JSON messages go to a private file; on a failure only the filtered diagnostics print.
   tofu "${args[@]}" >"$d/plan.jsonl" 2>"$d/plan.stderr" || rc=$?
   if ((rc != 0)); then
     echo "::error::plan failed (exit $rc). Its diagnostics, with names, numbers and addresses left out:"
-    jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/plan.jsonl" || true
+    jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/plan.jsonl" 2>/dev/null || true
     exit 1
   fi
   echo "plan ok"
 }
 
-summarize() {
-  local rc=0 has_changes delimiter refuse=0 action address counts
+# The saved plan's change list, from `tofu show -json` through summary.jq, into $d/changes.txt.
+changes() {
+  local rc=0
   tofu -chdir="$module" show -json "$d/plan.bin" >"$d/plan.json" 2>"$d/show.stderr" || rc=$?
-  ((rc == 0)) || fail "show failed (exit $rc)"
-  jq -r --slurpfile vars "$d/values.tfvars.json" -f "$here/summary.jq" "$d/plan.json" >"$d/changes.txt"
+  ((rc == 0)) || fail "show failed (exit $rc): a TOFU_STATE_PASSPHRASE other than the one that made the plan fails here too."
+  # jq's own errors quote the value they failed on, so they go to a private file.
+  jq -r --slurpfile vars "$d/values.tfvars.json" -f "$here/summary.jq" "$d/plan.json" >"$d/changes.txt" 2>"$d/summary.stderr" ||
+    fail "The change list couldn't be built from the saved plan; nothing was applied."
+}
+
+summarize() {
+  local has_changes delimiter digest refuse=0 action address counts
+  changes
   if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
 
   {
@@ -155,14 +182,16 @@ summarize() {
     echo "No changes."
   fi
 
-  # The Apply job compares its own list with this one, so it goes out whole, under a random
-  # delimiter no change line can hold.
+  # The Apply job checks the saved plan it fetches against this list and the plan's SHA-256, so
+  # the list goes out whole, under a random delimiter no change line can hold.
   delimiter="changes_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
   {
     echo "changes<<$delimiter"
     cat -- "$d/changes.txt"
     echo "$delimiter"
     echo "has_changes=$has_changes"
+    echo "digest=$digest"
   } >>"$GITHUB_OUTPUT"
 
   # The guards: a change this can't name is never applied; a delete or replace needs
@@ -183,28 +212,40 @@ summarize() {
 }
 
 compare() {
-  # Apply applies only what was approved: this job's own saved plan, and only when its change
-  # list equals the one the Plan job showed. GitHub drops a job output that looks like a secret,
-  # so an empty approved list is refused rather than taken as "no changes".
-  [[ -n ${APPROVED-} ]] || fail "The Plan job's change list didn't arrive, so there is nothing approved to compare with; dispatch a new run."
-  local current
+  # Apply applies only what was reviewed: the Plan job's saved plan, byte for byte, and only when
+  # its change list is the one the Plan job showed. GitHub drops a job output that looks like a
+  # secret, so a missing digest or an empty list is refused rather than taken as "no changes".
+  [[ ${DIGEST-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's digest didn't arrive, so there is nothing reviewed to compare with; dispatch a new run."
+  [[ -n ${APPROVED-} ]] || fail "The Plan job's change list didn't arrive, so there is nothing reviewed to compare with; dispatch a new run."
+  [[ -f $d/plan.bin ]] || fail "The saved plan didn't arrive (the artifact is kept one day); dispatch a new run."
+  local digest current
+  digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
+  [[ $digest == "${DIGEST-}" ]] || fail "The saved plan isn't the file the Plan job made; nothing was applied. Dispatch a new run."
+  changes
   current=$(<"$d/changes.txt")
-  [[ $current == "${APPROVED-}" ]] || fail "This plan differs from the one approved in the Plan job; nothing was applied. Dispatch a new run."
-  echo "The plan equals the approved one."
+  [[ $current == "${APPROVED-}" ]] || fail "The saved plan's changes differ from the ones the Plan job showed; nothing was applied. Dispatch a new run."
+  # The saved plan carries the values it was planned with, infra-plan's TOFU_VARS, and applies
+  # those; this job masked and listed the changes with infra's copy. The change list reads only
+  # hosts and db_allow_extra, so a key or hash set in one copy alone would otherwise pass unseen.
+  jq -e --slurpfile v "$d/values.tfvars.json" '(.variables | map_values(.value) | del(.state_passphrase)) == $v[0]' "$d/plan.json" >/dev/null 2>&1 ||
+    fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
+  echo "The saved plan is the reviewed one."
 }
 
 apply() {
   state_settings
-  provider_tokens
+  provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."
   local rc=0 action address line
+  # The saved plan alone, with no option that could change it: OpenTofu applies exactly what it
+  # holds, and refuses it as "Saved plan is stale" if the state changed since the Plan job read it.
   # Prints only the apply's counts, the filtered diagnostics on a failure, and one line per host
   # built or rebuilt: no key, name, address or ID. The owner then pins the new host's key from
   # their own machine.
   tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?
-  jq -rR -f "$here/applied.jq" "$d/apply.jsonl" || true
+  jq -rR -f "$here/applied.jq" "$d/apply.jsonl" 2>/dev/null || true
   if ((rc != 0)); then
-    echo "::error::apply failed (exit $rc). Its diagnostics, with names, numbers and addresses left out:"
-    jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/apply.jsonl" || true
+    echo "::error::apply failed (exit $rc); a stale plan fails here too, so dispatch a new run. Its diagnostics, with names, numbers and addresses left out:"
+    jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/apply.jsonl" 2>/dev/null || true
     exit 1
   fi
   while read -r action address _; do

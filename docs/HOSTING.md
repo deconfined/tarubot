@@ -492,10 +492,10 @@ Four layers, each with one owner:
 
 | Layer | What it does | Where |
 | --- | --- | --- |
-| OpenTofu | Builds the Linode (disk encryption), its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list. | `ops/tofu/`, planned and applied by `.github/workflows/infra.yml` in the `infra` environment after @deconfined's approval ([Infrastructure](#infrastructure-opentofu)) |
+| OpenTofu | Builds the Linode (disk encryption), its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list. | `ops/tofu/`, planned by `.github/workflows/infra.yml` in the read-only `infra-plan` environment and applied in `infra` after @deconfined's approval ([Infrastructure](#infrastructure-opentofu)) |
 | cloud-init | At first boot only: the hostname, root's public keys, root's optional console password hash (locked without one), password SSH off, `python3-libselinux`, and a one-line sshd drop-in that enforces `verify-required`. | `ops/tofu/cloud-init.yaml.tftpl`, rendered into the Linode's user data |
 | Ansible | **Configure:** `ops/ansible/site.yml` from `main`'s head, as root. **Bot:** the release's own `ops/ansible/bot.yml`, which deploys the bot as the `tarubot` user. | `.github/workflows/host.yml`, on a GitHub-hosted runner over SSH |
-| GitHub environments | Every secret and every approval. | `staging`, `production`, `infra` and `notify` |
+| GitHub environments | Every secret and every approval. | `staging`, `production`, `infra-plan`, `infra` and `notify` |
 
 ```
 merge to main ─► Publish containers (build, push, sign provenance)
@@ -531,12 +531,12 @@ Nothing on a host pulls, polls or judges releases. systemd starts the bot and ru
 
 ### Infrastructure (OpenTofu)
 
-[ops/tofu/README.md](../ops/tofu/README.md) is the runbook: what the module builds, the `infra` environment and its `TOFU_VARS`, the first apply, rebuilds, hand runs and upgrades. In short:
+[ops/tofu/README.md](../ops/tofu/README.md) is the runbook: what the module builds, the `infra-plan` and `infra` environments and `TOFU_VARS`, the first apply, rebuilds, hand runs and upgrades. In short:
 
 - **What it builds.** For each entry in `hosts` (keyed `staging` or `production`), a Linode on `linode/almalinux10` with disk encryption, its Cloud Firewall (inbound SSH and ICMP from anywhere, everything else dropped) and unproxied A and AAAA records. For each database cluster, the cluster's whole access list: every host's IPv6 `/128` and IPv4 `/32`, then `db_allow_extra`, with `prevent_destroy`. It never builds host keys, SSHFP records or the clusters themselves.
-- **Two dispatches, three approvals.** Dispatch **Infrastructure** from `main` with `operation=plan` and approve its Plan job. The summary lists each change as `ACTION ADDRESS`, with `+N -M` on access lists. If that is what you meant, dispatch `operation=apply` and approve Plan, then Apply. Apply plans again and refuses unless its change list equals the approved one. A delete or replace needs `allow_destroy`, and an access-list removal `allow_access_removal`.
+- **One dispatch, one approval** (REQUIREMENTS.md, confirmed item 4). Dispatch **Infrastructure** from `main` with `operation=apply`. Its Plan job runs in `infra-plan`, with read-only tokens, a read-only state key and no approval; its summary lists each change as `ACTION ADDRESS`, with `+N -M` on access lists. If that is what you meant, approve the Apply job in `infra`; if not, reject it. Apply never plans: it fetches the Plan job's saved plan (a one-day artifact, encrypted by OpenTofu), refuses unless its SHA-256 and change list are the Plan job's and it was planned with `infra`'s own `TOFU_VARS`, and applies exactly that plan, which OpenTofu refuses as stale if the state changed since. `operation=plan` stops after the Plan job. A delete or replace needs `allow_destroy`, and an access-list removal `allow_access_removal`.
 - **After any apply that touches an access list,** check production's readiness: the heartbeat check and `/sync status`.
-- **State** lives in a private Object Storage bucket, encrypted by OpenTofu with a passphrase only the `infra` environment and @deconfined hold. There is no state lock, so a hand run must never overlap a workflow run.
+- **State** lives in a private Object Storage bucket, encrypted by OpenTofu with a passphrase only the `infra-plan` and `infra` environments and @deconfined hold; the same passphrase encrypts the saved plan, which anyone signed in to GitHub can download from the public repository while its artifact is kept. There is no state lock, so a hand run must never overlap a workflow run; the Plan job plans with `-lock=false`, since its state key is read-only.
 - **User data applies only when a Linode is created.** A new root key, Configure key or hash reaches a host only through a rebuild ([Rebuilding staging](#rebuilding-staging)).
 
 **Pinning a new host key (trust on first use).** Nothing prints a host's key: scanners index host keys by address. After every build or rebuild, @deconfined pins it from their own machine, once the name resolves to the new addresses:
@@ -686,7 +686,7 @@ tarubot-tool [--image ghcr.io/deconfined/tarubot@sha256:<digest>] TOOL.js [ARG..
 ### Rebuilding staging
 
 For a lost, broken or outdated host, or a new key or root hash:
-1. Dispatch **Infrastructure** `operation=apply` with `replace=linode_instance.host["staging"]`, `allow_destroy` and `allow_access_removal`. The plan shows the instance's `replace`, updates of its two records and `+2 -2` on the access list, since the old addresses leave it. Approve Plan and Apply, then check production's readiness.
+1. Dispatch **Infrastructure** `operation=apply` with `replace=linode_instance.host["staging"]`, `allow_destroy` and `allow_access_removal`. The Plan job shows the instance's `replace`, updates of its two records and `+2 -2` on the access list, since the old addresses leave it. Approve the Apply job, then check production's readiness.
 2. [Pin the new host's key](#infrastructure-opentofu) once its name resolves to the new addresses.
 3. Dispatch **Deploy** `target=staging`, `action=configure`: the first Configure upgrades the host and reboots it. Dispatch it again: its PLAY RECAP must show `changed=0`.
 4. Dispatch `action=deploy` with the live version. Its secrets are already in the environment, and `migrate.js` finds nothing pending on the database, which the rebuild didn't touch. Before the DevBot move a `deploy` ends `configured`; a `preflight` proves the database and backup instead.
@@ -731,10 +731,10 @@ In this order, each @deconfined's. Agents never create or change an environment,
 3. **Review the 2.36.0 pull request.** It changes what runs as root on staging and adds `infra.yml`. Merge it with a merge commit. Production's Deploy run then asks you to approve a restart of about 7 seconds onto 2.36.0 through the unchanged Compose path, with no bot change: approve it or leave it. Its **Deploy staging** job ends green with "no host in the staging environment".
 4. **The Protect Main ruleset:** require review from code owners, 1 approval, and dismissal of stale approvals on push. Keep signed commits, merge commits only, `CI result` and the CodeQL gate. If you ever author a pull request yourself, add yourself as a bypass actor in "pull requests only" mode, since GitHub never counts an author's own approval. In the repository's Actions settings, turn off "Allow GitHub Actions to create and approve pull requests".
 5. **On your own machine, prepare:**
-   - a private Object Storage bucket for OpenTofu's state, and an access key limited to it;
-   - a Linode personal access token with an expiry (the scopes are in `ops/tofu/README.md`);
-   - a Cloudflare API token with DNS edit on the one zone;
-   - a state passphrase of 32 or more random characters, kept in your password manager;
+   - a private Object Storage bucket for OpenTofu's state, and two access keys limited to it: one read-only (for `infra-plan`) and one read/write (for `infra`);
+   - two Linode personal access tokens with an expiry: one with Linodes, Firewalls, Databases and Events all read-only (for `infra-plan`), and one with Linodes, Firewalls and Databases read/write and Events read-only (for `infra`). Give the read-only one a short expiry, such as 90 days, and renew it when it lapses: Databases read-only also shows each cluster's admin user and password, and no narrower scope exists, so it is as sensitive as the database's admin password and runs without an approval (a risk you accepted on 2026-09-29; REQUIREMENTS.md "Accepted risks");
+   - two Cloudflare API tokens on the one zone: one with Zone Read and DNS Read (for `infra-plan`), and one with DNS edit (for `infra`);
+   - a state passphrase of 32 or more random characters, kept in your password manager. The workflow and the module refuse a shorter one: it is all that protects the saved plan, which anyone signed in to GitHub can download for a day;
    - staging's Configure key pair, made in memory with no passphrase (ssh runs in batch mode and could never unlock one), its private half straight into the `staging` environment, and only its public half printed, for step 6:
 
      ```sh
@@ -744,15 +744,19 @@ In this order, each @deconfined's. Agents never create or change an environment,
 
      Until `TARGET_HOST` exists, runs end `no-host` before they read the key;
    - optionally, root's console password hash: `mkpasswd -m yescrypt`, or `openssl passwd -6`.
-6. **The `infra` environment:** required reviewer @deconfined with self-review allowed, administrators can't bypass it, deployment branches `main` only. Its secrets: `LINODE_TOKEN`, `CLOUDFLARE_API_TOKEN`, `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_ACCESS_KEY`, `TOFU_STATE_SECRET_KEY`, `TOFU_STATE_PASSPHRASE`, and `TOFU_VARS` ([ops/tofu/README.md](../ops/tofu/README.md#tofu_vars)) with:
-   - `hosts` = `{}`;
-   - `database_ids` = `{"primary": <id>}`;
-   - `db_allow_extra` = exactly the access list Cloud Manager shows now, in its CIDR form, including the production Compose host's IPv4 and IPv6;
-   - `root_keys` = your FIDO2 line (with `verify-required`) and an optional operator key;
-   - `configure_keys.staging` = the Configure key's public half;
-   - `root_password_hash` and `cloudflare_zone_id`.
-7. **The first apply, import only.** Dispatch **Infrastructure** with `operation=plan` and approve Plan. Its summary must show only `import linode_database_access_controls.db["primary"] +0 -0`; anything else means a value is wrong, so fix `TOFU_VARS` and never apply. Then dispatch `operation=apply` and approve Plan and Apply.
-8. **Build staging.** Add the `staging` entry to `TOFU_VARS`' `hosts` (role `staging`; the label is the Linode's display name, so leave the domain out of it). Dispatch a plan: expect creates for the firewall, the instance and the A and AAAA records, and one access-list update that only adds entries (`+2 -0`). Dispatch the apply and approve both jobs. Then check production's readiness: the heartbeat, and `/sync status`.
+6. **The `infra-plan` and `infra` environments** ([ops/tofu/README.md](../ops/tofu/README.md#the-infra-plan-and-infra-environments)), in Settings → Environments, both with deployment branches "Selected branches and tags" and the one branch rule `main`, and no wait timer. A new environment starts with no branch rule, and `infra-plan`'s is the only thing between another branch's code and its secrets:
+   - **`infra-plan`:** no required reviewers, so a plan never waits. Its secrets: `LINODE_READ_TOKEN`, `CLOUDFLARE_READ_TOKEN`, `TOFU_STATE_READ_ACCESS_KEY` and `TOFU_STATE_READ_SECRET_KEY` (the read-only ones from step 5), and the four shared ones below.
+   - **`infra`:** required reviewer `deconfined` only; "Prevent self-review" **off**; "Allow administrators to bypass configured protection rules" **off**. Its secrets: `LINODE_WRITE_TOKEN`, `CLOUDFLARE_WRITE_TOKEN`, `TOFU_STATE_WRITE_ACCESS_KEY` and `TOFU_STATE_WRITE_SECRET_KEY` (the write ones), and the four shared ones below.
+   - **In both, with exactly the same values:** `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_PASSPHRASE`, and `TOFU_VARS` ([ops/tofu/README.md](../ops/tofu/README.md#tofu_vars)). The saved plan records `infra-plan`'s bucket and endpoint, and the apply writes the new state there, so `infra`'s read/write key must be for that same bucket; Apply decrypts with its own passphrase, and refuses a plan made with a `TOFU_VARS` other than its own. `TOFU_VARS` holds:
+     - `hosts` = `{}`;
+     - `database_ids` = `{"primary": <id>}`;
+     - `db_allow_extra` = exactly the access list Cloud Manager shows now, in its CIDR form, including the production Compose host's IPv4 and IPv6;
+     - `root_keys` = your FIDO2 line (with `verify-required`) and an optional operator key;
+     - `configure_keys.staging` = the Configure key's public half;
+     - `root_password_hash` and `cloudflare_zone_id`.
+   - **Then read both back once,** before the first dispatch, and again after any change to either. For each of `infra-plan` and `infra`, `gh api repos/deconfined/tarubot/environments/<name> --jq .deployment_branch_policy` must show `protected_branches` false and `custom_branch_policies` true, and `gh api repos/deconfined/tarubot/environments/<name>/deployment-branch-policies --jq '[.branch_policies[] | {name, type}]'` exactly one entry, `main` of type `branch`. For `infra`, `gh api repos/deconfined/tarubot/environments/infra --jq '{can_admins_bypass, rules: [.protection_rules[] | select(.type == "required_reviewers") | {prevent_self_review, reviewers: [.reviewers[] | .type + " " + .reviewer.login]}]}'` must show `can_admins_bypass` false and one rule, `prevent_self_review` false, with the one reviewer `User deconfined`. No run checks these settings again: like the ruleset, they are yours to keep right (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)").
+7. **The first apply, import only.** Dispatch **Infrastructure** with `operation=apply`. The Plan job runs without an approval, and its summary must show only `import linode_database_access_controls.db["primary"] +0 -0`; anything else means a value is wrong, so reject the Apply job, fix `TOFU_VARS` in both environments and dispatch again. Approve the Apply job only for exactly that line.
+8. **Build staging.** Add the `staging` entry to `TOFU_VARS`' `hosts` in both environments (role `staging`; the label is the Linode's display name, so leave the domain out of it). Dispatch `operation=apply`: the Plan job must show creates for the firewall, the instance and the A and AAAA records, and one access-list update that only adds entries (`+2 -0`). Approve the Apply job. Then check production's readiness: the heartbeat, and `/sync status`.
 9. **Pin the new host's key** from your own machine ([above](#infrastructure-opentofu)), then set `TARGET_HOST` (the DNS name) in the `staging` environment (`ANSIBLE_SSH_KEY` went in at step 5).
 10. **Configure it:** dispatch **Deploy** with `target=staging`, `action=configure` and `version=2.36.0`. The first run upgrades the host and reboots it. Dispatch it again: its PLAY RECAP (host `target`) must show `changed=0`.
 11. **Staging's values** in the `staging` environment, all new and staging-only: `DATABASE_URL` (`tarubot_staging`, its password percent-encoded) and `DATABASE_CA_CERT`; `REPORTS_GITHUB_TOKEN` (the reports token, which the bot reads as `GITHUB_REPORTS_TOKEN`: GitHub refuses a secret name that starts with `GITHUB_`) and `HEALTHCHECKS_PING_URL`; `BACKUP_STORAGE_ENDPOINT`, `BACKUP_STORAGE_REGION`, `BACKUP_STORAGE_ACCESS_KEY` and `BACKUP_STORAGE_SECRET_KEY` with a new key pair; and `HEALTHCHECKS_BACKUP_URL` with a new check. Single-line values carry no stray spaces or newlines. Leave `DISCORD_TOKEN` unset until the DevBot move. Then dispatch `target=staging`, `action=preflight`, `version=2.36.0`: it must end `preflight-ok`. It also enables the nightly backup, so the new backup check keeps getting pings from here on.

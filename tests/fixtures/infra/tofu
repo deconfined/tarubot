@@ -2,8 +2,9 @@
 # A stand-in for OpenTofu in tests/unit/infra.test.ts, which runs ops/tofu/ci/tofu-ci.sh's phases.
 # It records each call's arguments (one a line) in $STUB/calls/<n>, then answers the subcommand
 # that follows -chdir=...: `show -json` prints $STUB/plan.json, `plan` and `apply` print
-# $STUB/<subcommand>.jsonl (OpenTofu's JSON messages), and `init` prints a line. Each exits with
-# $STUB/exit.<subcommand>, 0 when there is none.
+# $STUB/<subcommand>.jsonl (OpenTofu's JSON messages), `plan` also writes a stand-in saved plan to
+# its -out= file, and `init` prints a line. Each exits with $STUB/exit.<subcommand>, 0 when there
+# is none.
 set -euo pipefail
 mkdir -p "$STUB/calls"
 n=$(($(find "$STUB/calls" -type f | wc -l) + 1))
@@ -12,7 +13,14 @@ printf '%s\n' "$@" >"$STUB/calls/$n"
 sub=${2-}
 case $sub in
   show) cat -- "$STUB/plan.json" ;;
-  plan | apply) if [[ -f $STUB/$sub.jsonl ]]; then cat -- "$STUB/$sub.jsonl"; fi ;;
+  plan | apply)
+    if [[ $sub == plan ]]; then
+      for a in "$@"; do
+        if [[ $a == -out=* ]]; then printf 'a stand-in saved plan, call %s\n' "$n" >"${a#-out=}"; fi
+      done
+    fi
+    if [[ -f $STUB/$sub.jsonl ]]; then cat -- "$STUB/$sub.jsonl"; fi
+    ;;
   init) echo "OpenTofu has been successfully initialized!" ;;
   *) exit 64 ;;
 esac

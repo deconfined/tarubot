@@ -1011,7 +1011,8 @@ describe("the other workflows", () => {
     ],
     [
       "infra.yml",
-      /environment:\s*infra\b|secrets\.(?:LINODE_TOKEN|CLOUDFLARE_API_TOKEN|TOFU_[A-Z_]+)\b/u,
+      // infra-plan's and infra's: the *_READ_* and *_WRITE_* tokens, and the TOFU_* settings.
+      /environment:\s*infra(?:-plan)?\b|secrets\.(?:LINODE_[A-Z_]*TOKEN|CLOUDFLARE_[A-Z_]*TOKEN|TOFU_[A-Z_]+)\b/u,
     ],
   ];
 
@@ -1101,7 +1102,7 @@ describe("CI's guards", () => {
     );
     expect(infra?.environment).toBeUndefined();
     expect(JSON.stringify(infra)).not.toMatch(/\$\{\{\s*(?:secrets|vars)\./u);
-    expect(infra?.env).toEqual({ TF_VAR_state_passphrase: "ci-only-throwaway-passphrase" });
+    expect(infra?.env).toEqual({ TF_VAR_state_passphrase: "ci-only-throwaway-state-passphrase" });
     // The cloud-init image is pinned by its index digest.
     expect(JSON.stringify(infra)).toMatch(/almalinux:10@sha256:[0-9a-f]{64}/u);
     expect(ci.jobs.result?.needs).toEqual(["checks", "images", "playbook", "infrastructure"]);

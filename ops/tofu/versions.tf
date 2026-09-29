@@ -2,8 +2,9 @@
 # backend and state encryption. What the module builds is in main.tf; README.md says how it runs.
 #
 # The real values never live in the repository. .github/workflows/infra.yml passes them from the
-# `infra` GitHub environment: TOFU_VARS as a -var-file, the backend's bucket and endpoint as a
-# -backend-config file, and the state passphrase as TF_VAR_state_passphrase.
+# `infra-plan` (Plan) and `infra` (Apply) GitHub environments: TOFU_VARS as a -var-file, the
+# backend's bucket and endpoint as a -backend-config file, and the state passphrase as
+# TF_VAR_state_passphrase.
 terraform {
   # ops/tofu/.opentofu-version names the release CI and infra.yml install; it must satisfy this
   # (tests/unit/infra.test.ts checks). 1.12 is the release this module was written and tested on.
@@ -28,8 +29,8 @@ terraform {
   # the bucket, `endpoints = { s3 = "<the bucket's cluster endpoint>" }` and use_path_style come
   # from the -backend-config file infra.yml writes (backend.hcl; README.md has its form), so no
   # bucket or endpoint is named here. use_path_style is false for Linode, and true for a lab's
-  # local S3. The credentials are AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, filled from the
-  # infra environment's state keys.
+  # local S3. The credentials are AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, filled from
+  # infra-plan's read-only state key in the Plan job and infra's read/write one in the Apply job.
   backend "s3" {
     key = "tarubot/infra.tfstate"
     # Linode Object Storage accepts any SigV4 region; the endpoint picks the cluster.
@@ -41,12 +42,15 @@ terraform {
     skip_metadata_api_check     = true
     skip_s3_checksum            = true
     # No use_lockfile: Linode's conditional writes are unverified. The `infra` concurrency group
-    # in infra.yml serializes runs, and a hand run must never overlap one.
+    # in infra.yml serializes runs, and a hand run must never overlap one. The Plan job also plans
+    # with -lock=false, since its state key is read-only.
   }
 
   # Native state encryption. State holds the database access lists, the hosts' addresses and
   # root's optional password hash, so it is written only encrypted, and so is a saved plan
-  # (enforced = true refuses to read or write either in plain text).
+  # (enforced = true refuses to read or write either in plain text). The saved plan also travels
+  # from infra.yml's Plan job to its Apply job as a one-day artifact, which anyone signed in to
+  # GitHub can download from this public repository, so this is what protects it there.
   encryption {
     key_provider "pbkdf2" "state" {
       passphrase = var.state_passphrase
@@ -66,7 +70,8 @@ terraform {
 }
 
 # Credentials come from the environment only: LINODE_TOKEN and CLOUDFLARE_API_TOKEN, which
-# infra.yml sets on its Plan and Apply steps from the `infra` environment's secrets.
+# infra.yml sets on its Plan step from infra-plan's read-only tokens and on its Apply step from
+# infra's write tokens.
 provider "linode" {}
 
 provider "cloudflare" {}

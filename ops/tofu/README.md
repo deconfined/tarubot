@@ -1,6 +1,6 @@
 # OpenTofu: TaruBot's hosts
 
-This module builds the provider side of TaruBot's hosts (2.36.0, issue #62). `.github/workflows/infra.yml` plans and applies it from GitHub Actions, after @deconfined approves each job in the `infra` environment. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)".
+This module builds the provider side of TaruBot's hosts (2.36.0, issue #62). `.github/workflows/infra.yml` plans and applies it from GitHub Actions: its Plan job runs in the `infra-plan` environment with read-only credentials and no approval, and its Apply job runs in `infra`, after @deconfined approves it. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)" (the environments are its confirmed item 4).
 
 The four layers each have one owner:
 - **OpenTofu** (this module) builds the VM, its firewall, its DNS records and the database access lists.
@@ -32,26 +32,40 @@ It never builds:
 
 User data takes effect only when a Linode is created (`ignore_changes = [metadata]`). Changing the template, a key or the hash never plans a rebuild; a [rebuild](#rebuilding-a-host) is always deliberate.
 
-## The `infra` environment
+## The `infra-plan` and `infra` environments
 
-@deconfined creates it and fills it; agents never read, set or change it. It has a required reviewer (@deconfined, self-review allowed), admins can't bypass it, and it accepts deployments from `main` only.
+@deconfined creates both and fills them; agents never read, set or change them. Both accept deployments from `main` only: deployment branches "Selected branches and tags", with the one branch rule `main`.
+- **`infra-plan`** has no required reviewer, so a plan runs without an approval. It holds read-only credentials only.
+- **`infra`** has a required reviewer (@deconfined, self-review allowed), and admins can't bypass it. It holds the write credentials.
 
-| Secret | What it holds |
-|---|---|
-| `LINODE_TOKEN` | A Linode personal access token with an expiry: Linodes, Firewalls and Databases read/write, and Events read-only (the provider waits on events). |
-| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token with DNS edit on the one zone. |
-| `TOFU_STATE_BUCKET` | The private Object Storage bucket for the state. |
-| `TOFU_STATE_ENDPOINT` | `https://<region>.linodeobjects.com`, the bucket's cluster. |
-| `TOFU_STATE_ACCESS_KEY`, `TOFU_STATE_SECRET_KEY` | An Object Storage key limited to that bucket, read/write. |
-| `TOFU_STATE_PASSPHRASE` | At least 16 characters (32 or more random ones recommended), kept in the owner's password manager. State and saved plans are encrypted with a key derived from it; without it the state can't be read. |
-| `TOFU_VARS` | The module's values, one JSON document (below). |
+`infra-plan`'s branch rule is the only thing between another ref's code and its secrets, and GitHub leaves it off by default: an environment made in the UI starts with no branch rule, and one a workflow creates by naming it (a typo) has no rules at all. No run checks the rules: they are @deconfined's own settings, which they read back once when they make the environments ([docs/HOSTING.md](../docs/HOSTING.md#owner-steps-for-2360), step 6) and again after any change to either (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)").
+
+| Secret | Environment | What it holds |
+|---|---|---|
+| `LINODE_READ_TOKEN` | `infra-plan` | A Linode personal access token with a short expiry, such as 90 days: Linodes, Firewalls, Databases and Events, each read-only. Databases read-only also shows each cluster's admin user and password, and no narrower scope exists, so this token is as sensitive as the database's admin password, and it runs without an approval (a risk @deconfined accepted on 2026-09-29; REQUIREMENTS.md "Accepted risks"). |
+| `CLOUDFLARE_READ_TOKEN` | `infra-plan` | A Cloudflare API token with Zone Read and DNS Read on the one zone. |
+| `TOFU_STATE_READ_ACCESS_KEY`, `TOFU_STATE_READ_SECRET_KEY` | `infra-plan` | An Object Storage key limited to the state bucket, read-only. |
+| `LINODE_WRITE_TOKEN` | `infra` | A Linode personal access token with an expiry: Linodes, Firewalls and Databases read/write, and Events read-only (the provider waits on events). |
+| `CLOUDFLARE_WRITE_TOKEN` | `infra` | A Cloudflare API token with DNS edit on the one zone. |
+| `TOFU_STATE_WRITE_ACCESS_KEY`, `TOFU_STATE_WRITE_SECRET_KEY` | `infra` | An Object Storage key limited to the state bucket, read/write. |
+| `TOFU_STATE_BUCKET` | both | The private Object Storage bucket for the state. |
+| `TOFU_STATE_ENDPOINT` | both | `https://<region>.linodeobjects.com`, the bucket's cluster. |
+| `TOFU_STATE_PASSPHRASE` | both | At least 32 characters, random, kept in the owner's password manager; the workflow and the module refuse a shorter one. State and saved plans are encrypted with a key derived from it, and the saved plan is a public artifact for a day, so the passphrase is all that protects it. Without it the state can't be read. |
+| `TOFU_VARS` | both | The module's values, one JSON document (below). |
+
+The four secrets marked "both" must hold the same value in each environment:
+- **The bucket and endpoint.** The saved plan records the Plan job's bucket and endpoint, and OpenTofu writes the new state there; `infra`'s own copies serve only its `init`. So `infra`'s read/write key must be for that same bucket, and `TOFU_STATE_BUCKET` and `TOFU_STATE_ENDPOINT` must match exactly, or the apply changes the resources and then fails to write the state.
+- **The passphrase.** Apply decrypts the saved plan with its own copy.
+- **`TOFU_VARS`.** The saved plan applies the values it was planned with, `infra-plan`'s. Apply masks with its own copy and refuses to go on when the two differ, since a key or hash set in one copy alone changes no line of the change list.
+
+The `_READ_` and `_WRITE_` names keep each job to its own kind: the Plan job reads only `_READ_` secrets and the Apply job only `_WRITE_` ones (`tests/unit/infra.test.ts` checks).
 
 ### `TOFU_VARS`
 
-One JSON object with exactly these seven keys. `examples/example.tfvars.json` shows the shape with placeholders. Store it compact, on one line, so GitHub masks it as one value:
+One JSON object with exactly these seven keys. `examples/example.tfvars.json` shows the shape with placeholders. Store it compact, on one line, so GitHub masks it as one value, in both environments:
 
 ```sh
-jq -c . values.json | gh secret set TOFU_VARS --env infra
+for e in infra-plan infra; do jq -c . values.json | gh secret set TOFU_VARS --env "$e"; done
 ```
 
 | Key | Value |
@@ -71,14 +85,18 @@ Rules that keep the public log clean:
 
 The workflow masks every `fqdn`, the zone ID, each `db_allow_extra` entry and its bare address, the hash, and each key's base64 field before anything else prints. Database IDs are never printed.
 
-Each of the workflow's steps runs one phase of `ci/tofu-ci.sh` (install, prepare, init, plan, summarize, and for Apply compare and apply), and the rules it applies live in the jq programs beside it: `shape.jq` (the value's shape), `masks.jq` (what is masked), `summary.jq` (the change list), `diag.jq` (the diagnostics filter) and `applied.jq` (the apply's counts). Both jobs run the same code, and each step's environment holds only the secrets its phase needs.
+Each of the workflow's steps runs one phase of `ci/tofu-ci.sh` (install, prepare and init in Plan and Apply; plan and summarize in Plan; compare and apply in Apply), and the rules it applies live in the jq programs beside it: `shape.jq` (the value's shape), `masks.jq` (what is masked), `summary.jq` (the change list), `diag.jq` (the diagnostics filter) and `applied.jq` (the apply's counts). Plan and Apply run the same code, and each step's environment holds only the secrets its phase needs.
 
 ## Operating it
 
-Every change is two dispatches of **Infrastructure** from `main`:
+Every change is one dispatch of **Infrastructure** from `main` and one approval:
 
-1. `operation=plan`. Approve the Plan job. Its summary lists each change as `ACTION ADDRESS`, with `+N -M` (entries added and removed) on each access list. Read it.
-2. `operation=apply`, if the plan was what you meant. Approve the Plan job, then the Apply job. Apply plans again and refuses unless its change list equals the one you approved. It then applies and prints only the counts, plus one line per host it built.
+1. `operation=apply`. The Plan job runs at once, with no approval. Its summary lists each change as `ACTION ADDRESS`, with `+N -M` (entries added and removed) on each access list. Read it.
+2. If the plan is what you meant, approve the Apply job; if not, reject it. Apply never plans: it fetches the Plan job's saved plan, refuses unless the file's SHA-256 and change list are the ones the Plan job produced and the plan was made with `infra`'s own `TOFU_VARS`, and applies exactly that plan. OpenTofu refuses it as "Saved plan is stale" if the state changed since the Plan job read it. It prints only the counts, plus one line per host it built.
+
+`operation=plan` stops after the Plan job, to look without an apply waiting.
+
+The saved plan travels from Plan to Apply as a workflow artifact kept for one day, so approve within the day or dispatch again. The repository is public, so anyone signed in to GitHub can download that artifact while it lasts. It is only ever OpenTofu's encrypted plan file (`versions.tf` enforces plan encryption), readable only with the state passphrase, which is why the passphrase must be at least 32 random characters. A plan-only run, or a plan the guards refuse, uploads nothing.
 
 The plan refuses to go on:
 - a delete or a replace, unless you dispatch with `allow_destroy`;
@@ -87,27 +105,27 @@ The plan refuses to go on:
 
 **The runbook rule.** Never apply a destroy, a replace, an in-place change (on production's instance, a `type` resize reboots it) or an access-list removal you didn't intend. After any apply that touches an access list, check production's readiness: the heartbeat check and `/sync status` in Discord.
 
-There is no state lock. Runs serialize through the workflow's `infra` concurrency group, and a [hand run](#a-hand-run-when-actions-is-down) must never overlap one.
+There is no state lock. Runs serialize through the workflow's `infra` concurrency group, and a [hand run](#a-hand-run-when-actions-is-down) must never overlap one. The Plan job plans with `-lock=false` as well, because its state key is read-only and could never write a lock: the backend configures none today (no `use_lockfile`), and the flag keeps a later one from making Plan write.
 
 ## The first apply
 
 It is two applies, so that adopting the existing access list can't change it.
 
-1. **Import only.** Set `TOFU_VARS` with `"hosts": {}`, `database_ids` holding the cluster, and `db_allow_extra` set to exactly the list Cloud Manager shows now, including the production Compose host's IPv4 and IPv6. Dispatch a plan. It must show only:
+1. **Import only.** Set `TOFU_VARS` in both environments with `"hosts": {}`, `database_ids` holding the cluster, and `db_allow_extra` set to exactly the list Cloud Manager shows now, including the production Compose host's IPv4 and IPv6. Dispatch `operation=apply`. The Plan job must show only:
 
    ```
    import linode_database_access_controls.db["primary"] +0 -0
    ```
 
-   Anything else means a value is wrong: fix `TOFU_VARS` and never apply. Then dispatch an apply.
+   Anything else means a value is wrong: reject the Apply job, fix `TOFU_VARS` and dispatch again. Approve the Apply job only for exactly that line.
 
-2. **Staging.** Add the `staging` entry to `hosts`. The plan must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
+2. **Staging.** Add the `staging` entry to `hosts`, in both environments. Dispatch `operation=apply`: the Plan job must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
 
    ```
    update linode_database_access_controls.db["primary"] +2 -0
    ```
 
-   Apply it, check production's readiness, then [pin the new host's key](#pinning-a-new-host-key).
+   Approve the Apply job, check production's readiness, then [pin the new host's key](#pinning-a-new-host-key).
 
 ## Pinning a new host key
 
@@ -125,7 +143,9 @@ Until the new key is pinned, every run for that host fails at its first connecti
 
 ## Rebuilding a host
 
-Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal`: the old addresses leave the access list and the new ones join it. The plan shows a `replace` of the instance, updates of its two records and `+2 -2` on the access list. Then pin the new key.
+Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal`: the old addresses leave the access list and the new ones join it. The Plan job shows a `replace` of the instance, updates of its two records and `+2 -2` on the access list. Approve the Apply job, then pin the new key.
+
+The workflow reads `replace` from the dispatch's event payload, never from a step's `env:`, which GitHub prints unmasked, and refuses any other value without echoing it. So a host name or address typed there by mistake stays out of the public log.
 
 A new owner key, Configure key or root hash reaches a host only through a rebuild, since user data applies only at creation. A new Configure key is made the way docs/HOSTING.md's owner step 5 makes the first one: without a passphrase, its private half straight into the environment's `ANSIBLE_SSH_KEY`. Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key.
 
@@ -143,8 +163,8 @@ endpoints      = { s3 = "https://<region>.linodeobjects.com" }
 use_path_style = false
 EOF
 # Write "$W/values.tfvars.json": the same document as TOFU_VARS.
-export AWS_ACCESS_KEY_ID=<state access key> AWS_SECRET_ACCESS_KEY=<state secret key>
-export TF_VAR_state_passphrase=<passphrase> LINODE_TOKEN=<token> CLOUDFLARE_API_TOKEN=<token>
+export AWS_ACCESS_KEY_ID=<read/write state access key> AWS_SECRET_ACCESS_KEY=<its secret key>
+export TF_VAR_state_passphrase=<passphrase> LINODE_TOKEN=<write token> CLOUDFLARE_API_TOKEN=<write token>
 tofu -chdir=ops/tofu init -lockfile=readonly -backend-config="$W/backend.hcl"
 tofu -chdir=ops/tofu plan -var-file="$W/values.tfvars.json" -out="$W/plan.bin"
 tofu -chdir=ops/tofu apply "$W/plan.bin"
@@ -158,14 +178,14 @@ The same runbook rule applies. `tofu output -json addresses` shows the hosts' ad
 CI's "Infrastructure checks" job runs, on pull requests and dispatches:
 
 ```sh
-export TF_VAR_state_passphrase=ci-only-throwaway-passphrase
+export TF_VAR_state_passphrase=ci-only-throwaway-state-passphrase
 tofu -chdir=ops/tofu fmt -check -recursive
 tofu -chdir=ops/tofu init -backend=false -input=false -lockfile=readonly
 tofu -chdir=ops/tofu validate
 tofu -chdir=ops/tofu test -var-file=examples/example.tfvars.json
 ```
 
-It also runs `cloud-init schema` over `examples/user-data-*.yaml`. `tests/main.tftest.hcl` checks that the module renders exactly those two files, so the schema check covers what the module sends. After changing the template, render the examples again and commit them with it. `tests/unit/infra.test.ts` pins the workflow and the module, and runs `ci/`'s jq programs and the script's phases against sample plans with a stand-in `tofu`; CI's ShellCheck covers `ci/tofu-ci.sh`.
+It also runs `cloud-init schema` over `examples/user-data-*.yaml`. `tests/main.tftest.hcl` checks that the module renders exactly those two files, so the schema check covers what the module sends. After changing the template, render the examples again and commit them with it. `tests/unit/infra.test.ts` pins the workflow and the module, and runs `ci/`'s jq programs and the script's phases against sample plans with a stand-in for `tofu`; CI's ShellCheck covers `ci/tofu-ci.sh`.
 
 **Upgrading OpenTofu.**
 1. Download `tofu_<v>_linux_amd64.zip`, `tofu_<v>_SHA256SUMS` and `tofu_<v>_SHA256SUMS.gpgsig` from the release page, https://github.com/opentofu/opentofu/releases.

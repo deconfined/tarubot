@@ -319,10 +319,11 @@ run "refuses_a_configure_key_that_is_not_ssh_ed25519" {
   expect_failures = [var.configure_keys]
 }
 
+# One character short of the 32 the saved plan's public artifact calls for.
 run "refuses_a_short_state_passphrase" {
   command = plan
   variables {
-    state_passphrase = "too-short"
+    state_passphrase = "a-31-character-throwaway-phrase"
   }
   expect_failures = [var.state_passphrase]
 }

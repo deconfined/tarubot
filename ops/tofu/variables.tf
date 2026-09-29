@@ -1,6 +1,7 @@
-# The module's inputs (2.36.0, issue #62). The real values are the `infra` environment's TOFU_VARS
-# secret, one JSON tfvars document; ops/tofu/examples/example.tfvars.json shows its shape with
-# placeholders. The state passphrase comes from TF_VAR_state_passphrase instead.
+# The module's inputs (2.36.0, issue #62). The real values are the TOFU_VARS secret, the same in
+# the `infra-plan` and `infra` environments: one JSON tfvars document, whose shape
+# ops/tofu/examples/example.tfvars.json shows with placeholders. The state passphrase comes from
+# TF_VAR_state_passphrase instead.
 #
 # Every variable is sensitive, so OpenTofu never prints a value in a plan, and every validation
 # message is fixed text that never echoes one. Two things do reach the public Actions log on
@@ -170,8 +171,10 @@ variable "state_passphrase" {
   nullable    = false
   sensitive   = true
 
+  # At least 32 characters: it is the only key to the saved plan, which infra.yml keeps as a
+  # one-day artifact that anyone signed in to GitHub can download from the public repository.
   validation {
-    condition     = length(var.state_passphrase) >= 16
-    error_message = "state_passphrase must be at least 16 characters."
+    condition     = length(var.state_passphrase) >= 32
+    error_message = "state_passphrase must be at least 32 characters."
   }
 }

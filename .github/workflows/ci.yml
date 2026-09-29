@@ -86,7 +86,8 @@ jobs:
           command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck --version | sed -n 2p
           shellcheck -S warning ops/*.sh
-          # infra.yml's steps (ops/tofu/ci/), which run with the infra environment's secrets.
+          # infra.yml's steps (ops/tofu/ci/), which run with the infra-plan and infra
+          # environments' secrets.
           shellcheck -S warning ops/tofu/ci/tofu-ci.sh
       - name: Compile the application
         run: bun run build
@@ -244,7 +245,7 @@ jobs:
     env:
       # The module's state encryption needs a passphrase to validate and test; this one guards
       # nothing, since no state is ever written here.
-      TF_VAR_state_passphrase: ci-only-throwaway-passphrase
+      TF_VAR_state_passphrase: ci-only-throwaway-state-passphrase
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
