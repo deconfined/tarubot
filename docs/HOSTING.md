@@ -488,7 +488,7 @@ Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) the simple
 
 ### The simple pipeline (2.36.0)
 
-Four layers, each with one owner:
+[DEPLOYMENT.md](DEPLOYMENT.md) walks the whole process as step tables, what @deconfined does against what runs by itself, from building a host to a deployed release. Four layers, each with one owner:
 
 | Layer | What it does | Where |
 | --- | --- | --- |
