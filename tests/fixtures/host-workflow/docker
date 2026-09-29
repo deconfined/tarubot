@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# A simulated `docker buildx imagetools inspect ghcr.io/deconfined/tarubot@DIGEST --format
+# '{{json .Image}}'` for tests/unit/host-workflow.test.ts: $STUB/images/<DIGEST> holds the amd64
+# image's revision label. No file is the registry's "not found". Every call is recorded in
+# $STUB/docker-calls.
+set -euo pipefail
+printf '%s\n' "$*" >>"$STUB/docker-calls"
+[[ $1 == buildx && $2 == imagetools && $3 == inspect && $5 == --format && $6 == '{{json .Image}}' ]] || exit 1
+digest=${4##*@}
+[[ $4 == "ghcr.io/deconfined/tarubot@$digest" && -f $STUB/images/$digest ]] || {
+  printf 'ERROR: %s: not found\n' "$4" >&2
+  exit 1
+}
+jq -cn --arg rev "$(cat "$STUB/images/$digest")" \
+  '{"linux/amd64": {config: {Labels: {"org.opencontainers.image.revision": $rev}}},
+    "linux/arm64": {config: {Labels: {"org.opencontainers.image.revision": $rev}}}}'

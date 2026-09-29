@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# One TaruBot maintenance tool in a one-off container, with the bot's own settings, secrets and
+# hardening (#62). ops/ansible/bot.yml installs it as ~/.local/bin/tarubot-tool for the tarubot
+# user; the bot's unit runs it before every start (ExecStartPre, migrate.js), bot.yml runs
+# migrate.js, register.js and commands.js with it, and operators run it from root with
+# `run0 --user=tarubot ~tarubot/.local/bin/tarubot-tool TOOL.js [ARG...]`.
+#
+#   tarubot-tool [--image ghcr.io/deconfined/tarubot@sha256:DIGEST] TOOL.js [ARG...]
+#
+#   --image   the release to run. Without it, the one ~/.config/tarubot/image names, which bot.yml
+#             writes with the unit; the unit passes its own Image= so a crash restart never runs
+#             another release's migrate.js.
+#   TOOL.js   a script in the image's dist/scripts/, such as migrate.js or commands.js.
+#
+# The container gets ~/.config/tarubot/tarubot.env and one read-only secret file for each of its
+# NAME_FILE lines, exactly as the unit mounts them, and the unit's hardening. The tool's output
+# streams through and its exit status is this script's. A usage error exits 64; a missing or
+# unreadable settings or image file exits 1. It prints names and paths, never a value.
+# tests/unit/bot-play.test.ts runs it against a podman stand-in.
+set -Eeuo pipefail
+umask 077
+
+# The one repository the unit runs (vars/bot.yml tb_image_repository).
+readonly IMAGE_PATTERN='^ghcr\.io/deconfined/tarubot@sha256:[0-9a-f]{64}$'
+readonly CONFIG="$HOME/.config/tarubot"
+readonly ENV_FILE="$CONFIG/tarubot.env"
+readonly IMAGE_FILE="$CONFIG/image"
+
+say() { printf 'tarubot-tool: %s\n' "$1" >&2; }
+usage() {
+  say 'usage: tarubot-tool [--image ghcr.io/deconfined/tarubot@sha256:DIGEST] TOOL.js [ARG...]'
+  exit 64
+}
+
+image=''
+if [[ ${1-} == --image ]]; then
+  (($# >= 2)) || usage
+  image=$2
+  [[ $image =~ $IMAGE_PATTERN ]] || usage
+  shift 2
+fi
+(($# >= 1)) || usage
+tool=$1
+shift
+[[ $tool =~ ^[a-z][a-z-]*[.]js$ ]] || usage
+
+if [[ -z $image ]]; then
+  if [[ ! -r $IMAGE_FILE ]]; then
+    say "$IMAGE_FILE is missing; bot.yml writes it with the unit"
+    exit 1
+  fi
+  # $(<file) drops the file's final newline.
+  image=$(<"$IMAGE_FILE")
+  if [[ ! $image =~ $IMAGE_PATTERN ]]; then
+    say "$IMAGE_FILE must hold one ghcr.io/deconfined/tarubot@sha256: reference"
+    exit 1
+  fi
+fi
+if [[ ! -r $ENV_FILE ]]; then
+  say "$ENV_FILE is missing; bot.yml writes it with the unit"
+  exit 1
+fi
+
+# One --secret for each NAME_FILE=/run/secrets/name line: the Podman secret bot.yml wrote for NAME
+# (tarubot- and the name in lower case with dashes), mounted where the line says, as the unit's
+# Secret= lines mount it. A NAME_FILE line that points anywhere else isn't a secret of ours and is
+# left alone, but a /run/secrets line whose file isn't the name in lower case is refused.
+secrets=()
+while IFS= read -r line || [[ -n $line ]]; do
+  [[ $line =~ ^([A-Z][A-Z_]*)_FILE=/run/secrets/ ]] || continue
+  if [[ ! $line =~ ^([A-Z][A-Z_]*)_FILE=/run/secrets/([a-z_]+)$ ||
+    ${BASH_REMATCH[1],,} != "${BASH_REMATCH[2]}" ]]; then
+    say "$ENV_FILE: a NAME_FILE line under /run/secrets must name /run/secrets/<name in lower case>"
+    exit 1
+  fi
+  name=${BASH_REMATCH[2]}
+  secrets+=(--secret "tarubot-${name//_/-},type=mount,target=/run/secrets/$name,uid=1000,gid=1000,mode=0400")
+done <"$ENV_FILE"
+
+# Rootless Podman keeps its runtime state in the user's runtime directory. The user manager sets it
+# for the unit, and bot.yml sets it; an operator's shell from run0 may not.
+if [[ -z ${XDG_RUNTIME_DIR-} ]]; then
+  XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export XDG_RUNTIME_DIR
+fi
+# Under the unit's ExecStartPre, systemd hands this process the service's notification socket.
+# The tool is not the service: without this, Podman would pass the socket on and report its conmon
+# as the service's main process.
+unset NOTIFY_SOCKET
+
+# The unit's hardening, as podman run spells it. --read-only is what makes Podman mount the secret
+# files read-only. --log-driver=none keeps no copy of the tool's output in the journal (under the
+# unit, systemd already keeps what streams through). There is no --name or --replace, so an
+# operator's run never collides with the unit's own migrate.js; the label finds a stuck one.
+exec podman run --rm --pull=never --read-only --read-only-tmpfs=false --cap-drop=all \
+  --security-opt=no-new-privileges --env-host=false --http-proxy=false --log-driver=none \
+  --label io.tarubot.role=tool --env-file "$ENV_FILE" "${secrets[@]}" \
+  "$image" bun "dist/scripts/$tool" "$@"

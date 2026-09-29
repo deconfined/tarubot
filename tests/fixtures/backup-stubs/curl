@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Stand-in for curl in tests/unit/backup-quadlet.test.ts: it records the call and keeps the
-# --config text ops/backup.sh sends on stdin (the ping URL or the bucket's key) as `stdin`, so a
-# test can read the pings and check that no credential was an argument.
+# Stand-in for curl in tests/unit/backup-quadlet.test.ts (ops/backup.sh and tarubot-backup): it
+# records the call and keeps the --config text the backup script sends on stdin (the ping URL or
+# the bucket's key) as `stdin`, so a test can read the pings and check that no credential was an
+# argument.
 set -euo pipefail
 # shellcheck source=tests/fixtures/backup-stubs/record.sh
 . "$(dirname "$(readlink -f "$0")")/record.sh"

@@ -1,9 +1,0 @@
-# Installed by TaruBot's host playbook as /etc/tarubot/allowed_signers (2.34.0), from the host
-# settings (tarubot_allowed_signers in /etc/tarubot/host.yml), never from the repository. Don't edit
-# it by hand: the next run replaces it. It shows the keys whose SSH signature the pull unit requires
-# on merged pull-request heads that change ops/ansible/ (question 14); the pull unit itself reads
-# them from host.yml at every run, and the playbook checks that both readings agree. To rotate a
-# key, edit host.yml as root.
-{% for key in tb_signer_keys %}
-{{ tb_signer_principal }} namespaces="git" {{ key }}
-{% endfor %}

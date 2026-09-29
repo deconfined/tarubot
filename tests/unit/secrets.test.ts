@@ -1,6 +1,7 @@
 /**
  * File-delivered secrets (2.33.0, #50): on a Quadlet host the six secrets arrive as Podman secrets
- * mounted as files, and NAME_FILE names each file (ops/quadlet/README.md "Secrets"). These pin the
+ * mounted as files, and NAME_FILE names each file (since #62 the staging container's, written by
+ * ops/ansible/bot.yml from the job's environment; tests/unit/bot-play.test.ts). These pin the
  * resolver in src/config/secrets.ts and every reader that goes through it:
  * - the rules: the file's text less one newline, both forms refused, an empty NAME_FILE unset,
  *   failures that name settings only, and process.env never written;

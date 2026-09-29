@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installed by TaruBot's host playbook as /usr/local/sbin/tarubot-ipv6-online and run once at boot
-# by tarubot-ipv6-online.service, which network-online.target waits for (#50).
+# by tarubot-ipv6-online.service, which network-online.target waits for (#50, #62).
 #
 # Rootless Podman's pasta copies the host's addresses when a container starts, so a bot that starts
 # before the host has IPv6 stays IPv4-only until its next restart. Quadlet's own wait unit only

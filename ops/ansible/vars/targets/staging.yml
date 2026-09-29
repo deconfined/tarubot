@@ -1,0 +1,41 @@
+---
+# Staging's settings (#62), read by bot.yml with -e tarubot_target=staging. Staging runs DevBot's
+# application under the staging tool-guard profile (src/config/deployment.ts), against its own
+# database and role on the managed cluster. The values live in the staging GitHub environment;
+# this file only names them. It holds no Discord ID: the application and the test guild come from
+# the release image itself (vars/bot.yml tb_identity_script).
+
+# The bot's secrets, all required for deploy and bot. Each becomes a Podman secret
+# (tarubot-<name in lower case, _ as ->), a Secret= mount in the unit and a NAME_FILE line in
+# tarubot.env. Staging never holds the GitHub App key: /suggest posts publicly.
+tarubot_secrets:
+  - DATABASE_CA_CERT
+  - DATABASE_URL
+  - DISCORD_TOKEN
+  - GITHUB_REPORTS_TOKEN
+  - HEALTHCHECKS_PING_URL
+
+# The backup's settings, all required by every action: staging's own bucket, key and check,
+# never production's. They become Podman secrets that only tarubot-backup reads; the bot's
+# container never mounts them.
+tarubot_backup_settings:
+  - BACKUP_STORAGE_ENDPOINT
+  - BACKUP_STORAGE_REGION
+  - BACKUP_STORAGE_ACCESS_KEY
+  - BACKUP_STORAGE_SECRET_KEY
+  - HEALTHCHECKS_BACKUP_URL
+
+# The only database and role DATABASE_URL may name here; the staging profile's own rule
+# (STAGING_DATABASE). A production URL pasted into staging is refused before anything is written.
+tarubot_database:
+  user: tarubot_staging
+  names:
+    - tarubot_staging
+
+# The container's plain settings, after vars/bot.yml tb_base_settings. Observers see replies in
+# the test guild, and /suggest stays off. TEST_PLAN_CHANNEL_ID is left out (its value would be a
+# Discord ID), so the startup test plan goes to #chat.
+tarubot_settings:
+  TARUBOT_ENVIRONMENT: staging
+  PUBLIC_TEST_RESPONSES: "true"
+  GITHUB_APP_CLIENT_ID: ""

@@ -1,0 +1,355 @@
+# The host job (2.36.0, issue #62): Configure, then the bot, on one target, over SSH as root from
+# a GitHub-hosted runner. deploy.yml's staging job calls it after every publish of main and on
+# dispatch; production joins in 2.37.0. The owner's decisions are REQUIREMENTS.md "Approved
+# pipeline amendments (2026-09-29)", and docs/HOSTING.md "The simple pipeline" has the flow.
+#
+#   Configure  ops/ansible/site.yml at main's head (config_commit), as root: plain host
+#              configuration. No secret reaches it. Actions deploy, configure and preflight.
+#   Bot        The release's own ops/ansible/bot.yml, at the commit its image was built from, with
+#              main's ansible.cfg and the environment's bot settings in its environment: it writes
+#              them into Podman secrets on the host, renders the unit and restarts the bot, and
+#              writes a result file on every path. Actions deploy, bot and preflight.
+#
+# The job names the target's environment, so that environment's secrets load there and nowhere
+# else; the caller passes `secrets: inherit`. One concurrency group per target keeps two runs off a
+# host at once: a newer run waits, and nothing is cancelled. Re-runs are refused, as in deploy.yml:
+# start a new dispatch. The repository and its logs are public, so the host's name and key are
+# secrets (Actions masks them), every address the name resolves to is masked before anything else
+# prints, no script traces, and ansible-playbook never runs with -v, --diff or --check.
+name: Host
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "The environment and host: staging (production joins in 2.37.0)"
+        type: string
+        required: true
+      action:
+        description: "deploy (Configure, then the bot), bot, configure or preflight"
+        type: string
+        required: true
+      version:
+        description: "The release X.Y.Z (empty for configure)"
+        type: string
+        default: ""
+      commit:
+        description: "The release's commit, 40 hex (empty for configure)"
+        type: string
+        default: ""
+      digest:
+        description: "The release's image index digest, sha256:<64 hex> (empty for configure)"
+        type: string
+        default: ""
+      config_commit:
+        description: "Main's head when the run was created: Configure applies site.yml from it"
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  host:
+    name: Host
+    if: github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    # Configure's first run on a new host upgrades every package and reboots; bot.yml waits up to
+    # 3 minutes for healthy and runs migrate.js before the start.
+    timeout-minutes: 40
+    environment: ${{ inputs.target }}
+    concurrency:
+      group: host-${{ inputs.target }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # the two checkouts of this public repository
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the request
+        env:
+          TARGET: ${{ inputs.target }}
+          ACTION: ${{ inputs.action }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DIGEST: ${{ inputs.digest }}
+          CONFIG_COMMIT: ${{ inputs.config_commit }}
+        run: |
+          # Every input is public data from deploy.yml's plan, and each must fit its pattern before
+          # a later step builds a ref, a path or an ansible-playbook argument from it.
+          set -Eeuo pipefail
+          export LC_ALL=C
+          bad() { echo "::error::$1"; exit 1; }
+          [[ $TARGET == staging ]] || bad "The target must be staging; production joins host.yml in 2.37.0."
+          [[ $ACTION =~ ^(deploy|bot|configure|preflight)$ ]] || bad "The action must be deploy, bot, configure or preflight."
+          [[ $CONFIG_COMMIT =~ ^[0-9a-f]{40}$ ]] || bad "config_commit must be a commit: 40 lowercase hex digits."
+          # configure touches no release, so it takes none.
+          if [[ $ACTION != configure ]]; then
+            [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]] || bad "The version must be X.Y.Z."
+            [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || bad "The commit must be 40 lowercase hex digits."
+            [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || bad "The digest must be sha256: and 64 lowercase hex digits."
+          fi
+
+      - name: Load the host settings
+        id: host
+        env:
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
+          TARGET_HOST_KEY: ${{ secrets.TARGET_HOST_KEY }}
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+          EVENT: ${{ github.event_name }}
+          TARGET: ${{ inputs.target }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          # The host, its pinned host key and root's Configure key are secrets of the target's
+          # environment, so Actions masks them in the log. The addresses the name resolves to
+          # aren't, so they are masked here before anything else prints; nothing below prints the
+          # name, an address, a key or the key's file. The files are private (umask 077) and the
+          # last step removes them.
+          set -Eeuo pipefail
+          export LC_ALL=C
+          umask 077
+          dir=$RUNNER_TEMP/ssh
+          out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          bad() { echo "::error::$1"; exit 1; }
+
+          # No host yet (before the owner builds it, or after it is retired): a merge stays green
+          # with a notice, while a dispatch asked for this host and fails.
+          if [[ -z $TARGET_HOST ]]; then
+            [[ $EVENT != workflow_dispatch ]] || bad "no host in the $TARGET environment: set its TARGET_HOST secret."
+            jq -n --arg action "$ACTION" '{outcome: "no-host", action: $action, version: "-", previous: "-",
+              restore_point: "-", migrations: [], schema_head: "-", step: "-", reason: "-", warnings: []}' \
+              > "$RUNNER_TEMP/result.json"
+            out skip true
+            echo "::notice::no host in the $TARGET environment"
+            exit 0
+          fi
+
+          # A DNS name with A and AAAA records, or an address literal (the lab): nothing that ssh or
+          # Ansible could read as an option.
+          NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+          IPV6='^[0-9a-fA-F]{0,4}(:[0-9a-fA-F]{0,4}){2,7}$'
+          [[ $TARGET_HOST =~ $NAME || $TARGET_HOST =~ $IPV6 ]] ||
+            bad "TARGET_HOST must be a lowercase DNS name with at least two labels, or an IPv4 or IPv6 address."
+          # Every address it resolves to (a literal resolves to itself), masked first.
+          resolved=$(getent ahosts "$TARGET_HOST") || bad "TARGET_HOST doesn't resolve."
+          mapfile -t addresses < <(awk '{ print $1 }' <<< "$resolved" | sort -u)
+          (( ${#addresses[@]} )) || bad "TARGET_HOST resolves to no address."
+          for address in "${addresses[@]}"; do echo "::add-mask::$address"; done
+
+          # The host key the owner pinned from their own machine after the build (trust on first
+          # use): the key alone, no name or comment. A trailing newline is tolerated.
+          key=${TARGET_HOST_KEY%$'\n'}
+          key=${key%$'\r'}
+          [[ $key =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] ||
+            bad "TARGET_HOST_KEY must be one line: ssh-ed25519 and the host's key, with no name or comment."
+
+          mkdir -p -- "$dir"
+          chmod 700 -- "$dir"
+          # Carriage returns from a key pasted on another system would break it for ssh.
+          printf '%s\n' "${ANSIBLE_SSH_KEY//$'\r'/}" > "$dir/key"
+          unset ANSIBLE_SSH_KEY
+          grep -q 'PRIVATE KEY' "$dir/key" || bad "ANSIBLE_SSH_KEY isn't set in the $TARGET environment."
+          # The pinned key under the alias `target`, the one host of the inventory, so neither file
+          # holds the host's name.
+          printf 'target %s\n' "$key" > "$dir/known_hosts"
+          # AddressFamily=any follows the owner's IPv6-first rule: on a runner without IPv6 the IPv6
+          # attempt fails at once and ssh tries IPv4. Only the pinned ed25519 key is accepted.
+          jq -n --arg host "$TARGET_HOST" --arg dir "$dir" '{all: {hosts: {target: {
+              ansible_host: $host,
+              ansible_user: "root",
+              ansible_ssh_private_key_file: ($dir + "/key"),
+              ansible_ssh_common_args: ("-F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes"
+                + " -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + $dir + "/known_hosts"
+                + " -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=target -o HostKeyAlgorithms=ssh-ed25519"
+                + " -o CheckHostIP=no -o UpdateHostKeys=no -o AddressFamily=any -o ConnectTimeout=20"
+                + " -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR")}}}}' \
+            > "$dir/inventory.json"
+          out skip false
+
+      - name: Find the release's commit in its image
+        id: release
+        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        env:
+          DIGEST: ${{ inputs.digest }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          # The release checkout's ref comes from the image itself: the revision label of the digest
+          # the plan verified, whose provenance binds it to main's publish.yml. It must equal the
+          # plan's commit, so the checkout never takes a ref from event data, and this workflow
+          # takes nothing from its caller on trust. The package is public: no login.
+          set -Eeuo pipefail
+          export LC_ALL=C
+          rev=$(docker buildx imagetools inspect "ghcr.io/deconfined/tarubot@$DIGEST" --format '{{json .Image}}' |
+            jq -er '."linux/amd64".config.Labels["org.opencontainers.image.revision"] | select(test("^[0-9a-f]{40}$"))') ||
+            { echo "::error::The image carries no revision label, or the registry didn't answer."; exit 1; }
+          [[ $rev == "$COMMIT" ]] || { echo "::error::The image's revision label names another commit than the plan's."; exit 1; }
+          printf 'ref=%s\n' "$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out main's host configuration
+        if: steps.host.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.config_commit }}
+          path: config
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the release
+        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+          path: release
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Ansible
+        if: steps.host.outputs.skip != 'true'
+        run: |
+          # Main's pinned ansible-core (config/ops/ansible/requirements.txt), every package by hash;
+          # --no-deps keeps pip from fetching anything the file doesn't list. It runs here, on the
+          # runner: the hosts carry no ansible-core.
+          set -Eeuo pipefail
+          python3 -m venv "$RUNNER_TEMP/ansible"
+          "$RUNNER_TEMP/ansible/bin/pip" install --quiet --disable-pip-version-check \
+            --no-deps --require-hashes -r config/ops/ansible/requirements.txt
+          echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
+
+      - name: Configure the host
+        if: steps.host.outputs.skip != 'true' && inputs.action != 'bot'
+        working-directory: config/ops/ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/config/ops/ansible/ansible.cfg
+          # ansible-core refuses to start under a non-UTF-8 locale.
+          LC_ALL: C.UTF-8
+          TARGET: ${{ inputs.target }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          # site.yml at main's head, as root: packages, updates, sshd, su and polkit, the tarubot
+          # account. It reads no secret, and none is in this step's environment.
+          set -Eeuo pipefail
+          ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" site.yml -e "tarubot_role=$TARGET"
+          # A configure dispatch ends here; bot.yml writes the result for every other action.
+          if [[ $ACTION == configure ]]; then
+            jq -n '{outcome: "configured", action: "configure", version: "-", previous: "-",
+              restore_point: "-", migrations: [], schema_head: "-", step: "-", reason: "-", warnings: []}' \
+              > "$RUNNER_TEMP/result.json"
+          fi
+
+      - name: Deploy the bot
+        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        working-directory: release/ops/ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/config/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+          TARGET: ${{ inputs.target }}
+          ACTION: ${{ inputs.action }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DIGEST: ${{ inputs.digest }}
+          # The release's bot.yml reads exactly these (its vars/bot.yml tb_secret_env), only in
+          # no_log tasks, and feeds each to the host on stdin. An unset one is empty here; bot.yml
+          # decides which the action needs. GITHUB_APP_PRIVATE_KEY is production's.
+          BACKUP_STORAGE_ACCESS_KEY: ${{ secrets.BACKUP_STORAGE_ACCESS_KEY }}
+          BACKUP_STORAGE_ENDPOINT: ${{ secrets.BACKUP_STORAGE_ENDPOINT }}
+          BACKUP_STORAGE_REGION: ${{ secrets.BACKUP_STORAGE_REGION }}
+          BACKUP_STORAGE_SECRET_KEY: ${{ secrets.BACKUP_STORAGE_SECRET_KEY }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          GITHUB_REPORTS_TOKEN: ${{ secrets.GITHUB_REPORTS_TOKEN }}
+          HEALTHCHECKS_BACKUP_URL: ${{ secrets.HEALTHCHECKS_BACKUP_URL }}
+          HEALTHCHECKS_PING_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+        run: |
+          # The release's own bot.yml: every check before any write, then the secrets, the unit,
+          # the restart, the health wait and the commands. Its arguments are public; its last play
+          # writes the result file on every path and fails the step unless the outcome is one this
+          # job calls green. It always runs: bot.yml, not this step, decides what a missing
+          # DISCORD_TOKEN means.
+          set -Eeuo pipefail
+          ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" bot.yml \
+            -e "tarubot_target=$TARGET" -e "tarubot_action=$ACTION" -e "tarubot_version=$VERSION" \
+            -e "tarubot_commit=$COMMIT" -e "tarubot_digest=$DIGEST" \
+            -e "tarubot_result=$RUNNER_TEMP/result.json"
+
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          TARGET: ${{ inputs.target }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          # The result file holds public data only, but it came from the host: each field is
+          # printed only when it fits its pattern, and as ? otherwise. No file after a failed step
+          # means the run failed. The job is green only for no-host, configured, deployed,
+          # superseded and preflight-ok.
+          set -Eeuo pipefail
+          export LC_ALL=C
+          file=$RUNNER_TEMP/result.json
+          VER='(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})'
+          SQL='[0-9]{3}_[a-z0-9_]+\.sql'
+          WORD='[a-z0-9-]{1,40}'
+          FIELDS=(outcome action version previous restore_point migrations schema_head step reason warnings)
+          declare -A PATTERN=(
+            [outcome]='deployed|superseded|configured|refused|unhealthy|failed|preflight-ok|no-host'
+            [action]='deploy|bot|preflight|configure'
+            [version]="$VER|-"
+            [previous]="$VER|-"
+            [restore_point]='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z|-'
+            [migrations]="($SQL( $SQL)*)?"
+            [schema_head]="$SQL|none|-"
+            [step]='checks|live|image|migrations|identity|secrets|files|preflight|unit|restart|health|timer|commands|tidy|-'
+            [reason]="$WORD|-"
+            [warnings]="($WORD( $WORD)*)?"
+          )
+          # One field as text: a list field's strings joined by spaces, any other field's string as
+          # it is, and ? for anything of another type.
+          LISTS=' migrations warnings '
+          field() {
+            local kind=string
+            if [[ $LISTS == *" $1 "* ]]; then kind=array; fi
+            jq -j --arg k "$1" --arg kind "$kind" '.[$k] | if $kind == "string" and type == "string" then .
+              elif $kind == "array" and type == "array" and all(.[]; type == "string") then join(" ")
+              else "?" end' "$file" 2> /dev/null || printf '?'
+          }
+          ok() { [[ $2 =~ ^(${PATTERN[$1]})$ ]]; }
+          declare -A value
+          if [[ -f $file ]] && jq -e 'type == "object"' "$file" > /dev/null 2>&1; then
+            for k in "${FIELDS[@]}"; do
+              v=$(field "$k")
+              if ok "$k" "$v"; then value[$k]=$v; else value[$k]='?'; fi
+            done
+          else
+            for k in "${FIELDS[@]}"; do value[$k]=-; done
+            value[migrations]='' value[warnings]=''
+            if ok action "$ACTION"; then value[action]=$ACTION; else value[action]='?'; fi
+            if [[ $JOB_STATUS == success ]]; then value[outcome]='?'; else value[outcome]=failed; fi
+          fi
+          [[ $TARGET =~ ^(staging|production)$ ]] || TARGET='?'
+          echo "Result on $TARGET: outcome=${value[outcome]} action=${value[action]} version=${value[version]} previous=${value[previous]} restore_point=${value[restore_point]} migrations=${value[migrations]:-none} schema_head=${value[schema_head]} step=${value[step]} reason=${value[reason]} warnings=${value[warnings]:-none}"
+          {
+            printf '## %s: %s\n\n| | |\n| --- | --- |\n' "$TARGET" "${value[outcome]}"
+            for k in "${FIELDS[@]:1}"; do
+              v=${value[$k]}
+              printf '| %s | %s |\n' "$k" "\`${v:-none}\`"
+            done
+            printf '\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # An unhealthy release stays in place (no automatic restore): the way back is a dispatch.
+          if [[ ${value[outcome]} == unhealthy && ${value[previous]} =~ ^$VER$ ]]; then
+            hint="To roll back, run Deploy with target=$TARGET, version=${value[previous]} and action=bot."
+            echo "::error::${value[version]} isn't healthy on $TARGET. $hint"
+            printf '%s\n' "$hint" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          case ${value[outcome]} in
+            no-host | configured | deployed | superseded | preflight-ok) ;;
+            *)
+              echo "::error::The $TARGET run ended ${value[outcome]} (step ${value[step]}, reason ${value[reason]})."
+              exit 1
+              ;;
+          esac
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf -- "${RUNNER_TEMP:?}/ssh"

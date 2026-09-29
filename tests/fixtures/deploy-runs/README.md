@@ -7,6 +7,5 @@ leave out `*.log`; the test copies it back to its real name. `tests/unit/deploy-
 format and this layout are a versioned contract, because after a rollback an older script answers
 the current workflow. A change to either raises `FLOOR` in `ops/deploy.sh` and adds a `v2/` here.
 
-The Quadlet modes (2.33.0, `deploy.sh quadlet` and `deploy.sh quadlet staging`) keep the command
-format and this layout, so the same `v1/` directory replays through their entry too; their own
-contract is the word `quadlet` in `CAPABILITIES`, not `FLOOR`.
+The script's Quadlet modes (2.33.0) served the staging host that 2.36.0 retired, and no test runs
+them now; production's Compose mode keeps this contract until the script goes in 2.38.0.

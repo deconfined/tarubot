@@ -1,21 +1,19 @@
-# Installed by TaruBot's host playbook as /etc/dnf/automatic.conf (#50) for this {{ tb_role }} host.
-# dnf-automatic.timer runs dnf-automatic once a day (06:00 UTC plus up to an hour) and applies
-# security updates only. Its report goes to the journal (journalctl -u dnf-automatic).
+# Installed by TaruBot's host playbook as /etc/dnf/automatic.conf (#62) for this {{ tb_role }} host.
+# dnf-automatic is the hosts' only updater: the playbook installs what is missing and upgrades
+# everything once, on a new host's first Configure, and never again. dnf-automatic.timer runs it
+# daily (staging at 06:00 UTC plus up to an hour, production four hours later through its timer
+# drop-in). It applies every update, not only security errata, so bugfix errata and minor-release
+# streams land too. Its report goes to the journal (journalctl -u dnf-automatic).
 
 [commands]
-upgrade_type = security
+upgrade_type = default
 random_sleep = 0
 network_online_timeout = 60
 download_updates = yes
 apply_updates = yes
-{% if tb_role == 'staging' %}
-# Staging reboots itself when an update needs it (a kernel, glibc or systemd update), so it
-# meets every update the way a rebuilt host would.
+# Both hosts reboot themselves when an update needs it (a kernel, glibc or systemd update;
+# needs-restarting from dnf-plugins-core decides). The bot's unit starts again at boot.
 reboot = when-needed
-{% else %}
-# Production never reboots on its own; the owner picks the moment.
-reboot = never
-{% endif %}
 reboot_command = "shutdown -r +5 'Rebooting after applying package updates'"
 
 [emitters]
@@ -24,8 +22,3 @@ emit_via = stdio
 [base]
 # This section overrides dnf.conf for dnf-automatic only; a manual dnf upgrade is unaffected.
 debuglevel = 1
-{% if tb_role == 'production' %}
-# Production's automatic updates leave the container stack and ansible-core alone: they move only
-# deliberately, after staging has run the new versions.
-excludepkgs = {{ tb_production_update_excludes | join(' ') }}
-{% endif %}

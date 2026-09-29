@@ -1,11 +1,12 @@
 /**
  * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
  * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
- * and the tracked production and staging env templates, the file-delivered secrets (2.33.0), and
- * DevBot's throwaway-server rehearsal allowance (2.35.0, #46).
+ * and the tracked production env template, the file-delivered secrets (2.33.0), and DevBot's
+ * throwaway-server rehearsal allowance (2.35.0, #46). Staging's container settings are pinned from
+ * the playbook's side in bot-play.test.ts (2.36.0).
  * Every refusal is checked to be a configuration Failure that never echoes a secret.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +34,9 @@ import { commandToolScope, parseArguments as commandArguments } from "../../scri
 import { migrateArguments, migrateToolScope } from "../../scripts/migrate.js";
 import { parsePreviewArguments, previewToolScope } from "../../scripts/preview.js";
 import { registerToolScope, registrationScope } from "../../scripts/register.js";
+
+// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
+setDefaultTimeout(120_000);
 
 const PRODUCTION_APP = deployments.production.applicationId;
 const PRODUCTION_GUILD = deployments.production.guilds[0];
@@ -83,9 +87,10 @@ const rehearsalEnv = (overrides: Environment = {}): Environment =>
   });
 
 /**
- * The staging container's settings (#50): the host's .env (staging.env.example, filled in) with the
- * staging target's fixed values (ops/quadlet/staging/target.env): DevBot's application in its test
- * guild, public test replies, and staging's own database and role on the managed cluster.
+ * The staging container's settings (#50; since 2.36.0 written by ops/ansible/bot.yml): the fixed
+ * values in ops/ansible/vars/targets/staging.yml (the staging marker and public test replies),
+ * plus the identity the release image reports (DevBot's application in its test guild), and
+ * staging's own database and role on the managed cluster from the staging environment's secrets.
  */
 const stagingEnv = (overrides: Environment = {}): Environment => ({
   TARUBOT_ENVIRONMENT: "staging",
@@ -1220,10 +1225,15 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
 
   test("the setting lives only in the guard: never in the bot, a tool, a host file or a template", () => {
     const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
-    /** Every file under a directory, as a repository-relative path. */
+    /**
+     * Every file under a directory, as a repository-relative path. A local `tofu init` leaves
+     * provider binaries under ops/tofu/.terraform/ (ignored by Git), so any path with a
+     * `.terraform` segment is dropped before it is read; .terraform.lock.hcl is still scanned.
+     */
     const walk = (directory: string): string[] =>
       readdirSync(root(directory), { recursive: true, encoding: "utf8" })
         .map((path) => `${directory}/${path}`)
+        .filter((path) => !path.split("/").includes(".terraform"))
         .filter((path) => statSync(root(path)).isFile());
     // The root's Compose files, env templates and image recipe.
     const topLevel = readdirSync(root(".")).filter(
@@ -1237,7 +1247,6 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
       expect.arrayContaining([
         ".env.example",
         "production.env.example",
-        "staging.env.example",
         "docker-compose.yml",
         "docker-compose.devbot.yml",
         "docker-compose.production.yml",
@@ -1245,9 +1254,8 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
       ]),
     );
     const files = [...["src", "scripts", "ops", ".github"].flatMap(walk), ...topLevel];
-    expect(files).toEqual(
-      expect.arrayContaining(["src/config/env.ts", "ops/quadlet/units/tarubot.container"]),
-    );
+    // Including the playbook that deploys staging's bot (2.36.0), which replaced ops/quadlet.
+    expect(files).toEqual(expect.arrayContaining(["src/config/env.ts", "ops/ansible/bot.yml"]));
     const mentions = files.filter((path) =>
       readFileSync(root(path), "utf8").includes("DEVBOT_THROWAWAY_GUILD_ID"),
     );
@@ -1272,8 +1280,8 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
 
 describe("file-delivered secrets (#50, 2.33.0)", () => {
   /**
-   * Write the given settings as files, the way secrets.sh fills a Podman secret (the value and one
-   * newline), run the check with their NAME_FILE paths, and clean up.
+   * Write the given settings as files, the way ops/ansible/bot.yml fills a Podman secret over stdin
+   * (the value and one newline), run the check with their NAME_FILE paths, and clean up.
    */
   function withFiles<T>(
     values: Record<string, string>,
@@ -1304,7 +1312,7 @@ describe("file-delivered secrets (#50, 2.33.0)", () => {
   }
 
   test("staging's container reads its database URL and CA from files, as the bot does", () => {
-    // In a Quadlet container the unit unsets the plain names and sets NAME_FILE instead.
+    // In the Quadlet container tarubot.env sets NAME_FILE, and the plain names are never set.
     const url = managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE);
     withFiles({ DATABASE_URL: url, DATABASE_CA_CERT: CA }, (paths) => {
       const env = stagingEnv({ DATABASE_URL: undefined, DATABASE_CA_CERT: undefined, ...paths });
@@ -1339,7 +1347,7 @@ describe("file-delivered secrets (#50, 2.33.0)", () => {
   });
 
   test("a managed profile refuses an empty or unreadable CA file", () => {
-    // secrets.sh writes an empty value as a lone newline, which reads back as empty.
+    // An empty value written with its newline is a lone newline, which reads back as empty.
     for (const [profile, build] of [
       ["staging", stagingEnv],
       ["production", productionEnv],
@@ -1406,17 +1414,6 @@ describe("templates", () => {
     expect(child.exitCode).toBe(0);
     return JSON.parse(child.stdout.toString());
   };
-  /**
-   * A Quadlet target list's fixed NAME=value lines (bare names copy from .env and are skipped). A
-   * NAME_FILE line names a file that exists only inside the container, so it is skipped too; the
-   * template's plain values stand in for those files here.
-   */
-  const fixedValues = async (path: string): Promise<Record<string, string>> =>
-    Object.fromEntries(
-      [...(await Bun.file(root(path)).text()).matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)]
-        .filter((match) => !(match[1] ?? "").endsWith("_FILE"))
-        .map((match) => [match[1] ?? "", match[2] ?? ""]),
-    );
 
   test("(n) production.env.example lists every key and loads as a passing production env", async () => {
     const template = await Bun.file(root("production.env.example")).text();
@@ -1451,82 +1448,6 @@ describe("templates", () => {
     const launch: Launch = { execArgv: ["--env-file=production.env"], envFiles: [".env"] };
     expect(assertToolScope(env, scope.import(PRODUCTION_GUILD), launch).name).toBe("production");
     expect(assertToolScope(env, scope.register(), launch).name).toBe("production");
-  });
-
-  test("(#50) staging.env.example is the staging host's .env: placeholders under the host's rules", async () => {
-    const text = await Bun.file(root("staging.env.example")).text();
-    const names = keys(text);
-    // Each name once, and exactly one plain release pin, which deploy.sh and the playbook require.
-    expect(new Set(names).size).toBe(names.length);
-    expect(names.filter((name) => name === "TARUBOT_IMAGE_TAG")).toHaveLength(1);
-    // The playbook refuses an image override, a digest before the first start, and on staging any
-    // GitHub App value; the staging target fixes the identity and scoping; staging has no restore
-    // target. None of them belongs in the template.
-    for (const name of [
-      "TARUBOT_IMAGE",
-      "TARUBOT_IMAGE_DIGEST",
-      "GITHUB_APP_CLIENT_ID",
-      "GITHUB_APP_PRIVATE_KEY",
-      "TARUBOT_ENVIRONMENT",
-      "DISCORD_APPLICATION_ID",
-      "TEST_GUILD_ID",
-      "PUBLIC_TEST_RESPONSES",
-      "RESTORE_DATABASE_URL",
-      "RESTORE_DATABASE_CA_CERT",
-    ])
-      expect(names).not.toContain(name);
-    expect(names.filter((name) => name.startsWith("GITHUB_APP_"))).toEqual([]);
-    // Placeholders only: no Discord ID, and every value that isn't empty is a REPLACE_ marker.
-    expect(text).not.toMatch(/\b[1-9][0-9]{16,19}\b/);
-    const env = loadEnvFile(root("staging.env.example"));
-    const values = Object.fromEntries(names.map((name) => [name, env[name] ?? ""]));
-    const filled = Object.entries(values).filter(([, value]) => value !== "");
-    expect(filled.map(([name]) => name).sort()).toEqual(
-      ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN", "TARUBOT_IMAGE_TAG"].sort(),
-    );
-    for (const [name, value] of filled) expect(value, name).toContain("REPLACE_");
-    // The token stays an obvious placeholder until the DevBot move.
-    expect(values.DISCORD_TOKEN).toMatch(/^REPLACE_[A-Z_]+$/);
-    expect(values.DATABASE_CA_CERT).toStartWith("-----BEGIN CERTIFICATE-----\nREPLACE_WITH_");
-    expect(values.DATABASE_CA_CERT).toEndWith("\n-----END CERTIFICATE-----");
-    // Staging's own database and role on the cluster's direct port.
-    expect(databaseIdentity(values.DATABASE_URL ?? "")).toMatchObject({
-      port: 27520,
-      name: STAGING_DATABASE,
-      user: STAGING_DATABASE,
-    });
-
-    // The host's own checks accept it: check-env.sh reads each line the same way systemd and
-    // Compose would, then checks the settings systemd read (with the digest a start would pin).
-    const checkEnv = (args: string[], settings: Record<string, string>) =>
-      Bun.spawnSync(["sh", root("ops/quadlet/check-env.sh"), ...args], {
-        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...settings },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-    const syntax = checkEnv(["--syntax", root("staging.env.example")], {});
-    expect({ code: syntax.exitCode, err: syntax.stderr.toString() }).toEqual({ code: 0, err: "" });
-    const settings = checkEnv([], { ...values, TARUBOT_IMAGE_DIGEST: `sha256:${"0".repeat(64)}` });
-    expect({ code: settings.exitCode, err: settings.stderr.toString() }).toEqual({
-      code: 0,
-      err: "",
-    });
-
-    // Under the staging target's fixed settings, staging's tools resolve the staging profile in
-    // the bot's container.
-    const staging = { ...values, ...(await fixedValues("ops/quadlet/staging/target.env")) };
-    for (const tool of [scope.migrate, scope.register(DEV_GUILD), scope.preview(DEV_GUILD)])
-      expect(assertToolScope(staging, tool, container)).toMatchObject({
-        name: "staging",
-        applicationId: DEVBOT_APP,
-        registrationScope: DEV_GUILD,
-      });
-    // A host that linked production's target by mistake is refused before any I/O: the
-    // production profile never takes staging's database.
-    const wrongTarget = { ...values, ...(await fixedValues("ops/quadlet/production/target.env")) };
-    expect(wrongTarget.TARUBOT_ENVIRONMENT).toBe("production");
-    for (const tool of [scope.migrate, scope.import(PRODUCTION_GUILD)])
-      refused(() => assertToolScope(wrongTarget, tool, container), "belongs to staging");
   });
 
   test("(n, C4) operator env files stay out of Git and images; the templates stay in both", async () => {

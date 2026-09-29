@@ -1,4 +1,5 @@
-# Sourced by the stand-ins for ops/backup.sh's tools (tests/unit/backup-quadlet.test.ts). record
+# Sourced by the stand-ins for the backup scripts' tools (tests/unit/backup-quadlet.test.ts) and for
+# tarubot-tool's podman (tests/unit/bot-play.test.ts). record
 # TOOL ARG... keeps one call as a directory under $BACKUP_SIM/calls, named by the time in
 # microseconds and the process id so the calls sort in the order they started: `tool` holds the
 # tool's name, `argv` its arguments and `env` its environment (both NUL-separated), and $call names

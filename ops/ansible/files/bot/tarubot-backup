@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Daily encrypted off-site backup of the bot's database on a Quadlet host (#62): ops/backup.sh's
+# Quadlet path without a .env. ops/ansible/bot.yml installs it as ~/.local/bin/tarubot-backup for
+# the tarubot user, with tarubot-backup.service (which runs it) and tarubot-backup.timer (every
+# night at 04:30 UTC). A preflight runs it once through the service. It takes no argument; any
+# argument exits 64 before a setting is read or anything is sent.
+#
+#   1. The settings come from the Podman secrets bot.yml wrote from the job's environment: the
+#      bucket's endpoint, region and key, and the backup check's ping URL. `podman secret inspect
+#      --showsecret` prints each value to this script, never into an argument or an environment
+#      variable of any command.
+#   2. pg_dump (custom format) runs in the pinned PostgreSQL 18 image as a one-off `podman run`,
+#      as hardened as Compose's backup service: a read-only root with no tmpfs, no capability and
+#      no new privilege. It reads the database's URL and CA as files mounted from the same Podman
+#      secrets the bot's unit mounts, and verifies the server (verify-full). Its log driver is
+#      `none`, so Podman keeps no copy of the plaintext while stdout still streams through conmon.
+#      The dump is never a Quadlet unit, whose output would go to a log.
+#   3. The dump streams straight into age, encrypted for ~/.config/tarubot/age-recipients.txt (the
+#      release's ops/age-recipients.txt). The plaintext never touches the disk, and the host holds
+#      no key that could decrypt what it wrote. A result of 4096 bytes or less means pg_dump wrote
+#      nothing.
+#   4. curl uploads it to the bucket, signing with SigV4, credentials on stdin: daily/ every day,
+#      and monthly/ on the 1st. The bucket's lifecycle rules expire old copies.
+#   5. The backup check hears /start, then success with the size, or /fail naming the failed step.
+#
+# Its last line on success is `<time> backup ok: tarubot-<stamp> (<n> bytes)`.
+# tests/unit/backup-quadlet.test.ts runs it against stand-ins for podman, age, curl, id and date.
+set -Eeuo pipefail
+umask 077
+
+if (($#)); then
+  echo 'usage: tarubot-backup' >&2
+  exit 64
+fi
+
+readonly RECIPIENTS="$HOME/.config/tarubot/age-recipients.txt"
+# Compose's backup image (postgres:18.4-alpine), fully qualified (Podman on EL enforces short-name
+# resolution and has no terminal here to ask on) and pinned by its image index digest, because the
+# container gets the database URL and CA and can reach the network. This line stays byte-equal to
+# ops/backup.sh's (tests/unit/backup-quadlet.test.ts); a new PostgreSQL image is a change to both.
+readonly PG_IMAGE=docker.io/library/postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+
+# Rootless Podman keeps its runtime state in the user's runtime directory. The user manager sets
+# XDG_RUNTIME_DIR for the timer's service; a shell without it gets /run/user/<uid>, which must be
+# this user's own private directory (logind's, kept by lingering). Nothing can be pinged before
+# the secrets are readable, so this failure only prints.
+if [[ -z ${XDG_RUNTIME_DIR-} ]]; then
+  uid=$(id -u)
+  if [[ $(stat -c '%u %a %F' "/run/user/$uid" 2>/dev/null || true) != "$uid 700 directory" ]]; then
+    echo "$(date -u +%FT%TZ) backup failed at: settings (XDG_RUNTIME_DIR is not set, and /run/user/$uid is not this user's private directory)" >&2
+    exit 1
+  fi
+  export XDG_RUNTIME_DIR="/run/user/$uid"
+fi
+
+# One setting from its Podman secret: the value bot.yml stored, without the newline its copy gains.
+# Empty when the secret is missing or can't be read.
+setting() {
+  podman secret inspect --showsecret --format '{{.SecretData}}' "tarubot-$1" 2>/dev/null || true
+}
+
+# The ping URL first, so every later failure can report itself.
+PING_URL=$(setting healthchecks-backup-url)
+
+# Tell the backup check how the run went: $1 is "", /start or /fail, $2 a short note. A ping that
+# can't be delivered never fails the backup itself. The URL reaches curl on stdin.
+notify() {
+  [[ -n $PING_URL ]] || return 0
+  printf 'url = "%s%s"\n' "$PING_URL" "$1" |
+    curl --config - --silent --show-error --fail --max-time 10 --retry 3 \
+      --data-raw "$2" --output /dev/null || true
+}
+
+step=settings
+trap 'notify /fail "backup failed at: $step"; echo "$(date -u +%FT%TZ) backup failed at: $step" >&2' ERR
+
+ENDPOINT=$(setting backup-storage-endpoint)
+REGION=$(setting backup-storage-region)
+ACCESS_KEY=$(setting backup-storage-access-key)
+SECRET_KEY=$(setting backup-storage-secret-key)
+for name in ENDPOINT REGION ACCESS_KEY SECRET_KEY; do
+  if [[ -z ${!name} ]]; then
+    echo "BACKUP_STORAGE_$name is empty or missing from Podman's secrets." >&2
+    false
+  fi
+done
+# The bucket's URL, with or without https://: https:// is added when it has no scheme, and any
+# other scheme is refused.
+case $ENDPOINT in
+  https://*) ;;
+  *://*)
+    echo "BACKUP_STORAGE_ENDPOINT must use https." >&2
+    false
+    ;;
+  *) ENDPOINT="https://$ENDPOINT" ;;
+esac
+ENDPOINT=${ENDPOINT%/}
+
+# Upload file $1 to key $2 in the bucket; the credentials go to curl on stdin.
+put() {
+  printf 'user = "%s:%s"\n' "$ACCESS_KEY" "$SECRET_KEY" |
+    curl --config - --silent --show-error --fail --max-time 300 --retry 3 \
+      --aws-sigv4 "aws:amz:$REGION:s3" --upload-file "$1" --output /dev/null \
+      "$ENDPOINT/$2"
+}
+
+notify /start "backup starting"
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+work=$(mktemp -d)
+trap 'rm -rf -- "${work:?}"' EXIT
+
+# The container's shell reads the URL from its secret file (single quotes: it expands there, not
+# here), and libpq reads the CA from its own. --read-only is what makes Podman mount both copies
+# read-only, and --read-only-tmpfs=false leaves no writable path: the job writes no file. The
+# label and name find a stuck run. stdin is closed, so none of this script's input reaches the
+# container. `podman run` returns pg_dump's exit status, and pipefail carries a failure into the
+# ERR trap.
+step=dump
+podman run --rm --name "tarubot-backup-$stamp" --label io.tarubot.role=backup \
+  --pull=missing --log-driver=none \
+  --env-host=false --http-proxy=false --read-only --read-only-tmpfs=false --cap-drop=all \
+  --security-opt=no-new-privileges \
+  --secret tarubot-database-url,type=mount,target=/run/secrets/database_url,mode=0400 \
+  --secret tarubot-database-ca-cert,type=mount,target=/run/secrets/database_ca_cert,mode=0400 \
+  --env PGSSLMODE=verify-full --env PGSSLROOTCERT=/run/secrets/database_ca_cert \
+  --entrypoint sh "$PG_IMAGE" \
+  -c 'exec pg_dump --format=custom --no-owner --no-privileges "$(cat /run/secrets/database_url)"' \
+  </dev/null | age --encrypt --recipients-file "$RECIPIENTS" --output "$work/db.age"
+db_bytes=$(stat -c %s "$work/db.age")
+# A real custom-format dump of this database is far larger; a tiny file means pg_dump wrote nothing.
+step="dump size ($db_bytes bytes)"
+[[ $db_bytes -gt 4096 ]]
+
+step=upload
+put "$work/db.age" "daily/tarubot-$stamp.dump.age"
+if [[ $(date -u +%d) == 01 ]]; then put "$work/db.age" "monthly/tarubot-$stamp.dump.age"; fi
+
+notify "" "daily/tarubot-$stamp.dump.age: $db_bytes bytes"
+echo "$(date -u +%FT%TZ) backup ok: tarubot-$stamp ($db_bytes bytes)"

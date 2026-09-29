@@ -1,5 +1,5 @@
 /** Behavior tests for the generic extension mechanism, independent of Discord credentials. */
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { Client, Events, ModalBuilder, SlashCommandBuilder } from "discord.js";
 import { Command, defineCommand } from "../../src/bot/command.js";
 import type { BotContext } from "../../src/bot/context.js";
@@ -8,6 +8,9 @@ import { InteractionRouter } from "../../src/bot/router.js";
 import { ServiceKey, Services } from "../../src/bot/services.js";
 import { viewerOf } from "../../src/discord/presenters/audience.js";
 import { Presented, reply } from "../../src/discord/presenters/reply.js";
+
+// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
+setDefaultTimeout(120_000);
 
 /** Real EventEmitter behavior needs no login, sockets, or game-service mocks. */
 function context(client: Client, services = new Services()): BotContext {

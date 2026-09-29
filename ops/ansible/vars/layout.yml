@@ -1,141 +1,26 @@
 ---
-# Shared by both plays in site.yml. Nothing here is a setting: the host's settings arrive as extra
-# vars (-e @host.yml; see host.example.yml), and the tb_* names below only read them once, with
-# their defaults, so every task uses the same validated value. site.yml's first play asserts them.
+# site.yml's fixed layout (#62). The one setting, the host's role, arrives as an extra var
+# (-e tarubot_role=staging|production; host.example.yml), and tb_role only reads it once, so every
+# task uses the same value. site.yml asserts it before anything changes.
 
-# The host's settings.
+# staging or production. They differ only in when dnf-automatic runs (tb_production_timer).
 tb_role: "{{ tarubot_role | default('') }}"
-tb_hostname: "{{ tarubot_hostname | default('') }}"
-tb_deploy_key: "{{ tarubot_deploy_key_public | default('', true) | trim }}"
-tb_operator_keys: "{{ tarubot_operator_keys | default([], true) }}"
-tb_root_keys: "{{ tarubot_root_keys | default([], true) }}"
-# The keys whose SSH signature the pull unit requires on merged pull-request heads that change
-# ops/ansible/ (2.34.0, question 14). They come from the host's own settings, never from the
-# repository. The pull unit reads them from host.yml itself at every run and checks signatures
-# against that reading; the playbook renders the same list into /etc/tarubot/allowed_signers for
-# people, and checks that the two readings agree (tb_signer_digest). An empty list is valid; the
-# pull unit then stops at any host change (needs-you no-signers).
-tb_allowed_signers: "{{ tarubot_allowed_signers | default([], true) }}"
 
-# A host name: one DNS label or name, lowercase, at most 64 characters (the kernel's limit).
-tb_hostname_pattern: '^(?=.{1,64}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
-
-# A public key line with no options: an algorithm, the key, and an optional comment, all on one
-# line. The playbook adds the options (restrict, command=, verify-required) itself.
-tb_pubkey_pattern: >-
-  ^(ssh-ed25519|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ecdsa-sha2-nistp(256|384|521)|ssh-rsa)
-  AAAA[0-9A-Za-z+/]+={0,3}( [^\r\n]*)?$
-# A signer's line: the same form, Ed25519 only (a FIDO key's sk-ssh-ed25519 included). The
-# template keeps the type and the key and drops the comment.
-tb_signer_pattern: '^(ssh-ed25519|sk-ssh-ed25519@openssh\.com) AAAA[0-9A-Za-z+/]+={0,3}( [^\r\n]*)?$'
-# The one principal every signer line names: ops/deploy.sh's REVIEWER, the approver of record. git
-# checks only that a key is listed for the "git" namespace, so the name is a label, not a lookup.
-tb_signer_principal: deconfined
-# Each signer as "<type> <key>", its comment dropped, and the sha256 of those joined by commas: the
-# form the template renders, and exactly what the pull unit computes from its own reading of
-# host.yml and passes as tarubot_pull_signers. Read only after the settings assert has checked
-# every line against tb_signer_pattern.
-tb_signer_keys: "{{ tb_allowed_signers | map('trim') | map('split') | map('batch', 2) | map('first') | map('join', ' ') | list }}"
-tb_signer_digest: "{{ tb_signer_keys | join(',') | hash('sha256') }}"
-
-# The deploy key's forced-command words for each role (ops/deploy.sh's Quadlet modes, 2.33.0).
-# deploy.sh up to 2.32.x exits 64 on any argument, so until 2.33.0 reaches the host the line fails
-# closed; staging never gets production's argument-less Compose mode.
-tb_deploy_args: "{{ {'staging': 'quadlet staging', 'production': 'quadlet'}[tb_role] | default('') }}"
-
-# The first start (the start tag, 2.33.0): a release and its image index digest, both verified on
-# the workstation first (site.yml's header). Passed with -e only, never kept in host.yml; empty
-# means no start. The first play refuses one without the other, or either malformed.
-tb_start_version: "{{ tarubot_start_version | default('') }}"
-tb_start_digest: "{{ tarubot_start_digest | default('') }}"
-# A release number, exactly as ops/deploy.sh's VERSION reads it, and an image index digest.
-tb_version_pattern: '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
-tb_digest_pattern: '^sha256:[0-9a-f]{64}$'
-# The line a release's ops/deploy.sh declares its contract words on (deploy.sh's CAPABILITY_LINE).
-# The start requires `quadlet`, and on staging `staging`, from the commit it starts: the words say
-# what a release speaks, so no floor number is copied here.
-tb_capability_line: '^readonly CAPABILITIES="([a-z0-9]+( [a-z0-9]+)*)"$'
-# What the bot logs while another writer holds the database lease (src/application/lifecycle.ts).
-# The start waits for it or for a healthy bot: a new host's bot waits there while an old host still
-# runs (production's rebuild by overlap).
-tb_start_marker: Waiting for the database writer lease
-# The bot's image repository; the unit fixes it, and the start pulls it by the verified digest.
-tb_image: ghcr.io/deconfined/tarubot
-
-# The host lock (2.33.0): a root-owned file that systemd-tmpfiles creates
-# (files/tmpfiles-tarubot.conf) and ops/deploy.sh's Quadlet modes hold, as QUADLET_LOCK, around
-# every change. The tarubot play's user-manager commands (daemon-reload, enable, start) run under
-# tb_locked, which waits up to five minutes for it. flock locks belong to an open file, so a
-# command that opened the file again would wait on its own caller: a caller that already holds the
-# lock, such as the pull unit (2.34.0), passes -e tarubot_host_lock_held=true, and tb_locked is
-# then empty. The first play checks that something really holds the lock when the flag is set, and
-# the start refuses the flag.
-tb_host_lock: /run/tarubot/host.lock
-tb_lock_held: "{{ tarubot_host_lock_held | default(false) | bool }}"
-tb_locked: "{{ [] if tb_lock_held | bool else ['flock', '-w', '300', tb_host_lock] }}"
-
-# The pull unit (2.34.0): tarubot-host-config, a root-owned script with its own clone, applies this
-# playbook to its host (-c local) and passes who ran it with -e, never through host.yml. A hand run
-# is `manual`, the default, with the others empty; the pull unit's runs are `pull`, `bootstrap` or
-# `emergency`, with the commit, a run id, and the role and signers' digest the script read from
-# host.yml. The first play refuses anything else. It writes the source, commit and run id to the
-# run marker (tb_pull_marker), which the script compares with its own record to notice a hand run
-# or one of its runs that died; the role and the digest are only checked against its own reading.
-tb_source: "{{ tarubot_source | default('manual') }}"
-tb_commit: "{{ tarubot_commit | default('') }}"
-tb_run: "{{ tarubot_run | default('') }}"
-tb_pull_role: "{{ tarubot_pull_role | default('') }}"
-tb_pull_signers: "{{ tarubot_pull_signers | default('') }}"
-# The pull unit's files. The playbook creates only the directory, HOME (root's own, so nothing goes
-# to /root) and the marker; the script alone writes its clone (repo/), home/tmp, state.json and
-# the pause and now flags. state.json exists once the host is bootstrapped, and pause while an
-# operator has paused the unit.
-tb_pull_dir: /var/lib/tarubot-config
-tb_pull_home: /var/lib/tarubot-config/home
-tb_pull_state: /var/lib/tarubot-config/state.json
-tb_pull_pause: /var/lib/tarubot-config/pause
-tb_pull_marker: /var/lib/tarubot-config/last-run.json
-tb_pull_script: /usr/local/sbin/tarubot-host-config
-
-# The layout: fixed, like the paths in ops/quadlet/units/tarubot.container and ops/deploy.sh.
+# The account the bot runs as, under rootless Podman. Nothing logs in as it over SSH (the sshd
+# drop-in allows root only); operators reach it from root with run0 --user=tarubot.
 tb_user: tarubot
 tb_home: /home/tarubot
-tb_clone: /home/tarubot/tarubot
-tb_repository: https://github.com/deconfined/tarubot.git
-tb_quadlet: /home/tarubot/tarubot/ops/quadlet
-tb_links_dir: /home/tarubot/.config/containers/systemd
-# The release's two links in tb_links_dir, and where they point (ops/quadlet/README.md). Only the
-# start tag makes them; every other run checks them.
-tb_links:
-  tarubot: /home/tarubot/tarubot/ops/quadlet/units
-  tarubot-target: "/home/tarubot/tarubot/ops/quadlet/{{ tb_role }}"
-tb_generator: /usr/lib/systemd/system-generators/podman-system-generator
-# The backup's user units (2.33.0), which belong to the release like the bot's unit: each is a link
-# in tarubot's user unit directory to the clone's ops/systemd/<unit>, so a deploy's daemon-reload
-# picks up a release's change to them.
-tb_backup_units:
-  - tarubot-backup.service
-  - tarubot-backup.timer
-tb_user_units_dir: /home/tarubot/.config/systemd/user
-# What ~/tarubot/.env loses before check-env.sh reads it, exactly the unit's [Service]
-# UnsetEnvironment= and ops/deploy.sh's UNSET_SETTINGS (the `quadlet` contract, so a release that
-# declares the word has this list): the backup's settings, the secrets and the other secret-bearing
-# names. The start's settings check runs through systemd-run with it, as a deploy's does.
-tb_unset_settings: >-
-  BACKUP_STORAGE_ENDPOINT BACKUP_STORAGE_ACCESS_KEY BACKUP_STORAGE_SECRET_KEY BACKUP_STORAGE_REGION
-  HEALTHCHECKS_BACKUP_URL DATABASE_CA_CERT DATABASE_URL DISCORD_TOKEN GITHUB_APP_PRIVATE_KEY
-  GITHUB_REPORTS_TOKEN HEALTHCHECKS_PING_URL POSTGRES_PASSWORD RESTORE_DATABASE_CA_CERT
-  RESTORE_DATABASE_URL
 
-# Podman units that stay masked for the system and for every user: no API socket or service, and
-# no auto-update (images move only through deploy.sh, by digest).
-tb_podman_masks:
-  - podman.socket
-  - podman.service
-  - podman-auto-update.timer
-  - podman-auto-update.service
-
-# Packages the hosts need. Nothing from Docker: the bot runs under rootless Podman and Quadlet.
+# Packages from AlmaLinux's own repositories, installed if missing and never upgraded by the
+# playbook: dnf-automatic is the hosts' only updater after the first Configure.
+# - podman, crun, passt, container-selinux: rootless Podman, its runtime, its network and its
+#   SELinux policy.
+# - acl: lets a task run as tarubot read the files Ansible uploads as root.
+# - chrony: the clock. dnf-automatic: the updater. dnf-plugins-core: needs-restarting, which
+#   dnf-automatic's reboot = when-needed runs.
+# - polkit: the rule in files/polkit-10-tarubot.rules needs it installed to take effect.
+# - python3-libselinux: Ansible's file tasks on an SELinux host (cloud-init installs it first).
+# - sudo: how bot.yml becomes tarubot from root; tarubot itself has no sudo rights.
 tb_packages:
   - podman
   - crun
@@ -144,41 +29,16 @@ tb_packages:
   - acl
   - chrony
   - dnf-automatic
-  - git
-  - gnupg2
-  - jq
+  - dnf-plugins-core
+  - polkit
+  - python3-libselinux
   - sudo
-# age (the backups' encryption) comes from EPEL, restricted to that package.
+
+# From EPEL, which epel-release enables: age, which encrypts the backups.
 tb_epel_packages:
   - age
-tb_epel_fingerprint: 7D8D15CBFC4E62688591FB2633D98517E37ED158
-tb_podman_minimum: 5.8.2
-# ansible-core, which the pull unit runs, from AlmaLinux's AppStream: at least AlmaLinux's build
-# with the CVE-2026-11332 backport (epoch 1). The playbook compares it with RPM's own ordering and
-# installs this spec only when it is missing or older, so a run with nothing to do never loads the
-# repositories. Production's automatic updates skip ansible-core (below): it moves there only when
-# a playbook commit raises this floor.
-tb_ansible_core_floor: "1:2.16.16-2.el10_2.1"
-tb_ansible_core: "ansible-core >= {{ tb_ansible_core_floor }}"
 
-# Packages that must never be installed: Docker and the Docker shims, whose API socket or CLI
-# would give a second way to run containers.
-tb_forbidden_packages_pattern: '^(docker|docker-ce.*|docker-buildx-plugin|docker-compose-plugin|containerd\.io|moby-.*|podman-docker|podman-compose)$'
-
-# Production's automatic updates skip these (the container stack and ansible-core).
-tb_production_update_excludes:
-  - podman*
-  - crun*
-  - conmon
-  - passt*
-  - container-selinux
-  - containers-common*
-  - netavark
-  - aardvark-dns
-  - catatonit
-  - criu*
-  - skopeo
-  - buildah
-  - fuse-overlayfs
-  - slirp4netns
-  - ansible-core
+# Production's drop-in for dnf-automatic's timer (files/dnf-automatic-timer-production.conf). It
+# moves production's updates to 10:00 UTC, after staging's 06:00 run and its random delay of up
+# to an hour. On staging the playbook makes sure it is absent.
+tb_production_timer: /etc/systemd/system/dnf-automatic.timer.d/50-tarubot.conf

@@ -1,0 +1,15 @@
+# The nightly schedule of tarubot-backup.service on a Quadlet host (#50; #62): the time the Compose
+# host's crontab runs ops/backup.sh. ops/ansible/bot.yml installs it with the service and enables
+# it after the bot is healthy. `systemctl --user list-timers` shows the next run.
+# Comments stay on their own lines: systemd has no inline comments.
+
+[Timer]
+# Every day at 04:30 UTC, whatever the host's time zone.
+OnCalendar=*-*-* 04:30:00 UTC
+# A run missed while the host was down starts once it's back.
+Persistent=true
+
+[Install]
+# Enabled in the user manager's timers.target, which starts at boot with the tarubot user's
+# lingering.
+WantedBy=timers.target
