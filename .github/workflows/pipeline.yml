@@ -1,0 +1,163 @@
+# One invocation builds a release, reconciles its Linode host, configures AlmaLinux 10 and
+# deploys the bot with rootless Podman. Settings live once in the selected environment.
+# Production's environment approval covers the entire host job; staging has no approval.
+name: Build and deploy
+run-name: Build and deploy to ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to provision, configure and deploy
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
+      rebuild:
+        description: Replace this environment's host instead of reusing it
+        type: boolean
+        default: false
+      prepare_only:
+        description: Prepare and verify the host and backup without starting the bot
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Both hosts share infrastructure state and the managed database's complete access list.
+# Keep the existing Infrastructure workflow in this group until its owner retires it.
+concurrency:
+  group: infra
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    name: Build release
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    uses: ./.github/workflows/publish.yml
+    # These are ceilings for the reusable publisher, whose individual jobs narrow them.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+  deploy:
+    name: Provision, configure and deploy
+    needs: build
+    if: >-
+      github.ref == 'refs/heads/main' && github.run_attempt == '1'
+      && (inputs.environment == 'staging' || inputs.environment == 'production')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    # Canonical names prevent a malformed dispatch from creating an unprotected environment.
+    environment: ${{ inputs.environment == 'production' && 'production' || 'staging' }}
+    concurrency:
+      group: host-${{ inputs.environment }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      attestations: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the built source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify the build digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+            --source-ref refs/heads/main --source-digest "$COMMIT" \
+            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners
+
+      - name: Install OpenTofu and Ansible
+        run: |
+          set -Eeuo pipefail
+          bash ops/tofu/ci/tofu-ci.sh install
+          python3 -m venv "$RUNNER_TEMP/ansible"
+          "$RUNNER_TEMP/ansible/bin/pip" install --quiet --disable-pip-version-check \
+            --no-deps --require-hashes -r ops/ansible/requirements.txt
+          echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
+
+      - name: Provision the environment
+        env:
+          TARGET: ${{ inputs.environment }}
+          REBUILD: ${{ inputs.rebuild }}
+          TOFU_VARS: ${{ secrets.TOFU_VARS }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_IN_AUTOMATION: "1"
+          TF_INPUT: "0"
+        run: bash ops/pipeline/infra.sh
+
+      - name: Establish the host connection
+        id: host
+        env:
+          TARGET: ${{ inputs.environment }}
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_KEY }}
+        run: bash ops/pipeline/host.sh "$TARGET" "$RUNNER_TEMP/tofu/outputs.json" "$RUNNER_TEMP/tofu/plan.json"
+
+      - name: Configure AlmaLinux 10
+        working-directory: ops/ansible
+        env:
+          TARGET: ${{ inputs.environment }}
+          INVENTORY: ${{ steps.host.outputs.inventory }}
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+        run: ansible-playbook -i "$INVENTORY" site.yml -e "tarubot_role=$TARGET"
+
+      - name: Deploy the bot with Podman
+        working-directory: ops/ansible
+        env:
+          TARGET: ${{ inputs.environment }}
+          INVENTORY: ${{ steps.host.outputs.inventory }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          PREPARE_ONLY: ${{ inputs.prepare_only }}
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GITHUB_REPORTS_TOKEN: ${{ secrets.REPORTS_GITHUB_TOKEN }}
+          GITHUB_APP_CLIENT_ID: ${{ secrets.SUGGEST_APP_CLIENT_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.SUGGEST_APP_PRIVATE_KEY }}
+          HEALTHCHECKS_PING_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+          HEALTHCHECKS_BACKUP_URL: ${{ secrets.HEALTHCHECKS_BACKUP_URL }}
+          BACKUP_STORAGE_ENDPOINT: ${{ secrets.BACKUP_STORAGE_ENDPOINT }}
+          BACKUP_STORAGE_REGION: ${{ secrets.BACKUP_STORAGE_REGION }}
+          BACKUP_STORAGE_ACCESS_KEY: ${{ secrets.BACKUP_STORAGE_ACCESS_KEY }}
+          BACKUP_STORAGE_SECRET_KEY: ${{ secrets.BACKUP_STORAGE_SECRET_KEY }}
+        run: |
+          ansible-playbook -i "$INVENTORY" deploy.yml \
+            -e "tarubot_target=$TARGET" -e "tarubot_version=$VERSION" \
+            -e "tarubot_commit=$COMMIT" -e "tarubot_digest=$DIGEST" \
+            -e "{\"tarubot_prepare_only\":$PREPARE_ONLY}"
+
+      - name: Remove runner credentials and private files
+        if: always()
+        run: rm -rf -- "${RUNNER_TEMP:?}/pipeline-host" "$RUNNER_TEMP/tofu" "$RUNNER_TEMP/ansible"

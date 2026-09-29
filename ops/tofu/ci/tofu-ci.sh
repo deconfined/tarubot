@@ -251,6 +251,9 @@ apply() {
   while read -r action address _; do
     if [[ $action =~ ^(create|replace)$ && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
       line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"
+      if [[ ${AUTOMATE_HOST_PIN-} == true ]]; then
+        line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): the pipeline will establish and retain its SSH host pin"
+      fi
       echo "$line"
       echo "- $line" >>"$GITHUB_STEP_SUMMARY"
     fi

@@ -10,7 +10,8 @@
  *   `contents: read`, `id-token: write` and `attestations: write` only. It pushes nothing to the
  *   registry and reads no tag: any same-repository workflow can repoint a GHCR tag, so a digest
  *   read back from one would let a branch's image receive main's signature.
- * - No other job, in any workflow, may write attestations; in publish.yml only attest holds an OIDC
+ * - Only attest signs; pipeline.yml delegates the required permission ceilings to this reusable
+ *   publisher. In publish.yml only attest holds an OIDC
  *   token, and only the publish and latest jobs may write packages.
  * - latest waits for attest and promotes the digest the build returned, not a tag.
  *
@@ -196,11 +197,36 @@ describe("the attest job", () => {
 });
 
 describe("who may sign or write", () => {
-  test("only publish.yml's attest job may write attestations, in any workflow", () => {
+  test("only the publisher signs, with one trusted reusable caller granting its permission ceiling", () => {
     for (const file of workflowFiles) {
       const source = read(`.github/workflows/${file}`);
       const grants = [...source.matchAll(/^\s*attestations:\s*write\b/gmu)].length;
-      expect({ file, grants }).toEqual({ file, grants: file === "publish.yml" ? 1 : 0 });
+      expect({ file, grants }).toEqual({
+        file,
+        grants: file === "publish.yml" || file === "pipeline.yml" ? 1 : 0,
+      });
+      if (file === "pipeline.yml") {
+        const caller = z
+          .object({
+            jobs: z
+              .object({
+                build: z
+                  .object({
+                    uses: z.string(),
+                    steps: z.unknown().optional(),
+                    secrets: z.unknown().optional(),
+                  })
+                  .passthrough(),
+              })
+              .passthrough(),
+          })
+          .passthrough()
+          .parse(YAML.parse(source)).jobs.build;
+        expect(caller.uses).toBe("./.github/workflows/publish.yml");
+        expect(caller.steps).toBeUndefined();
+        expect(caller.secrets).toBeUndefined();
+        expect(source).not.toMatch(/uses:\s+actions\/attest/u);
+      }
     }
   });
 

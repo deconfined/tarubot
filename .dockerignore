@@ -3,6 +3,16 @@
 .git
 **/.git
 **/.terraform
+# Keep local infrastructure values, state and saved plans out of COPY . and build caches.
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/plan.bin
+**/*.tfvars
+**/*.tfvars.json
+**/backend.hcl
+# CI and the image's unit tests need only the committed, non-secret infrastructure examples.
+!ops/tofu/examples/*.tfvars.json
 .serena
 .cache
 node_modules
@@ -21,5 +31,8 @@ artifacts
 # The non-secret templates are unit-tested inside the build stage; the runtime stages never copy them.
 !.env.example
 tarubot_backup.sql
+# Operator database backups may use names other than the supplied acceptance fixture.
+**/*.dump
+**/*.backup
 *.log
 .DS_Store

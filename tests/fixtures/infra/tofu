@@ -22,6 +22,8 @@ case $sub in
     if [[ -f $STUB/$sub.jsonl ]]; then cat -- "$STUB/$sub.jsonl"; fi
     ;;
   init) echo "OpenTofu has been successfully initialized!" ;;
+  # The unified pipeline reads this privately after applying even a resource no-op.
+  output) cat -- "$STUB/outputs.json" ;;
   *) exit 64 ;;
 esac
 exit "$(cat "$STUB/exit.$sub" 2>/dev/null || printf 0)"

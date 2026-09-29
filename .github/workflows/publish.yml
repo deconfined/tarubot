@@ -5,6 +5,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        description: The validated release version
+        value: ${{ jobs.verify.outputs.version }}
+      digest:
+        description: The published and signed image index digest
+        value: ${{ jobs.publish.outputs.digest }}
 
 permissions:
   contents: read
@@ -96,8 +104,8 @@ jobs:
     # through Sigstore's public-good instance, and stores the attestation with the repository.
     # Its certificate names this workflow, the ref (refs/heads/main) and the commit, which no pull
     # request or branch workflow can mint. The BuildKit provenance and SBOM the build attaches stay
-    # unsigned. Nothing verifies the signature yet: the deploy plan's `gh attestation verify`
-    # arrives in 2.33.0.
+    # unsigned. Deploy verifies the signature; the environment pipeline receives this build's
+    # digest directly after this reusable workflow has completed successfully.
     # A separate job keeps the OIDC token out of the build, which runs the repository's code, and
     # keeps registry write access out of the job that can sign. The attestation isn't pushed to
     # GHCR (push-to-registry stays off), so this job needs neither packages: write nor a login,

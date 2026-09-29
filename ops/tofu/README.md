@@ -1,11 +1,19 @@
 # OpenTofu: TaruBot's hosts
 
-This module builds the provider side of TaruBot's hosts (2.36.0, issue #62). `.github/workflows/infra.yml` plans and applies it from GitHub Actions: its Plan job runs in the `infra-plan` environment with read-only credentials and no approval, and its Apply job runs in `infra`, after @deconfined approves it. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)" (the environments are its confirmed item 4).
+This module builds the provider side of TaruBot's hosts (introduced in 2.36.0, issue #62). Since 2.37.0, **Build and deploy** (`.github/workflows/pipeline.yml`) uses it as part of one build, provision, configure and deployment run. The earlier `.github/workflows/infra.yml` remains for existing installations; its separate approval and environment setup is recorded below.
+
+## Environment pipeline (2.37.0)
+
+Start **Build and deploy** from `main` with `environment=staging` or `production`, `rebuild=false` and `prepare_only=false` for a normal deployment. The selected environment holds its provider, storage, SSH and bot settings once: [DEPLOYMENT.md](../../docs/DEPLOYMENT.md) lists their canonical secret names and the owner setup. Staging has no approval; production's one approval covers provisioning, host configuration and bot deployment together. This path needs no separate Infrastructure dispatch or `infra-plan`/`infra` settings.
+
+`ops/pipeline/infra.sh` plans and applies on the same runner using the existing encrypted shared state. Each environment's `TOFU_VARS` must describe the complete host topology and retained database access entries. A plan cannot change the other environment's host. Both workflows use the global `infra` concurrency group, since the state owns each database's whole access list.
+
+`ops/pipeline/host.sh` records a newly created host's authenticated SSH public key and instance ID in a private object beside the state. Later runs require that retained pin. The owner migrates an existing host's verified pin before adoption; an unpinned reused instance is refused. Hosts generate their own private keys. Use `rebuild=true` only for a deliberate replacement, and `prepare_only=true` to provision a new host and verify its database and backup without migrations or a bot start. The production cutover remains an owner operation; adding this path does not move the live Compose bot.
 
 The four layers each have one owner:
 - **OpenTofu** (this module) builds the VM, its firewall, its DNS records and the database access lists.
 - **cloud-init** (`cloud-init.yaml.tftpl`) sets the hostname and root's credentials at first boot.
-- **Ansible** configures the host (`ops/ansible/site.yml`) and deploys the bot (`ops/ansible/bot.yml`), from `.github/workflows/host.yml`.
+- **Ansible** configures the host (`ops/ansible/site.yml`) and deploys the bot (`ops/ansible/deploy.yml`) in the environment pipeline. The earlier `.github/workflows/host.yml` uses `ops/ansible/bot.yml`.
 - **GitHub environments** hold every secret.
 
 ## What it builds
@@ -26,13 +34,15 @@ The user data carries only public keys, root's optional password hash and the ho
 The provider refuses a Linode without a root password or keys, so each Linode gets a random throwaway password, which the user data replaces with the hash or locks. cloud-init stays the only writer of root's keys.
 
 It never builds:
-- **SSH host keys.** Each host makes its own Ed25519 key at first boot, and the owner pins it from their own machine ([Pinning a new host key](#pinning-a-new-host-key)). State holds no private key.
+- **SSH host keys.** Each host makes its own Ed25519 key at first boot. The environment pipeline retains its public pin; the earlier workflow uses the owner's manual [pinning procedure](#pinning-a-new-host-key). State holds no private key.
 - **SSH fingerprint records** in DNS.
 - **Database clusters.** They stay outside OpenTofu, and so does their admin password.
 
 User data takes effect only when a Linode is created (`ignore_changes = [metadata]`). Changing the template, a key or the hash never plans a rebuild; a [rebuild](#rebuilding-a-host) is always deliberate.
 
 ## The `infra-plan` and `infra` environments
+
+**Earlier separate workflow.** This section and the operating, first-apply and manual pinning procedures below describe `infra.yml`, introduced in 2.36.0. Use [the environment pipeline](#environment-pipeline-2370) for the new single-run path; the old secret names and dispatch steps are retained here for existing installations.
 
 @deconfined creates both and fills them; agents never read, set or change them. Both accept deployments from `main` only: deployment branches "Selected branches and tags", with the one branch rule `main`.
 - **`infra-plan`** has no required reviewer, so a plan runs without an approval. It holds read-only credentials only.

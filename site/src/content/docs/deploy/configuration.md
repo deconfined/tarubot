@@ -7,6 +7,8 @@ sidebar:
 
 Settings live in `.env` next to `docker-compose.yml`, copied from your release's [`.env.example`](https://github.com/deconfined/tarubot/blob/main/.env.example) as [Install](/tarubot/deploy/install/#1-get-the-compose-file-and-settings-template) shows. Keep it private (`chmod 600 .env`) and out of Git: it holds the bot token and the database password.
 
+That file setup applies to Compose. The managed [Build and deploy pipeline](/tarubot/deploy/pipeline/) keeps its settings in the selected GitHub environment and delivers secrets through Podman's secret store. The runtime settings below describe the same bot.
+
 The bot validates its settings at startup and refuses to start with an invalid one, naming the setting but never its value. Compose passes the bot container only the settings `docker-compose.yml` lists; a one-off `docker compose run` can add others with `-e NAME=value`. Settings removed in earlier releases are ignored; the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) records each removal.
 
 ## Runtime

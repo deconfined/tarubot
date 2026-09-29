@@ -1016,14 +1016,14 @@ describe("the other workflows", () => {
     ],
   ];
 
-  test("only deploy.yml names production's settings, host.yml staging's and infra.yml Tofu's", () => {
+  test("legacy secret scopes stay confined, with environment infrastructure/runtime secrets also in pipeline.yml", () => {
     for (const file of files) {
       const source = read(`.github/workflows/${file}`);
       for (const [owner, names] of owners)
         expect({ file, owner, named: names.test(source) }).toEqual({
           file,
           owner,
-          named: file === owner,
+          named: file === owner || (file === "pipeline.yml" && owner !== "deploy.yml"),
         });
       // No workflow runs untrusted pull-request code with the repository's secrets.
       expect({ file, target: source.includes("pull_request_target") }).toEqual({

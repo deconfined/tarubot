@@ -1,0 +1,399 @@
+---
+# The pipeline configures the host with site.yml, then deploys one build digest with this current
+# playbook. Both environments use the same tasks; a rollback supplies an older digest. Settings
+# and database compatibility are checked before any secret is replaced or the running bot stops.
+# prepare_only proves a new host's database connection and encrypted backup without a Discord
+# token, migrations or a bot start, so the old production bot can stay online until cutover.
+- name: Deploy TaruBot
+  hosts: target
+  gather_facts: false
+  become: false
+  vars_files:
+    - vars/bot.yml
+  vars:
+    # The image's own guards see the complete settings, on stdin, before they reach Podman secrets.
+    # Diagnostics identify the failed setting only: guard exceptions can contain private IDs/hosts.
+    tb_validate_script: |
+      let check = "settings";
+      try {
+        const input = JSON.parse(await Bun.stdin.text());
+        const {resolveDeployment, assertToolScope, databaseIdentity} = await import("/app/dist/src/config/deployment.js");
+        const {configuration} = await import("/app/dist/src/config/env.js");
+        const identity = resolveDeployment(input.settings);
+        const env = {...input.settings, ...input.secrets,
+          DISCORD_APPLICATION_ID: identity.applicationId,
+          TEST_GUILD_ID: identity.registrationScope === "global" ? "" : identity.registrationScope};
+        const botSecrets = input.prepareOnly ? ["DATABASE_CA_CERT", "DATABASE_URL"] : [...input.botSecrets];
+        check = "GITHUB_APP_CLIENT_ID";
+        if (!input.prepareOnly && (env.GITHUB_APP_CLIENT_ID || env.GITHUB_APP_PRIVATE_KEY)) {
+          if (input.settings.TARUBOT_ENVIRONMENT !== "production" || !env.GITHUB_APP_CLIENT_ID)
+            throw new Error();
+          botSecrets.push("GITHUB_APP_PRIVATE_KEY");
+        }
+        for (const name of [...botSecrets, ...input.backupSecrets]) {
+          check = name;
+          const value = env[name];
+          if (!value || !value.trim() || (!input.multiline.includes(name) && /\s/u.test(value)))
+            throw new Error();
+        }
+        check = "GITHUB_APP_CLIENT_ID";
+        if (!input.prepareOnly && /\s/u.test(env.GITHUB_APP_CLIENT_ID)) throw new Error();
+        if (!input.prepareOnly) {
+          check = "DISCORD_TOKEN";
+          const tokenApplication = Buffer.from(env.DISCORD_TOKEN.split(".")[0], "base64url").toString();
+          if (tokenApplication !== identity.applicationId) throw new Error();
+        }
+        check = "HEALTHCHECKS_BACKUP_URL";
+        if (new URL(env.HEALTHCHECKS_BACKUP_URL).protocol !== "https:") throw new Error();
+        check = "BACKUP_STORAGE_ENDPOINT";
+        const endpoint = env.BACKUP_STORAGE_ENDPOINT;
+        if (new URL(endpoint.includes("://") ? endpoint : "https://" + endpoint).protocol !== "https:")
+          throw new Error();
+        check = "configuration";
+        if (!input.prepareOnly) configuration(env);
+        check = "DATABASE_URL";
+        const database = databaseIdentity(env.DATABASE_URL);
+        if (database.user !== input.database.user || !input.database.names.includes(database.name))
+          throw new Error();
+        assertToolScope(env, {tool: "migrate", discord: "none", guilds: [], databases: ["DATABASE_URL"]},
+          {execArgv: [], envFiles: []});
+        check = "identity";
+        if (!input.prepareOnly)
+          assertToolScope(env, {tool: "register", discord: "write", guilds: identity.guilds, databases: [],
+            registerScope: identity.registrationScope, globalCommands: identity.registrationScope === "global"},
+            {execArgv: [], envFiles: []});
+        const settings = {...input.settings, GITHUB_APP_CLIENT_ID: input.prepareOnly ? "" : env.GITHUB_APP_CLIENT_ID,
+          DISCORD_APPLICATION_ID: env.DISCORD_APPLICATION_ID, TEST_GUILD_ID: env.TEST_GUILD_ID};
+        console.log(JSON.stringify({settings, botSecrets, registrationScope: identity.registrationScope}));
+      } catch {
+        console.log(JSON.stringify({error: check}));
+        process.exit(1);
+      }
+  tasks:
+    - name: Require the environment and the build's immutable identity
+      ansible.builtin.assert:
+        that:
+          - tarubot_target in ['staging', 'production']
+          - tarubot_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+          - tarubot_commit is match('^[0-9a-f]{40}$')
+          - tarubot_digest is match('^sha256:[0-9a-f]{64}$')
+        fail_msg: Supply staging or production, a release version, its commit and its image digest.
+        quiet: true
+
+    - name: Read the environment's settings
+      ansible.builtin.include_vars:
+        file: vars/targets/{{ tarubot_target }}.yml
+
+    - name: Find the account site.yml configured
+      ansible.builtin.getent:
+        database: passwd
+        key: tarubot
+
+    - name: Keep the rootless account's uid and home
+      ansible.builtin.set_fact:
+        tb_uid: "{{ ansible_facts.getent_passwd.tarubot[1] }}"
+        tb_home: "{{ ansible_facts.getent_passwd.tarubot[4] }}"
+        tb_ref: "{{ tb_image_repository }}@{{ tarubot_digest }}"
+        tb_prepare: "{{ tarubot_prepare_only | default(false) | bool }}"
+
+    - name: Install and start the build as tarubot
+      become: true
+      become_user: tarubot
+      vars:
+        ansible_remote_tmp: /run/user/{{ tb_uid }}
+      environment:
+        XDG_RUNTIME_DIR: /run/user/{{ tb_uid }}
+        DBUS_SESSION_BUS_ADDRESS: unix:path=/run/user/{{ tb_uid }}/bus
+        PYTHONNOUSERSITE: "1"
+      block:
+        - name: Pull the build by digest
+          ansible.builtin.command:
+            argv: [podman, pull, --quiet, "{{ tb_ref }}"]
+          changed_when: false
+
+        - name: Inspect the pulled build
+          ansible.builtin.command:
+            argv: [podman, image, inspect, "{{ tb_ref }}"]
+          register: tb_image_inspect
+          changed_when: false
+
+        - name: Require the image the pipeline built
+          ansible.builtin.assert:
+            that:
+              - tb_ref in tb_image.RepoDigests
+              - tb_image.Config.Labels['org.opencontainers.image.version'] == tarubot_version
+              - tb_image.Config.Labels['org.opencontainers.image.revision'] == tarubot_commit
+            fail_msg: The pulled image doesn't match the build's version, commit and digest.
+            quiet: true
+          vars:
+            tb_image: "{{ (tb_image_inspect.stdout | from_json)[0] }}"
+
+        - name: Validate the complete settings inside the release image
+          ansible.builtin.command:
+            argv:
+              [podman, run, --rm, --interactive, --pull=never, --network=none, --read-only,
+               --read-only-tmpfs=false, --cap-drop=all, --security-opt=no-new-privileges,
+               --env-host=false, --http-proxy=false, --log-driver=none, --entrypoint, bun,
+               "{{ tb_ref }}", -e, "{{ tb_validate_script }}"]
+            stdin: >-
+              {{ {'settings': tb_base_settings | combine(tarubot_settings),
+                  'secrets': dict(tb_secret_env | zip(query('ansible.builtin.env', *tb_secret_env)))
+                    | combine({'GITHUB_APP_CLIENT_ID': lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID')}),
+                  'botSecrets': tarubot_secrets, 'backupSecrets': tarubot_backup_settings, 'database': tarubot_database,
+                  'multiline': tb_multiline_secrets, 'prepareOnly': tb_prepare} | to_json }}
+          register: tb_validation
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Refuse invalid settings before changing the running bot
+          ansible.builtin.assert:
+            that: tb_validation.rc == 0
+            fail_msg: "Deployment settings failed validation: {{ tb_failed_setting }}."
+            quiet: true
+          vars:
+            # The script emits only known setting names; never print its raw result or exceptions.
+            tb_failed_setting: >-
+              {{ (tb_validation.stdout | regex_findall('"error": "([A-Za-z_]+)"|"error":"([A-Za-z_]+)"')
+                  | flatten | reject('equalto', '') | list + ['settings']) | first }}
+
+        - name: Keep the validated container settings and secret mounts
+          ansible.builtin.set_fact:
+            tb_validated: "{{ tb_validation.stdout | from_json }}"
+            tb_env: "{{ (tb_validation.stdout | from_json).settings | dict2items(key_name='name') }}"
+            tb_files: >-
+              {{ dict((tb_validation.stdout | from_json).botSecrets
+                      | zip((tb_validation.stdout | from_json).botSecrets | map('lower')))
+                 | dict2items(key_name='name', value_name='path') }}
+            tb_mounts: >-
+              {{ dict((tb_validation.stdout | from_json).botSecrets | map('lower') | map('replace', '_', '-')
+                      | map('regex_replace', '^', 'tarubot-')
+                      | zip((tb_validation.stdout | from_json).botSecrets | map('lower')))
+                 | dict2items(key_name='secret', value_name='target') }}
+          no_log: true
+
+        - name: Look for the installed bot unit
+          ansible.builtin.stat:
+            path: "{{ tb_home }}/.config/containers/systemd/tarubot.container"
+            get_checksum: false
+          register: tb_installed
+
+        - name: Prepare only a new host, without changing an installed bot
+          ansible.builtin.assert:
+            that: not tb_installed.stat.exists
+            fail_msg: prepare_only requires a host without an installed bot unit; use a normal deploy.
+            quiet: true
+          when: tb_prepare
+
+        - name: Read the installed unit for the schema compatibility check
+          ansible.builtin.slurp:
+            src: "{{ tb_home }}/.config/containers/systemd/tarubot.container"
+          register: tb_installed_text
+          when: tb_installed.stat.exists
+
+        - name: Keep the installed image reference
+          ansible.builtin.set_fact:
+            tb_live_ref: >-
+              {{ ((tb_installed_text.content | b64decode | regex_findall('^Image=(.*)$', multiline=True)) + ['']) | first
+                 if tb_installed.stat.exists else '' }}
+
+        - name: Require an installed image from this repository
+          ansible.builtin.assert:
+            that: tb_live_ref is match('^ghcr[.]io/deconfined/tarubot@sha256:[0-9a-f]{64}$')
+            fail_msg: The installed unit has no TaruBot image digest.
+            quiet: true
+          when: tb_installed.stat.exists
+
+        - name: List candidate and installed migrations
+          ansible.builtin.command:
+            argv: [podman, run, --rm, --pull=missing, --network=none, --read-only, --entrypoint, ls, "{{ item }}", /app/migrations]
+          loop: "{{ [tb_ref] + ([tb_live_ref] if tb_installed.stat.exists else []) }}"
+          register: tb_migration_lists
+          changed_when: false
+
+        - name: Refuse rollback across a migration before writes or shutdown
+          ansible.builtin.assert:
+            that:
+              - tb_candidate | length > 0
+              - tb_live | difference(tb_candidate) | length == 0
+            fail_msg: The candidate lacks installed migrations; deploy a fix or restore the database.
+            quiet: true
+          vars:
+            tb_candidate: "{{ tb_migration_lists.results[0].stdout_lines | select('match', '^[0-9]{3}_[a-z0-9_]+[.]sql$') | list }}"
+            tb_live: >-
+              {{ tb_migration_lists.results[1].stdout_lines | select('match', '^[0-9]{3}_[a-z0-9_]+[.]sql$')
+                 | list if tb_installed.stat.exists else [] }}
+
+        - name: Create the unit and tool directories
+          ansible.builtin.file:
+            path: "{{ tb_home }}/{{ item }}"
+            state: directory
+            mode: "0700"
+          loop: [.config/tarubot, .config/tarubot/candidate, .local/bin, .config/containers/systemd, .config/systemd/user]
+
+        - name: Render the candidate Quadlet unit
+          ansible.builtin.template:
+            src: templates/bot/tarubot.container.j2
+            dest: "{{ tb_home }}/.config/tarubot/candidate/tarubot.container"
+            mode: "0644"
+          no_log: true
+          when: not tb_prepare
+
+        - name: Check the candidate with Quadlet before stopping the bot
+          ansible.builtin.command:
+            argv: [/usr/libexec/podman/quadlet, -dryrun, -user]
+          environment:
+            QUADLET_UNIT_DIRS: "{{ tb_home }}/.config/tarubot/candidate"
+          register: tb_quadlet
+          changed_when: false
+          failed_when: tb_quadlet.rc != 0 or '---tarubot.service---' not in tb_quadlet.stdout_lines
+          no_log: true
+          when: not tb_prepare
+
+        - name: Store each required Podman secret from stdin
+          ansible.builtin.command:
+            argv: [podman, secret, create, --replace, "tarubot-{{ item | lower | replace('_', '-') }}", "-"]
+            stdin: "{{ lookup('ansible.builtin.env', item) }}"
+          loop: "{{ tb_validated.botSecrets + tarubot_backup_settings }}"
+          changed_when: true
+          no_log: true
+
+        - name: Stop the previous bot before migration
+          ansible.builtin.systemd_service:
+            name: tarubot.service
+            state: stopped
+            scope: user
+          when: tb_installed.stat.exists and not tb_prepare
+
+        - name: Capture the recovery boundary before any migration or new start
+          ansible.builtin.command:
+            argv: [date, -u, '+%Y-%m-%dT%H:%M:%S.%6NZ']
+          register: tb_recovery
+          changed_when: false
+          when: not tb_prepare
+
+        - name: Keep the recovery boundary even if startup fails
+          ansible.builtin.copy:
+            content: "{{ tb_recovery.stdout }}\n"
+            dest: "{{ tb_home }}/.config/tarubot/recovery-point"
+            mode: "0600"
+          when: not tb_prepare
+
+        - name: Install the container settings
+          ansible.builtin.template:
+            src: templates/bot/tarubot.env.j2
+            dest: "{{ tb_home }}/.config/tarubot/tarubot.env"
+            mode: "0600"
+          no_log: true
+
+        - name: Install the checked Quadlet unit
+          ansible.builtin.copy:
+            src: "{{ tb_home }}/.config/tarubot/candidate/tarubot.container"
+            remote_src: true
+            dest: "{{ tb_home }}/.config/containers/systemd/tarubot.container"
+            mode: "0644"
+          when: not tb_prepare
+
+        - name: Install the tool wrapper and backup script
+          ansible.builtin.copy:
+            src: files/bot/{{ item }}
+            dest: "{{ tb_home }}/.local/bin/{{ item }}"
+            mode: "0755"
+          loop: [tarubot-tool, tarubot-backup]
+
+        - name: Install the backup units
+          ansible.builtin.copy:
+            src: files/bot/{{ item }}
+            dest: "{{ tb_home }}/.config/systemd/user/{{ item }}"
+            mode: "0644"
+          loop: [tarubot-backup.service, tarubot-backup.timer]
+
+        - name: Install the backup encryption recipients
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../age-recipients.txt"
+            dest: "{{ tb_home }}/.config/tarubot/age-recipients.txt"
+            mode: "0644"
+
+        - name: Pin the maintenance tools to the same build
+          ansible.builtin.copy:
+            content: "{{ tb_ref }}\n"
+            dest: "{{ tb_home }}/.config/tarubot/image"
+            mode: "0600"
+
+        # ExecStartPre runs migrate.js after the old bot stopped; systemd completes this even if
+        # the runner disconnects. The recorded boundary cannot be overwritten by a crash restart.
+        - name: Reload and start the bot with its migration
+          ansible.builtin.systemd_service:
+            name: tarubot.service
+            daemon_reload: true
+            state: started
+            scope: user
+          when: not tb_prepare
+
+        - name: Wait for readiness in the new build
+          ansible.builtin.command:
+            argv: [podman, container, inspect, tarubot]
+          register: tb_ready
+          until: >-
+            tb_ready.rc == 0 and (tb_ready.stdout | from_json)[0].State.Status == 'running'
+            and ((tb_ready.stdout | from_json)[0].State.Health | default({}, true)).Status | default('') == 'healthy'
+            and (tb_ready.stdout | from_json)[0].Image == (tb_image_inspect.stdout | from_json)[0].Id
+          retries: "{{ tb_health.retries }}"
+          delay: "{{ tb_health.delay }}"
+          changed_when: false
+          failed_when: false
+          no_log: true
+          when: not tb_prepare
+
+        # This probe never creates tables or takes the writer lease. In particular it cannot
+        # migrate production while the old Compose bot is still running on its other host.
+        - name: Verify the database connection and CA without migrations
+          ansible.builtin.command:
+            argv:
+              [podman, run, --rm, --pull=never, --read-only, --read-only-tmpfs=false,
+               --cap-drop=all, --security-opt=no-new-privileges, --env-host=false,
+               --http-proxy=false, --log-driver=none, --env-file, "{{ tb_home }}/.config/tarubot/tarubot.env",
+               --secret, 'tarubot-database-url,type=mount,target=/run/secrets/database_url,uid=1000,gid=1000,mode=0400',
+               --secret, 'tarubot-database-ca-cert,type=mount,target=/run/secrets/database_ca_cert,uid=1000,gid=1000,mode=0400',
+               --entrypoint, bun, "{{ tb_ref }}", -e, "{{ tb_probe }}"]
+          vars:
+            tb_probe: >-
+              const{Database}=await import('/app/dist/src/infrastructure/postgres/database.js');
+              const{secretSetting}=await import('/app/dist/src/config/secrets.js');
+              const db=new Database(secretSetting(process.env,'DATABASE_URL'));
+              try{await db.query('SELECT 1')}finally{await db.close()}
+          changed_when: false
+          no_log: true
+          when: tb_prepare
+
+        - name: Prove one encrypted backup from the prepared host
+          ansible.builtin.systemd_service:
+            name: tarubot-backup.service
+            daemon_reload: true
+            state: started
+            scope: user
+          when: tb_prepare
+
+        - name: Start the nightly backup timer
+          ansible.builtin.systemd_service:
+            name: tarubot-backup.timer
+            enabled: true
+            state: started
+            scope: user
+
+        - name: Register and verify the environment's commands
+          ansible.builtin.command:
+            argv: >-
+              {{ [tb_home ~ '/.local/bin/tarubot-tool'] + item }}
+          loop:
+            - "{{ ['register.js', '--global'] if tb_validated.registrationScope == 'global' else ['register.js', '--guild', tb_validated.registrationScope] }}"
+            - [commands.js, list]
+          changed_when: true
+          no_log: true
+          when: not tb_prepare
+      always:
+        # This still reports the original boundary when migration, startup or readiness failed.
+        - name: Report the point before migration for database recovery
+          ansible.builtin.debug:
+            msg: "Recovery point before migration: {{ tb_recovery.stdout }}"
+          when: tb_recovery is defined and tb_recovery.stdout is defined

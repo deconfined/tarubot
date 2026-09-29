@@ -1,6 +1,17 @@
 # Version history
 
-The current application version is **2.36.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.37.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.37.0 — Build and deploy an environment in one workflow
+
+The **Build and deploy** workflow (`pipeline.yml`) builds and signs an image, provisions the selected Linode with OpenTofu, configures AlmaLinux 10 with Ansible and runs the bot with rootless Podman/Quadlet. Settings come from the selected `staging` or `production` environment; its approval covers provisioning through deployment once. The owner confirmed Linode-only hosts, automated initial SSH pinning and this single approval in the review session. There is no bot behavior change or migration.
+
+- The pipeline consumes the publisher's immutable digest directly, with provenance and image-label checks. Plan and apply stay on one runner; no saved-plan artifact or separate `infra-plan`/`infra` settings are needed. Shared state retains the database's whole access list, and a selected run refuses host, firewall or DNS changes outside that environment.
+- A newly created or explicitly rebuilt host establishes its SSH public-key pin automatically, retained privately in Object Storage against its instance ID. Later runs reuse that pin and refuse an unexpected key change. No host private key reaches state or the runner.
+- The new deployment playbook validates complete settings with the release image's own application guards before writes or shutdown, installs the unit and tools, waits for readiness and registers commands. The recovery boundary is recorded after stopping the old bot and before migration; startup failures and restarts cannot overwrite it. `prepare_only` proves the database and backup without starting the bot for the owner's cutover.
+- The Docker build context excludes private infrastructure values, state, plans and database dumps. Contributor and public operator documentation describe the new entry point and owner setup.
+
+This release prepares the source path for production's move. The live Compose scripts, files and production workflow jobs remain byte-identical until the owner completes the cutover. No cloud resources, environment settings, credentials or live deployments changed in this session.
 
 ## 2.36.0 — The simple pipeline for staging
 

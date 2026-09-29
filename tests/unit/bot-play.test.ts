@@ -875,6 +875,7 @@ describe("the bot's files", () => {
       "templates/bot/tarubot.container.j2",
       "templates/bot/tarubot.env.j2",
       "vars/bot.yml",
+      "vars/targets/production.yml",
       "vars/targets/staging.yml",
     ]);
   });

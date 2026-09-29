@@ -89,6 +89,8 @@ jobs:
           # infra.yml's steps (ops/tofu/ci/), which run with the infra-plan and infra
           # environments' secrets.
           shellcheck -S warning ops/tofu/ci/tofu-ci.sh
+          # The single environment pipeline's provisioning and SSH handoff run on the runner.
+          shellcheck -S warning ops/pipeline/*.sh
       - name: Compile the application
         run: bun run build
       - name: Generate synthetic integration input
@@ -196,6 +198,7 @@ jobs:
           # With the example inventory and host settings, so both examples parse too.
           ansible-playbook --syntax-check -i inventory.example.yml -e @host.example.yml site.yml
           ansible-playbook --syntax-check -i inventory.example.yml bot.yml
+          ansible-playbook --syntax-check -i inventory.example.yml deploy.yml
           # ansible-lint runs its own syntax check without an inventory, which ansible.cfg's
           # unparsed_is_failed would refuse; the setting stays on for real runs.
           ANSIBLE_INVENTORY_UNPARSED_FAILED=False ansible-lint --offline --project-dir .

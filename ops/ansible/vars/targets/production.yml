@@ -1,0 +1,25 @@
+---
+# Production uses its own environment values. The application identity comes from the image,
+# and the GitHub App key is required and mounted only when its client ID is configured.
+tarubot_secrets:
+  - DATABASE_CA_CERT
+  - DATABASE_URL
+  - DISCORD_TOKEN
+  - GITHUB_REPORTS_TOKEN
+  - HEALTHCHECKS_PING_URL
+
+tarubot_backup_settings:
+  - BACKUP_STORAGE_ENDPOINT
+  - BACKUP_STORAGE_REGION
+  - BACKUP_STORAGE_ACCESS_KEY
+  - BACKUP_STORAGE_SECRET_KEY
+  - HEALTHCHECKS_BACKUP_URL
+
+tarubot_database:
+  user: tarubot
+  names: [tarubot, tarubot_restore]
+
+tarubot_settings:
+  TARUBOT_ENVIRONMENT: production
+  PUBLIC_TEST_RESPONSES: "false"
+  GITHUB_APP_CLIENT_ID: ""

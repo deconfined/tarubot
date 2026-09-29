@@ -2,6 +2,8 @@
 
 Production TaruBot has run on a **Linode Docker host with Linode managed PostgreSQL** since 2026-09-24.
 
+2.37.0 adds the unified **Build and deploy** workflow for either environment: image build, OpenTofu, Ansible configuration and rootless Podman on AlmaLinux 10, with one production environment approval. [DEPLOYMENT.md](DEPLOYMENT.md) is its setup and operating guide, including automated initial SSH pinning and preparation without starting the bot. Production remains on the Compose path described here until the owner completes that cutover; the earlier pipeline sections below record the transition path.
+
 The cutover first went live on DigitalOcean App Platform, then moved the same evening, with about 90 seconds of downtime, because **the Lodestone refuses DigitalOcean's addresses**: HTTP 403 at the edge, within milliseconds. From App Platform, Nodestone could not refresh profiles, verify claims or read the roster. Linode's addresses get HTTP 200. [MIGRATION.md](MIGRATION.md#record-of-the-2026-09-24-cutover) has the record. [APP_PLATFORM.md](APP_PLATFORM.md) records the App Platform setup, retired in 2.21.0; the owner has since deleted the app and its cluster (recorded 2026-09-26).
 
 A second Linode, the [staging host](#staging-host-50) (#50), runs on AlmaLinux with rootless Podman. Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) it is built and run by [the simple pipeline](#the-simple-pipeline-2360): OpenTofu builds it, cloud-init sets its credentials, the Deploy workflow configures it and deploys the bot with Ansible from a GitHub runner, and every secret lives in a GitHub environment. Production moves to the same pipeline in 2.37.0; until then, the sections before "Staging host" describe it as it runs.
