@@ -3,7 +3,9 @@
 # hardening (#62). ops/ansible/bot.yml installs it as ~/.local/bin/tarubot-tool for the tarubot
 # user; the bot's unit runs it before every start (ExecStartPre, migrate.js), bot.yml runs
 # migrate.js, register.js and commands.js with it, and operators run it from root with
-# `run0 --user=tarubot ~tarubot/.local/bin/tarubot-tool TOOL.js [ARG...]`.
+# `run0 --user=tarubot sh -c '~/.local/bin/tarubot-tool TOOL.js [ARG...]'`. The shell is needed:
+# under SELinux a service of the system manager, which run0 starts, can't execute a file in a
+# home directory itself (it fails with status 203/EXEC).
 #
 #   tarubot-tool [--image ghcr.io/deconfined/tarubot@sha256:DIGEST] TOOL.js [ARG...]
 #

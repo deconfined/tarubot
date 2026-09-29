@@ -112,10 +112,10 @@ It is two applies, so that adopting the existing access list can't change it.
 After every build or rebuild, the owner pins the new host's key from their own machine, trusting it on first use. The workflow never prints a host key: scanners index keys by address, so a key in a public log would lead to the address and the name.
 
 ```sh
-ssh-keyscan -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TARGET_HOST_KEY --env <role>
+ssh-keyscan -q -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TARGET_HOST_KEY --env <role>
 ```
 
-`TARGET_HOST_KEY` holds exactly `ssh-ed25519 <key>`, with no host name. Before running it, make sure `<name>` already resolves to the new addresses Cloud Manager shows, not to a rebuilt host's old ones. To check the key itself, compare `ssh-keyscan -t ed25519 <name> 2>/dev/null | ssh-keygen -lf -` with the Ed25519 fingerprint cloud-init printed on the Lish console at first boot.
+`TARGET_HOST_KEY` holds exactly `ssh-ed25519 <key>`, with no host name. The `-q` matters: without it `ssh-keyscan` also prints a `# <name>:22 SSH-2.0-…` banner line on standard output, which would reach the secret, and the host job would refuse it. Before running it, make sure `<name>` already resolves to the new addresses Cloud Manager shows, not to a rebuilt host's old ones. To check the key itself, compare `ssh-keyscan -q -t ed25519 <name> 2>/dev/null | ssh-keygen -lf -` with the Ed25519 fingerprint cloud-init printed on the Lish console at first boot.
 
 A new host also needs `TARGET_HOST` (its DNS name) and `ANSIBLE_SSH_KEY` (the Configure key's private half) in its environment before its first Configure.
 
