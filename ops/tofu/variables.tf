@@ -35,20 +35,15 @@ variable "hosts" {
     error_message = "Every hosts key must be staging or production, optionally followed by -N (one or two digits), and its role must equal the key's part before -N."
   }
 
-  # infra.yml masks each label in the public log. A label with a '-' can never equal one of the
-  # plain words that log prints (actions, roles and resource names), so masking it censors nothing
-  # else; it must also not occur inside a host key. Linode also wants labels to start with a
-  # letter, end with a letter or digit, and hold no doubled '-'.
+  # A label is the Linode's display name inside the account, not a DNS name or an address, and
+  # infra.yml doesn't mask it (don't put the domain in one). Linode's rules, kept to lowercase and
+  # '-': 3 to 64 characters, starting and ending with a letter or digit, no doubled '-'. That also
+  # keeps the firewall label derived from it (main.tf) within Linode's rules.
   validation {
     condition = alltrue([
-      for h in values(var.hosts) : (
-        can(regex("^[a-z][a-z0-9-]{6,61}[a-z0-9]$", h.label))
-        && strcontains(h.label, "-")
-        && !strcontains(h.label, "--")
-        && !anytrue([for k in keys(var.hosts) : strcontains(k, h.label)])
-      )
+      for h in values(var.hosts) : can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label)) && !strcontains(h.label, "--")
     ])
-    error_message = "Every host label must be 8 to 63 characters of a-z, 0-9 and '-', start with a letter, end with a letter or digit, contain at least one '-' (never two in a row), and not occur inside a host key."
+    error_message = "Every host label must be 3 to 64 characters of a-z, 0-9 and '-', start and end with a letter or digit, and hold no doubled '-'."
   }
 
   validation {

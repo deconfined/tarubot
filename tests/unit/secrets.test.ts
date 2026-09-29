@@ -127,7 +127,7 @@ describe("the resolver", () => {
     const path = `${SECRET_DIR}/discord_token`;
     const read = (text: string) =>
       secretSetting({ DISCORD_TOKEN_FILE: path }, "DISCORD_TOKEN", files({ [path]: text }));
-    // secrets.sh writes the value and one newline.
+    // bot.yml's `podman secret create` gets the value on stdin, with the newline Ansible adds.
     expect(read(`${TOKEN}\n`)).toBe(TOKEN);
     // A value's own final newline survives, and a file without one is taken as it is.
     expect(read(`${CA}\n\n`)).toBe(`${CA}\n`);
@@ -348,7 +348,7 @@ describe("configuration()", () => {
         expect(configuration({ ...env, DATABASE_CA_CERT_FILE: paths.ca })).toEqual(
           PLAIN_CONFIGURATION,
         );
-        // secrets.sh's empty value (a lone newline) is no CA at all.
+        // An empty value, a lone newline, is no CA at all.
         expect(() => configuration({ ...env, DATABASE_CA_CERT_FILE: paths.empty })).toThrow(
           "DATABASE_CA_CERT: required",
         );

@@ -7,8 +7,10 @@
  *   by the last play with the final assert, no meta: end_*, no play-level ansible_remote_tmp;
  * - the secrets: lookup('ansible.builtin.env', NAME) only in no_log tasks, only in the five
  *   set_facts of names and booleans and in a secret's own stdin, never in vars, environment or a
- *   template; the secret task's argv, stdin and label; the refusals as plain asserts, whose names
- *   reach the log; no_log on every tool run and container inspect; no debug and no diff;
+ *   template, and only with operations that can't raise on a value (an exception's text reaches
+ *   the log's [ERROR] line even under no_log); the secret task's argv, stdin and label; the
+ *   refusals as plain asserts, whose names reach the log, each declaring its outcome and reason
+ *   for the rescue; no_log on every tool run and container inspect; no debug and no diff;
  * - the writes: tarubot.env, the unit and the image file only in the preflight and unit phases,
  *   the unit only after Quadlet's dry run;
  * - the settings against the code: the staging lists against src/config/secrets.ts and
@@ -205,12 +207,13 @@ describe("bot.yml's shape", () => {
       DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ tb_uid }}/bus",
       PYTHONNOUSERSITE: "1",
     });
-    // The rescue records the outcome, the phase and the reason for the last play.
+    // The rescue records the outcome and reason the failed task declares in its own vars (failed
+    // and - for any other), and the phase, for the last play.
     const rescue = mappings(outer?.rescue, "rescue");
     expect(rescue).toHaveLength(1);
     expect(mapping(argsOf(rescue[0] ?? {}).tb_result, "tb_result")).toEqual({
-      outcome: "{{ tb_outcome | default('failed') }}",
-      reason: "{{ tb_reason | default('-') }}",
+      outcome: "{{ (ansible_failed_task.vars | default({})).tb_outcome | default('failed') }}",
+      reason: "{{ (ansible_failed_task.vars | default({})).tb_reason | default('-') }}",
       step: "{{ tb_step | default('checks') }}",
     });
   });
@@ -281,6 +284,70 @@ describe("bot.yml's shape", () => {
       .join("\n");
     expect([...text.matchAll(/\\(?!n")/gu)]).toEqual([]);
   });
+
+  test("a task that can fail names its outcome and reason in its own vars, and nothing else sets them", async () => {
+    const all = await allTasks();
+    // No set_fact records an outcome or reason ahead of a task any more.
+    for (const { task } of all)
+      if (moduleOf(task) === "ansible.builtin.set_fact")
+        for (const key of ["tb_outcome", "tb_reason"])
+          expect({ task: task.name, key, set: key in argsOf(task) }).toEqual({
+            task: task.name,
+            key,
+            set: false,
+          });
+    // Every task that declares one: its phase, outcome (failed when absent) and reason.
+    const declared = all
+      .filter(({ task }) => task.vars !== undefined && moduleOf(task) !== "block")
+      .map(({ task, phase }) => {
+        const vars = mapping(task.vars, String(task.name));
+        return [phase, task.name, vars.tb_outcome ?? "failed", vars.tb_reason];
+      });
+    expect(declared).toEqual([
+      [
+        "Decide",
+        "Refuse a deploy without DISCORD_TOKEN on a host that runs a bot",
+        "refused",
+        "missing-secret",
+      ],
+      ["Decide", "Refuse missing secrets", "refused", "missing-secret"],
+      ["Decide", "Refuse secrets with stray whitespace", "refused", "malformed-secret"],
+      ["Decide", "Refuse another target's database", "refused", "database-not-this-target"],
+      ["Decide", "Refuse a preflight on a host that runs a bot", "refused", "bot-exists"],
+      ["Image", "Refuse an image that isn't the release's", "refused", "image-mismatch"],
+      [
+        "Migrations",
+        "Refuse a rollback across a migration",
+        "refused",
+        "rollback-across-migration",
+      ],
+      [
+        "Identity",
+        "Refuse a Discord token of another application",
+        "refused",
+        "token-application-mismatch",
+      ],
+      ["Preflight", "Require Schema ready.", "failed", "schema-not-ready"],
+      ["Preflight", "Run one backup", "failed", "backup-failed"],
+      ["Unit", "Refuse a unit Quadlet can't turn into tarubot.service", "failed", "unit-invalid"],
+      ["Restart", "Restart the bot", "failed", "restart-failed"],
+      ["Health", "Require healthy", "unhealthy", "not-healthy"],
+      ["Health", "Require the same container, still healthy", "unhealthy", "not-healthy"],
+      ["Health", "Require the release's own image", "unhealthy", "image-mismatch"],
+      ["Commands", "Register the commands in the target's scope", "failed", "register-failed"],
+      ["Commands", "Read the registration back", "failed", "register-failed"],
+    ]);
+    // Those vars are the outcome and the reason only, in the result's own vocabulary.
+    for (const { task } of all.filter(
+      ({ task }) => task.vars !== undefined && moduleOf(task) !== "block",
+    )) {
+      const vars = mapping(task.vars, String(task.name));
+      expect(Object.keys(vars).every((key) => ["tb_outcome", "tb_reason"].includes(key))).toBe(
+        true,
+      );
+      expect(String(vars.tb_reason)).toMatch(/^[a-z0-9-]{1,40}$/u);
+    }
+  });
 });
 
 describe("the secrets in bot.yml", () => {
@@ -319,6 +386,57 @@ describe("the secrets in bot.yml", () => {
       }
     }
     expect([...holding].sort()).toEqual(LOOKUP_FACTS);
+  });
+
+  test("a secret's value meets only operations that can't raise on any string", async () => {
+    // ansible-core 2.19 and later censor a no_log task's result, but not the [ERROR] line of an
+    // exception raised while templating, which can quote the value (urlsplit's "Port could not
+    // be cast to integer value as '<start of the password>'", for one). So an expression that
+    // reads a value may use only these filters and tests, and .split() as its one method.
+    const FILTERS = ["b64decode", "first", "join", "length", "map", "regex_escape"];
+    const TESTS = ["match"];
+    /** Every string in a value, depth first. */
+    const strings = (value: unknown): string[] =>
+      typeof value === "string"
+        ? [value]
+        : typeof value === "object" && value !== null
+          ? Object.values(value).flatMap(strings)
+          : [];
+    for (const { task } of await allTasks()) {
+      const { block: _b, rescue: _r, always: _a, ...own } = task;
+      const where = String(task.name);
+      // Each string that reads a value: a set_fact's expression, a condition or a stdin.
+      for (const expression of strings(own).filter((text) => text.includes(LOOKUP))) {
+        const filters = [...expression.matchAll(/\|\s*([a-z0-9_]+)/gu)].map((m) => m[1] ?? "");
+        const tests = [...expression.matchAll(/\bis\s+(?:not\s+)?([a-z_]+)/gu)].map(
+          (m) => m[1] ?? "",
+        );
+        const methods = [...expression.matchAll(/\)\s*\.([a-z_]+)\(/gu)].map((m) => m[1] ?? "");
+        expect({ where, odd: filters.filter((f) => !FILTERS.includes(f)) }).toEqual({
+          where,
+          odd: [],
+        });
+        expect({ where, odd: tests.filter((t) => !TESTS.includes(t)) }).toEqual({ where, odd: [] });
+        expect({ where, odd: methods.filter((m) => m !== "split") }).toEqual({ where, odd: [] });
+        // The parsers that raise on malformed input, by name, whatever the syntax.
+        expect(expression).not.toMatch(
+          /urlsplit|from_json|from_yaml|\bint\b|\bfloat\b|to_datetime|ipaddr/u,
+        );
+      }
+    }
+    // b64decode only behind its guards: base64url characters, and never a length of 4n+1.
+    const token = (await allTasks()).find(({ task }) => "tb_token_ok" in argsOf(task));
+    const expression = String(argsOf(token?.task ?? {}).tb_token_ok);
+    const guards = [
+      expression.indexOf("is match('^[A-Za-z0-9_-]+$')"),
+      expression.indexOf("% 4 != 1"),
+    ];
+    expect(guards.every((at) => at >= 0 && at < expression.indexOf("b64decode"))).toBe(true);
+    // DATABASE_URL is checked by one regular expression, not parsed.
+    const database = (await allTasks()).find(({ task }) => "tb_db_ok" in argsOf(task));
+    expect(String(argsOf(database?.task ?? {}).tb_db_ok)).toContain(
+      "lookup('ansible.builtin.env', 'DATABASE_URL')\n   is match('^postgres(ql)?://'",
+    );
   });
 
   test("no play, block, vars file or template reads the environment", async () => {
@@ -386,14 +504,16 @@ describe("the secrets in bot.yml", () => {
       // They read names, booleans and public inputs, never a value.
       expect(ownText(task)).not.toContain("lookup(");
     }
-    // The missing and malformed refusals name the settings.
+    // The missing and malformed refusals name the settings, by the environment secrets the owner
+    // sets (tb_secret_names: each name's own, or tb_secret_source's).
     const messages = checks.map(({ task }) => String(argsOf(task).fail_msg ?? ""));
-    expect(messages.some((message) => message.includes("{{ tb_missing | join(', ') }}"))).toBe(
-      true,
-    );
-    expect(messages.some((message) => message.includes("{{ tb_malformed | join(', ') }}"))).toBe(
-      true,
-    );
+    for (const list of ["tb_missing", "tb_malformed"])
+      expect({
+        list,
+        named: messages.some((message) =>
+          message.includes(`{{ ${list} | map('extract', tb_secret_names) | join(', ') }}`),
+        ),
+      }).toEqual({ list, named: true });
   });
 
   test("every tool run and container inspect is no_log: their output names guilds or holds the environment", async () => {
@@ -523,11 +643,13 @@ describe("the vars against the code", () => {
       "tb_inputs",
       "tb_actions",
       "tb_secret_env",
+      "tb_secret_source",
       "tb_multiline_secrets",
       "tb_preflight_secrets",
       "tb_base_settings",
       "tb_health",
       "tb_prune_until",
+      "tb_image_source",
       "tb_identity_script",
     ]);
     const vars = await botVars();
@@ -543,6 +665,49 @@ describe("the vars against the code", () => {
     expect(vars.tb_base_settings).toEqual({ HEALTH_PORT: "3000", ENABLE_EFFECTS: "true" });
     expect(vars.tb_health).toEqual({ retries: 36, delay: 5, settle: 60 });
     expect(vars.tb_prune_until).toBe("168h");
+    // The source label publish.yml sets on every release, of the one repository the bot runs.
+    expect(vars.tb_image_source).toBe(
+      `https://github.com/${String(vars.tb_image_repository).replace(/^ghcr\.io\//u, "")}`,
+    );
+    expect(await read(".github/workflows/publish.yml")).toContain(
+      `org.opencontainers.image.source=https://github.com/\${{ github.repository }}`,
+    );
+  });
+
+  test("the tidy step prunes only TaruBot's release images, so the backup's PostgreSQL image stays", async () => {
+    const tidy = (await allTasks()).filter(({ phase }) => phase === "Tidy");
+    const prune = tidy.find(({ task }) => argvText(task).includes('"prune"'));
+    expect(argsOf(prune?.task ?? {}).argv).toEqual([
+      "podman",
+      "image",
+      "prune",
+      "--all",
+      "--force",
+      "--filter",
+      "until={{ tb_prune_until }}",
+      "--filter",
+      "label=org.opencontainers.image.source={{ tb_image_source }}",
+    ]);
+  });
+
+  test("a preflight enables the nightly backup after its one backup, as a healthy deploy does", async () => {
+    const preflight = (await allTasks()).filter(
+      ({ phase, section }) => phase === "Preflight" && section === "block",
+    );
+    const names = preflight.map(({ task }) => task.name);
+    const timer = preflight.find(({ task }) => argsOf(task).name === "tarubot-backup.timer");
+    expect(argsOf(timer?.task ?? {})).toEqual({
+      name: "tarubot-backup.timer",
+      enabled: true,
+      state: "started",
+      scope: "user",
+    });
+    expect(names.indexOf(timer?.task.name as string)).toBeGreaterThan(
+      names.indexOf("Run one backup"),
+    );
+    expect(names.indexOf(timer?.task.name as string)).toBeLessThan(
+      names.indexOf("End as preflight-ok"),
+    );
   });
 
   test("tb_secret_env is src/config/secrets.ts's six plus the backup's five", async () => {
@@ -550,6 +715,12 @@ describe("the vars against the code", () => {
     expect(names(vars.tb_secret_env, "tb_secret_env")).toEqual(
       [...FILE_SETTINGS, ...BACKUP_SETTINGS].sort(),
     );
+    // GitHub refuses a secret name that starts with GITHUB_, so these two come from environment
+    // secrets of other names (host.yml's Bot step maps them back; deploy-workflow.test.ts).
+    expect(vars.tb_secret_source).toEqual({
+      GITHUB_APP_PRIVATE_KEY: "SUGGEST_APP_PRIVATE_KEY",
+      GITHUB_REPORTS_TOKEN: "REPORTS_GITHUB_TOKEN",
+    });
     expect(names(vars.tb_multiline_secrets, "tb_multiline_secrets")).toEqual([
       "DATABASE_CA_CERT",
       "GITHUB_APP_PRIVATE_KEY",

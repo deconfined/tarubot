@@ -24,9 +24,10 @@ tb_actions:
   - bot
   - preflight
 
-# Every secret any target reads, exactly the names host.yml's Bot step exports from the job's
-# environment (secrets.NAME). bot.yml reads them only with lookup('ansible.builtin.env', NAME), in
-# no_log tasks. src/config/secrets.ts's FILE_SETTINGS plus the backup's five.
+# Every secret any target reads: exactly the environment variables host.yml's Bot step exports
+# from the job's GitHub environment, each from the secret tb_secret_source names for it, or else
+# from the secret of the same name. bot.yml reads them only with lookup('ansible.builtin.env',
+# NAME), in no_log tasks. src/config/secrets.ts's FILE_SETTINGS plus the backup's five.
 tb_secret_env:
   - BACKUP_STORAGE_ACCESS_KEY
   - BACKUP_STORAGE_ENDPOINT
@@ -39,6 +40,14 @@ tb_secret_env:
   - GITHUB_REPORTS_TOKEN
   - HEALTHCHECKS_BACKUP_URL
   - HEALTHCHECKS_PING_URL
+
+# The GitHub secret behind each tb_secret_env name that GitHub won't take as a secret's name (it
+# refuses every name that starts with GITHUB_). host.yml's Bot step maps each one back, as in
+# `GITHUB_REPORTS_TOKEN: secrets.REPORTS_GITHUB_TOKEN`, so the variable, the Podman secret and the
+# NAME_FILE line keep the bot's own name. The refusals name the secret the owner sets.
+tb_secret_source:
+  GITHUB_APP_PRIVATE_KEY: SUGGEST_APP_PRIVATE_KEY
+  GITHUB_REPORTS_TOKEN: REPORTS_GITHUB_TOKEN
 
 # The PEMs, the only values that may span lines. Every other value must be one run of
 # non-whitespace characters: a stray space or newline (as `gh secret set < file` leaves) is
@@ -67,8 +76,11 @@ tb_health:
   delay: 5
   settle: 60
 
-# The tidy step removes images older than this that no container uses.
+# The tidy step removes TaruBot release images older than this that no container uses: those whose
+# org.opencontainers.image.source label (publish.yml sets it on every release) is this, so the
+# backup's pinned PostgreSQL image stays.
 tb_prune_until: 168h
+tb_image_source: https://github.com/deconfined/tarubot
 
 # Run with `bun -e` in the release image (no network, no secret): it prints the application and
 # the registration scope the image's own src/config/deployment.ts gives the target's

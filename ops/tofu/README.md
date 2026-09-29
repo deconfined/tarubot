@@ -66,10 +66,12 @@ jq -c . values.json | gh secret set TOFU_VARS --env infra
 
 Rules that keep the public log clean:
 - **Map keys and resource addresses appear in public logs** (`create linode_instance.host["staging"]`), and so do roles. That is why the keys are held to those few words. Nothing else from `TOFU_VARS` ever prints.
-- **Every label must contain a `-`** (8 to 63 characters of `a-z`, `0-9` and `-`, starting with a letter, never two `-` in a row), and must not occur inside a host key. The workflow masks each label in the log. A label with a `-` can never equal a plain word the log prints, so masking it censors nothing else.
+- **A label is the Linode's display name** inside the account, not a DNS name or an address, so the workflow doesn't mask it. It follows Linode's rules: 3 to 64 characters of `a-z`, `0-9` and `-`, starting and ending with a letter or digit, never two `-` in a row. Don't put the domain in it.
 - **`db_allow_extra` uses the form the Linode API stores**: a CIDR with its prefix length (`198.51.100.10/32`, `2001:db8::10/128`). Copy each entry exactly as Cloud Manager shows it. An entry written any other way shows as a change on every plan.
 
-The workflow masks every `fqdn` and label, the zone ID, each `db_allow_extra` entry and its bare address, the hash, and each key's base64 field before anything else prints. Database IDs are never printed.
+The workflow masks every `fqdn`, the zone ID, each `db_allow_extra` entry and its bare address, the hash, and each key's base64 field before anything else prints. Database IDs are never printed.
+
+Each of the workflow's steps runs one phase of `ci/tofu-ci.sh` (install, prepare, init, plan, summarize, and for Apply compare and apply), and the rules it applies live in the jq programs beside it: `shape.jq` (the value's shape), `masks.jq` (what is masked), `summary.jq` (the change list), `diag.jq` (the diagnostics filter) and `applied.jq` (the apply's counts). Both jobs run the same code, and each step's environment holds only the secrets its phase needs.
 
 ## Operating it
 
@@ -99,7 +101,7 @@ It is two applies, so that adopting the existing access list can't change it.
 
    Anything else means a value is wrong: fix `TOFU_VARS` and never apply. Then dispatch an apply.
 
-2. **Staging.** Add the `staging` entry to `hosts`, with a label that contains a `-`. The plan must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
+2. **Staging.** Add the `staging` entry to `hosts`. The plan must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
 
    ```
    update linode_database_access_controls.db["primary"] +2 -0
@@ -117,32 +119,36 @@ ssh-keyscan -q -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TA
 
 `TARGET_HOST_KEY` holds exactly `ssh-ed25519 <key>`, with no host name. The `-q` matters: without it `ssh-keyscan` also prints a `# <name>:22 SSH-2.0-…` banner line on standard output, which would reach the secret, and the host job would refuse it. Before running it, make sure `<name>` already resolves to the new addresses Cloud Manager shows, not to a rebuilt host's old ones. To check the key itself, compare `ssh-keyscan -q -t ed25519 <name> 2>/dev/null | ssh-keygen -lf -` with the Ed25519 fingerprint cloud-init printed on the Lish console at first boot.
 
-A new host also needs `TARGET_HOST` (its DNS name) and `ANSIBLE_SSH_KEY` (the Configure key's private half) in its environment before its first Configure.
+A new host also needs `TARGET_HOST` (its DNS name) and `ANSIBLE_SSH_KEY` (the Configure key's private half, without a passphrase) in its environment before its first Configure.
 
-Until the new key is pinned, every run for that host stops in the host job's "Load the host settings" step with "The host's key isn't the one pinned in TARGET_HOST_KEY", before ssh runs. That step reads the key each of the host's addresses offers and masks it and its fingerprint first, because ssh's own "REMOTE HOST IDENTIFICATION HAS CHANGED" message would print the new key's fingerprint in the public log.
+Until the new key is pinned, every run for that host fails at its first connection with "Host key verification failed.". The host job runs ssh with `LogLevel=FATAL`, so ssh's "REMOTE HOST IDENTIFICATION HAS CHANGED" banner, which would print the new key's fingerprint in the public log, never prints. The same setting also leaves a host that is down, or has port 22 closed, ending UNREACHABLE with no reason given: check that it's up first.
 
 ## Rebuilding a host
 
 Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal`: the old addresses leave the access list and the new ones join it. The plan shows a `replace` of the instance, updates of its two records and `+2 -2` on the access list. Then pin the new key.
 
-A new owner key, Configure key or root hash reaches a host only through a rebuild, since user data applies only at creation. Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key.
+A new owner key, Configure key or root hash reaches a host only through a rebuild, since user data applies only at creation. A new Configure key is made the way docs/HOSTING.md's owner step 5 makes the first one: without a passphrase, its private half straight into the environment's `ANSIBLE_SSH_KEY`. Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key.
 
 ## A hand run when Actions is down
 
-From the owner's machine, never from an agent's, and never while an Infrastructure run is active. Keep the files in a private directory (`umask 077`):
+From the owner's machine, never from an agent's, and never while an Infrastructure run is active. Run it from the repository's root. Every file it writes (the backend settings, the values, OpenTofu's working directory and the saved plan) goes to a private directory outside the checkout, so none of them can be committed, and the directory goes afterwards:
 
 ```sh
-cat > backend.hcl <<'EOF'
+umask 077
+W=$(mktemp -d)
+export TF_DATA_DIR="$W/data"
+cat > "$W/backend.hcl" <<'EOF'
 bucket         = "<bucket>"
 endpoints      = { s3 = "https://<region>.linodeobjects.com" }
 use_path_style = false
 EOF
-# values.tfvars.json holds the same document as TOFU_VARS.
+# Write "$W/values.tfvars.json": the same document as TOFU_VARS.
 export AWS_ACCESS_KEY_ID=<state access key> AWS_SECRET_ACCESS_KEY=<state secret key>
 export TF_VAR_state_passphrase=<passphrase> LINODE_TOKEN=<token> CLOUDFLARE_API_TOKEN=<token>
-tofu -chdir=ops/tofu init -lockfile=readonly -backend-config="$PWD/backend.hcl"
-tofu -chdir=ops/tofu plan -var-file="$PWD/values.tfvars.json" -out="$PWD/plan.bin"
-tofu -chdir=ops/tofu apply "$PWD/plan.bin"
+tofu -chdir=ops/tofu init -lockfile=readonly -backend-config="$W/backend.hcl"
+tofu -chdir=ops/tofu plan -var-file="$W/values.tfvars.json" -out="$W/plan.bin"
+tofu -chdir=ops/tofu apply "$W/plan.bin"
+rm -rf -- "${W:?}"
 ```
 
 The same runbook rule applies. `tofu output -json addresses` shows the hosts' addresses; nothing else reads that output.
@@ -159,7 +165,7 @@ tofu -chdir=ops/tofu validate
 tofu -chdir=ops/tofu test -var-file=examples/example.tfvars.json
 ```
 
-It also runs `cloud-init schema` over `examples/user-data-*.yaml`. `tests/main.tftest.hcl` checks that the module renders exactly those two files, so the schema check covers what the module sends. After changing the template, render the examples again and commit them with it. `tests/unit/infra.test.ts` pins the rest statically.
+It also runs `cloud-init schema` over `examples/user-data-*.yaml`. `tests/main.tftest.hcl` checks that the module renders exactly those two files, so the schema check covers what the module sends. After changing the template, render the examples again and commit them with it. `tests/unit/infra.test.ts` pins the workflow and the module, and runs `ci/`'s jq programs and the script's phases against sample plans with a stand-in `tofu`; CI's ShellCheck covers `ci/tofu-ci.sh`.
 
 **Upgrading OpenTofu.**
 1. Download `tofu_<v>_linux_amd64.zip`, `tofu_<v>_SHA256SUMS` and `tofu_<v>_SHA256SUMS.gpgsig` from the release page, https://github.com/opentofu/opentofu/releases.

@@ -9,7 +9,9 @@
  *   in a sandbox home. Its settings come from the Podman secrets bot.yml writes, and these pin
  *   what keeps the dump safe: no value reaches an argument or an environment variable of any
  *   tool, the one `podman run` is as hardened as Compose's backup service, reads the two database
- *   secrets as files the bot's unit mounts and gets nothing on stdin, the dump streams into age,
+ *   secrets as files the bot's unit mounts and gets nothing on stdin, the container's shell hands
+ *   the URL's parts to pg_dump as libpq's environment and never as an argument (run here too,
+ *   with bash in POSIX mode standing in for the image's BusyBox sh), the dump streams into age,
  *   uploads and pings go as before, and failures ping /fail by step.
  * The byte-exact stream through `--log-driver=none` was checked on a local Podman 5.8.2 with a real
  * PostgreSQL 18.4 dump (2.33.0's verification record, docs/VERIFICATION.md).
@@ -308,8 +310,17 @@ function home(name: string, secrets: Record<string, string | undefined> = {}) {
   return { base, runtime, knob, run, calls: () => recorded(sim) };
 }
 
+/** The program tarubot-backup's DUMP gives the container's shell, from its heredoc. */
+const dumpProgram = async () => {
+  const found = /^DUMP=\$\(\n {2}cat <<'SH'\n([\s\S]*?)\nSH\n\)\nreadonly DUMP$/mu.exec(
+    await read("ops/ansible/files/bot/tarubot-backup"),
+  )?.[1];
+  if (found === undefined) throw new Error("no DUMP heredoc in tarubot-backup");
+  return found;
+};
+
 /** The one `podman run`, exactly. */
-const dumpArgv = (stamp: string) => [
+const dumpArgv = (stamp: string, program: string) => [
   "run",
   "--rm",
   "--name",
@@ -336,7 +347,7 @@ const dumpArgv = (stamp: string) => [
   "sh",
   PG_IMAGE,
   "-c",
-  'exec pg_dump --format=custom --no-owner --no-privileges "$(cat /run/secrets/database_url)"',
+  program,
 ];
 
 /** One successful run, shared by the tests that read its calls. */
@@ -365,7 +376,7 @@ describe("tarubot-backup", () => {
     expect(Bun.spawnSync(["bash", "-n", BACKUP]).exitCode).toBe(0);
   });
 
-  test("reads its five settings from Podman's secrets, then runs one hardened pg_dump into age", () => {
+  test("reads its five settings from Podman's secrets, then runs one hardened pg_dump into age", async () => {
     const { result, calls } = sharedRun();
     expect(result).toMatchObject({ code: 0, err: "" });
     // The ping URL first, so every later failure can report itself, then the bucket's four.
@@ -390,7 +401,7 @@ describe("tarubot-backup", () => {
       ]),
     );
     const dump = dumpCall();
-    expect(dump.argv).toEqual(dumpArgv(STAMP));
+    expect(dump.argv).toEqual(dumpArgv(STAMP, await dumpProgram()));
     // stdin is closed: nothing of the script's input reaches the container.
     expect(dump.stdin).toBe("eof");
     // The dump streams into age, for the recipients bot.yml installed, never onto the disk.
@@ -556,8 +567,9 @@ describe("tarubot-backup's dump against Compose's backup service and the release
     expect(named).toBe(`docker.io/library/${backup.image}`);
     expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/u);
     expect(valuesAfter(argv, "--env")).toContain(`PGSSLMODE=${backup.environment.PGSSLMODE}`);
-    // The same pg_dump call; only where the URL comes from differs.
-    const options = (command: string) => /pg_dump( --[^"]+) "/u.exec(command)?.[1];
+    // The same pg_dump options; only where the connection comes from differs.
+    const options = (command: string) =>
+      /exec pg_dump((?: --[a-z-]+(?:=[a-z]+)?)+)/u.exec(command)?.[1];
     expect(options(argv.at(-1) ?? "")).toBe(options(backup.entrypoint.join(" ")));
     expect(options(argv.at(-1) ?? "")).toBe(" --format=custom --no-owner --no-privileges");
     expect(backup.read_only).toBe(true);
@@ -591,7 +603,10 @@ describe("tarubot-backup's dump against Compose's backup service and the release
     // The secrets as files instead of Compose's environment and /tmp tmpfs.
     expect(backup.tmpfs).toEqual(["/tmp:size=1m,mode=0700"]);
     expect(argv).toContain("--read-only-tmpfs=false");
-    expect(argv.at(-1)).toContain('"$(cat /run/secrets/database_url)"');
+    // The URL is read from its file inside the container, and pg_dump's line ends with its
+    // options: no connection argument.
+    expect(argv.at(-1)).toContain("u=$(cat /run/secrets/database_url)");
+    expect(argv.at(-1)).toMatch(/\nexec pg_dump --format=custom --no-owner --no-privileges$/u);
   });
 
   test("its PostgreSQL image line is byte-equal to ops/backup.sh's", async () => {
@@ -697,5 +712,84 @@ describe("tarubot-backup's units (ops/ansible/files/bot/)", () => {
     ]);
     // With no Unit=, the timer starts the service of its own name.
     expect((await timer()).some((line) => line.includes("Unit="))).toBe(false);
+  });
+});
+
+/**
+ * The dump container's program (tarubot-backup's DUMP), run by bash in POSIX mode with a stand-in
+ * pg_dump that prints its arguments and libpq's variables. The image runs it with BusyBox sh; the
+ * lab ran these same URLs there, and a real dump with a percent-encoded password
+ * (docs/VERIFICATION.md). bash stands in because it also expands \xHH in printf's %b.
+ */
+describe("tarubot-backup's dump program", () => {
+  const run = async (url: string) => {
+    const dir = join(scratch, `dump-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(join(dir, "database_url"), url);
+    writeFileSync(
+      join(dir, "bin", "pg_dump"),
+      `#!/bin/sh\nprintf '%s\\n' "argv=$*" "host=\${PGHOST-unset}" "port=\${PGPORT-unset}" "user=\${PGUSER-unset}" "password=\${PGPASSWORD-unset}" "database=\${PGDATABASE-unset}"\n`,
+    );
+    chmodSync(join(dir, "bin", "pg_dump"), 0o755);
+    const program = (await dumpProgram()).replace(
+      "/run/secrets/database_url",
+      join(dir, "database_url"),
+    );
+    const result = Bun.spawnSync(["bash", "--posix", "-c", program], {
+      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, LC_ALL: "C" },
+      stdin: "ignore",
+    });
+    return {
+      code: result.exitCode,
+      out: result.stdout.toString().trimEnd().split("\n"),
+      err: result.stderr.toString(),
+    };
+  };
+
+  test("hands every part of the URL to libpq's environment, decoded, and none to pg_dump's arguments", async () => {
+    const cases: [string, string[]][] = [
+      [
+        "postgresql://tarubot_staging:p%40ss%2Fw%3Aord%25x@db.example.org:27520/tarubot_staging?sslmode=verify-full",
+        ["db.example.org", "27520", "tarubot_staging", "p@ss/w:ord%x", "tarubot_staging"],
+      ],
+      [
+        "postgres://tarubot_staging:plain@db.example.org/tarubot_staging",
+        ["db.example.org", "unset", "tarubot_staging", "plain", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging:pw@[2001:db8::5]:27520/tarubot_staging",
+        ["2001:db8::5", "27520", "tarubot_staging", "pw", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging:a\\b%41B%zz:c@db.example.org:27520/tarubot%5Fstaging#x",
+        ["db.example.org", "27520", "tarubot_staging", "a\\bAB%zz:c", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging@db.example.org:27520/tarubot_staging",
+        ["db.example.org", "27520", "tarubot_staging", "unset", "tarubot_staging"],
+      ],
+    ];
+    for (const [url, [host, port, user, password, database]] of cases) {
+      const r = await run(url);
+      expect({ url, code: r.code, err: r.err, out: r.out }).toEqual({
+        url,
+        code: 0,
+        err: "",
+        out: [
+          "argv=--format=custom --no-owner --no-privileges",
+          `host=${host}`,
+          `port=${port}`,
+          `user=${user}`,
+          `password=${password}`,
+          `database=${database}`,
+        ],
+      });
+    }
+  });
+
+  test("refuses anything but a postgresql:// URL, naming no value", async () => {
+    const r = await run("mysql://user:secret@db.example.org/db");
+    expect({ code: r.code, out: r.out }).toEqual({ code: 2, out: [""] });
+    expect(r.err).toBe("DATABASE_URL is not a postgresql:// URL.\n");
   });
 });

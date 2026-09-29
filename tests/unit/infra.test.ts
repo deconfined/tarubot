@@ -1,29 +1,42 @@
 /**
  * The OpenTofu module (ops/tofu) and the "Infrastructure" workflow that plans and applies it
- * (.github/workflows/infra.yml), since 2.36.0 (issue #62).
+ * (.github/workflows/infra.yml), since 2.36.0 (issue #62). Each of the workflow's steps runs one
+ * phase of ops/tofu/ci/tofu-ci.sh, whose rules live in the jq programs beside it.
  *
- * Static only: nothing here runs tofu, jq, a shell or the network, because the unit suite also
- * runs inside the image build. OpenTofu's own tests (ops/tofu/tests/main.tftest.hcl, in CI's
+ * Nothing here runs tofu or the network. The jq programs and the script's phases run against
+ * sample plans and a stand-in tofu (tests/fixtures/infra/) where jq is installed, and are skipped
+ * where it isn't (the image build); OpenTofu's own tests (ops/tofu/tests/main.tftest.hcl, in CI's
  * "Infrastructure checks") cover what the module renders and plans.
  *
  * - infra.yml: dispatch from main only, the `infra` environment on both jobs, first attempts only,
- *   least permissions, pinned actions, every ${{ }} through env:, each secret in the steps that
- *   need it, and the Plan job's shared steps repeated unchanged in Apply.
+ *   least permissions, one concurrency group that queues every waiting run, pinned actions, every
+ *   ${{ }} through env:, each secret in the steps that need it, and both jobs running the same
+ *   phases.
  * - Public logs (the repository and its Actions logs are public): every tofu command writes to a
- *   private file, the Prepare step masks every identifying value in TOFU_VARS before anything
+ *   private file, the prepare phase masks every identifying value in TOFU_VARS before anything
  *   else prints, diagnostics print through a filter that no digit, '/', '@' or '=' survives, no
  *   host key is ever fetched or printed, and the guards refuse deletes, replaces and access-list
  *   removals nobody asked for. Apply refuses a missing or different change list.
- * - The pinned OpenTofu: one install step, byte-identical in ci.yml and infra.yml, whose version
- *   and checksum files agree and satisfy the module's required_version.
+ * - The pinned OpenTofu: one install phase, used by ci.yml and infra.yml, whose version and
+ *   checksum files agree and satisfy the module's required_version.
  * - ops/tofu: every variable sensitive, the addresses output sensitive, the validations present
  *   and in step with infra.yml's own checks, no host key or private key anywhere, verify-required
  *   seeded, the access lists protected and adopted by import, encrypted state and plans, no bucket
  *   or endpoint in the repository, the lock file pinning both providers, and examples that use
  *   only documentation names and addresses.
  */
-import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
@@ -32,6 +45,10 @@ import { z } from "zod";
 /** A repository path, resolved relative to this test. */
 const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
 const read = (path: string) => readFileSync(root(path), "utf8");
+
+// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
+setDefaultTimeout(120_000);
+const hasJq = Bun.which("jq") !== null;
 
 /** Every file under a directory, relative to the repository, skipping tofu's .terraform/. */
 const walk = (dir: string): string[] =>
@@ -83,7 +100,9 @@ const workflow = z
       .object({ workflow_dispatch: z.object({ inputs: z.record(z.string(), input) }).strict() })
       .strict(),
     permissions: z.object({}).strict(),
-    concurrency: z.object({ group: z.string(), "cancel-in-progress": z.boolean() }).strict(),
+    concurrency: z
+      .object({ group: z.string(), "cancel-in-progress": z.boolean(), queue: z.literal("max") })
+      .strict(),
     defaults: z.object({ run: z.object({ shell: z.literal("bash") }).strict() }).strict(),
     env: z.record(z.string(), z.string()),
     jobs: z.object({ plan: job, apply: job }).strict(),
@@ -102,30 +121,37 @@ const stepOf = (j: Job, name: string) => {
   if (!found) throw new Error(`no step ${name}`);
   return found;
 };
-const runOf = (j: Job, name: string) => stepOf(j, name).run ?? "";
 /** A GitHub Actions expression, `${{ inner }}`, built so this source holds no placeholder. */
 const expr = (inner: string) => `\${{ ${inner} }}`;
 
-/** The steps both jobs share, in order, and the ones only Apply adds before its cleanup. */
-const SHARED = [
-  "Check out source",
-  "Install the pinned OpenTofu",
-  "Prepare the values and the masks",
-  "Initialize OpenTofu",
-  "Plan",
-  "Summarize the plan",
+/** The steps both jobs share, in order, with the script phase each runs (none for the checkout). */
+const SHARED: [string, string | null][] = [
+  ["Check out source", null],
+  ["Install the pinned OpenTofu", "install"],
+  ["Prepare the values and the masks", "prepare"],
+  ["Initialize OpenTofu", "init"],
+  ["Plan", "plan"],
+  ["Summarize the plan", "summarize"],
 ];
-const PREPARE = runOf(plan, "Prepare the values and the masks");
-const SUMMARIZE = runOf(plan, "Summarize the plan");
-
-/** A jq program the Prepare step writes to "$d/<name>" with a quoted heredoc. */
-const jqProgram = (name: string) => {
-  const match = new RegExp(`cat > "\\$d/${name}" <<'JQ'\\n([\\s\\S]*?)\\nJQ\\n`, "u").exec(PREPARE);
-  if (!match?.[1]) throw new Error(`no ${name} in the Prepare step`);
+/** The script every step runs, and one of its phases (a shell function) as text. */
+const SCRIPT = "ops/tofu/ci/tofu-ci.sh";
+const scriptText = read(SCRIPT);
+const phaseOf = (name: string) => {
+  const match = new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)^\\}$`, "mu").exec(scriptText);
+  if (!match?.[1]) throw new Error(`no phase ${name} in ${SCRIPT}`);
   return match[1];
 };
+const PREPARE = phaseOf("prepare");
+const SUMMARIZE = phaseOf("summarize");
 
-/** Every command line of every run script (heredoc bodies and comments left out). */
+/** One of the jq programs beside the script, without its leading comment lines. */
+const jqProgram = (name: string) =>
+  read(`ops/tofu/ci/${name}`)
+    .split("\n")
+    .filter((line) => !line.startsWith("#"))
+    .join("\n");
+
+/** Every command line of a script (heredoc bodies and comments left out). */
 const commandLines = (script: string) => {
   const lines: string[] = [];
   let heredoc: string | null = null;
@@ -169,7 +195,12 @@ describe("infra.yml's shape", () => {
   });
 
   test("one concurrency group serializes runs, and nothing holds a permission by default", () => {
-    expect(infra.concurrency).toEqual({ group: "infra", "cancel-in-progress": false });
+    // queue: max keeps every waiting run; GitHub's default keeps one and cancels it for the next.
+    expect(infra.concurrency).toEqual({
+      group: "infra",
+      "cancel-in-progress": false,
+      queue: "max",
+    });
     expect(infra.permissions).toEqual({});
     expect(infra.env).toEqual({ TF_IN_AUTOMATION: "1", TF_INPUT: "0" });
   });
@@ -204,20 +235,28 @@ describe("infra.yml's shape", () => {
     }
   });
 
-  test("the steps run in order, and Apply repeats the Plan job's steps unchanged", () => {
-    expect(plan.steps.map((s) => s.name)).toEqual([...SHARED, "Clean up"]);
-    expect(apply.steps.map((s) => s.name)).toEqual([
+  test("both jobs run the script's phases in order, Apply adding compare and apply", () => {
+    const phases = (j: Job) =>
+      j.steps.map((s) => [
+        s.name,
+        /^bash ops\/tofu\/ci\/tofu-ci\.sh ([a-z]+)$/u.exec(s.run ?? "")?.[1] ?? null,
+      ]);
+    const cleanup = ["Clean up", null];
+    expect(phases(plan)).toEqual([...SHARED, cleanup]);
+    expect(phases(apply)).toEqual([
       ...SHARED,
-      "Compare with the approved plan",
-      "Apply",
-      "Clean up",
+      ["Compare with the approved plan", "compare"],
+      ["Apply", "apply"],
+      cleanup,
     ]);
-    for (const name of [...SHARED, "Clean up"])
-      expect({ name, same: stepOf(apply, name) }).toEqual({ name, same: stepOf(plan, name) });
+    // The script holds exactly those phases, and runs nothing else.
+    expect(scriptText).toContain(
+      "  install | prepare | init | plan | summarize | compare | apply)\n",
+    );
     for (const j of [plan, apply]) {
-      const cleanup = stepOf(j, "Clean up");
-      expect(cleanup.if).toBe("always()");
-      expect(cleanup.run).toBe(`rm -rf -- "\${RUNNER_TEMP:?}/tofu"`);
+      const clean = stepOf(j, "Clean up");
+      expect(clean.if).toBe("always()");
+      expect(clean.run).toBe(`rm -rf -- "\${RUNNER_TEMP:?}/tofu"`);
     }
   });
 
@@ -285,65 +324,64 @@ describe("infra.yml's shape", () => {
 
 describe("public-log hygiene", () => {
   test("every tofu command writes its output and errors to a private file", () => {
-    for (const j of [plan, apply])
-      for (const s of j.steps) {
-        if (s.name === "Install the pinned OpenTofu" || !s.run) continue;
-        for (const line of commandLines(s.run).filter((l) => /(?:^|[\s;&|(])tofu\s/u.test(l))) {
-          // stdout to a file under $d, and stderr to a file or along with stdout.
-          const ok =
-            /> "\$d\/[a-z.]+"/u.test(line) &&
-            (/ 2> "\$d\/[a-z.]+"/u.test(line) || / 2>&1/u.test(line));
-          expect({ step: s.name, line, ok }).toEqual({ step: s.name, line, ok: true });
-        }
-      }
-    // No step reads outputs or state, which hold addresses and the hash.
-    expect(infraText).not.toMatch(/\btofu(?: -chdir=\S+)? (?:output|state|console)\b/u);
-    expect(infraText).not.toMatch(
-      / -no-color| -detailed-exitcode|set -x|\bcat "\$d\/(?!changes\.txt)/u,
-    );
+    // init, plan, show and apply: every tofu call starts its line.
+    const calls = commandLines(scriptText).filter((l) => /^tofu\s/u.test(l));
+    expect(calls.length).toBe(4);
+    expect(scriptText.match(/\btofu -chdir=/gu)).toHaveLength(3);
+    for (const line of calls) {
+      // stdout to a file under $d, and stderr to a file or along with stdout.
+      const ok =
+        />"\$d\/[a-z.]+"/u.test(line) && (/ 2>"\$d\/[a-z.]+"/u.test(line) || / 2>&1/u.test(line));
+      expect({ line, ok }).toEqual({ line, ok: true });
+    }
+    // Nothing reads outputs or state, which hold addresses and the hash, and nothing traces.
+    for (const text of [infraText, scriptText]) {
+      expect(text).not.toMatch(/\btofu(?: -chdir=\S+)? (?:output|state|console)\b/u);
+      expect(text).not.toMatch(
+        / -no-color| -detailed-exitcode|set -[a-zA-Z]*x|\bcat (?:-- )?"\$d\/(?!changes\.txt)/u,
+      );
+    }
   });
 
-  test("the Prepare step masks every identifying value before anything else prints", () => {
+  test("the prepare phase masks every identifying value before anything else prints", () => {
     const masks = jqProgram("masks.jq");
     for (const part of [
-      "(.hosts[] | .fqdn, .label)",
+      "(.hosts[] | .fqdn)",
       ".cloudflare_zone_id",
       '(.db_allow_extra[] | ., split("/")[0])',
       '(.root_password_hash | select(. != ""))',
       '((.root_keys[], .configure_keys[]) | split(" ")[] | select(startswith("AAAA")))',
     ])
       expect({ part, present: masks.includes(part) }).toEqual({ part, present: true });
+    // Labels are Linode display names, never masked: masking a plain word would censor the log.
+    expect(masks).not.toContain(".label");
     const lines = commandLines(PREPARE);
     const loop = lines.findIndex((l) => l.includes("::add-mask::"));
     expect(loop).toBeGreaterThan(0);
-    // Before the masks: only fixed ::error:: messages print. TOFU_VARS reaches jq through
-    // printf (a builtin) and a pipe, and jq's output and errors go to a file or nowhere.
+    // Before the masks: only fixed messages print (fail takes one literal). TOFU_VARS reaches jq
+    // through printf (a builtin) and a pipe, and jq's output and errors go to a file or nowhere.
     for (const line of lines.slice(0, loop)) {
-      if (/^(?:echo|printf)\b/u.test(line) && !line.startsWith("printf '%s' \"$TOFU_VARS\" |"))
-        expect({ line, fixed: /^echo "::error::[^$`]*"$/u.test(line) }).toEqual({
-          line,
-          fixed: true,
-        });
-      if (line.includes("$TOFU_VARS"))
+      if (/^(?:echo|printf)\b/u.test(line) && !line.startsWith(`printf '%s' "\${TOFU_VARS-}" |`))
+        expect({ line, printed: true }).toEqual({ line, printed: false });
+      if (/^fail /u.test(line))
+        expect({ line, fixed: /^fail "[^$`]*"$/u.test(line) }).toEqual({ line, fixed: true });
+      if (line.includes(`\${TOFU_VARS-}`))
         expect({
           line,
-          private: /> (?:"\$d\/[a-z.]+"|\/dev\/null 2>&1); then$|> "\$d\/[a-z.]+"$/u.test(line),
-        }).toEqual({
-          line,
-          private: true,
-        });
+          private: />(?:"\$d\/[a-z.]+"|\/dev\/null 2>&1); then$|>"\$d\/[a-z.]+"$/u.test(line),
+        }).toEqual({ line, private: true });
     }
     // The shape check says nothing of the value, and the replace target is never echoed back.
-    expect(PREPARE).toContain(`jq -e -f "$d/shape.jq" > /dev/null 2>&1`);
-    expect(PREPARE).not.toMatch(/echo[^\n]*\$REPLACE/u);
+    expect(PREPARE).toContain(`jq -e -f "$here/shape.jq" >/dev/null 2>&1`);
+    expect(PREPARE).not.toMatch(/echo[^\n]*\$\{?REPLACE/u);
+    expect(scriptText).toMatch(/^fail\(\) \{\n {2}echo "::error::\$1"\n {2}exit 1\n\}$/mu);
   });
 
-  test("the masks and the shape check agree with ops/tofu/variables.tf on labels and keys", () => {
+  test("the shape check agrees with ops/tofu/variables.tf on keys and names", () => {
     const shape = jqProgram("shape.jq");
     const variables = read("ops/tofu/variables.tf");
     for (const pattern of [
       "^(staging|production)(-[0-9]{1,2})?$",
-      "^[a-z][a-z0-9-]{6,61}[a-z0-9]$",
       "^[a-z]{1,16}$",
       "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
     ])
@@ -359,11 +397,10 @@ describe("public-log hygiene", () => {
     // Exactly the seven keys of examples/example.tfvars.json.
     const keys = Object.keys(JSON.parse(read("ops/tofu/examples/example.tfvars.json"))).sort();
     expect(shape).toContain(`keys == ${JSON.stringify(keys).replaceAll(",", ", ")}`);
-    // A label must hold a '-', and never occur inside a host key, in both checks.
-    expect(shape).toContain('contains("-") and (contains("--") | not)');
-    expect(shape).toContain("$k | contains($l) | not");
-    expect(variables).toContain('strcontains(h.label, "-")');
-    expect(variables).toContain("!anytrue([for k in keys(var.hosts) : strcontains(k, h.label)])");
+    // A label is only a string here (it isn't masked); variables.tf keeps Linode's own rules.
+    expect(shape).toContain('(.value.label | type == "string")');
+    expect(variables).toContain('can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label))');
+    expect(variables).not.toContain("strcontains(k, h.label)");
   });
 
   test("the diagnostics filter lets no digit, '/', '@' or '=' through, nor a dotted name", () => {
@@ -393,8 +430,10 @@ describe("public-log hygiene", () => {
     expect(infraText).not.toMatch(
       /ssh-keyscan|known_hosts|ssh-ed25519|TARGET_HOST|host_key|ssh-keygen/u,
     );
-    const run = runOf(apply, "Apply");
-    expect(run).toContain(
+    expect(scriptText).not.toMatch(
+      /ssh-keyscan|known_hosts|ssh-ed25519|TARGET_HOST|host_key|ssh-keygen/u,
+    );
+    expect(phaseOf("apply")).toContain(
       `line="built \${BASH_REMATCH[1]} (\${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"`,
     );
     expect(read("ops/tofu/README.md")).toContain("## Pinning a new host key");
@@ -408,7 +447,7 @@ describe("public-log hygiene", () => {
     expect(env?.ALLOW_ACCESS_REMOVAL).toBe(expr("inputs.allow_access_removal"));
     const guards = [
       ...SUMMARIZE.matchAll(
-        /if grep -qE '([^']+)' "\$d\/changes\.txt"( && \[\[ \$([A-Z_]+) != true \]\])?/gu,
+        /if grep -qE '([^']+)' "\$d\/changes\.txt"( && \[\[ \$\{([A-Z_]+)-\} != true \]\])?/gu,
       ),
     ].map((m) => ({ pattern: new RegExp(m[1] ?? "", "mu"), flag: m[3] ?? null }));
     expect(guards.map((g) => g.flag)).toEqual([null, "ALLOW_DESTROY", "ALLOW_ACCESS_REMOVAL"]);
@@ -433,7 +472,7 @@ describe("public-log hygiene", () => {
     expect(SUMMARIZE).toContain('exit "$refuse"');
     // A replace names exactly one configured host's instance.
     expect(PREPARE).toContain(
-      'if ! [[ $REPLACE =~ ^linode_instance\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] \\',
+      `if ! [[ \${REPLACE-} =~ ^linode_instance\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] ||`,
     );
     expect(PREPARE).toContain(`jq -e --arg k "\${BASH_REMATCH[1]}" '.hosts | has($k)'`);
   });
@@ -454,45 +493,37 @@ describe("public-log hygiene", () => {
   test("Apply refuses a missing or different change list, and applies its own saved plan", () => {
     const compare = stepOf(apply, "Compare with the approved plan");
     expect(compare.env).toEqual({ APPROVED: expr("needs.plan.outputs.changes") });
-    expect(compare.run).toContain("if [[ -z $APPROVED ]]; then");
-    expect(compare.run).toContain('current=$(< "$d/changes.txt")');
-    expect(compare.run).toContain('if [[ $current != "$APPROVED" ]]; then');
-    const run = runOf(apply, "Apply");
-    expect(run).toContain(
-      'tofu -chdir=ops/tofu apply -input=false -json "$d/plan.bin" > "$d/apply.jsonl" 2> "$d/apply.stderr" || rc=$?',
+    expect(phaseOf("compare")).toContain(`[[ -n \${APPROVED-} ]] || fail`);
+    expect(phaseOf("compare")).toContain('current=$(<"$d/changes.txt")');
+    expect(phaseOf("compare")).toContain(`[[ $current == "\${APPROVED-}" ]] || fail`);
+    expect(phaseOf("apply")).toContain(
+      'tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?',
     );
-    expect(runOf(plan, "Plan")).toContain('-out="$d/plan.bin"');
+    expect(phaseOf("plan")).toContain('-out="$d/plan.bin"');
   });
 });
 
 // ---- The pinned OpenTofu ------------------------------------------------------------------------
 
-/** The install step's text, byte for byte, as interfaces §4 gives it. */
-const INSTALL_STEP = `      - name: Install the pinned OpenTofu
-        run: |
-          # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256 (copied
-          # from that release's signature-verified SHA256SUMS) before anything runs it.
-          set -Eeuo pipefail
-          v=$(< ops/tofu/.opentofu-version)
-          [[ $v =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || { echo "::error::ops/tofu/.opentofu-version must hold X.Y.Z."; exit 1; }
-          d=$RUNNER_TEMP/tofu-bin
-          mkdir -p "$d"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$d/tofu_\${v}_linux_amd64.zip" "https://github.com/opentofu/opentofu/releases/download/v\${v}/tofu_\${v}_linux_amd64.zip"
-          (cd "$d" && sha256sum --check --strict --quiet "$GITHUB_WORKSPACE/ops/tofu/opentofu.sha256")
-          unzip -q -o "$d/tofu_\${v}_linux_amd64.zip" tofu -d "$d"
-          echo "$d" >> "$GITHUB_PATH"
-`;
-
-/** Each "Install the pinned OpenTofu" step's text in a workflow file, up to the next step. */
-const installSteps = (text: string) =>
-  [...text.matchAll(/^ {6}- name: Install the pinned OpenTofu\n(?: {8}.*\n|\n)*/gmu)].map(
-    (m) => m[0],
-  );
-
 describe("the pinned OpenTofu", () => {
-  test("one install step, byte-identical in ci.yml and in both of infra.yml's jobs", () => {
-    expect(installSteps(infraText)).toEqual([INSTALL_STEP, INSTALL_STEP]);
-    expect(installSteps(read(".github/workflows/ci.yml"))).toEqual([INSTALL_STEP]);
+  test("one install phase, which ci.yml and both of infra.yml's jobs run", () => {
+    const installs = (text: string) =>
+      [
+        ...text.matchAll(
+          /^ {6}- name: Install the pinned OpenTofu\n(?: {8}#.*\n)* {8}run: (.*)$/gmu,
+        ),
+      ].map((m) => m[1]);
+    const call = "bash ops/tofu/ci/tofu-ci.sh install";
+    expect(installs(infraText)).toEqual([call, call]);
+    expect(installs(read(".github/workflows/ci.yml"))).toEqual([call]);
+    // The release's zip, checked against the committed SUMS line before anything runs it.
+    const install = phaseOf("install");
+    expect(install).toContain('v=$(<"$module/.opentofu-version")');
+    expect(install).toContain(
+      `"https://github.com/opentofu/opentofu/releases/download/v\${v}/tofu_\${v}_linux_amd64.zip"`,
+    );
+    expect(install).toContain('sha256sum --check --strict --quiet "$module/opentofu.sha256"');
+    expect(install.indexOf("sha256sum")).toBeLessThan(install.indexOf("unzip"));
   });
 
   test("the checksum names the pinned release, which satisfies required_version", () => {
@@ -553,6 +584,12 @@ describe("ops/tofu", () => {
       "ops/tofu/.opentofu-version",
       "ops/tofu/.terraform.lock.hcl",
       "ops/tofu/README.md",
+      "ops/tofu/ci/applied.jq",
+      "ops/tofu/ci/diag.jq",
+      "ops/tofu/ci/masks.jq",
+      "ops/tofu/ci/shape.jq",
+      "ops/tofu/ci/summary.jq",
+      "ops/tofu/ci/tofu-ci.sh",
       "ops/tofu/cloud-init.yaml.tftpl",
       "ops/tofu/examples/example.tfvars.json",
       "ops/tofu/examples/user-data-with-hash.yaml",
@@ -604,7 +641,7 @@ describe("ops/tofu", () => {
     expect(hosts).toContain(
       'can(regex("^(staging|production)(-[0-9]{1,2})?$", k)) && split("-", k)[0] == h.role',
     );
-    expect(hosts).toContain('can(regex("^[a-z][a-z0-9-]{6,61}[a-z0-9]$", h.label))');
+    expect(hosts).toContain('can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label))');
     expect(block(VARIABLES, "variable.database_ids")).toContain('can(regex("^[a-z]{1,16}$", k))');
     expect(block(VARIABLES, "variable.db_allow_extra")).toContain(
       'can(cidrhost(x, 0)) && strcontains(x, "/")',
@@ -913,5 +950,418 @@ describe("no host and no real address", () => {
           documentation: true,
         });
     }
+  });
+});
+
+// ---- The jq programs and the script's phases, run --------------------------------------------
+
+/** Run jq over a value with one of the programs beside the script. */
+function jq(program: string, input: string, args: string[] = []) {
+  const run = Bun.spawnSync(["jq", ...args, "-f", root(`ops/tofu/ci/${program}`)], {
+    stdin: new TextEncoder().encode(input),
+  });
+  return { code: run.exitCode, out: run.stdout.toString(), err: run.stderr.toString() };
+}
+const EXAMPLE = read("ops/tofu/examples/example.tfvars.json");
+const example = () => JSON.parse(EXAMPLE) as Record<string, unknown> & { hosts: object };
+
+/** A plan's resource change, in the shape of `tofu show -json`. */
+const change = (
+  address: string,
+  actions: string[],
+  fields: {
+    before?: object;
+    after?: object | null;
+    after_unknown?: object;
+    importing?: object;
+  } = {},
+) => {
+  const [, type, name, index] =
+    /^([a-z_]+)\.([a-z_]+)(?:\["([a-z0-9-]+)"\])?$/u.exec(address) ?? [];
+  return {
+    address,
+    type,
+    name,
+    ...(index === undefined ? {} : { index }),
+    change: { actions, before: {}, after: {}, after_unknown: {}, ...fields },
+  };
+};
+const SUMMARY_VARS = ["--slurpfile", "vars", root("ops/tofu/examples/example.tfvars.json"), "-r"];
+
+describe.skipIf(!hasJq)("the jq programs", () => {
+  test("shape.jq takes the example and refuses what the masks can't rely on", () => {
+    expect(jq("shape.jq", EXAMPLE, ["-e"]).code).toBe(0);
+    // A label is any string now; only variables.tf holds Linode's rules.
+    const plainLabel = example();
+    Object.assign((plainLabel.hosts as Record<string, object>).staging ?? {}, { label: "tarubot" });
+    expect(jq("shape.jq", JSON.stringify(plainLabel), ["-e"]).code).toBe(0);
+    for (const [what, edit] of [
+      ["an extra key", (v: Record<string, unknown>) => Object.assign(v, { more: 1 })],
+      ["a host key", (v: Record<string, unknown>) => Object.assign(v, { hosts: { stage: {} } })],
+      [
+        "an upper-case fqdn",
+        (v: Record<string, unknown>) => {
+          Object.assign((v.hosts as Record<string, object>).staging ?? {}, {
+            fqdn: "Staging.Example.Org",
+          });
+        },
+      ],
+      ["a zone ID", (v: Record<string, unknown>) => Object.assign(v, { cloudflare_zone_id: "x" })],
+      [
+        "an extra entry",
+        (v: Record<string, unknown>) => Object.assign(v, { db_allow_extra: ["x"] }),
+      ],
+    ] as const) {
+      const value = example();
+      edit(value);
+      expect({ what, code: jq("shape.jq", JSON.stringify(value), ["-e"]).code }).toEqual({
+        what,
+        code: 1,
+      });
+    }
+    expect(jq("shape.jq", "not json", ["-e"]).code).not.toBe(0);
+  });
+
+  test("masks.jq lists the names, the zone, the extras, the hash and each key's base64, never a label", () => {
+    const value = example();
+    Object.assign(value, { root_password_hash: "$y$j9T$EXAMPLEsalt$EXAMPLEhashEXAMPLEhash" });
+    const masks = JSON.parse(jq("masks.jq", JSON.stringify(value), ["-c"]).out) as string[];
+    expect(masks).toContain("staging.example.org");
+    expect(masks).toContain("0".repeat(32));
+    expect(masks).toContain("$y$j9T$EXAMPLEsalt$EXAMPLEhashEXAMPLEhash");
+    for (const extra of value.db_allow_extra as string[]) {
+      expect(masks).toContain(extra);
+      expect(masks).toContain(extra.split("/")[0] ?? "");
+    }
+    for (const key of [
+      ...(value.root_keys as string[]),
+      ...Object.values(value.configure_keys as object),
+    ])
+      expect(masks).toContain(
+        String(key)
+          .split(" ")
+          .find((part) => part.startsWith("AAAA")) ?? "",
+      );
+    for (const word of ["tarubot-staging", "staging", "primary", "us-east", "g6-standard-1"])
+      expect({ word, masked: masks.includes(word) }).toEqual({ word, masked: false });
+  });
+
+  test("summary.jq names each change, counts access-list entries, and turns the unknown into ?", () => {
+    const summarize = (changes: object[]) =>
+      jq("summary.jq", JSON.stringify({ resource_changes: changes }), SUMMARY_VARS).out;
+    const extra = JSON.parse(EXAMPLE).db_allow_extra as string[];
+    // A new host: its addresses are unknown, so the list's counts are rebuilt (two per host).
+    expect(
+      summarize([
+        change('linode_instance.host["staging"]', ["create"], {
+          after_unknown: { ipv4: true, ipv6: true },
+        }),
+        change('linode_firewall.host["staging"]', ["create"]),
+        change('cloudflare_dns_record.a["staging"]', ["create"]),
+        change('linode_database_access_controls.db["primary"]', ["update"], {
+          before: { allow_list: extra },
+          after: {},
+          after_unknown: { allow_list: true },
+        }),
+      ]),
+    ).toBe(
+      [
+        'create cloudflare_dns_record.a["staging"]',
+        'create linode_firewall.host["staging"]',
+        'create linode_instance.host["staging"]',
+        'update linode_database_access_controls.db["primary"] +2 -0',
+        "",
+      ].join("\n"),
+    );
+    // A rebuild: a replace, and the old addresses leave the list.
+    expect(
+      summarize([
+        change('linode_instance.host["staging"]', ["delete", "create"], {
+          before: { ipv4: ["192.0.2.10"], ipv6: "2001:db8:1::10/128" },
+          after_unknown: { ipv4: true, ipv6: true },
+        }),
+        change('linode_database_access_controls.db["primary"]', ["update"], {
+          before: { allow_list: ["2001:db8:1::10/128", "192.0.2.10/32", ...extra] },
+          after: {},
+          after_unknown: { allow_list: true },
+        }),
+      ]),
+    ).toBe(
+      'replace linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -2\n',
+    );
+    // An import with a known list, no-ops left out, and what it can't name as ?.
+    expect(
+      summarize([
+        change('linode_database_access_controls.db["primary"]', ["no-op"], {
+          before: { allow_list: extra },
+          after: { allow_list: extra },
+          importing: { id: "0:postgresql" },
+        }),
+        change('linode_firewall.host["staging"]', ["no-op"]),
+        change('linode_firewall.host["staging"]', ["forget"]),
+        change("module.other.thing", ["create"]),
+      ]),
+    ).toBe(
+      [
+        '? linode_firewall.host["staging"]',
+        "create ?",
+        'import linode_database_access_controls.db["primary"] +0 -0',
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("diag.jq prints severity, address, place and a summary with no digit, '/', '@', '=' or dotted name", () => {
+    const masks = join(tmpdir(), `infra-masks-${process.pid}.json`);
+    writeFileSync(masks, JSON.stringify(["tarubot-lab-label", "staging.example.org"]));
+    try {
+      const lines = [
+        {
+          type: "diagnostic",
+          diagnostic: {
+            severity: "error",
+            summary:
+              "Error 403 for db 123456 at https://api.example.org/v4/x?id=9 from 192.0.2.10 and 2001:db8::1, key=AAAAC3Nz@host",
+            detail: "the detail never prints",
+            address: 'provider["registry.opentofu.org/linode/linode"]',
+          },
+        },
+        {
+          type: "diagnostic",
+          diagnostic: {
+            severity: "error",
+            summary: "Record staging.example.org exists; label tarubot-lab-label in use",
+            address: 'cloudflare_dns_record.a["staging"]',
+            range: { filename: "main.tf", start: { line: 46 } },
+          },
+        },
+        { type: "change_summary", changes: { add: 1 } },
+      ]
+        .map((line) => JSON.stringify(line))
+        .concat(["not json at all"])
+        .join("\n");
+      const out = jq("diag.jq", lines, ["-rR", "--slurpfile", "masks", masks]).out;
+      expect(out).toBe(
+        [
+          "error ? Error for db at https:(name) from ... and :db::, keyAAAACNzhost",
+          'error cloudflare_dns_record.a["staging"] main.tf:46 Record (masked) exists label (masked) in use',
+          "",
+        ].join("\n"),
+      );
+      // The one number left is the module's own line.
+      expect(out.replace("main.tf:46", "")).not.toMatch(/[0-9/@=]|example|detail/u);
+    } finally {
+      rmSync(masks, { force: true });
+    }
+  });
+
+  test("applied.jq prints only the apply's counts", () => {
+    const out = jq(
+      "applied.jq",
+      [
+        JSON.stringify({ type: "apply_complete", hook: { resource: { addr: "x" } } }),
+        JSON.stringify({
+          type: "change_summary",
+          changes: { add: 4, change: 1, import: 0, remove: 0, operation: "apply" },
+        }),
+      ].join("\n"),
+      ["-rR"],
+    ).out;
+    expect(out).toBe("applied: 4 added, 1 changed, 0 imported, 0 destroyed\n");
+  });
+});
+
+describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in tofu", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "infra-phases-"));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  let boxes = 0;
+
+  /** A runner: the stand-in tofu first on PATH, RUNNER_TEMP, and the step files. */
+  function runner() {
+    const dir = join(scratch, `r${++boxes}`);
+    for (const path of ["bin", "temp", "stub"]) mkdirSync(join(dir, path), { recursive: true });
+    cpSync(root("tests/fixtures/infra/tofu"), join(dir, "bin", "tofu"));
+    chmodSync(join(dir, "bin", "tofu"), 0o755);
+    for (const name of ["env", "output", "summary", "path"]) writeFileSync(join(dir, name), "");
+    const phase = (name: string, env: Record<string, string> = {}) => {
+      const r = Bun.spawnSync(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", root(SCRIPT), name],
+        {
+          env: {
+            PATH: `${join(dir, "bin")}:/usr/bin:/bin`,
+            HOME: dir,
+            STUB: join(dir, "stub"),
+            RUNNER_TEMP: join(dir, "temp"),
+            GITHUB_ENV: join(dir, "env"),
+            GITHUB_OUTPUT: join(dir, "output"),
+            GITHUB_STEP_SUMMARY: join(dir, "summary"),
+            GITHUB_PATH: join(dir, "path"),
+            ...env,
+          },
+          stdin: "ignore",
+        },
+      );
+      return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
+    };
+    const file = (path: string) => readFileSync(join(dir, path), "utf8");
+    return { dir, phase, file };
+  }
+  const PREPARED = {
+    TOFU_VARS: EXAMPLE,
+    STATE_BUCKET: "state-bucket-example",
+    STATE_ENDPOINT: "https://us-east-1.example.org",
+    REPLACE: "",
+  };
+  const STATE = {
+    AWS_ACCESS_KEY_ID: "access-example",
+    AWS_SECRET_ACCESS_KEY: "secret-example",
+    TF_VAR_state_passphrase: "a passphrase of sixteen or more",
+  };
+
+  test("prepare masks every identifying value first, and writes only private files", () => {
+    const r = runner();
+    const done = r.phase("prepare", PREPARED);
+    expect({ code: done.code, err: done.err }).toEqual({ code: 0, err: "" });
+    const lines = done.out.trimEnd().split("\n");
+    const masks = JSON.parse(jq("masks.jq", EXAMPLE, ["-c"]).out) as string[];
+    expect(lines.slice(0, masks.length)).toEqual(masks.map((m) => `::add-mask::${m}`));
+    expect(lines.slice(masks.length)).toEqual([
+      "Prepared the values for 1 host(s) and 1 access list(s).",
+    ]);
+    expect(r.file("env")).toBe(`TF_DATA_DIR=${join(r.dir, "temp", "tofu")}/data\n`);
+    expect(r.file("temp/tofu/backend.hcl")).toContain('bucket         = "state-bucket-example"');
+    expect(JSON.parse(r.file("temp/tofu/values.tfvars.json"))).toEqual(JSON.parse(EXAMPLE));
+    // A value the shape refuses: one fixed error, no mask, nothing of the value.
+    const bad = runner().phase("prepare", {
+      ...PREPARED,
+      TOFU_VARS: '{"hosts": "staging.example.org"}',
+    });
+    expect(bad.code).toBe(1);
+    expect(bad.out).toStartWith("::error::TOFU_VARS must be one JSON object");
+    expect(bad.out + bad.err).not.toContain("example.org");
+    // A replace names one configured host's instance, and is never echoed back.
+    for (const replace of ['linode_instance.host["production"]', "linode_instance.host", "x; id"]) {
+      const refused = runner().phase("prepare", { ...PREPARED, REPLACE: replace });
+      expect({ replace, code: refused.code }).toEqual({ replace, code: 1 });
+      expect(refused.out.trimEnd().split("\n").at(-1)).toBe(
+        '::error::replace must be exactly linode_instance.host["<key>"], naming a host in TOFU_VARS.',
+      );
+    }
+    expect(
+      runner().phase("prepare", { ...PREPARED, REPLACE: 'linode_instance.host["staging"]' }).code,
+    ).toBe(0);
+  });
+
+  test("init, plan and summarize keep tofu's output private, list the changes and apply the guards", () => {
+    const r = runner();
+    expect(r.phase("prepare", PREPARED).code).toBe(0);
+    expect(r.phase("init", STATE)).toEqual({ code: 0, out: "init ok\n", err: "" });
+    const tokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
+    expect(r.phase("plan", tokens)).toEqual({ code: 0, out: "plan ok\n", err: "" });
+    // A plan with a replace and an access-list removal.
+    writeFileSync(
+      join(r.dir, "stub", "plan.json"),
+      JSON.stringify({
+        resource_changes: [
+          change('linode_instance.host["staging"]', ["delete", "create"], {
+            after_unknown: { ipv4: true, ipv6: true },
+          }),
+          change('linode_database_access_controls.db["primary"]', ["update"], {
+            before: { allow_list: ["2001:db8:1::10/128", "192.0.2.10/32"] },
+            after: {},
+            after_unknown: { allow_list: true },
+          }),
+        ],
+      }),
+    );
+    const guarded = r.phase("summarize", {
+      TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+      ALLOW_DESTROY: "false",
+      ALLOW_ACCESS_REMOVAL: "false",
+    });
+    expect(guarded.code).toBe(1);
+    expect(guarded.out).toBe(
+      [
+        "The plan's changes:",
+        'replace linode_instance.host["staging"]',
+        'update linode_database_access_controls.db["primary"] +4 -2',
+        "::error::The plan deletes or replaces a resource; dispatch again with allow_destroy if you meant it.",
+        "::error::The plan removes an entry from a database access list; dispatch again with allow_access_removal if you meant it.",
+        "",
+      ].join("\n"),
+    );
+    expect(r.file("summary")).toContain('| replace | `linode_instance.host["staging"]` |  |');
+    const output = r.file("output");
+    expect(output).toMatch(/^changes<<changes_[0-9a-f]{32}\nreplace /u);
+    expect(output).toContain("has_changes=true\n");
+    const allowed = runner();
+    allowed.phase("prepare", PREPARED);
+    writeFileSync(
+      join(allowed.dir, "stub", "plan.json"),
+      readFileSync(join(r.dir, "stub", "plan.json")),
+    );
+    expect(
+      allowed.phase("summarize", {
+        TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+        ALLOW_DESTROY: "true",
+        ALLOW_ACCESS_REMOVAL: "true",
+      }).code,
+    ).toBe(0);
+    // Every tofu call ran in the module, and stdout and stderr went to files under $d.
+    const calls = readdirSync(join(r.dir, "stub", "calls")).map(
+      (n) => readFileSync(join(r.dir, "stub", "calls", n), "utf8").split("\n")[0],
+    );
+    expect(calls.every((first) => first === `-chdir=${root("ops/tofu")}`)).toBe(true);
+    // A failed plan prints only the filtered diagnostics.
+    const failed = runner();
+    failed.phase("prepare", PREPARED);
+    writeFileSync(join(failed.dir, "stub", "exit.plan"), "1");
+    writeFileSync(
+      join(failed.dir, "stub", "plan.jsonl"),
+      `${JSON.stringify({ type: "diagnostic", diagnostic: { severity: "error", summary: "No access to 192.0.2.10 at staging.example.org", detail: "secret" } })}\n`,
+    );
+    const r2 = failed.phase("plan", tokens);
+    expect(r2.code).toBe(1);
+    expect(r2.out).toBe(
+      "::error::plan failed (exit 1). Its diagnostics, with names, numbers and addresses left out:\nerror - No access to ... at (masked) \n",
+    );
+  });
+
+  test("compare refuses a missing or different list, and apply prints counts and built hosts only", () => {
+    const r = runner();
+    r.phase("prepare", PREPARED);
+    const list =
+      'create linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -0';
+    writeFileSync(join(r.dir, "temp", "tofu", "changes.txt"), `${list}\n`);
+    expect(r.phase("compare", { APPROVED: list })).toEqual({
+      code: 0,
+      out: "The plan equals the approved one.\n",
+      err: "",
+    });
+    expect(r.phase("compare", { APPROVED: "" }).out).toStartWith(
+      "::error::The Plan job's change list didn't arrive",
+    );
+    expect(r.phase("compare", { APPROVED: list.replace("+2", "+3") }).out).toStartWith(
+      "::error::This plan differs from the one approved in the Plan job",
+    );
+    writeFileSync(
+      join(r.dir, "stub", "apply.jsonl"),
+      `${JSON.stringify({ type: "change_summary", changes: { add: 4, change: 1, import: 0, remove: 0 } })}\n`,
+    );
+    const applied = r.phase("apply", { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" });
+    expect(applied).toEqual({
+      code: 0,
+      out: [
+        "applied: 4 added, 1 changed, 0 imported, 0 destroyed",
+        "built staging (staging): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)",
+        "",
+      ].join("\n"),
+      err: "",
+    });
+    // Without the tokens, nothing runs.
+    expect(r.phase("apply", STATE).out).toBe(
+      "::error::LINODE_TOKEN and CLOUDFLARE_API_TOKEN must be set in the infra environment.\n",
+    );
+    expect(r.phase("nothing").code).toBe(1);
   });
 });

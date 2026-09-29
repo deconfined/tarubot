@@ -4,18 +4,18 @@
  * SSH from a GitHub runner. deploy.yml's staging job calls it; production joins in 2.37.0.
  *
  * - Shape: the six inputs and nothing else that triggers it, one job in the target's environment,
- *   first attempts only, one concurrency group per target that never cancels, least permissions,
- *   every ${{ }} through env:, no tracing and no verbose or diffing ansible-playbook, the two
- *   pinned checkouts (the release's ref from the image's own label), the 14 secret names each in
- *   the one step that needs them, and the key removed on every path.
- * - Behavior: the step scripts run here with simulated getent, ssh-keyscan, docker and
- *   ansible-playbook (tests/fixtures/host-workflow) and the real ssh-keygen: the request check,
- *   the no-host rule, the host settings and their masks, the key each address offers checked
- *   against the pinned one, files and inventory, the release commit taken from the image,
- *   Configure and the Bot step for each action, the summary's pattern filter and its green
- *   outcomes, and the key's removal. The public-log rules come first: masks before any other
- *   output, no host key or fingerprint outside a mask, no secret in any argument, and nothing
- *   unmatched from the host's result file reaches the log.
+ *   first attempts only, one concurrency group per target that queues every waiting run and never
+ *   cancels, least permissions, every ${{ }} through env:, no tracing and no verbose or diffing
+ *   ansible-playbook, the two pinned checkouts (the release's ref from the image's own label), the
+ *   14 secret names each in the one step that needs them, and the key removed on every path.
+ * - Behavior: the step scripts run here with simulated getent, docker and ansible-playbook
+ *   (tests/fixtures/host-workflow) and the real ssh-keygen: the request check, the no-host rule,
+ *   the host settings and their masks, the Configure key without a passphrase, files and the
+ *   inventory (ssh at LogLevel=FATAL, so a changed host key never prints its fingerprint), the
+ *   release commit taken from the image, Configure and the Bot step for each action, the summary,
+ *   and the key's removal. The public-log rules come first: masks before any other output, no host
+ *   key or fingerprint outside a mask, no secret in any argument, and only plain characters from
+ *   the result file in the log.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -42,7 +42,7 @@ const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.met
 const read = (path: string) => readFileSync(root(path), "utf8");
 const STUBS = root("tests/fixtures/host-workflow");
 const hasJq = Bun.which("jq") !== null;
-/** The settings step computes fingerprints with OpenSSH's ssh-keygen, as a runner has it. */
+/** The settings step reads keys with OpenSSH's ssh-keygen, as a runner has it. */
 const canSettle = hasJq && Bun.which("ssh-keygen") !== null;
 
 // Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
@@ -85,7 +85,11 @@ const workflow = z
             "timeout-minutes": z.number(),
             environment: z.string(),
             concurrency: z
-              .object({ group: z.string(), "cancel-in-progress": z.boolean() })
+              .object({
+                group: z.string(),
+                "cancel-in-progress": z.boolean(),
+                queue: z.literal("max"),
+              })
               .strict(),
             permissions: z.record(z.string(), z.string()),
             defaults: z.object({ run: z.object({ shell: z.literal("bash") }).strict() }).strict(),
@@ -120,7 +124,7 @@ const secretsIn = (value: unknown) =>
 
 /** The host's three settings, read in "Load the host settings" only. */
 const HOST_SECRETS = ["ANSIBLE_SSH_KEY", "TARGET_HOST", "TARGET_HOST_KEY"];
-/** The bot's 11 (vars/bot.yml tb_secret_env), read in "Deploy the bot" only. */
+/** The bot's 11 variables (vars/bot.yml tb_secret_env), set in "Deploy the bot" only. */
 const BOT_SECRETS = [
   "BACKUP_STORAGE_ACCESS_KEY",
   "BACKUP_STORAGE_ENDPOINT",
@@ -134,6 +138,18 @@ const BOT_SECRETS = [
   "HEALTHCHECKS_BACKUP_URL",
   "HEALTHCHECKS_PING_URL",
 ];
+/**
+ * The environment secret behind each of those variables. GitHub refuses a secret name that starts
+ * with GITHUB_, so the two GITHUB_ variables read secrets of other names (vars/bot.yml
+ * tb_secret_source); every other variable reads the secret of its own name.
+ */
+const SECRET_OF: Record<string, string> = {
+  GITHUB_APP_PRIVATE_KEY: "SUGGEST_APP_PRIVATE_KEY",
+  GITHUB_REPORTS_TOKEN: "REPORTS_GITHUB_TOKEN",
+};
+const secretOf = (name: string) => SECRET_OF[name] ?? name;
+/** The environment secrets "Deploy the bot" reads, sorted. */
+const BOT_SECRET_NAMES = BOT_SECRETS.map(secretOf).sort();
 /** The step order interfaces §3 gives, by name. */
 const ORDER = [
   "Check the request",
@@ -176,10 +192,12 @@ describe("the workflow's shape", () => {
     const job = host.jobs.host;
     expect(job.if).toBe("github.run_attempt == '1'");
     expect(job.environment).toBe(`\${{ inputs.target }}`);
-    // Two runs never overlap on a host; a newer one waits and nothing is cancelled.
+    // Two runs never overlap on a host. A newer one waits, and queue: max keeps every waiting
+    // run: GitHub's default keeps one and cancels it for the next, which could drop a rollback.
     expect(job.concurrency).toEqual({
       group: `host-\${{ inputs.target }}`,
       "cancel-in-progress": false,
+      queue: "max",
     });
     expect(job["runs-on"]).toBe("ubuntu-24.04");
     expect(job["timeout-minutes"]).toBe(40);
@@ -261,15 +279,20 @@ describe("the workflow's shape", () => {
   });
 
   test("names 14 secrets: the host's three in its settings step, the bot's 11 in the bot's step", () => {
-    expect(secretsIn(host)).toEqual([...HOST_SECRETS, ...BOT_SECRETS].sort());
+    expect(secretsIn(host)).toEqual([...HOST_SECRETS, ...BOT_SECRET_NAMES].sort());
     for (const s of steps) {
       const expected =
-        s.id === "host" ? HOST_SECRETS : s.name === "Deploy the bot" ? BOT_SECRETS : [];
+        s.id === "host" ? HOST_SECRETS : s.name === "Deploy the bot" ? BOT_SECRET_NAMES : [];
       expect({ step: s.name, secrets: secretsIn(s) }).toEqual({ step: s.name, secrets: expected });
     }
-    // Each under its own name, straight from the environment's secret.
+    // Each variable straight from its environment secret: its own name, or SECRET_OF's for the
+    // two GitHub won't take.
     const bot = stepOf("Deploy the bot").env ?? {};
-    for (const name of BOT_SECRETS) expect(bot[name]).toBe(`\${{ secrets.${name} }}`);
+    for (const name of BOT_SECRETS)
+      expect({ name, value: bot[name] }).toEqual({
+        name,
+        value: `\${{ secrets.${secretOf(name)} }}`,
+      });
     expect(Object.keys(bot).sort()).toEqual(
       [
         ...BOT_SECRETS,
@@ -358,8 +381,6 @@ const DIGEST = `sha256:${"ab".repeat(32)}`;
 const HOST = "staging.example.org";
 /** An ed25519 key line as ssh-keyscan prints it, without the name: a 68-character blob. */
 const HOST_KEY = `ssh-ed25519 ${"AAAAC3NzaC1lZDI1NTE5AAAAIExample".padEnd(68, "E")}`;
-/** Another host's key: what a rebuilt host offers before the owner pins it. */
-const OTHER_KEY = `ssh-ed25519 ${"AAAAC3NzaC1lZDI1NTE5AAAAIOther".padEnd(68, "O")}`;
 /** A key line's base64 part. */
 const blobOf = (line: string) => line.split(" ")[1] ?? "";
 /** The SHA256 fingerprint ssh-keygen prints for a key, without its SHA256: prefix. */
@@ -379,15 +400,40 @@ const unmasked = (output: string) =>
     .split("\n")
     .filter((line) => !line.startsWith("::add-mask::"))
     .join("\n");
-const PRIVATE_KEY =
-  "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAexample\n-----END OPENSSH PRIVATE KEY-----";
+/**
+ * A throwaway Configure key made here by ssh-keygen, without its final newline (as the settings
+ * step writes it back with one), and the same kind of key with a passphrase, which the step must
+ * refuse. Without ssh-keygen (the image build) the suites that use them are skipped.
+ */
+function throwawayKey(passphrase: string) {
+  if (!canSettle)
+    return "-----BEGIN OPENSSH PRIVATE KEY-----\nunused\n-----END OPENSSH PRIVATE KEY-----";
+  const dir = mkdtempSync(join(tmpdir(), "host-workflow-key-"));
+  try {
+    const made = Bun.spawnSync(
+      ["ssh-keygen", "-q", "-t", "ed25519", "-N", passphrase, "-C", "", "-f", join(dir, "k")],
+      { stdin: "ignore" },
+    );
+    if (made.exitCode !== 0) throw new Error("ssh-keygen couldn't make a test key");
+    return readFileSync(join(dir, "k"), "utf8").trimEnd();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const PRIVATE_KEY = throwawayKey("");
+const LOCKED_KEY = throwawayKey("a throwaway passphrase");
 /** Documentation addresses the simulated name resolves to. */
 const ADDRESSES = ["2001:db8::10", "192.0.2.10"];
 
-/** Every bot secret, set to a marker value the tests look for in arguments and logs. */
+/**
+ * Every bot secret, by its environment secret's name, set to a marker value named after the
+ * variable it feeds, which the tests look for in the step's environment, arguments and logs.
+ */
 const botSecrets = (overrides: Record<string, string> = {}) => ({
-  ...Object.fromEntries(BOT_SECRETS.map((name) => [name, `marker-${name.toLowerCase()}`])),
-  GITHUB_APP_PRIVATE_KEY: "",
+  ...Object.fromEntries(
+    BOT_SECRETS.map((name) => [secretOf(name), `marker-${name.toLowerCase()}`]),
+  ),
+  SUGGEST_APP_PRIVATE_KEY: "",
   ...overrides,
 });
 const context = (
@@ -545,10 +591,6 @@ function staged() {
   writeFileSync(join(where.dir, "hosts", HOST), `${ADDRESSES.join("\n")}\n`);
   writeFileSync(join(where.dir, "hosts", "2001:db8::20"), "2001:db8::20\n");
   writeFileSync(join(where.dir, "hosts", "198.51.100.20"), "198.51.100.20\n");
-  // Every address offers the pinned key.
-  mkdirSync(join(where.dir, "keys"));
-  for (const address of [...ADDRESSES, "2001:db8::20", "198.51.100.20"])
-    writeFileSync(join(where.dir, "keys", address), `${HOST_KEY}\n`);
   writeFileSync(join(where.dir, "images", DIGEST), COMMIT);
   return where;
 }
@@ -717,7 +759,9 @@ describe.skipIf(!canSettle)("the host settings", () => {
         "-o ConnectTimeout=20",
         "-o ServerAliveInterval=15",
         "-o ServerAliveCountMax=4",
-        "-o LogLevel=ERROR",
+        // ERROR would let ssh print a changed host key's fingerprint; FATAL leaves only "Host key
+        // verification failed." (an authentication failure still prints).
+        "-o LogLevel=FATAL",
       ]
         .join(" ")
         .split(" "),
@@ -767,6 +811,18 @@ describe.skipIf(!canSettle)("the host settings", () => {
         "TARGET_HOST_KEY must be",
       ],
       [{ ANSIBLE_SSH_KEY: "" }, "ANSIBLE_SSH_KEY isn't set in the staging environment."],
+      // BatchMode can never unlock a key with a passphrase, nor use something that isn't a key.
+      [
+        { ANSIBLE_SSH_KEY: LOCKED_KEY },
+        "ANSIBLE_SSH_KEY must be an OpenSSH private key without a passphrase",
+      ],
+      [
+        {
+          ANSIBLE_SSH_KEY:
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a key\n-----END OPENSSH PRIVATE KEY-----",
+        },
+        "ANSIBLE_SSH_KEY must be an OpenSSH private key without a passphrase",
+      ],
     ] as const) {
       const r = settings(secrets);
       expect({ secrets, code: r.code, error: r.stdout.includes(`::error::${message}`) }).toEqual({
@@ -778,67 +834,11 @@ describe.skipIf(!canSettle)("the host settings", () => {
       expect(existsSync(join(r.ssh, "inventory.json"))).toBe(false);
     }
   });
-  test("reads the key each address offers first, masks every key seen, and stops on any other", () => {
-    // Each address scanned once, quietly, for its ed25519 key.
-    const ok = settings();
-    expect(ok.code).toBe(0);
-    expect(readFileSync(join(ok.where.dir, "keyscan-calls"), "utf8")).toBe(
-      [...ADDRESSES]
-        .sort()
-        .map((a) => `-q -T 20 -t ed25519 -- ${a}\n`)
-        .join(""),
-    );
-    const scan = (where: Box) => runStep("Load the host settings", where, context());
-    // A rebuilt host not yet pinned: both keys are masked before the fixed error, nothing else
-    // names either, and no file is written, so ssh never runs and never prints a fingerprint.
-    const rebuilt = staged();
-    for (const a of ADDRESSES) writeFileSync(join(rebuilt.dir, "keys", a), `${OTHER_KEY}\n`);
-    const moved = scan(rebuilt);
-    expect(moved.code).toBe(1);
-    const lines = moved.stdout.trimEnd().split("\n");
-    expect(lines.slice(0, -1).sort()).toEqual(
-      [
-        ...ADDRESSES.map((a) => `::add-mask::${a}`),
-        ...keyMasks(HOST_KEY),
-        ...keyMasks(OTHER_KEY),
-      ].sort(),
-    );
-    expect(lines.slice(0, 2).sort()).toEqual(ADDRESSES.map((a) => `::add-mask::${a}`).sort());
-    expect(lines.at(-1)).toBe(
-      `::error::The host's key isn't the one pinned in TARGET_HOST_KEY. After a rebuild, pin the new key from your own machine (ops/tofu/README.md, "Pinning a new host key").`,
-    );
-    for (const secret of [blobOf(OTHER_KEY), fingerprintOf(OTHER_KEY), blobOf(HOST_KEY)])
-      expect(unmasked(moved.stdout + moved.stderr)).not.toContain(secret);
-    expect(moved.stderr).toBe("");
-    expect(existsSync(join(rebuilt.temp, "ssh"))).toBe(false);
-    expect(moved.outputs.skip).toBeUndefined();
-    // One address offering another key (a stale record, say) stops the run too.
-    const split = staged();
-    writeFileSync(join(split.dir, "keys", ADDRESSES[1] ?? ""), `${OTHER_KEY}\n`);
-    expect(scan(split).code).toBe(1);
-    // An address this runner can't reach offers nothing, and its complaint goes nowhere; the
-    // others decide.
-    const v4only = staged();
-    rmSync(join(v4only.dir, "keys", ADDRESSES[0] ?? ""));
-    const reached = scan(v4only);
-    expect({ code: reached.code, stderr: reached.stderr }).toEqual({ code: 0, stderr: "" });
-    // No address answering stops with its own message.
-    const down = staged();
-    for (const a of ADDRESSES) rmSync(join(down.dir, "keys", a));
-    const silent = scan(down);
-    expect(silent.code).toBe(1);
-    expect(silent.stdout.trimEnd().split("\n").at(-1)).toBe(
-      "::error::The host offered no Ed25519 host key at any of its addresses: is it up, with port 22 open?",
-    );
-    expect(existsSync(join(down.temp, "ssh"))).toBe(false);
-    // The whole job: nothing reaches ansible-playbook, and the run reads failed.
-    const again = staged();
-    for (const a of ADDRESSES) writeFileSync(join(again.dir, "keys", a), `${OTHER_KEY}\n`);
-    const run = job(again, context());
-    expect(run.calls).toEqual([]);
-    expect(run.failed).toBe(true);
-    expect(run.summary).toContain("## staging: failed");
-    expect(unmasked(run.log)).not.toContain(fingerprintOf(OTHER_KEY));
+  test("never reads the host's key itself: ssh at LogLevel=FATAL refuses any other key quietly", () => {
+    // No keyscan pass and no fingerprint of an offered key: the pinned key in known_hosts and
+    // StrictHostKeyChecking decide, on every connection of the run.
+    expect(runOf("Load the host settings")).not.toMatch(/ssh-keyscan/u);
+    expect(text).not.toMatch(/LogLevel=(?!FATAL\b)/u);
   });
 });
 
@@ -929,6 +929,8 @@ describe.skipIf(!canSettle)("Configure and the bot", () => {
       for (const name of BOT_SECRETS)
         expect({ name, present: name in (bot?.env ?? {}) }).toEqual({ name, present: true });
       expect(bot?.env.DISCORD_TOKEN).toBe(token);
+      // The renamed secret reaches bot.yml under the bot's own name.
+      expect(bot?.env.GITHUB_REPORTS_TOKEN).toBe("marker-github_reports_token");
       // No secret value is ever an argument.
       for (const value of Object.values(context({}, { DISCORD_TOKEN: token }).secrets).filter(
         Boolean,
@@ -968,9 +970,11 @@ describe.skipIf(!canSettle)("Configure and the bot", () => {
       "Remove the key",
     ]);
     expect(run.calls.map((c) => c.argv[2])).toEqual(["site.yml"]);
-    expect(run.results.Summary?.code).toBe(1);
-    expect(run.results.Summary?.stdout).toContain(
-      "Result on staging: outcome=failed action=deploy",
+    // The job is red from Configure's step; the summary only reports, and names no phase.
+    expect(run.failed).toBe(true);
+    expect(run.results.Summary?.code).toBe(0);
+    expect(run.results.Summary?.stdout).toBe(
+      "Result on staging: outcome=failed, no result file: the run stopped before bot.yml's last play. A step above failed, or the host became unreachable while bot.yml ran.\n",
     );
     expect(run.summary).toContain("## staging: failed");
   });
@@ -982,8 +986,9 @@ describe.skipIf(!canSettle)("Configure and the bot", () => {
     });
     expect(refused.failed).toBe(true);
     expect(refused.results.Summary?.stdout).toContain(
-      "::error::The staging run ended refused (step checks, reason missing-secret).",
+      "Result on staging: outcome=refused action=deploy",
     );
+    expect(refused.summary).toContain("## staging: refused");
     const where = staged();
     writeFileSync(join(where.dir, "images", DIGEST), "f".repeat(40));
     const moved = job(where, context(), { result: deployed });
@@ -1005,7 +1010,7 @@ describe.skipIf(!hasJq)("the summary", () => {
     return { ...r, summary: readFileSync(join(where.dir, "summary"), "utf8") };
   };
 
-  test("prints every field that fits its pattern", () => {
+  test("renders the file to the log and the run's summary, and decides nothing", () => {
     const r = summarize(deployed);
     expect(r.code).toBe(0);
     expect(r.stdout).toBe(
@@ -1015,47 +1020,39 @@ describe.skipIf(!hasJq)("the summary", () => {
     expect(r.summary).toContain("| migrations | `011_example.sql` |");
     const window = summarize({ ...deployed, warnings: ["db-maintenance-window"] });
     expect(window.stdout).toContain("warnings=db-maintenance-window");
-  });
-
-  test("prints anything else as ?, so nothing from the host reaches the log unmatched", () => {
-    const r = summarize({
-      outcome: "deployed",
-      action: "deploy",
-      version: "2.36.0; echo leaked",
-      previous: "2.35.0\n::error::leaked",
-      restore_point: "yesterday leaked",
-      migrations: ["011_example.sql", "leaked.sql"],
-      schema_head: ["011_example.sql"],
-      step: "health leaked",
-      reason: "Leaked-Reason",
-      warnings: [{ leaked: true }],
-    });
-    expect(r.code).toBe(0);
-    expect(r.stdout + r.summary).not.toContain("leaked");
-    expect(r.stdout).toBe(
-      "Result on staging: outcome=deployed action=deploy version=? previous=? restore_point=? migrations=? schema_head=? step=? reason=? warnings=?\n",
-    );
-    for (const odd of ["not json", "[]", '"deployed"', "{"]) {
-      const s = summarize(odd);
-      expect({ odd, code: s.code, outcome: s.stdout.split(" ")[3] }).toEqual({
-        odd,
-        code: 1,
-        outcome: "outcome=?",
-      });
-    }
-  });
-
-  test("is green only for no-host, configured, deployed, superseded and preflight-ok", () => {
-    for (const outcome of ["no-host", "configured", "deployed", "superseded", "preflight-ok"])
+    // The job's colour comes from the steps above: a red outcome renders and exits 0.
+    for (const outcome of ["refused", "unhealthy", "failed"])
       expect({ outcome, code: summarize({ ...deployed, outcome }).code }).toEqual({
         outcome,
         code: 0,
       });
-    for (const outcome of ["refused", "unhealthy", "failed", "deployed-ish", ""])
-      expect({ outcome, code: summarize({ ...deployed, outcome }).code }).toEqual({
-        outcome,
-        code: 1,
+  });
+
+  test("prints only plain characters, and ? for anything that isn't a string or a list of them", () => {
+    const r = summarize({
+      ...deployed,
+      version: "2.36.0; echo $HOME",
+      previous: "2.35.0\n::error::injected",
+      schema_head: ["011_example.sql"],
+      warnings: [{ odd: true }],
+      step: "",
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(
+      "version=2.36.0??echo??HOME previous=2.35.0?::error::injected restore_point=",
+    );
+    // A list of strings is still a list; anything else is ?.
+    expect(r.stdout).toContain("schema_head=011_example.sql step=? reason=- warnings=?");
+    // Every line of the log is the one result line: nothing starts a workflow command.
+    expect(r.stdout.trimEnd().split("\n")).toHaveLength(1);
+    for (const odd of ["not json", "[]", '"deployed"', "{"]) {
+      const s = summarize(odd, "failure");
+      expect({ odd, code: s.code, start: s.stdout.slice(0, 45) }).toEqual({
+        odd,
+        code: 0,
+        start: "Result on staging: outcome=failed, no result ",
       });
+    }
   });
 
   test("names the rollback dispatch when the release isn't healthy", () => {
@@ -1065,7 +1062,7 @@ describe.skipIf(!hasJq)("the summary", () => {
       step: "health",
       reason: "not-healthy",
     });
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(0);
     expect(r.stdout).toContain(
       "::error::2.36.0 isn't healthy on staging. To roll back, run Deploy with target=staging, version=2.35.0 and action=bot.",
     );
@@ -1075,15 +1072,15 @@ describe.skipIf(!hasJq)("the summary", () => {
     expect(first.stdout).not.toContain("To roll back");
   });
 
-  test("without a result, a failed job reads as failed and a green one can't pass", () => {
+  test("without a result, says the run stopped before bot.yml's last play, with no phase", () => {
     const failed = summarize(undefined, "failure");
-    expect(failed.code).toBe(1);
-    expect(failed.stdout).toContain(
-      "Result on staging: outcome=failed action=deploy version=- previous=- restore_point=- migrations=none schema_head=- step=- reason=-",
+    expect(failed.code).toBe(0);
+    expect(failed.stdout).toBe(
+      "Result on staging: outcome=failed, no result file: the run stopped before bot.yml's last play. A step above failed, or the host became unreachable while bot.yml ran.\n",
     );
-    const unknown = summarize(undefined, "success", "configure");
-    expect(unknown.code).toBe(1);
-    expect(unknown.stdout).toContain("outcome=? action=configure");
+    expect(failed.summary).toContain("## staging: failed");
+    const green = summarize(undefined, "success", "configure");
+    expect(green.stdout).toContain("outcome=?, no result file");
   });
 });
 

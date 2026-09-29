@@ -10,17 +10,19 @@
 #          plans again, refuses unless its change list equals the approved one, and applies that
 #          new saved plan.
 #
-# The repository and its Actions logs are public. So nothing here prints OpenTofu's own output, a
-# host name, an address, an ID or a key: the Prepare step masks every such value inside TOFU_VARS
-# before anything else prints (GitHub masks a secret only where its whole value appears), plan
-# and apply write to private files under $RUNNER_TEMP/tofu, and diagnostics print filtered. Apply
-# prints no host key either: after a build the owner pins it from their own machine (README.md,
-# "Pinning a new host key").
+# Each step runs one phase of ops/tofu/ci/tofu-ci.sh, which holds the scripts and, beside it, the
+# jq programs, so both jobs run the same code; each step's env: holds only the secrets its phase
+# needs. The repository and its Actions logs are public. So nothing here prints OpenTofu's own
+# output, a host name, an address, an ID or a key: the prepare phase masks every such value inside
+# TOFU_VARS before anything else prints (GitHub masks a secret only where its whole value
+# appears), plan and apply write to private files under $RUNNER_TEMP/tofu, and diagnostics print
+# filtered. Apply prints no host key either: after a build the owner pins it from their own
+# machine (README.md, "Pinning a new host key").
 #
 # Dispatch only, from main only (the environment also accepts only main), so no pull request's
 # code ever runs with these secrets. Re-runs are refused: every job requires the first attempt.
-# The one concurrency group serializes runs; there is no state lock, so a hand run must never
-# overlap one.
+# The one concurrency group serializes runs, and `queue: max` keeps every waiting run instead of
+# replacing it with the newest; there is no state lock, so a hand run must never overlap one.
 name: Infrastructure
 run-name: Infrastructure ${{ inputs.operation }}
 
@@ -50,6 +52,7 @@ permissions: {}
 concurrency:
   group: infra
   cancel-in-progress: false
+  queue: max
 
 defaults:
   run:
@@ -77,194 +80,20 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned OpenTofu
-        run: |
-          # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256 (copied
-          # from that release's signature-verified SHA256SUMS) before anything runs it.
-          set -Eeuo pipefail
-          v=$(< ops/tofu/.opentofu-version)
-          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::ops/tofu/.opentofu-version must hold X.Y.Z."; exit 1; }
-          d=$RUNNER_TEMP/tofu-bin
-          mkdir -p "$d"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$d/tofu_${v}_linux_amd64.zip" "https://github.com/opentofu/opentofu/releases/download/v${v}/tofu_${v}_linux_amd64.zip"
-          (cd "$d" && sha256sum --check --strict --quiet "$GITHUB_WORKSPACE/ops/tofu/opentofu.sha256")
-          unzip -q -o "$d/tofu_${v}_linux_amd64.zip" tofu -d "$d"
-          echo "$d" >> "$GITHUB_PATH"
+        run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Prepare the values and the masks
         env:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
           REPLACE: ${{ inputs.replace }}
-        run: |
-          # Checks TOFU_VARS silently, masks every identifying value inside it before anything
-          # else prints, then writes the private working files: the values, the backend settings,
-          # the replace target and the jq programs the later steps share. Values reach jq through
-          # printf (a shell builtin) and a pipe, never an argument or a temporary file.
-          set -Eeuo pipefail
-          umask 077
-          d=$RUNNER_TEMP/tofu
-          mkdir -p "$d"
-
-          # The shape of TOFU_VARS: exactly the seven keys, and the values the masks rely on.
-          # ops/tofu/variables.tf validates every value again, precisely.
-          cat > "$d/shape.jq" <<'JQ'
-          def str($re): type == "string" and test($re);
-          type == "object"
-          and (keys == ["cloudflare_zone_id", "configure_keys", "database_ids", "db_allow_extra", "hosts", "root_keys", "root_password_hash"])
-          and (.hosts | type == "object")
-          and all(.hosts | to_entries[];
-              (.key | test("^(staging|production)(-[0-9]{1,2})?$"))
-              and (.value | type == "object" and keys == ["fqdn", "label", "region", "role", "type"])
-              and (.value.label | str("^[a-z][a-z0-9-]{6,61}[a-z0-9]$") and contains("-") and (contains("--") | not))
-              and (.value.fqdn | str("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"))
-              and (.value.role | str("^(staging|production)$"))
-              and (.value.region | str("^[a-z0-9-]{2,32}$"))
-              and (.value.type | str("^[a-z0-9-]{2,64}$")))
-          and ([.hosts[].label] as $labels | all(.hosts | keys[]; . as $k | all($labels[]; . as $l | $k | contains($l) | not)))
-          and (.root_keys | type == "array" and all(.[]; str("^[ -~]+$")))
-          and (.configure_keys | type == "object" and all(.[]; str("^[ -~]+$")))
-          and (.root_password_hash | str("^[$./0-9A-Za-z=]*$"))
-          and (.cloudflare_zone_id | str("^[0-9a-f]{32}$"))
-          and (.database_ids | type == "object" and all(to_entries[]; (.key | test("^[a-z]{1,16}$")) and (.value | str("^[0-9]{1,20}$"))))
-          and (.db_allow_extra | type == "array" and all(.[]; str("^[0-9A-Fa-f.:]+/[0-9]{1,3}$")))
-          JQ
-
-          # Every value that may name or identify a host or an account. Map keys, roles, regions,
-          # types and database IDs are never masked: they are public words or never printed, and
-          # masking them would censor the change list. Values under six characters identify
-          # nothing and would mask too much.
-          cat > "$d/masks.jq" <<'JQ'
-          [ (.hosts[] | .fqdn, .label),
-            .cloudflare_zone_id,
-            (.db_allow_extra[] | ., split("/")[0]),
-            (.root_password_hash | select(. != "")),
-            ((.root_keys[], .configure_keys[]) | split(" ")[] | select(startswith("AAAA")))
-          ] | map(select(length >= 6)) | unique
-          JQ
-
-          # The shape check prints nothing of the value: jq's own messages could quote it.
-          if ! printf '%s' "$TOFU_VARS" | jq -e -f "$d/shape.jq" > /dev/null 2>&1; then
-            echo "::error::TOFU_VARS must be one JSON object with exactly the keys hosts, root_keys, configure_keys, root_password_hash, cloudflare_zone_id, database_ids and db_allow_extra, in the shape of ops/tofu/examples/example.tfvars.json (labels: 8 to 63 characters with a '-', never inside a host key)."
-            exit 1
-          fi
-          printf '%s' "$TOFU_VARS" | jq -c -f "$d/masks.jq" > "$d/masks.json"
-          while IFS= read -r m; do
-            echo "::add-mask::$m"
-          done < <(jq -r '.[]' "$d/masks.json")
-          # From here on every identifying value prints as ***.
-
-          printf '%s' "$TOFU_VARS" | jq -c . > "$d/values.tfvars.json"
-
-          # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
-          [[ $STATE_BUCKET =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::TOFU_STATE_BUCKET must be an Object Storage bucket name."; exit 1; }
-          [[ $STATE_ENDPOINT =~ ^https://[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || { echo "::error::TOFU_STATE_ENDPOINT must be the bucket's https:// endpoint, with no path (ops/tofu/README.md)."; exit 1; }
-          {
-            printf 'bucket         = "%s"\n' "$STATE_BUCKET"
-            printf 'endpoints      = { s3 = "%s" }\n' "$STATE_ENDPOINT"
-            printf 'use_path_style = false\n'
-          } > "$d/backend.hcl"
-
-          # The replace input: exactly one configured host's instance, never echoed back.
-          if [[ -n $REPLACE ]]; then
-            if ! [[ $REPLACE =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] \
-              || ! jq -e --arg k "${BASH_REMATCH[1]}" '.hosts | has($k)' "$d/values.tfvars.json" > /dev/null; then
-              echo "::error::replace must be exactly linode_instance.host[\"<key>\"], naming a host in TOFU_VARS."
-              exit 1
-            fi
-          fi
-          printf '%s' "$REPLACE" > "$d/replace"
-
-          # The public change list: one sorted line per change, `ACTION ADDRESS`, plus ` +N -M`
-          # on a database access list. Input: `tofu show -json` of the saved plan; $vars[0]: the
-          # values. A set with a new host's addresses in it is wholly unknown in a plan, so its
-          # counts are rebuilt the way ops/tofu/main.tf builds the list: db_allow_extra, each
-          # known host's IPv6 /128 and IPv4 /32, and two entries per host still being built.
-          cat > "$d/summary.jq" <<'JQ'
-          def addr: if test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end;
-          def act:
-            if . == ["create"] then "create"
-            elif . == ["update"] then "update"
-            elif . == ["delete"] then "delete"
-            elif . == ["read"] then "read"
-            elif . == ["delete", "create"] or . == ["create", "delete"] then "replace"
-            elif . == ["no-op"] then "no-op"
-            else "?" end;
-          def unknown: if type == "boolean" then . else tostring | contains("true") end;
-          $vars[0] as $v
-          | [.resource_changes[]?] as $rc
-          | [$v.hosts | keys[] as $k
-              | ([$rc[] | select(.type == "linode_instance" and .name == "host" and .index == $k and (has("deposed") | not))][0].change) as $c
-              | if $c == null or $c.after == null or ($c.after_unknown.ipv4 // false | unknown) or ($c.after_unknown.ipv6 // false | unknown)
-                then {unknown: 2}
-                else {known: [(($c.after.ipv6 // "?") | split("/")[0]) + "/128", (($c.after.ipv4 // ["?"])[0]) + "/32"]}
-                end] as $hosts
-          | ($v.db_allow_extra + [$hosts[] | (.known // [])[]]) as $known
-          | ([$hosts[] | .unknown // 0] | add // 0) as $pending
-          | def counts:
-              (.before.allow_list // []) as $b
-              | if .actions == ["delete"] then {plus: 0, minus: ($b | length)}
-                elif (.after_unknown.allow_list // false | unknown) or .after.allow_list == null
-                then {plus: ((($known - $b) | unique | length) + $pending), minus: (($b - $known) | unique | length)}
-                else (.after.allow_list) as $a | {plus: (($a - $b) | unique | length), minus: (($b - $a) | unique | length)}
-                end;
-          [ $rc[]
-            | (.change.actions | act) as $act
-            | (.address | addr) as $a
-            | (if .type == "linode_database_access_controls" then .change | counts | " +\(.plus) -\(.minus)" else "" end) as $n
-            | (if .change.importing != null then "import \($a)\($n)" else empty end),
-              (if $act != "no-op" then "\($act) \($a)\($n)" else empty end)
-          ] | sort | .[]
-          JQ
-
-          # One line per diagnostic: SEVERITY ADDRESS [FILE:LINE] SUMMARY. The file and line are in
-          # this public module (a variable's validation names its block). The summary has every
-          # masked value replaced, then is reduced to letters, spaces and . , : ' ( ) -: digits,
-          # '/', '@' and '=' never survive, so no ID, address, key or URL does, and what is left of
-          # a dotted name (a host or a domain) becomes "(name)". At most 120 characters; the
-          # detail never prints.
-          cat > "$d/diag.jq" <<'JQ'
-          fromjson?
-          | select(type == "object" and .type == "diagnostic")
-          | .diagnostic
-          | (if .severity == "error" or .severity == "warning" then .severity else "?" end) as $sev
-          | ((.address // "-") | if . == "-" or test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end) as $addr
-          | (if (.range.filename | type == "string" and test("^[a-z0-9_-]+[.](tf|tftpl)$")) and (.range.start.line | type == "number")
-             then " \(.range.filename):\(.range.start.line)" else "" end) as $where
-          | (reduce $masks[0][] as $m ((.summary // "") | tostring; split($m) | join(" (masked) ")))
-          | gsub("[^A-Za-z .,:'()-]"; "") | gsub("[A-Za-z-]+([.][A-Za-z-]+)+"; "(name)") | gsub(" +"; " ")
-          | .[0:120]
-          | "\($sev) \($addr)\($where) \(.)"
-          JQ
-
-          # The apply's own counts, from its change_summary message; numbers only.
-          cat > "$d/applied.jq" <<'JQ'
-          fromjson?
-          | select(type == "object" and .type == "change_summary") | .changes
-          | "applied: \(.add | numbers) added, \(.change | numbers) changed, \(.import | numbers) imported, \(.remove | numbers) destroyed"
-          JQ
-
-          # Provider downloads and the backend's settings stay under $d, which the last step removes.
-          echo "TF_DATA_DIR=$d/data" >> "$GITHUB_ENV"
-          echo "Prepared the values for $(jq -r '.hosts | length' "$d/values.tfvars.json") host(s) and $(jq -r '.database_ids | length' "$d/values.tfvars.json") access list(s)."
+        run: bash ops/tofu/ci/tofu-ci.sh prepare
       - name: Initialize OpenTofu
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-        run: |
-          # The backend from backend.hcl and the providers from the lock file only. Its output
-          # goes to a private file: it can name the bucket and the endpoint.
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          [[ -n $AWS_ACCESS_KEY_ID && -n $AWS_SECRET_ACCESS_KEY ]] || { echo "::error::TOFU_STATE_ACCESS_KEY and TOFU_STATE_SECRET_KEY must be set in the infra environment."; exit 1; }
-          (( ${#TF_VAR_state_passphrase} >= 16 )) || { echo "::error::TOFU_STATE_PASSPHRASE must be at least 16 characters."; exit 1; }
-          rc=0
-          tofu -chdir=ops/tofu init -input=false -lockfile=readonly -backend-config="$d/backend.hcl" > "$d/init.log" 2>&1 || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::init failed (exit $rc): check the infra environment's TOFU_STATE_* secrets (a wrong passphrase fails here too)."
-            exit 1
-          fi
-          echo "init ok"
+        run: bash ops/tofu/ci/tofu-ci.sh init
       - name: Plan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
@@ -272,88 +101,14 @@ jobs:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
           LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          # A saved, encrypted plan in $d. OpenTofu's JSON messages go to a private file; on a
-          # failure only the filtered diagnostics print (diag.jq).
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          [[ -n $LINODE_TOKEN && -n $CLOUDFLARE_API_TOKEN ]] || { echo "::error::LINODE_TOKEN and CLOUDFLARE_API_TOKEN must be set in the infra environment."; exit 1; }
-          args=(-chdir=ops/tofu plan -input=false -json -var-file="$d/values.tfvars.json" -out="$d/plan.bin")
-          replace=$(< "$d/replace")
-          if [[ -n $replace ]]; then
-            args+=("-replace=$replace")
-          fi
-          rc=0
-          tofu "${args[@]}" > "$d/plan.jsonl" 2> "$d/plan.stderr" || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::plan failed (exit $rc). Its diagnostics, with names, numbers and addresses left out:"
-            jq -rR --slurpfile masks "$d/masks.json" -f "$d/diag.jq" "$d/plan.jsonl" || true
-            exit 1
-          fi
-          echo "plan ok"
+        run: bash ops/tofu/ci/tofu-ci.sh plan
       - name: Summarize the plan
         id: summary
         env:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
           ALLOW_DESTROY: ${{ inputs.allow_destroy }}
           ALLOW_ACCESS_REMOVAL: ${{ inputs.allow_access_removal }}
-        run: |
-          # The change list (summary.jq) to the log, the run summary and the job's outputs, then
-          # the guards: a delete or replace needs allow_destroy, a removed access-list entry
-          # needs allow_access_removal, and a change this workflow can't name is never applied.
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          rc=0
-          tofu -chdir=ops/tofu show -json "$d/plan.bin" > "$d/plan.json" 2> "$d/show.stderr" || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::show failed (exit $rc)"
-            exit 1
-          fi
-          jq -r --slurpfile vars "$d/values.tfvars.json" -f "$d/summary.jq" "$d/plan.json" > "$d/changes.txt"
-          if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
-
-          {
-            echo "### Infrastructure plan"
-            echo
-            if [[ $has_changes == true ]]; then
-              echo "| Change | Resource | Access list |"
-              echo "|---|---|---|"
-              while read -r action address counts; do
-                echo "| $action | \`$address\` | ${counts:-} |"
-              done < "$d/changes.txt"
-            else
-              echo "No changes."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ $has_changes == true ]]; then
-            echo "The plan's changes:"
-            cat "$d/changes.txt"
-          else
-            echo "No changes."
-          fi
-
-          delimiter="changes_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-          {
-            echo "changes<<$delimiter"
-            cat "$d/changes.txt"
-            echo "$delimiter"
-            echo "has_changes=$has_changes"
-          } >> "$GITHUB_OUTPUT"
-
-          refuse=0
-          if grep -qE '^\? |^[a-z-]+ \?( |$)' "$d/changes.txt"; then
-            echo "::error::The plan holds a change this workflow can't name (shown as ?); it is never applied."
-            refuse=1
-          fi
-          if grep -qE '^(delete|replace) ' "$d/changes.txt" && [[ $ALLOW_DESTROY != true ]]; then
-            echo "::error::The plan deletes or replaces a resource; dispatch again with allow_destroy if you meant it."
-            refuse=1
-          fi
-          if grep -qE ' -[1-9][0-9]*$' "$d/changes.txt" && [[ $ALLOW_ACCESS_REMOVAL != true ]]; then
-            echo "::error::The plan removes an entry from a database access list; dispatch again with allow_access_removal if you meant it."
-            refuse=1
-          fi
-          exit "$refuse"
+        run: bash ops/tofu/ci/tofu-ci.sh summarize
       - name: Clean up
         if: always()
         run: rm -rf -- "${RUNNER_TEMP:?}/tofu"
@@ -370,199 +125,26 @@ jobs:
     permissions:
       contents: read
     steps:
+      # The Plan job's steps again, so this job applies its own saved plan, then the two it adds.
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the pinned OpenTofu
-        run: |
-          # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256 (copied
-          # from that release's signature-verified SHA256SUMS) before anything runs it.
-          set -Eeuo pipefail
-          v=$(< ops/tofu/.opentofu-version)
-          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::ops/tofu/.opentofu-version must hold X.Y.Z."; exit 1; }
-          d=$RUNNER_TEMP/tofu-bin
-          mkdir -p "$d"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$d/tofu_${v}_linux_amd64.zip" "https://github.com/opentofu/opentofu/releases/download/v${v}/tofu_${v}_linux_amd64.zip"
-          (cd "$d" && sha256sum --check --strict --quiet "$GITHUB_WORKSPACE/ops/tofu/opentofu.sha256")
-          unzip -q -o "$d/tofu_${v}_linux_amd64.zip" tofu -d "$d"
-          echo "$d" >> "$GITHUB_PATH"
+        run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Prepare the values and the masks
         env:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
           REPLACE: ${{ inputs.replace }}
-        run: |
-          # Checks TOFU_VARS silently, masks every identifying value inside it before anything
-          # else prints, then writes the private working files: the values, the backend settings,
-          # the replace target and the jq programs the later steps share. Values reach jq through
-          # printf (a shell builtin) and a pipe, never an argument or a temporary file.
-          set -Eeuo pipefail
-          umask 077
-          d=$RUNNER_TEMP/tofu
-          mkdir -p "$d"
-
-          # The shape of TOFU_VARS: exactly the seven keys, and the values the masks rely on.
-          # ops/tofu/variables.tf validates every value again, precisely.
-          cat > "$d/shape.jq" <<'JQ'
-          def str($re): type == "string" and test($re);
-          type == "object"
-          and (keys == ["cloudflare_zone_id", "configure_keys", "database_ids", "db_allow_extra", "hosts", "root_keys", "root_password_hash"])
-          and (.hosts | type == "object")
-          and all(.hosts | to_entries[];
-              (.key | test("^(staging|production)(-[0-9]{1,2})?$"))
-              and (.value | type == "object" and keys == ["fqdn", "label", "region", "role", "type"])
-              and (.value.label | str("^[a-z][a-z0-9-]{6,61}[a-z0-9]$") and contains("-") and (contains("--") | not))
-              and (.value.fqdn | str("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"))
-              and (.value.role | str("^(staging|production)$"))
-              and (.value.region | str("^[a-z0-9-]{2,32}$"))
-              and (.value.type | str("^[a-z0-9-]{2,64}$")))
-          and ([.hosts[].label] as $labels | all(.hosts | keys[]; . as $k | all($labels[]; . as $l | $k | contains($l) | not)))
-          and (.root_keys | type == "array" and all(.[]; str("^[ -~]+$")))
-          and (.configure_keys | type == "object" and all(.[]; str("^[ -~]+$")))
-          and (.root_password_hash | str("^[$./0-9A-Za-z=]*$"))
-          and (.cloudflare_zone_id | str("^[0-9a-f]{32}$"))
-          and (.database_ids | type == "object" and all(to_entries[]; (.key | test("^[a-z]{1,16}$")) and (.value | str("^[0-9]{1,20}$"))))
-          and (.db_allow_extra | type == "array" and all(.[]; str("^[0-9A-Fa-f.:]+/[0-9]{1,3}$")))
-          JQ
-
-          # Every value that may name or identify a host or an account. Map keys, roles, regions,
-          # types and database IDs are never masked: they are public words or never printed, and
-          # masking them would censor the change list. Values under six characters identify
-          # nothing and would mask too much.
-          cat > "$d/masks.jq" <<'JQ'
-          [ (.hosts[] | .fqdn, .label),
-            .cloudflare_zone_id,
-            (.db_allow_extra[] | ., split("/")[0]),
-            (.root_password_hash | select(. != "")),
-            ((.root_keys[], .configure_keys[]) | split(" ")[] | select(startswith("AAAA")))
-          ] | map(select(length >= 6)) | unique
-          JQ
-
-          # The shape check prints nothing of the value: jq's own messages could quote it.
-          if ! printf '%s' "$TOFU_VARS" | jq -e -f "$d/shape.jq" > /dev/null 2>&1; then
-            echo "::error::TOFU_VARS must be one JSON object with exactly the keys hosts, root_keys, configure_keys, root_password_hash, cloudflare_zone_id, database_ids and db_allow_extra, in the shape of ops/tofu/examples/example.tfvars.json (labels: 8 to 63 characters with a '-', never inside a host key)."
-            exit 1
-          fi
-          printf '%s' "$TOFU_VARS" | jq -c -f "$d/masks.jq" > "$d/masks.json"
-          while IFS= read -r m; do
-            echo "::add-mask::$m"
-          done < <(jq -r '.[]' "$d/masks.json")
-          # From here on every identifying value prints as ***.
-
-          printf '%s' "$TOFU_VARS" | jq -c . > "$d/values.tfvars.json"
-
-          # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
-          [[ $STATE_BUCKET =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::TOFU_STATE_BUCKET must be an Object Storage bucket name."; exit 1; }
-          [[ $STATE_ENDPOINT =~ ^https://[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || { echo "::error::TOFU_STATE_ENDPOINT must be the bucket's https:// endpoint, with no path (ops/tofu/README.md)."; exit 1; }
-          {
-            printf 'bucket         = "%s"\n' "$STATE_BUCKET"
-            printf 'endpoints      = { s3 = "%s" }\n' "$STATE_ENDPOINT"
-            printf 'use_path_style = false\n'
-          } > "$d/backend.hcl"
-
-          # The replace input: exactly one configured host's instance, never echoed back.
-          if [[ -n $REPLACE ]]; then
-            if ! [[ $REPLACE =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] \
-              || ! jq -e --arg k "${BASH_REMATCH[1]}" '.hosts | has($k)' "$d/values.tfvars.json" > /dev/null; then
-              echo "::error::replace must be exactly linode_instance.host[\"<key>\"], naming a host in TOFU_VARS."
-              exit 1
-            fi
-          fi
-          printf '%s' "$REPLACE" > "$d/replace"
-
-          # The public change list: one sorted line per change, `ACTION ADDRESS`, plus ` +N -M`
-          # on a database access list. Input: `tofu show -json` of the saved plan; $vars[0]: the
-          # values. A set with a new host's addresses in it is wholly unknown in a plan, so its
-          # counts are rebuilt the way ops/tofu/main.tf builds the list: db_allow_extra, each
-          # known host's IPv6 /128 and IPv4 /32, and two entries per host still being built.
-          cat > "$d/summary.jq" <<'JQ'
-          def addr: if test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end;
-          def act:
-            if . == ["create"] then "create"
-            elif . == ["update"] then "update"
-            elif . == ["delete"] then "delete"
-            elif . == ["read"] then "read"
-            elif . == ["delete", "create"] or . == ["create", "delete"] then "replace"
-            elif . == ["no-op"] then "no-op"
-            else "?" end;
-          def unknown: if type == "boolean" then . else tostring | contains("true") end;
-          $vars[0] as $v
-          | [.resource_changes[]?] as $rc
-          | [$v.hosts | keys[] as $k
-              | ([$rc[] | select(.type == "linode_instance" and .name == "host" and .index == $k and (has("deposed") | not))][0].change) as $c
-              | if $c == null or $c.after == null or ($c.after_unknown.ipv4 // false | unknown) or ($c.after_unknown.ipv6 // false | unknown)
-                then {unknown: 2}
-                else {known: [(($c.after.ipv6 // "?") | split("/")[0]) + "/128", (($c.after.ipv4 // ["?"])[0]) + "/32"]}
-                end] as $hosts
-          | ($v.db_allow_extra + [$hosts[] | (.known // [])[]]) as $known
-          | ([$hosts[] | .unknown // 0] | add // 0) as $pending
-          | def counts:
-              (.before.allow_list // []) as $b
-              | if .actions == ["delete"] then {plus: 0, minus: ($b | length)}
-                elif (.after_unknown.allow_list // false | unknown) or .after.allow_list == null
-                then {plus: ((($known - $b) | unique | length) + $pending), minus: (($b - $known) | unique | length)}
-                else (.after.allow_list) as $a | {plus: (($a - $b) | unique | length), minus: (($b - $a) | unique | length)}
-                end;
-          [ $rc[]
-            | (.change.actions | act) as $act
-            | (.address | addr) as $a
-            | (if .type == "linode_database_access_controls" then .change | counts | " +\(.plus) -\(.minus)" else "" end) as $n
-            | (if .change.importing != null then "import \($a)\($n)" else empty end),
-              (if $act != "no-op" then "\($act) \($a)\($n)" else empty end)
-          ] | sort | .[]
-          JQ
-
-          # One line per diagnostic: SEVERITY ADDRESS [FILE:LINE] SUMMARY. The file and line are in
-          # this public module (a variable's validation names its block). The summary has every
-          # masked value replaced, then is reduced to letters, spaces and . , : ' ( ) -: digits,
-          # '/', '@' and '=' never survive, so no ID, address, key or URL does, and what is left of
-          # a dotted name (a host or a domain) becomes "(name)". At most 120 characters; the
-          # detail never prints.
-          cat > "$d/diag.jq" <<'JQ'
-          fromjson?
-          | select(type == "object" and .type == "diagnostic")
-          | .diagnostic
-          | (if .severity == "error" or .severity == "warning" then .severity else "?" end) as $sev
-          | ((.address // "-") | if . == "-" or test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end) as $addr
-          | (if (.range.filename | type == "string" and test("^[a-z0-9_-]+[.](tf|tftpl)$")) and (.range.start.line | type == "number")
-             then " \(.range.filename):\(.range.start.line)" else "" end) as $where
-          | (reduce $masks[0][] as $m ((.summary // "") | tostring; split($m) | join(" (masked) ")))
-          | gsub("[^A-Za-z .,:'()-]"; "") | gsub("[A-Za-z-]+([.][A-Za-z-]+)+"; "(name)") | gsub(" +"; " ")
-          | .[0:120]
-          | "\($sev) \($addr)\($where) \(.)"
-          JQ
-
-          # The apply's own counts, from its change_summary message; numbers only.
-          cat > "$d/applied.jq" <<'JQ'
-          fromjson?
-          | select(type == "object" and .type == "change_summary") | .changes
-          | "applied: \(.add | numbers) added, \(.change | numbers) changed, \(.import | numbers) imported, \(.remove | numbers) destroyed"
-          JQ
-
-          # Provider downloads and the backend's settings stay under $d, which the last step removes.
-          echo "TF_DATA_DIR=$d/data" >> "$GITHUB_ENV"
-          echo "Prepared the values for $(jq -r '.hosts | length' "$d/values.tfvars.json") host(s) and $(jq -r '.database_ids | length' "$d/values.tfvars.json") access list(s)."
+        run: bash ops/tofu/ci/tofu-ci.sh prepare
       - name: Initialize OpenTofu
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-        run: |
-          # The backend from backend.hcl and the providers from the lock file only. Its output
-          # goes to a private file: it can name the bucket and the endpoint.
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          [[ -n $AWS_ACCESS_KEY_ID && -n $AWS_SECRET_ACCESS_KEY ]] || { echo "::error::TOFU_STATE_ACCESS_KEY and TOFU_STATE_SECRET_KEY must be set in the infra environment."; exit 1; }
-          (( ${#TF_VAR_state_passphrase} >= 16 )) || { echo "::error::TOFU_STATE_PASSPHRASE must be at least 16 characters."; exit 1; }
-          rc=0
-          tofu -chdir=ops/tofu init -input=false -lockfile=readonly -backend-config="$d/backend.hcl" > "$d/init.log" 2>&1 || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::init failed (exit $rc): check the infra environment's TOFU_STATE_* secrets (a wrong passphrase fails here too)."
-            exit 1
-          fi
-          echo "init ok"
+        run: bash ops/tofu/ci/tofu-ci.sh init
       - name: Plan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
@@ -570,107 +152,18 @@ jobs:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
           LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          # A saved, encrypted plan in $d. OpenTofu's JSON messages go to a private file; on a
-          # failure only the filtered diagnostics print (diag.jq).
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          [[ -n $LINODE_TOKEN && -n $CLOUDFLARE_API_TOKEN ]] || { echo "::error::LINODE_TOKEN and CLOUDFLARE_API_TOKEN must be set in the infra environment."; exit 1; }
-          args=(-chdir=ops/tofu plan -input=false -json -var-file="$d/values.tfvars.json" -out="$d/plan.bin")
-          replace=$(< "$d/replace")
-          if [[ -n $replace ]]; then
-            args+=("-replace=$replace")
-          fi
-          rc=0
-          tofu "${args[@]}" > "$d/plan.jsonl" 2> "$d/plan.stderr" || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::plan failed (exit $rc). Its diagnostics, with names, numbers and addresses left out:"
-            jq -rR --slurpfile masks "$d/masks.json" -f "$d/diag.jq" "$d/plan.jsonl" || true
-            exit 1
-          fi
-          echo "plan ok"
+        run: bash ops/tofu/ci/tofu-ci.sh plan
       - name: Summarize the plan
         id: summary
         env:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
           ALLOW_DESTROY: ${{ inputs.allow_destroy }}
           ALLOW_ACCESS_REMOVAL: ${{ inputs.allow_access_removal }}
-        run: |
-          # The change list (summary.jq) to the log, the run summary and the job's outputs, then
-          # the guards: a delete or replace needs allow_destroy, a removed access-list entry
-          # needs allow_access_removal, and a change this workflow can't name is never applied.
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          rc=0
-          tofu -chdir=ops/tofu show -json "$d/plan.bin" > "$d/plan.json" 2> "$d/show.stderr" || rc=$?
-          if (( rc != 0 )); then
-            echo "::error::show failed (exit $rc)"
-            exit 1
-          fi
-          jq -r --slurpfile vars "$d/values.tfvars.json" -f "$d/summary.jq" "$d/plan.json" > "$d/changes.txt"
-          if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
-
-          {
-            echo "### Infrastructure plan"
-            echo
-            if [[ $has_changes == true ]]; then
-              echo "| Change | Resource | Access list |"
-              echo "|---|---|---|"
-              while read -r action address counts; do
-                echo "| $action | \`$address\` | ${counts:-} |"
-              done < "$d/changes.txt"
-            else
-              echo "No changes."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ $has_changes == true ]]; then
-            echo "The plan's changes:"
-            cat "$d/changes.txt"
-          else
-            echo "No changes."
-          fi
-
-          delimiter="changes_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-          {
-            echo "changes<<$delimiter"
-            cat "$d/changes.txt"
-            echo "$delimiter"
-            echo "has_changes=$has_changes"
-          } >> "$GITHUB_OUTPUT"
-
-          refuse=0
-          if grep -qE '^\? |^[a-z-]+ \?( |$)' "$d/changes.txt"; then
-            echo "::error::The plan holds a change this workflow can't name (shown as ?); it is never applied."
-            refuse=1
-          fi
-          if grep -qE '^(delete|replace) ' "$d/changes.txt" && [[ $ALLOW_DESTROY != true ]]; then
-            echo "::error::The plan deletes or replaces a resource; dispatch again with allow_destroy if you meant it."
-            refuse=1
-          fi
-          if grep -qE ' -[1-9][0-9]*$' "$d/changes.txt" && [[ $ALLOW_ACCESS_REMOVAL != true ]]; then
-            echo "::error::The plan removes an entry from a database access list; dispatch again with allow_access_removal if you meant it."
-            refuse=1
-          fi
-          exit "$refuse"
+        run: bash ops/tofu/ci/tofu-ci.sh summarize
       - name: Compare with the approved plan
         env:
           APPROVED: ${{ needs.plan.outputs.changes }}
-        run: |
-          # Apply applies only what was approved: this job's own saved plan, and only when its
-          # change list equals the one the Plan job showed. GitHub drops a job output that looks
-          # like a secret, so an empty approved list is refused rather than taken as "no changes".
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          if [[ -z $APPROVED ]]; then
-            echo "::error::The Plan job's change list didn't arrive, so there is nothing approved to compare with; dispatch a new run."
-            exit 1
-          fi
-          current=$(< "$d/changes.txt")
-          if [[ $current != "$APPROVED" ]]; then
-            echo "::error::This plan differs from the one approved in the Plan job; nothing was applied. Dispatch a new run."
-            exit 1
-          fi
-          echo "The plan equals the approved one."
+        run: bash ops/tofu/ci/tofu-ci.sh compare
       - name: Apply
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_ACCESS_KEY }}
@@ -678,27 +171,7 @@ jobs:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
           LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          # Applies the saved plan. Prints only the apply's counts (applied.jq), the filtered
-          # diagnostics on a failure, and one line per host built or rebuilt: no key, name,
-          # address or ID. The owner then pins the new host's key from their own machine.
-          set -Eeuo pipefail
-          d=$RUNNER_TEMP/tofu
-          rc=0
-          tofu -chdir=ops/tofu apply -input=false -json "$d/plan.bin" > "$d/apply.jsonl" 2> "$d/apply.stderr" || rc=$?
-          jq -rR -f "$d/applied.jq" "$d/apply.jsonl" || true
-          if (( rc != 0 )); then
-            echo "::error::apply failed (exit $rc). Its diagnostics, with names, numbers and addresses left out:"
-            jq -rR --slurpfile masks "$d/masks.json" -f "$d/diag.jq" "$d/apply.jsonl" || true
-            exit 1
-          fi
-          while read -r action address _; do
-            if [[ $action =~ ^(create|replace)$ && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
-              line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"
-              echo "$line"
-              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done < "$d/changes.txt"
+        run: bash ops/tofu/ci/tofu-ci.sh apply
       - name: Clean up
         if: always()
         run: rm -rf -- "${RUNNER_TEMP:?}/tofu"

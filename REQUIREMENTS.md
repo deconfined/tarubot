@@ -2,7 +2,7 @@
 
 - **Status:** Draft for owner review
 - **Prepared:** 2026-09-21
-- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments")
+- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments"); 2026-09-29 (owner pipeline decisions on issue #62; see "Approved pipeline amendments")
 - **Deliverable:** A TypeScript Discord bot for Final Fantasy XIV Free Companies
 
 ### Approved implementation amendments (2026-09-21)
@@ -277,6 +277,8 @@ The plan also leaves out roles given on joining or rejoining the server, people 
 
 Issue #41 asked for production deploys from GitHub Actions over SSH, the last part of the robust-host follow-up of 2026-09-25 (see "Approved hosting amendment"). The owner approved the [plan](https://github.com/deconfined/tarubot/issues/41#issuecomment-5843136740) and answered its ten questions in the [decision comment](https://github.com/deconfined/tarubot/issues/41#issuecomment-5843517579): "Yes" to questions 1 to 8, "Warning" to question 9, and to question 10 "Yes. Itemize what fine-tune permissions are required on the new token." Release 2.30.0 implements them with `.github/workflows/deploy.yml` and `ops/deploy.sh`, with no bot change and no migration. They supersede conflicting text elsewhere in this document, for automated deploys only; the manual procedure in [docs/HOSTING.md](docs/HOSTING.md) is unchanged.
 
+**Since 2026-09-29** ("Approved pipeline amendments (2026-09-29)" below), the host-side mechanics here apply only to production's Compose host, until 2.37.0 moves production to the new pipeline: the host's own approval check, the dump before a migration, the automatic restore, the forced command and decision 5's quiet message. The rule for agents in this section stands word for word, widened by those amendments, and decision 7 is reworded there.
+
 **The owner's GitHub approval is the go-ahead (decisions 1, 2, 4 and 6).** The owner's own approval of a `production` deployment in the GitHub web or mobile interface authorizes what that run's plan lists:
 - moving the Linode host to the named release, whose image digest the plan names, or, with `rollback`, back to it from the named live release, never across a migration;
 - when the host finds migration files the live release lacks, stopping the bot, an encrypted `ops/backup.sh` dump, `migrate.js` in the new image and the start; otherwise a restart. One approval covers the host's choice between the two;
@@ -312,6 +314,8 @@ That SSH key pushes as the owner, so it can push any branch other than `main`, i
 ### Approved staging amendments (2026-09-26)
 
 Issue [#50](https://github.com/deconfined/tarubot/issues/50) asked for a staging host that matches production, configured with Ansible. The owner answered its first four questions in [a comment on the issue](https://github.com/deconfined/tarubot/issues/50#issuecomment-5847729593) and made the other decisions in chat the same day; the agent recorded each on the issue as it was made. The [consolidated plan revision](https://github.com/deconfined/tarubot/issues/50#issuecomment-5850822956) summarized them with 27 questions, and the owner accepted every recommendation in chat ("the rest of #50 is ready for launch", [recorded on the issue](https://github.com/deconfined/tarubot/issues/50#issuecomment-5851110558)), with two refinements: question 8 (secrets) and question 20 (the break-glass key). These amendments supersede conflicting text elsewhere in this document for the staging host and for every host the playbook builds. Production keeps its Docker host, Compose file and deploy path until it is rebuilt.
+
+**Since 2026-09-29** ("Approved pipeline amendments (2026-09-29)" below), much of this section is superseded: the pull unit and question 14's signature rule, `.env` as the only home of the secrets, "no secrets in user data", the host-key step, where OpenTofu runs, question 2's update rules, question 20's "no root password", PR images, staging's switch and dispatcher check, and the release list. What those amendments keep is listed there.
 
 **Releases.** Following the revision's order. The numbers after 2.32.0 are planned: a release that lands in between, such as #46's, takes the next free number and moves these up.
 1. **2.32.0** (#50 part 1): the Ansible playbook (`ops/ansible/`), the Quadlet unit files (`ops/quadlet/`), the `staging` tool profile, and signed build provenance in `publish.yml`, built and tested against the staging host by hand.
@@ -393,7 +397,7 @@ Nothing in this step trusts the host's own network.
 - **The first start (question 26).** The playbook's `start` tag takes a version and digest verified on the workstation, because the hosts hold no GitHub token and the playbook uses no lookups or delegation. On the host it re-checks the digest, the labels, the commit's place on `main`, its version and its `quadlet` contract words.
 - **The Quadlet contract level (question 10).** `ops/deploy.sh` keeps `FLOOR` for Compose, and the Quadlet modes require `QUADLET_FLOOR` (2.33.0) and their words on the target's `CAPABILITIES` line, so no floor number is copied into the workflow or the playbook.
 
-**Implementation notes (2.34.0).** How 2.34.0 carries out the pull-unit decisions (questions 14 to 18) and prepares question 20; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#the-pull-unit-2340) has the detail.
+**Implementation notes (2.34.0).** How 2.34.0 carries out the pull-unit decisions (questions 14 to 18) and prepares question 20; none changes a decision. 2.36.0 removed the pull unit ([docs/HOSTING.md](docs/HOSTING.md#the-old-staging-host-2320-to-2340)); the changelog and docs/VERIFICATION.md keep the detail.
 - **Numbering.** 2.34.0 is the pull unit, the second half of "Releases" item 2. The later items, cloud-init and OpenTofu, the DevBot move, PR images and the production rebuild, take the next free numbers when they land.
 - **What runs.** `tarubot-host-config` is a root-owned script installed as `/usr/local/sbin/tarubot-host-config`, with a oneshot service and a timer. Its state and clone live in `/var/lib/tarubot-config` (root, 0700), and its settings are root's own files: `/etc/tarubot/host.yml` and `/etc/tarubot/host-config.env`. Its source is `ops/ansible/files/host-config/`, not a separate directory, so the playbook still reads nothing outside `ops/ansible/`, and question 14's signature rule covers the code that root runs. The clone fetches `main` only, over HTTPS, with hooks, fsmonitor, submodules, redirects and the system and global git settings off. Nothing is ever run from it except the playbook after the checks below.
 - **Staging and production (questions 15 and 17).** Staging takes the head of `main` every 5 minutes, and production polls every 10 minutes. Production's rule follows the 2.33.0 note, "Production's result":
@@ -457,6 +461,142 @@ Issue [#46](https://github.com/deconfined/tarubot/issues/46) asked for TaruBot t
 - New guilds are inserted with the role layout off; the column default, the importer and existing rows are unchanged, so there is no migration.
 
 **Open for later releases (non-blocking).** Whether a later `/setup overrides` option should record a channel hidden on purpose without Administrator, since from 2026-11-16 such a channel, hidden after the last run, looks missing, and its mirror: a channel whose deliberate deny is removed while TaruBot still can't see it keeps its recorded "hidden on purpose" (or "denied") until the window runs again; whether guilds with onboarding should get their own approved alert line; and whether the private-category rule should relax for a configured channel that isn't synced with its category. 2.35.0 applies the rules literally.
+
+### Approved pipeline amendments (2026-09-29)
+
+Issue [#62](https://github.com/deconfined/tarubot/issues/62) ("Simplify the deployment pipeline") follows #50. On 2026-09-29 @deconfined asked for a simpler pipeline:
+
+> Okay, so... We're running a Discord bot, not a SCIF. Let's revisit our deployment pipeline here, it's gotten overly complicated. Terraform builds a VM, cloud-init sets credentials/keys, which can include root's password hash, Ansible handles the rest of host config, deploy action handles the bot itself.
+
+Earlier the same day they had asked:
+
+> Why aren't we using secret injection via GH Actions environments for all of this stuff? That's what it's for, including the bot token and all of the other secrets we're passing around. I feel like we've started to reinvent the wheel.
+
+Their first answers the same day are recorded in the issue:
+- host changes run as a Configure step of the Deploy workflow over SSH, on staging at once and on production after their approval, and the pull unit goes;
+- the bot's secrets live in GitHub environments, and the job writes them into Podman secrets;
+- the provenance check, signed commits with merge-commit-only `main`, staging deploying on merge while production waits for approval, DevBot's move to staging and a simplified CrowdSec all stay;
+- the parked 2.36.0 (CrowdSec, root's console password and host names) isn't merged.
+
+The agent's plan went through two review rounds. @deconfined answered its six questions and cut five of its pieces ([recorded on #62](https://github.com/deconfined/tarubot/issues/62#issuecomment-5883718678)), then gave the go-ahead for 2.36.0 in the session: "Go for it."
+
+These amendments supersede conflicting text in "Approved SSH-deploy amendments (2026-09-26)", "Approved staging amendments (2026-09-26)" and elsewhere in this document. They take effect release by release: staging from 2.36.0, production from 2.37.0. Until production moves, its Compose host keeps its deploy path and the SSH-deploy amendments' host-side mechanics.
+
+**The four layers.** Each has one owner:
+- **OpenTofu** builds each host (`ops/tofu/`): the Linode with disk encryption, its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list.
+- **cloud-init** sets identity and credentials at first boot, from OpenTofu's user data:
+  - the hostname;
+  - root's public keys: @deconfined's FIDO2 key, an optional operator key, and that environment's Configure key;
+  - root's optional console password hash;
+  - password SSH off;
+  - the Python bindings Ansible needs.
+- **Ansible**, run from a GitHub-hosted runner over SSH as root, configures the host with `ops/ansible/site.yml` from `main`'s head, then deploys the bot with the release's own `ops/ansible/bot.yml`.
+- **GitHub environments** hold every secret and every approval: `staging` and `production` for the hosts and the bot, `infra` for OpenTofu, and `notify` for Pushover.
+
+**The answers ([#62](https://github.com/deconfined/tarubot/issues/62#issuecomment-5883718678)).**
+1. **Cutover (2.37.0): a new host, stopped at the approval.** The preflight proves the new host without the Discord token. While the deploy's approval waits, @deconfined stops the old bot, shuts the old Linode down, resets the token into the `production` environment and approves. The old host stays off as a fallback for a week. This replaces question 25's rebuild by overlap.
+2. **OpenTofu runs in an Actions workflow** (`.github/workflows/infra.yml`). The answer: it plans on pull requests and applies after @deconfined's approval, with the Linode and Cloudflare write tokens in an `infra` environment and OpenTofu's natively encrypted state in Linode Object Storage (the S3 backend). @deconfined creates that environment and its secrets; agents never do. This replaces question 23 (apply from the operator machine with tokens pasted per session, and local state with an `age` copy) and question 24's plans by agents with read-only tokens. 2.36.0 runs the real plan by dispatch only (item 6 below).
+3. **Updates.** dnf-automatic is the only updater on both hosts, with no exclude list, and a host reboots when an update needs it. Production's timer runs later than staging's. This replaces question 2's "production never reboots itself" with its container-stack exclusion, and question 18's ansible-core exclusion, since the hosts carry no ansible-core.
+4. **An unhealthy release.** The run fails and pages, and @deconfined rolls back by dispatching the previous version. Nothing is put back automatically, unlike the SSH-deploy amendments' automatic restore.
+5. **The merge gate.** `.github/CODEOWNERS` is `* @deconfined`, and the Protect Main ruleset requires a code owner's review, one approval, and dismissal of stale approvals on push; @deconfined sets the ruleset. This replaces question 14's host-side signature rule and the approval commit.
+6. **Testing.** Changes are tried on staging, where DevBot runs `main` after its move, between a merge and production's approval. PR images on staging are dropped (the staging amendments' answer 3 and question 4).
+
+**Cut from the design.** @deconfined dropped five pieces of the plan:
+- the Deploy plan's self-check of the ruleset;
+- the point-in-time fork drill during the staging soak;
+- the metadata-service guard;
+- moving the operator material off the agent VM, which is on-site;
+- host keys generated by OpenTofu and seeded through cloud-init: "we don't need to seed SSH host keys via cloud-init. We can TOFU the host key of the host we literally just built ourselves."
+
+So each host generates its own Ed25519 host key at first boot. @deconfined trusts it on first use from their own machine, right after the build, and pins it in the environment's `TARGET_HOST_KEY`. OpenTofu's state holds no private key.
+
+**What this reverses.**
+- **Secrets leave the hosts.** The Discord token, the database URL and CA, the reports token, the ping URLs, the GitHub App key and the backup's settings live in GitHub environments. The job reads them only in its Bot step, and writes each into its Podman secret over standard input.
+  - Question 8's rule that `.env` is the only place they are kept ends on each host as it moves, and so does the SSH-deploy era's "the token and database URL never leave the host".
+  - The encrypted settings copy, `scripts/host-env-backup.ts` and the backup's `env/` copy go with production's `.env`, at the cleanup release.
+  - The secrets still reach the bot only as read-only files (`NAME_FILE`).
+- **User data may carry credentials** ("cloud-init sets credentials/keys, which can include root's password hash"). The staging amendments' "no secrets in user data" (questions 19 and 21) ends. 2.36.0's user data carries public keys and root's optional password hash, yescrypt or SHA-512 crypt, set by cloud-init's `chpasswd` (`type: hash`), which therefore reaches the Linode API and OpenTofu's state. It carries no host key.
+- **The pull unit ends.** With it go:
+  - question 14's signature rule and the approval commit;
+  - question 15's production pull after an approved deploy;
+  - question 17's daily re-apply and per-host check;
+  - the host lock, the playbook's `start` tag and its hand-run guard;
+  - the staging amendments' "no root-capable credential exists off the host": each environment's `ANSIBLE_SSH_KEY` is root on its host.
+- **The host-key step ends.** The Lish readback, a known-hosts line taken from the console and the SSHFP records give way to trust on first use from @deconfined's own machine, pinned in `TARGET_HOST_KEY`. ssh refuses any key but the pinned one.
+- **Root's password.** Question 20's "no host has a root password" becomes an optional console password. Without a hash, cloud-init locks root's password. With one, `pam_wheel` on `su` and a polkit rule that refuses every subject but root keep the password to the console; sshd accepts keys only. The FIDO2 break-glass key stays in root's keys, and sshd enforces `verify-required` itself.
+- **OpenTofu** moves into the approved Actions workflow (answer 2). The clusters stay outside it, and so does their admin password (question 22). Question 27's defaults stay, without SSHFP.
+- **The merge gate** is the ruleset's code-owner review (answer 5). Signed commits and merge commits only stay, now for their own sake.
+- **Staging's switch and dispatcher check end.** Staging deploys on every merge and on any dispatch from `main`, with no reviewer: `STAGING_DEPLOY_ENABLED` and the check that a staging dispatch came from @deconfined's own account go. Pausing staging means adding a reviewer to its environment.
+- **The SSH-deploy amendments, on the new path:**
+  - the host no longer checks the approval with GitHub's API; the environment's gate is the check;
+  - decision 3's fresh dump before a migration gives way to point-in-time recovery from the restore point each run reports (the old instance's stop), with the nightly dump kept;
+  - decision 5's quiet message goes with the `notify` job at 2.37.0;
+  - decision 8's "the deploy key runs nothing but `ops/deploy.sh`" gives way to a Configure key without a forced command. Port 22 stays open to all sources, keys only;
+  - decision 7 is reworded below.
+- **The first start** is an ordinary run: question 26's digest verified on the workstation gives way to the plan's own provenance check.
+- **The release list.** The staging amendments' list gives way to this one:
+  1. 2.36.0: staging on the simple pipeline;
+  2. 2.36.1: CrowdSec, simplified;
+  3. 2.36.2: the DevBot move;
+  4. 2.37.0: production;
+  5. 2.38.0: the cleanup (`ops/deploy.sh`, the Compose production files, `scripts/host-env-backup.ts` and the old runbooks), after a settled week.
+
+**Decision 7, reworded.** Each target has one concurrency group, which keeps every waiting run (`queue: max`) instead of GitHub's default of cancelling a waiting run when a newer one arrives, and a job waiting for production's approval holds its group, so runs reach a host in the order they were created. An older request approved after a newer one ran ends `superseded` in `bot.yml`, but its Configure re-applies its older host configuration once, until the next run. Reject stale requests rather than approving them.
+
+**What stays.**
+- **The deployment rule for agents in "Approved SSH-deploy amendments (2026-09-26)", word for word.** @deconfined confirmed it in full on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)), and question 5 as amended on 2026-09-27 stands with it: agents never approve, reject or bypass a deployment, never change an environment, its secrets or its variables, never hold a deploy or Configure key, and dispatch only when @deconfined asks in that session. The widened rule below adds to it.
+- **One Discord application never runs in two places.** DevBot's token goes into the `staging` environment only at the move, after local DevBot stops and the token is reset. `bot.yml` checks the token's application against the release image's own identity before it writes anything.
+- **Provenance on every deploy.** The plan's `gh attestation verify` names the signer by its exact identity, `publish.yml` on `refs/heads/main`, and the host job checks that the image's revision label names the plan's commit.
+- **Signed commits, merge commits only, `CI result`, the CodeQL gate** and actions pinned to full SHAs.
+- **Public-repository naming.** The repository names no host, address, zone, account or cluster ID, and neither does anything a workflow prints: the Actions logs are public. Host names and pinned keys are environment secrets, and the workflows mask every value that could name a host.
+- **Question 7:** a rollback brings back that release's own unit and settings, through its own `bot.yml`.
+- **Decision 9's maintenance-window warning** for a deploy that applies migrations.
+- **The platform:** AlmaLinux 10 with SELinux enforcing, rootless Podman and Quadlet, secrets as read-only files, the backup never a Quadlet unit (question 11), staging's own database, bucket, key and checks (question 3), migrations tried on staging when they merge (question 6), the writer lease, the heartbeat and the nightly encrypted dump.
+
+**The widened rule for agents.** AGENTS.md carries it verbatim:
+
+> Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
+
+It also means:
+- agents run OpenTofu's `fmt`, `validate` and `test` and read public plan summaries, and never run `tofu plan`, `apply`, `import` or a state edit against real infrastructure themselves: the Infrastructure workflow does, after @deconfined's approval;
+- the staging-only Ansible key retires with the old staging host, so agents hold no root on any host;
+- a playbook runs against a real host only from the host job, or in @deconfined's own hand run while Actions is down; agents rehearse on throwaway VMs in @deconfined's lab.
+
+**Accepted risks.**
+- **GitHub is the root of trust.** @deconfined's account and the environments stand behind host root and every runtime secret. Question 14's aim, that a stolen GitHub session can't reach root through a merge, is given up by their direction.
+- **A merged change reaches staging with no further human step.** Configure applies `site.yml` from `main`'s head as root, and the release's `bot.yml` receives staging's secrets. @deconfined's code-owner review of the final head is the human step.
+- **User data and OpenTofu's state carry root's optional hash.** The Linode API keeps user data after creation, and any process on a host can read it from the metadata service, since the guard was cut. The state is encrypted with a passphrase that only the `infra` environment and @deconfined hold. Neither holds a host key.
+- **The `infra` environment's Linode token can manage the database cluster.** Every Infrastructure run waits for @deconfined's approval, and an apply asks twice.
+- **Approving a stale request re-applies older host configuration once** (decision 7 above).
+- **A new host's key is trusted on first use,** from @deconfined's own machine, right after the build.
+
+**For @deconfined to confirm in the pull request.** Choices the build made beyond the plan or the answers:
+1. **dnf-automatic applies all updates** (`upgrade_type = default`), not only security updates. It is the only updater, and Configure never upgrades after a host's first run, so bugfix errata and minor-release streams (Podman, crun, systemd) would otherwise never land.
+2. **The polkit rule refuses every subject but root,** `tarubot`'s subordinate UIDs included, not only the `tarubot` account.
+3. **sshd enforces `PubkeyAuthOptions verify-required`.** cloud-init 24.4 drops the options on root's key lines, so without it the FIDO2 key would need only a touch. User data seeds the one-line drop-in, and Configure replaces it with the full one.
+4. **An apply asks for two approvals** in the one `infra` environment: the Plan job, then the Apply job. The alternative is an `infra-plan` environment holding the state credentials and read-only provider tokens, so that a plan never asks.
+5. **Nothing prints a new host's key.** @deconfined pins it with `ssh-keyscan` from their own machine, because internet scanners index host keys by address and a key in a public log would lead to the host. The alternative is an Apply that prints the key encrypted to `ops/age-recipients.txt`.
+6. **No real plan on pull requests.** Answer 2 said OpenTofu plans on pull requests. Pull requests get only secret-free checks (`fmt`, `validate`, `tofu test` against mock providers, and cloud-init's schema over the rendered user data); the real plan runs only by dispatch from `main`, inside `infra`, because pull-request code must never see the state passphrase or the write tokens in a repository whose logs are public.
+
+**Implementation notes (2.36.0).** How 2.36.0 carries these out; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#the-simple-pipeline-2360) has the detail.
+- **Production is untouched.** `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts` and `deploy.yml`'s `deploy` and `notify` jobs are byte-identical to 2.35.0's, pinned by SHA-256 in `tests/unit/deploy-workflow.test.ts`. The new `action` input is staging's until 2.37.0, and a production rollback still uses `rollback` and `from`.
+- **Each release deploys with its own `bot.yml`.** The Bot step checks out the commit named by the image's own revision label, which must equal the plan's commit, and runs that release's `bot.yml` with `main`'s `ansible.cfg` and ansible-core. Six `-e` names and eleven secret names form the interface, pinned by tests. Staging takes 2.36.0 or later (`STAGING_MIN_RELEASE`).
+- **Every refusal comes before any write.** Nothing reaches the host before the secrets phase except an image pull. The checks cover:
+  - each required secret, missing or with stray whitespace, by name;
+  - the database URL's user and database;
+  - the Discord token's application, against the identity the release image's own `resolveDeployment` reports, so no Discord ID enters the Ansible files;
+  - the image's version and commit labels;
+  - a rollback across a migration.
+
+  Messages name settings, never values. Values reach the host only over standard input, in `no_log` tasks.
+- **One implicit rule.** A `deploy` without `DISCORD_TOKEN` ends `configured` (green) only while the host runs no bot; with a bot unit present it is refused `missing-secret`. That is how staging runs before the DevBot move.
+- **No host.** An automatic run on an environment without `TARGET_HOST` ends green with a notice; a dispatch fails.
+- **Public logs.** The host job masks every address the host name resolves to before anything else prints, and runs ssh with `LogLevel=FATAL`, so a key other than the pinned one ends in "Host key verification failed." without ssh printing its fingerprint. `bot.yml` reads a secret only through operations that can't raise, since an exception's text reaches the log even from a `no_log` task. `infra.yml` masks the values inside `TOFU_VARS` itself and prints only actions, resource addresses and access-list counts.
+- **Migrations.** `migrate.js` runs as the unit's `ExecStartPre`, in the unit's own image. The restore point is the old instance's stop (`InactiveEnterTimestamp`). Pull-request CI refuses any change to an applied migration.
+- **Backups on staging.** `tarubot-backup` reads the bucket's settings from Podman secrets, and the dump container mounts only the database's two secrets and hands the URL's parts to `pg_dump` as libpq's environment, never as arguments. The dump streams into `age` as before. A preflight enables the nightly timer, so the backup check keeps hearing from the host before the DevBot move.
+- **Accounts.** `tarubot` has no SSH login (`AllowUsers root`): operators log in as root and use `run0 --user=tarubot`.
+- **No state lock.** Linode's conditional writes are unverified, so the `infra` concurrency group serializes runs, and a hand run must never overlap one.
+- **Tools.** OpenTofu comes from a checksum pinned from its signature-verified `SHA256SUMS`, the runner's ansible-core from PyPI pinned by hash, and EPEL is installed the normal way, for `age` only.
 
 ## 1. Purpose and interpretation
 

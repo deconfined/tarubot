@@ -81,11 +81,13 @@ jobs:
           # ops/*.sh runs on the production host (backup.sh, and deploy.sh as the deploy key's
           # forced command). The playbook's scripts (ops/ansible/files/) are checked in the Host
           # playbook job; tests/unit/playbook.test.ts checks that every script under ops/ is
-          # covered by one of the two.
+          # covered by one of the ShellCheck lines.
           # The ubuntu-24.04 image ships ShellCheck; install it if an image ever drops it.
           command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck --version | sed -n 2p
           shellcheck -S warning ops/*.sh
+          # infra.yml's steps (ops/tofu/ci/), which run with the infra environment's secrets.
+          shellcheck -S warning ops/tofu/ci/tofu-ci.sh
       - name: Compile the application
         run: bun run build
       - name: Generate synthetic integration input
@@ -249,18 +251,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned OpenTofu
-        run: |
-          # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256 (copied
-          # from that release's signature-verified SHA256SUMS) before anything runs it.
-          set -Eeuo pipefail
-          v=$(< ops/tofu/.opentofu-version)
-          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::ops/tofu/.opentofu-version must hold X.Y.Z."; exit 1; }
-          d=$RUNNER_TEMP/tofu-bin
-          mkdir -p "$d"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$d/tofu_${v}_linux_amd64.zip" "https://github.com/opentofu/opentofu/releases/download/v${v}/tofu_${v}_linux_amd64.zip"
-          (cd "$d" && sha256sum --check --strict --quiet "$GITHUB_WORKSPACE/ops/tofu/opentofu.sha256")
-          unzip -q -o "$d/tofu_${v}_linux_amd64.zip" tofu -d "$d"
-          echo "$d" >> "$GITHUB_PATH"
+        # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256, by
+        # the same script infra.yml runs.
+        run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Check the OpenTofu module
         run: |
           # The lock file must already pin both providers (-lockfile=readonly), and no backend is

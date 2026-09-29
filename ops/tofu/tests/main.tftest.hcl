@@ -239,35 +239,21 @@ run "refuses_a_role_that_differs_from_its_key" {
   expect_failures = [var.hosts]
 }
 
-run "refuses_a_label_without_a_hyphen" {
-  command = plan
-  variables {
-    hosts = {
-      staging = { label = "tarubotstaging", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "staging" }
-    }
-  }
-  expect_failures = [var.hosts]
-}
-
 run "refuses_a_short_label" {
   command = plan
   variables {
     hosts = {
-      staging = { label = "tb-stg", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "staging" }
+      staging = { label = "tb", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "staging" }
     }
   }
   expect_failures = [var.hosts]
 }
 
-# A label inside a host key: masking it would censor that key in the public log.
-run "refuses_a_label_inside_a_host_key" {
+run "refuses_a_doubled_hyphen_in_a_label" {
   command = plan
   variables {
     hosts = {
-      staging-12 = { label = "staging-1", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "staging" }
-    }
-    configure_keys = {
-      staging = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0002 configure-staging"
+      staging = { label = "tarubot--staging", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "staging" }
     }
   }
   expect_failures = [var.hosts]

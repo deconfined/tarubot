@@ -13,7 +13,9 @@
  *   backup tool are pinned by SHA-256. The command contract and the result line are the same
  *   patterns as ops/deploy.sh's.
  * - The staging job calls host.yml with the plan's outputs, and host.yml hands bot.yml exactly
- *   the inputs and secret names the release's vars/bot.yml declares.
+ *   the inputs and secret names the release's vars/bot.yml declares, each from the environment
+ *   secret its tb_secret_source names. No workflow reads a secret or variable GitHub would refuse
+ *   to create (a GITHUB_ name other than the built-in GITHUB_TOKEN).
  * - The repository names no host: the workflows and ops/deploy.sh carry no host name beyond
  *   GitHub's, the registry's and Pushover's.
  * - Behavior: the plan, SSH and notify scripts run here with simulated gh, docker, ssh, curl and
@@ -829,16 +831,24 @@ describe("the staging job and host.yml", () => {
     const vars = YAML.parse(read("ops/ansible/vars/bot.yml")) as {
       tb_inputs: string[];
       tb_secret_env: string[];
+      tb_secret_source: Record<string, string>;
     };
     expect(botStep).toBeDefined();
     const run = (botStep?.run ?? "").replace(/\\\n\s*/gu, " ");
     const names = [...run.matchAll(/-e "(tarubot_[a-z_]+)=/gu)].map((m) => m[1]);
     expect(names.sort()).toEqual([...vars.tb_inputs].sort());
+    // Each variable from the environment secret tb_secret_source names for it, else from the
+    // secret of its own name. GitHub refuses a secret name that starts with GITHUB_, so the
+    // GITHUB_ variables need an entry, and exactly they have one.
+    const source = (name: string) => vars.tb_secret_source[name] ?? name;
+    expect(Object.keys(vars.tb_secret_source).sort()).toEqual(
+      vars.tb_secret_env.filter((name) => name.startsWith("GITHUB_")).sort(),
+    );
     const env = botStep?.env ?? {};
     const secrets = Object.entries(env)
       .filter(([, value]) => value.startsWith("${{ secrets."))
       .map(([name, value]) => {
-        expect(value).toBe(`\${{ secrets.${name} }}`);
+        expect({ name, value }).toEqual({ name, value: `\${{ secrets.${source(name)} }}` });
         return name;
       });
     expect(secrets.sort()).toEqual([...vars.tb_secret_env].sort());
@@ -981,8 +991,8 @@ describe("the other workflows", () => {
     "DATABASE_CA_CERT",
     "DATABASE_URL",
     "DISCORD_TOKEN",
-    "GITHUB_APP_PRIVATE_KEY",
-    "GITHUB_REPORTS_TOKEN",
+    "SUGGEST_APP_PRIVATE_KEY",
+    "REPORTS_GITHUB_TOKEN",
     "HEALTHCHECKS_BACKUP_URL",
     "HEALTHCHECKS_PING_URL",
   ];
@@ -1020,6 +1030,23 @@ describe("the other workflows", () => {
         target: false,
       });
     }
+  });
+
+  test("every secret and variable a workflow reads is one GitHub lets the owner create", () => {
+    // GitHub refuses a secret or variable name that starts with GITHUB_ (in any case) and allows
+    // only letters, digits and underscores, not starting with a digit. GITHUB_TOKEN is the one
+    // GITHUB_ secret, the job's own token, which nobody creates.
+    const refused: string[] = [];
+    for (const file of files) {
+      const source = read(`.github/workflows/${file}`);
+      for (const match of source.matchAll(/\b(secrets|vars)\.([A-Za-z0-9_]+)/gu)) {
+        const [, kind, name = ""] = match;
+        if (kind === "secrets" && name === "GITHUB_TOKEN") continue;
+        if (/^GITHUB_/iu.test(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
+          refused.push(`${file}: ${kind}.${name}`);
+      }
+    }
+    expect(refused).toEqual([]);
   });
 
   test("publish.yml builds from main only: no tag trigger", () => {

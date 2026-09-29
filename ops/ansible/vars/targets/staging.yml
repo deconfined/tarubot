@@ -5,9 +5,10 @@
 # this file only names them. It holds no Discord ID: the application and the test guild come from
 # the release image itself (vars/bot.yml tb_identity_script).
 
-# The bot's secrets, all required for deploy and bot. Each becomes a Podman secret
-# (tarubot-<name in lower case, _ as ->), a Secret= mount in the unit and a NAME_FILE line in
-# tarubot.env. Staging never holds the GitHub App key: /suggest posts publicly.
+# The bot's secrets, all required for deploy and bot, by the names the bot reads (the reports
+# token's environment secret is REPORTS_GITHUB_TOKEN: vars/bot.yml tb_secret_source). Each becomes
+# a Podman secret (tarubot-<name in lower case, _ as ->), a Secret= mount in the unit and a
+# NAME_FILE line in tarubot.env. Staging never holds the GitHub App key: /suggest posts publicly.
 tarubot_secrets:
   - DATABASE_CA_CERT
   - DATABASE_URL

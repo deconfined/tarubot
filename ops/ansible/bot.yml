@@ -27,7 +27,8 @@
 #                    and DISCORD_TOKEN's application checked against them;
 #        secrets     each required value into its Podman secret, over stdin;
 #        files       tarubot-tool, the backup script and units, the age recipients;
-#        preflight   (preflight only) migrate.js must print Schema ready., then one backup;
+#        preflight   (preflight only) migrate.js must print Schema ready., then one backup, and
+#                    the nightly backup timer;
 #        unit        render the candidate unit, check it with Quadlet's dry run, then write the
 #                    settings, the unit and the image file back to back;
 #        restart     systemd stops the old bot, runs migrate.js in the new image, starts it;
@@ -35,18 +36,25 @@
 #                    later, running the release's image;
 #        timer       the nightly backup timer;
 #        commands    register.js in the target's scope, then commands.js list;
-#        tidy        remove week-old images no container uses.
+#        tidy        remove week-old TaruBot release images no container uses.
 #      Before the secrets phase nothing is written to the host but image pulls. A failure anywhere
-#      lands in the rescue, which records the phase and its reason. Nothing is ever put back: an
+#      lands in the rescue, which records the phase, and the outcome and reason a task that can
+#      fail declares in its own vars (tb_outcome, tb_reason). Nothing is ever put back: an
 #      unhealthy release fails the run, and the owner rolls back by dispatching the previous one.
-#   3. On the runner, write the result JSON (public fields only) to tarubot_result on every path,
-#      then fail the run unless the outcome is deployed, superseded, configured or preflight-ok.
+#   3. On the runner, write the result JSON (public fields only) to tarubot_result, then fail the
+#      run unless the outcome is deployed, superseded, configured or preflight-ok. Ansible runs
+#      this play after the rescue and after play 1's unreachable check, but not when the host
+#      becomes unreachable during play 2 (Ansible then has no host left and stops): host.yml's
+#      summary then says there is no result file.
 #
 # Secrets. host.yml's Bot step exports exactly vars/bot.yml tb_secret_env from the job's GitHub
-# environment. This play reads them only with lookup('ansible.builtin.env', NAME), only in no_log
+# environment (two from secrets of other names, tb_secret_source). This play reads them only with lookup('ansible.builtin.env', NAME), only in no_log
 # tasks, and keeps only names and booleans from them (tb_token_absent, tb_missing, tb_malformed,
-# tb_db_ok, tb_token_ok); the one other use is a secret's own stdin. The refusals are plain assert
-# tasks over those names and booleans, so the names reach the public log and the values never do.
+# tb_db_ok, tb_token_ok); the one other use is a secret's own stdin. no_log censors a task's result
+# but not the [ERROR] line of an exception raised while templating, which can quote the value, so
+# those expressions use only operations that can't raise on any string (==, !=, split, first,
+# length, `is match`, and b64decode after its own guards). The refusals are plain assert tasks
+# over those names and booleans, so the names reach the public log and the values never do.
 # Every task that runs bun, tarubot-tool, podman exec or logs, podman container inspect or
 # journalctl carries no_log too: their output names guilds or holds the container's environment.
 # There is no debug task, no diff and no meta: end_*. tests/unit/bot-play.test.ts pins these rules.
@@ -119,8 +127,6 @@
             - name: Start the checks
               ansible.builtin.set_fact:
                 tb_step: checks
-                tb_outcome: failed
-                tb_reason: "-"
 
             - name: Check the inputs
               ansible.builtin.assert:
@@ -161,10 +167,13 @@
                 tb_token_absent: "{{ tarubot_action == 'deploy' and lookup('ansible.builtin.env', 'DISCORD_TOKEN') == '' }}"
               no_log: true
 
+            # The refusals below name each setting by the environment secret behind it: its own
+            # name, or vars/bot.yml tb_secret_source's for the two GitHub won't take.
             - name: Start the lists of missing and malformed settings
               ansible.builtin.set_fact:
                 tb_missing: []
                 tb_malformed: []
+                tb_secret_names: "{{ dict(tb_secret_env | zip(tb_secret_env)) | combine(tb_secret_source) }}"
 
             # A deploy with no token is decided below (configured, or refused on a host that
             # runs a bot), so the token isn't listed as missing then.
@@ -195,12 +204,20 @@
                       and lookup('ansible.builtin.env', item).split() != [lookup('ansible.builtin.env', item)])
               no_log: true
 
+            # One regular expression match, which can't raise on any value. A parser such as
+            # urlsplit raises on a malformed URL (a raw # or / in the password, an unbracketed IPv6
+            # host), and the exception's text, quoting the value, reaches the log's [ERROR] line
+            # even under no_log (ansible-core 2.19 and later censor only the result). The shape:
+            # postgres[ql]://USER[:PASSWORD]@HOST[:PORT]/DATABASE[?QUERY], the password with no raw
+            # @ / ? # (percent-encoded, as the bot's URL parser and tarubot-backup expect), and the
+            # host a name or an IPv4 address: the bot's database driver can't use an IPv6 literal.
             - name: Check that DATABASE_URL names this target's database and user (a boolean only)
               ansible.builtin.set_fact:
                 tb_db_ok: >-
-                  {{ (lookup('ansible.builtin.env', 'DATABASE_URL') | urlsplit('username')) == tarubot_database.user
-                     and (lookup('ansible.builtin.env', 'DATABASE_URL') | urlsplit('path') | regex_replace('^/', ''))
-                         in tarubot_database.names }}
+                  {{ lookup('ansible.builtin.env', 'DATABASE_URL')
+                     is match('^postgres(ql)?://' ~ (tarubot_database.user | regex_escape)
+                              ~ '(:[^@/?#]*)?@[^][@/?#:]+(:[0-9]{1,5})?/('
+                              ~ (tarubot_database.names | map('regex_escape') | join('|')) ~ ')([?][^#]*)?$') }}
               no_log: true
 
         # ------------------------------------------------------------------------------------
@@ -210,8 +227,6 @@
             - name: Start the live step
               ansible.builtin.set_fact:
                 tb_step: live
-                tb_outcome: failed
-                tb_reason: "-"
                 tb_live_ref: ""
                 tb_previous: "-"
 
@@ -275,15 +290,13 @@
 
         # ------------------------------------------------------------------------------------
         # In this order. The refusals are plain asserts over names and booleans, so the names
-        # reach the log; tb_outcome and tb_reason name the refusal for the rescue.
+        # reach the log.
         - name: Decide
           when: tb_result is not defined
           block:
             - name: Start the decisions
               ansible.builtin.set_fact:
                 tb_step: checks
-                tb_outcome: refused
-                tb_reason: missing-secret
 
             - name: End as configured when a deploy has no Discord token and the host runs no bot
               ansible.builtin.set_fact:
@@ -301,19 +314,23 @@
                   DISCORD_TOKEN is empty in the {{ tarubot_target }} environment, and this host
                   runs a bot. Set the secret again; a lost token never ends a deploy as configured.
                 quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: missing-secret
 
             - name: Refuse missing secrets
               ansible.builtin.assert:
                 that:
                   - tb_missing | length == 0
+                # Named as the environment's secrets, the names the owner sets.
                 fail_msg: >-
-                  The {{ tarubot_target }} environment has no value for: {{ tb_missing | join(', ') }}
+                  The {{ tarubot_target }} environment has no value for:
+                  {{ tb_missing | map('extract', tb_secret_names) | join(', ') }}
                   ({{ tarubot_action }} needs each one).
                 quiet: true
-
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_reason: malformed-secret
+              vars:
+                tb_outcome: refused
+                tb_reason: missing-secret
 
             - name: Refuse secrets with stray whitespace
               ansible.builtin.assert:
@@ -321,25 +338,25 @@
                   - tb_malformed | length == 0
                 fail_msg: >-
                   These values in the {{ tarubot_target }} environment hold whitespace, a stray
-                  space or newline (only the PEMs may span lines): {{ tb_malformed | join(', ') }}.
+                  space or newline (only the PEMs may span lines):
+                  {{ tb_malformed | map('extract', tb_secret_names) | join(', ') }}.
                 quiet: true
-
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_reason: database-not-this-target
+              vars:
+                tb_outcome: refused
+                tb_reason: malformed-secret
 
             - name: Refuse another target's database
               ansible.builtin.assert:
                 that:
                   - tb_db_ok
                 fail_msg: >-
-                  DATABASE_URL must connect as {{ tarubot_database.user }} to
-                  {{ tarubot_database.names | join(' or ') }}, the {{ tarubot_target }} database.
+                  DATABASE_URL must be a postgresql:// URL that connects as
+                  {{ tarubot_database.user }} to {{ tarubot_database.names | join(' or ') }}, the
+                  {{ tarubot_target }} database, with its password percent-encoded.
                 quiet: true
-
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_reason: bot-exists
+              vars:
+                tb_outcome: refused
+                tb_reason: database-not-this-target
 
             - name: Refuse a preflight on a host that runs a bot
               ansible.builtin.assert:
@@ -347,6 +364,9 @@
                   - not (tarubot_action == 'preflight' and tb_unit.stat.exists)
                 fail_msg: A preflight is for a host with no bot, and this one has one; dispatch deploy or bot.
                 quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: bot-exists
 
             - name: End as superseded when a deploy is older than the live release
               ansible.builtin.set_fact:
@@ -366,8 +386,6 @@
             - name: Start the image step
               ansible.builtin.set_fact:
                 tb_step: image
-                tb_outcome: failed
-                tb_reason: "-"
                 tb_ref: "{{ tb_image_repository }}@{{ tarubot_digest }}"
 
             - name: Look for the release's image
@@ -397,11 +415,6 @@
               ansible.builtin.set_fact:
                 tb_image: "{{ (tb_image_inspect.stdout | from_json)[0] }}"
 
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_outcome: refused
-                tb_reason: image-mismatch
-
             # The plan's digest is the image index's; Podman lists it in RepoDigests and keeps the
             # platform image's ID, which is what the health step compares the container with.
             - name: Refuse an image that isn't the release's
@@ -415,6 +428,9 @@
                   {{ tb_ref }} doesn't carry version {{ tarubot_version }} and commit
                   {{ tarubot_commit }} in its labels.
                 quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: image-mismatch
 
             - name: Keep the image's ID
               ansible.builtin.set_fact:
@@ -427,8 +443,6 @@
             - name: Start the migrations step
               ansible.builtin.set_fact:
                 tb_step: migrations
-                tb_outcome: failed
-                tb_reason: "-"
 
             # No database and no secret: the image's own file list (Dockerfile copies migrations/).
             - name: List the release's migrations
@@ -478,11 +492,6 @@
                 fail_msg: "{{ tb_ref }} has no /app/migrations/NNN_name.sql files."
                 quiet: true
 
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_outcome: refused
-                tb_reason: rollback-across-migration
-
             # The older image's migrate.js would refuse the newer schema only after systemd had
             # stopped the bot, so this is refused before anything is written.
             - name: Refuse a rollback across a migration
@@ -494,14 +503,15 @@
                   {{ tb_live_migrations | difference(tb_target_migrations) | sort | join(', ') }}.
                   Deploy a fix release, or restore from before the migration.
                 quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: rollback-across-migration
 
             # Everything on a first start; the database may already be at the release's schema,
             # and migrate.js then applies nothing. The Tuesday evening warning is the cluster's
             # maintenance window.
             - name: Name the migrations this deploy may apply, the schema head and the window warning
               ansible.builtin.set_fact:
-                tb_outcome: failed
-                tb_reason: "-"
                 tb_migrations: "{{ tb_target_migrations | difference(tb_live_migrations) | sort }}"
                 tb_schema_head: "{{ tb_target_migrations | last }}"
                 tb_warnings: >-
@@ -518,8 +528,6 @@
             - name: Start the identity step
               ansible.builtin.set_fact:
                 tb_step: identity
-                tb_outcome: failed
-                tb_reason: "-"
 
             # The release's own src/config/deployment.ts, in its image, with no network and no
             # secret. Its answer holds Discord IDs, which stay out of the public log.
@@ -582,12 +590,6 @@
                      | dict2items(key_name='secret', value_name='target') }}
               no_log: true
 
-            - name: Name the next refusal
-              ansible.builtin.set_fact:
-                tb_outcome: refused
-                tb_reason: token-application-mismatch
-              when: tarubot_action in ['deploy', 'bot']
-
             # A Discord token's first segment is its application ID in unpadded base64url. Python's
             # decoder refuses a length of 4n+1, so that is checked first.
             - name: Check that DISCORD_TOKEN belongs to that application (a boolean only)
@@ -610,6 +612,9 @@
                   application than the one this release runs for {{ tarubot_target }}.
                 quiet: true
               when: tarubot_action in ['deploy', 'bot']
+              vars:
+                tb_outcome: refused
+                tb_reason: token-application-mismatch
 
         # ------------------------------------------------------------------------------------
         # The first write. Each value goes to Podman on the command's stdin, never in its
@@ -621,8 +626,6 @@
             - name: Start the secrets step
               ansible.builtin.set_fact:
                 tb_step: secrets
-                tb_outcome: failed
-                tb_reason: "-"
 
             - name: Store each required value in its Podman secret
               ansible.builtin.command:
@@ -650,8 +653,6 @@
             - name: Start the files step
               ansible.builtin.set_fact:
                 tb_step: files
-                tb_outcome: failed
-                tb_reason: "-"
 
             - name: Create tarubot's directories
               ansible.builtin.file:
@@ -706,8 +707,6 @@
             - name: Start the preflight step
               ansible.builtin.set_fact:
                 tb_step: preflight
-                tb_outcome: failed
-                tb_reason: schema-not-ready
 
             - name: Write the container's settings, with the database's secrets only
               ansible.builtin.template:
@@ -739,15 +738,25 @@
                   - "'Schema ready.' in tb_migrate.stdout_lines"
                 fail_msg: migrate.js didn't report Schema ready. (the host's journal and the tool's own run show why).
                 quiet: true
-
-            - name: Name the next failure
-              ansible.builtin.set_fact:
-                tb_reason: backup-failed
+              vars:
+                tb_reason: schema-not-ready
 
             # Starting a oneshot waits for it, and fails when the backup fails.
             - name: Run one backup
               ansible.builtin.systemd_service:
                 name: tarubot-backup.service
+                state: started
+                scope: user
+              vars:
+                tb_reason: backup-failed
+
+            # From here the nightly backup runs, as after a healthy deploy, so the backup check the
+            # run above just pinged keeps getting pings until the DevBot move (a paused check would
+            # need the owner; a silent one would page).
+            - name: Enable and start the nightly backup timer
+              ansible.builtin.systemd_service:
+                name: tarubot-backup.timer
+                enabled: true
                 state: started
                 scope: user
 
@@ -767,8 +776,6 @@
             - name: Start the unit step
               ansible.builtin.set_fact:
                 tb_step: unit
-                tb_outcome: failed
-                tb_reason: unit-invalid
 
             - name: Render the candidate unit
               ansible.builtin.template:
@@ -795,10 +802,8 @@
                   - "'---tarubot.service---' in tb_dryrun.stdout_lines"
                 fail_msg: Quadlet's dry run refused the release's unit; nothing was installed.
                 quiet: true
-
-            - name: Name the next failure
-              ansible.builtin.set_fact:
-                tb_reason: "-"
+              vars:
+                tb_reason: unit-invalid
 
             # Back to back: the settings, the unit, the image file, then the reload.
             - name: Write the container's settings
@@ -837,14 +842,14 @@
             - name: Start the restart step
               ansible.builtin.set_fact:
                 tb_step: restart
-                tb_outcome: failed
-                tb_reason: restart-failed
 
             - name: Restart the bot
               ansible.builtin.systemd_service:
                 name: tarubot.service
                 state: restarted
                 scope: user
+              vars:
+                tb_reason: restart-failed
 
             # The old instance's stop, before migrate.js could commit: the point a restore goes
             # back to. Empty on a first start.
@@ -880,8 +885,6 @@
             - name: Start the health step
               ansible.builtin.set_fact:
                 tb_step: health
-                tb_outcome: unhealthy
-                tb_reason: not-healthy
 
             # It stops early when the container is gone or no longer running: the bot exited.
             - name: Wait for the bot to turn healthy
@@ -909,6 +912,9 @@
                   {{ tarubot_version }} didn't turn healthy within the wait, or exited. Nothing was
                   put back; to roll back, dispatch the previous release with action bot.
                 quiet: true
+              vars:
+                tb_outcome: unhealthy
+                tb_reason: not-healthy
 
             - name: Let it run a while
               ansible.builtin.pause:
@@ -934,10 +940,9 @@
                   {{ tarubot_version }} stopped being healthy, or restarted, in the minute after it
                   turned healthy. Nothing was put back.
                 quiet: true
-
-            - name: Name the next failure
-              ansible.builtin.set_fact:
-                tb_reason: image-mismatch
+              vars:
+                tb_outcome: unhealthy
+                tb_reason: not-healthy
 
             - name: Require the release's own image
               ansible.builtin.assert:
@@ -945,6 +950,9 @@
                   - (tb_health_again.stdout | from_json)[0].Image == tb_image_id
                 fail_msg: The running container isn't {{ tb_ref }}.
                 quiet: true
+              vars:
+                tb_outcome: unhealthy
+                tb_reason: image-mismatch
 
         # ------------------------------------------------------------------------------------
         - name: Timer
@@ -955,8 +963,6 @@
             - name: Start the timer step
               ansible.builtin.set_fact:
                 tb_step: timer
-                tb_outcome: failed
-                tb_reason: "-"
 
             - name: Enable and start the nightly backup timer
               ansible.builtin.systemd_service:
@@ -975,8 +981,6 @@
             - name: Start the commands step
               ansible.builtin.set_fact:
                 tb_step: commands
-                tb_outcome: failed
-                tb_reason: register-failed
 
             - name: Register the commands in the target's scope
               ansible.builtin.command:
@@ -986,6 +990,8 @@
                         else ['--guild', tb_identity.registrationScope]) }}
               changed_when: true
               no_log: true
+              vars:
+                tb_reason: register-failed
 
             - name: Read the registration back
               ansible.builtin.command:
@@ -995,6 +1001,8 @@
                   - list
               changed_when: false
               no_log: true
+              vars:
+                tb_reason: register-failed
 
         # ------------------------------------------------------------------------------------
         - name: Tidy
@@ -1005,11 +1013,11 @@
             - name: Start the tidy step
               ansible.builtin.set_fact:
                 tb_step: tidy
-                tb_outcome: failed
-                tb_reason: "-"
 
-            # Housekeeping never turns a healthy deploy red; the next deploy tries again.
-            - name: Remove old images no container uses
+            # Housekeeping never turns a healthy deploy red; the next deploy tries again. Only
+            # TaruBot's own release images (their source label): the backup's pinned PostgreSQL
+            # image stays, so the nightly backup never has to pull it again.
+            - name: Remove old TaruBot images no container uses
               ansible.builtin.command:
                 argv:
                   - podman
@@ -1019,6 +1027,8 @@
                   - --force
                   - --filter
                   - until={{ tb_prune_until }}
+                  - --filter
+                  - label=org.opencontainers.image.source={{ tb_image_source }}
               register: tb_prune
               changed_when: tb_prune.rc == 0 and tb_prune.stdout != ''
               failed_when: false
@@ -1032,12 +1042,14 @@
 
       rescue:
         # The failed task's own output already shows above (censored where it was no_log). A
-        # refusal set tb_outcome and tb_reason before its assert; anything else is a failure.
+        # task whose failure has a name declares it in its own vars (tb_outcome, tb_reason), which
+        # Ansible hands the rescue in ansible_failed_task; any other task's failure is failed, -.
+        # The step is the phase the last "Start the … step" task recorded.
         - name: Record where the run stopped
           ansible.builtin.set_fact:
             tb_result:
-              outcome: "{{ tb_outcome | default('failed') }}"
-              reason: "{{ tb_reason | default('-') }}"
+              outcome: "{{ (ansible_failed_task.vars | default({})).tb_outcome | default('failed') }}"
+              reason: "{{ (ansible_failed_task.vars | default({})).tb_reason | default('-') }}"
               step: "{{ tb_step | default('checks') }}"
 
 - name: Write the result on the runner
