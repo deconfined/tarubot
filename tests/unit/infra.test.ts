@@ -857,7 +857,7 @@ describe("no host and no real address", () => {
 
   test("the host check catches what it must", () => {
     for (const sample of [
-      "staging.tarubot.dev",
+      "staging.example.net",
       "db.example.com.",
       "https://host.linodeobjects.com/x",
     ])

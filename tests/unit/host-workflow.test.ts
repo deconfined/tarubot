@@ -8,14 +8,17 @@
  *   every ${{ }} through env:, no tracing and no verbose or diffing ansible-playbook, the two
  *   pinned checkouts (the release's ref from the image's own label), the 14 secret names each in
  *   the one step that needs them, and the key removed on every path.
- * - Behavior: the step scripts run here with simulated getent, docker and ansible-playbook
- *   (tests/fixtures/host-workflow): the request check, the no-host rule, the host settings and
- *   their masks, files and inventory, the release commit taken from the image, Configure and the
- *   Bot step for each action, the summary's pattern filter and its green outcomes, and the key's
- *   removal. The public-log rules come first: masks before any other output, no secret in any
- *   argument, and nothing unmatched from the host's result file reaches the log.
+ * - Behavior: the step scripts run here with simulated getent, ssh-keyscan, docker and
+ *   ansible-playbook (tests/fixtures/host-workflow) and the real ssh-keygen: the request check,
+ *   the no-host rule, the host settings and their masks, the key each address offers checked
+ *   against the pinned one, files and inventory, the release commit taken from the image,
+ *   Configure and the Bot step for each action, the summary's pattern filter and its green
+ *   outcomes, and the key's removal. The public-log rules come first: masks before any other
+ *   output, no host key or fingerprint outside a mask, no secret in any argument, and nothing
+ *   unmatched from the host's result file reaches the log.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -39,6 +42,8 @@ const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.met
 const read = (path: string) => readFileSync(root(path), "utf8");
 const STUBS = root("tests/fixtures/host-workflow");
 const hasJq = Bun.which("jq") !== null;
+/** The settings step computes fingerprints with OpenSSH's ssh-keygen, as a runner has it. */
+const canSettle = hasJq && Bun.which("ssh-keygen") !== null;
 
 // Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
 setDefaultTimeout(120_000);
@@ -353,6 +358,27 @@ const DIGEST = `sha256:${"ab".repeat(32)}`;
 const HOST = "staging.example.org";
 /** An ed25519 key line as ssh-keyscan prints it, without the name: a 68-character blob. */
 const HOST_KEY = `ssh-ed25519 ${"AAAAC3NzaC1lZDI1NTE5AAAAIExample".padEnd(68, "E")}`;
+/** Another host's key: what a rebuilt host offers before the owner pins it. */
+const OTHER_KEY = `ssh-ed25519 ${"AAAAC3NzaC1lZDI1NTE5AAAAIOther".padEnd(68, "O")}`;
+/** A key line's base64 part. */
+const blobOf = (line: string) => line.split(" ")[1] ?? "";
+/** The SHA256 fingerprint ssh-keygen prints for a key, without its SHA256: prefix. */
+const fingerprintOf = (line: string) =>
+  createHash("sha256")
+    .update(Buffer.from(blobOf(line), "base64"))
+    .digest("base64")
+    .replace(/=+$/u, "");
+/** The two masks the settings step prints for a key: its base64 and its fingerprint. */
+const keyMasks = (line: string) => [
+  `::add-mask::${blobOf(line)}`,
+  `::add-mask::${fingerprintOf(line)}`,
+];
+/** Output without its mask commands: what the log shows. */
+const unmasked = (output: string) =>
+  output
+    .split("\n")
+    .filter((line) => !line.startsWith("::add-mask::"))
+    .join("\n");
 const PRIVATE_KEY =
   "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAexample\n-----END OPENSSH PRIVATE KEY-----";
 /** Documentation addresses the simulated name resolves to. */
@@ -513,12 +539,16 @@ function job(where: Box, c: Context, bot?: { result?: unknown; exit?: number }) 
   };
 }
 
-/** A box whose simulated DNS and registry know the staging host and the release. */
+/** A box whose simulated DNS, host and registry know the staging host and the release. */
 function staged() {
   const where = box();
   writeFileSync(join(where.dir, "hosts", HOST), `${ADDRESSES.join("\n")}\n`);
   writeFileSync(join(where.dir, "hosts", "2001:db8::20"), "2001:db8::20\n");
   writeFileSync(join(where.dir, "hosts", "198.51.100.20"), "198.51.100.20\n");
+  // Every address offers the pinned key.
+  mkdirSync(join(where.dir, "keys"));
+  for (const address of [...ADDRESSES, "2001:db8::20", "198.51.100.20"])
+    writeFileSync(join(where.dir, "keys", address), `${HOST_KEY}\n`);
   writeFileSync(join(where.dir, "images", DIGEST), COMMIT);
   return where;
 }
@@ -579,7 +609,7 @@ describe("the request check", () => {
   });
 });
 
-describe.skipIf(!hasJq)("the host settings", () => {
+describe.skipIf(!canSettle)("the host settings", () => {
   const settings = (secrets: Record<string, string> = {}, event = "workflow_run", inputs = {}) => {
     const where = staged();
     const r = runStep("Load the host settings", where, context(inputs, secrets, event));
@@ -628,9 +658,9 @@ describe.skipIf(!hasJq)("the host settings", () => {
   test("masks every address before any other output, and prints nothing else", () => {
     const ok = settings();
     expect(ok.code).toBe(0);
+    // The addresses first, then the pinned key's base64 and fingerprint.
     expect(ok.stdout).toBe(
-      ADDRESSES.map((a) => `::add-mask::${a}`)
-        .sort()
+      [...ADDRESSES.map((a) => `::add-mask::${a}`).sort(), ...keyMasks(HOST_KEY)]
         .join("\n")
         .concat("\n"),
     );
@@ -644,10 +674,11 @@ describe.skipIf(!hasJq)("the host settings", () => {
     expect(lines.slice(2)).toEqual([
       "::error::TARGET_HOST_KEY must be one line: ssh-ed25519 and the host's key, with no name or comment.",
     ]);
-    // Neither the name nor the key reach the output, whatever happens.
+    // Neither the name nor the key reach the output, whatever happens, but in a mask.
     for (const r of [ok, bad]) {
       expect(r.stdout + r.stderr).not.toContain(HOST);
-      expect(r.stdout + r.stderr).not.toContain(HOST_KEY.split(" ")[1]);
+      expect(unmasked(r.stdout + r.stderr)).not.toContain(blobOf(HOST_KEY));
+      expect(unmasked(r.stdout + r.stderr)).not.toContain(fingerprintOf(HOST_KEY));
       expect(r.stdout + r.stderr).not.toContain("PRIVATE KEY");
     }
   });
@@ -708,7 +739,7 @@ describe.skipIf(!hasJq)("the host settings", () => {
       expect({ literal, code: r.code, stdout: r.stdout }).toEqual({
         literal,
         code: 0,
-        stdout: `::add-mask::${literal}\n`,
+        stdout: [`::add-mask::${literal}`, ...keyMasks(HOST_KEY)].join("\n").concat("\n"),
       });
     }
   });
@@ -730,6 +761,11 @@ describe.skipIf(!hasJq)("the host settings", () => {
       [{ TARGET_HOST_KEY: `${HOST_KEY}=` }, "TARGET_HOST_KEY must be"],
       [{ TARGET_HOST_KEY: HOST_KEY.slice(0, -1) }, "TARGET_HOST_KEY must be"],
       [{ TARGET_HOST_KEY: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ" }, "TARGET_HOST_KEY must be"],
+      // The right shape, but ssh-keygen reads no ed25519 key in it.
+      [
+        { TARGET_HOST_KEY: `ssh-ed25519 ${"AAAAB3NzaC1yc2EAAAADAQABAAAAQQ".padEnd(68, "A")}` },
+        "TARGET_HOST_KEY must be",
+      ],
       [{ ANSIBLE_SSH_KEY: "" }, "ANSIBLE_SSH_KEY isn't set in the staging environment."],
     ] as const) {
       const r = settings(secrets);
@@ -741,6 +777,68 @@ describe.skipIf(!hasJq)("the host settings", () => {
       expect(r.outputs.skip).toBeUndefined();
       expect(existsSync(join(r.ssh, "inventory.json"))).toBe(false);
     }
+  });
+  test("reads the key each address offers first, masks every key seen, and stops on any other", () => {
+    // Each address scanned once, quietly, for its ed25519 key.
+    const ok = settings();
+    expect(ok.code).toBe(0);
+    expect(readFileSync(join(ok.where.dir, "keyscan-calls"), "utf8")).toBe(
+      [...ADDRESSES]
+        .sort()
+        .map((a) => `-q -T 20 -t ed25519 -- ${a}\n`)
+        .join(""),
+    );
+    const scan = (where: Box) => runStep("Load the host settings", where, context());
+    // A rebuilt host not yet pinned: both keys are masked before the fixed error, nothing else
+    // names either, and no file is written, so ssh never runs and never prints a fingerprint.
+    const rebuilt = staged();
+    for (const a of ADDRESSES) writeFileSync(join(rebuilt.dir, "keys", a), `${OTHER_KEY}\n`);
+    const moved = scan(rebuilt);
+    expect(moved.code).toBe(1);
+    const lines = moved.stdout.trimEnd().split("\n");
+    expect(lines.slice(0, -1).sort()).toEqual(
+      [
+        ...ADDRESSES.map((a) => `::add-mask::${a}`),
+        ...keyMasks(HOST_KEY),
+        ...keyMasks(OTHER_KEY),
+      ].sort(),
+    );
+    expect(lines.slice(0, 2).sort()).toEqual(ADDRESSES.map((a) => `::add-mask::${a}`).sort());
+    expect(lines.at(-1)).toBe(
+      `::error::The host's key isn't the one pinned in TARGET_HOST_KEY. After a rebuild, pin the new key from your own machine (ops/tofu/README.md, "Pinning a new host key").`,
+    );
+    for (const secret of [blobOf(OTHER_KEY), fingerprintOf(OTHER_KEY), blobOf(HOST_KEY)])
+      expect(unmasked(moved.stdout + moved.stderr)).not.toContain(secret);
+    expect(moved.stderr).toBe("");
+    expect(existsSync(join(rebuilt.temp, "ssh"))).toBe(false);
+    expect(moved.outputs.skip).toBeUndefined();
+    // One address offering another key (a stale record, say) stops the run too.
+    const split = staged();
+    writeFileSync(join(split.dir, "keys", ADDRESSES[1] ?? ""), `${OTHER_KEY}\n`);
+    expect(scan(split).code).toBe(1);
+    // An address this runner can't reach offers nothing, and its complaint goes nowhere; the
+    // others decide.
+    const v4only = staged();
+    rmSync(join(v4only.dir, "keys", ADDRESSES[0] ?? ""));
+    const reached = scan(v4only);
+    expect({ code: reached.code, stderr: reached.stderr }).toEqual({ code: 0, stderr: "" });
+    // No address answering stops with its own message.
+    const down = staged();
+    for (const a of ADDRESSES) rmSync(join(down.dir, "keys", a));
+    const silent = scan(down);
+    expect(silent.code).toBe(1);
+    expect(silent.stdout.trimEnd().split("\n").at(-1)).toBe(
+      "::error::The host offered no Ed25519 host key at any of its addresses: is it up, with port 22 open?",
+    );
+    expect(existsSync(join(down.temp, "ssh"))).toBe(false);
+    // The whole job: nothing reaches ansible-playbook, and the run reads failed.
+    const again = staged();
+    for (const a of ADDRESSES) writeFileSync(join(again.dir, "keys", a), `${OTHER_KEY}\n`);
+    const run = job(again, context());
+    expect(run.calls).toEqual([]);
+    expect(run.failed).toBe(true);
+    expect(run.summary).toContain("## staging: failed");
+    expect(unmasked(run.log)).not.toContain(fingerprintOf(OTHER_KEY));
   });
 });
 
@@ -771,7 +869,7 @@ describe.skipIf(!hasJq)("the release's commit", () => {
   });
 });
 
-describe.skipIf(!hasJq)("Configure and the bot", () => {
+describe.skipIf(!canSettle)("Configure and the bot", () => {
   const inventory = (where: Box) => join(where.temp, "ssh", "inventory.json");
 
   test("configure runs site.yml alone, with no secret, and ends configured", () => {

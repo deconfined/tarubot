@@ -15,7 +15,9 @@
 # host at once: a newer run waits, and nothing is cancelled. Re-runs are refused, as in deploy.yml:
 # start a new dispatch. The repository and its logs are public, so the host's name and key are
 # secrets (Actions masks them), every address the name resolves to is masked before anything else
-# prints, no script traces, and ansible-playbook never runs with -v, --diff or --check.
+# prints, the key each address offers is masked and checked against the pinned one before ssh
+# runs (so ssh never prints another key's fingerprint), no script traces, and ansible-playbook
+# never runs with -v, --diff or --check.
 name: Host
 
 on:
@@ -140,8 +142,43 @@ jobs:
           # use): the key alone, no name or comment. A trailing newline is tolerated.
           key=${TARGET_HOST_KEY%$'\n'}
           key=${key%$'\r'}
-          [[ $key =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] ||
+          # ssh-keygen must read an ed25519 key in it too, not only the shape.
+          if ! [[ $key =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || ! ssh-keygen -E sha256 -lf - <<< "$key" > /dev/null 2>&1; then
             bad "TARGET_HOST_KEY must be one line: ssh-ed25519 and the host's key, with no name or comment."
+          fi
+
+          # When a host offers another key than the pinned one (a rebuild not yet pinned), ssh's
+          # "REMOTE HOST IDENTIFICATION HAS CHANGED" prints that key's SHA256 fingerprint, and
+          # scanners index host keys by address. So the key each address offers is read here first:
+          # every key seen, the pinned one included, is masked (its base64 and its fingerprint),
+          # and any key but the pinned one stops the run with a fixed message before ssh runs.
+          mask_key() {
+            local fingerprint
+            fingerprint=$(ssh-keygen -E sha256 -lf - <<< "ssh-ed25519 $1" 2> /dev/null | awk '{ print $2 }') ||
+              fingerprint=
+            echo "::add-mask::$1"
+            if [[ $fingerprint == SHA256:?* ]]; then echo "::add-mask::${fingerprint#SHA256:}"; fi
+          }
+          pinned=${key#ssh-ed25519 }
+          mask_key "$pinned"
+          declare -A offered=()
+          for address in "${addresses[@]}"; do
+            # -q drops the banner. An address this runner can't reach (IPv6 on a runner without
+            # it) offers nothing, and its complaint names the address, so it goes nowhere.
+            scanned=$(ssh-keyscan -q -T 20 -t ed25519 -- "$address" 2> /dev/null) || true
+            while read -r _ type blob _; do
+              if [[ $type == ssh-ed25519 && -n $blob ]]; then offered[$blob]=1; fi
+            done <<< "$scanned"
+          done
+          (( ${#offered[@]} )) ||
+            bad "The host offered no Ed25519 host key at any of its addresses: is it up, with port 22 open?"
+          for blob in "${!offered[@]}"; do
+            if [[ $blob != "$pinned" ]]; then mask_key "$blob"; fi
+          done
+          for blob in "${!offered[@]}"; do
+            [[ $blob == "$pinned" ]] ||
+              bad "The host's key isn't the one pinned in TARGET_HOST_KEY. After a rebuild, pin the new key from your own machine (ops/tofu/README.md, \"Pinning a new host key\")."
+          done
 
           mkdir -p -- "$dir"
           chmod 700 -- "$dir"

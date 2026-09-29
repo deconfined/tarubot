@@ -119,6 +119,8 @@ ssh-keyscan -q -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TA
 
 A new host also needs `TARGET_HOST` (its DNS name) and `ANSIBLE_SSH_KEY` (the Configure key's private half) in its environment before its first Configure.
 
+Until the new key is pinned, every run for that host stops in the host job's "Load the host settings" step with "The host's key isn't the one pinned in TARGET_HOST_KEY", before ssh runs. That step reads the key each of the host's addresses offers and masks it and its fingerprint first, because ssh's own "REMOTE HOST IDENTIFICATION HAS CHANGED" message would print the new key's fingerprint in the public log.
+
 ## Rebuilding a host
 
 Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal`: the old addresses leave the access list and the new ones join it. The plan shows a `replace` of the instance, updates of its two records and `+2 -2` on the access list. Then pin the new key.
