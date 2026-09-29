@@ -1,0 +1,5 @@
+# Issue #62, answer 5: @deconfined reviews every pull request. The Protect Main ruleset requires a
+# code owner's review and one approval, and dismisses stale approvals when new commits are pushed;
+# with signed commits and merge commits only, that review is the step before a change reaches
+# staging.
+* @deconfined

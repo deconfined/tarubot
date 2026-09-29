@@ -1,8 +1,9 @@
 /**
- * Readers for the Quadlet unit files and Podman env files in ops/quadlet/ (#50), shared by
- * tests/unit/quadlet.test.ts and tests/unit/container-hardening.test.ts. Each reader enforces house
- * rules that keep it exact rather than reimplementing systemd's or Podman's full parsers, so a file
- * the reader accepts means the same to the reader, to Quadlet and to Podman:
+ * Readers for the bot's Quadlet unit and Podman env file (#50; since #62 rendered from
+ * ops/ansible/templates/bot/ by tests/fixtures/bot-render.ts), shared by the unit tests that pin
+ * them. Each reader enforces house rules that keep it exact rather than reimplementing systemd's or
+ * Podman's full parsers, so a file the reader accepts means the same to the reader, to Quadlet and
+ * to Podman:
  * - unit files: whole-line "#" comments (systemd has no inline comments), [Section] headers and one
  *   Key=value per line, with no line continuations, no "#" in a value and no quoting (Quadlet strips
  *   a value's surrounding double quotes); the HealthCmd JSON array is the one value with quotes;
@@ -17,12 +18,6 @@ import { join, relative } from "node:path";
 export const root = (path: string) => new URL(`../../${path}`, import.meta.url).pathname;
 /** A repository file's text. */
 export const read = (path: string) => Bun.file(root(path)).text();
-
-/** The directory this release's Quadlet files live in. */
-export const QUADLET = "ops/quadlet";
-/** The two deployment targets, each a directory under ops/quadlet with a drop-in and a list. */
-export const TARGETS = ["production", "staging"] as const;
-export type Target = (typeof TARGETS)[number];
 
 /** One assignment in a unit file. */
 export interface UnitLine {
@@ -105,48 +100,16 @@ export function parseEnvFile(text: string, file: string): EnvEntry[] {
 export const namesOf = (entries: EnvEntry[]) => entries.map((entry) => entry.name);
 
 /**
- * The environment a container gets from env files read in order, as Podman merges them (a later
- * file wins): a fixed value, or null where the value comes from the host's environment.
+ * Every file under a repository directory, as paths relative to it, sorted. A `.terraform`
+ * directory (a local `tofu init`'s provider downloads) is never read.
  */
-export function merged(...files: EnvEntry[][]): Map<string, string | null> {
-  const result = new Map<string, string | null>();
-  for (const file of files) for (const entry of file) result.set(entry.name, entry.value);
-  return result;
-}
-
-/** The release's unit, parsed. */
-export const unit = async () =>
-  parseUnit(await read(`${QUADLET}/units/tarubot.container`), "units/tarubot.container");
-/** A target's drop-in, parsed. */
-export const dropIn = async (target: Target) => {
-  const path = `${target}/tarubot.container.d/50-target.conf`;
-  return parseUnit(await read(`${QUADLET}/${path}`), path);
-};
-/** The base list every host's container gets. */
-export const baseList = async () =>
-  parseEnvFile(await read(`${QUADLET}/units/tarubot.env`), "units/tarubot.env");
-/** A target's list. */
-export const targetList = async (target: Target) =>
-  parseEnvFile(await read(`${QUADLET}/${target}/target.env`), `${target}/target.env`);
-
-/** Every file under a repository directory, as paths relative to it, sorted. */
 export function filesUnder(directory: string): string[] {
   const base = root(directory);
   const walk = (path: string): string[] =>
     readdirSync(path).flatMap((name) => {
+      if (name === ".terraform") return [];
       const full = join(path, name);
       return statSync(full).isDirectory() ? walk(full) : [relative(base, full)];
-    });
-  return walk(base).sort();
-}
-
-/** Every directory under a repository directory, as paths relative to it, sorted. */
-export function directoriesUnder(directory: string): string[] {
-  const base = root(directory);
-  const walk = (path: string): string[] =>
-    readdirSync(path).flatMap((name) => {
-      const full = join(path, name);
-      return statSync(full).isDirectory() ? [relative(base, full), ...walk(full)] : [];
     });
   return walk(base).sort();
 }

@@ -1,52 +1,151 @@
 /**
- * ops/backup.sh on a Quadlet host (#50, 2.33.0) and the release's systemd user units that run it
- * every night (ops/systemd/). The real script runs in a sandbox: a clone-shaped directory with a
- * dummy .env, and stand-ins (tests/fixtures/backup-stubs/) for podman, docker, age, curl, id, date
- * and ops/quadlet/secrets.sh first on PATH, each recording its arguments and environment. These
- * pin what keeps the dump safe on Podman:
- * - the argument picks the runtime, and anything else stops before a setting is read;
- * - only the two database secrets are synced, and the one `podman run` is as hardened as Compose's
- *   backup service, reads both secrets as files and gets nothing on stdin;
- * - no setting's value reaches an argument or an environment variable of any tool;
- * - the last line is the one ops/deploy.sh's BACKUP_DONE reads, and failures ping /fail by step.
- * The no-argument Compose path keeps its own tests in backup-job.test.ts. The byte-exact stream
- * through `--log-driver=none` was checked on a local Podman 5.8.2 with a real PostgreSQL 18.4 dump
- * (the release's verification record, docs/VERIFICATION.md).
+ * The backup scripts, run for real against stand-ins (tests/fixtures/backup-stubs/) for podman,
+ * docker, age, curl, id and date, each first on PATH and recording its arguments and environment:
+ * - ops/backup.sh with no argument, the production host's Compose path, in a sandbox shaped like
+ *   the host's clone (its static properties are in backup-job.test.ts). The script stays as it is
+ *   until production moves (2.37.0); only its Compose path is pinned here.
+ * - ops/ansible/files/bot/tarubot-backup (#62), staging's backup on a Quadlet host, which
+ *   ops/ansible/bot.yml installs as ~/.local/bin/tarubot-backup with its user service and timer,
+ *   in a sandbox home. Its settings come from the Podman secrets bot.yml writes, and these pin
+ *   what keeps the dump safe: no value reaches an argument or an environment variable of any
+ *   tool, the one `podman run` is as hardened as Compose's backup service, reads the two database
+ *   secrets as files the bot's unit mounts and gets nothing on stdin, the container's shell hands
+ *   the URL's parts to pg_dump as libpq's environment and never as an argument (run here too,
+ *   with bash in POSIX mode standing in for the image's BusyBox sh), the dump streams into age,
+ *   uploads and pings go as before, and failures ping /fail by step.
+ * The byte-exact stream through `--log-driver=none` was checked on a local Podman 5.8.2 with a real
+ * PostgreSQL 18.4 dump (2.33.0's verification record, docs/VERIFICATION.md).
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
-  statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { YAML } from "bun";
 import { z } from "zod";
-import { filesUnder, parseUnit, read, root, valuesOf } from "../fixtures/quadlet.js";
+import { deployments } from "../../src/config/deployment.js";
+import { renderStaging } from "../fixtures/bot-render.js";
+import { parseUnit, read, root, valuesOf } from "../fixtures/quadlet.js";
+
+// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
+setDefaultTimeout(120_000);
 
 const STUBS = root("tests/fixtures/backup-stubs");
+const BACKUP = root("ops/ansible/files/bot/tarubot-backup");
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "backup-quadlet-")));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 /** The stand-ins' clock: 2026-09-29T04:30:00Z, not the 1st, so there is no monthly upload. */
 const NOW = Date.UTC(2026, 8, 29, 4, 30, 0) / 1000;
 const STAMP = "20260929T043000Z";
-/** Every secret-bearing value in the sandbox's .env carries this mark. */
+/** The 1st of October, when a copy also goes to monthly/. */
+const FIRST = Date.UTC(2026, 9, 1, 4, 30, 0) / 1000;
+/** Every secret-bearing value in a sandbox carries this mark. */
 const MARK = "backupmark7c1e";
 /** A user id whose /run/user directory doesn't exist. */
 const NO_RUNTIME_UID = "4294967294";
-const USAGE = "usage: backup.sh [quadlet]\n";
+
+/**
+ * The dump's image: Compose's name and tag, fully qualified, and pinned by the image index digest,
+ * since the container reads the database secrets and can reach the network.
+ */
+const PG_IMAGE =
+  "docker.io/library/postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15";
+
+/** One recorded call of a stand-in. */
+interface Call {
+  tool: string;
+  argv: string[];
+  env: Map<string, string>;
+  /** podman: "eof", "data" or "open"; curl: the --config text; otherwise null. */
+  stdin: string | null;
+}
+
+/** A NUL-separated list, as the stand-ins write it. */
+const fields = (text: string) => text.split("\0").slice(0, -1);
+
+/** Every recorded call under a stand-in directory, in the order the calls started. */
+function recorded(sim: string): Call[] {
+  return readdirSync(join(sim, "calls"))
+    .sort()
+    .map((id) => {
+      const directory = join(sim, "calls", id);
+      const env = new Map<string, string>();
+      for (const entry of fields(readFileSync(join(directory, "env"), "utf8"))) {
+        const at = entry.indexOf("=");
+        env.set(entry.slice(0, at), entry.slice(at + 1));
+      }
+      const stdin = join(directory, "stdin");
+      return {
+        tool: readFileSync(join(directory, "tool"), "utf8"),
+        argv: fields(readFileSync(join(directory, "argv"), "utf8")),
+        env,
+        stdin: existsSync(stdin) ? readFileSync(stdin, "utf8") : null,
+      };
+    });
+}
+
+/** Run a script as the timer does, with only the given variables; `undefined` leaves one out. */
+function spawn(command: string[], variables: Record<string, string | undefined>) {
+  const result = Bun.spawnSync(command, {
+    env: Object.fromEntries(
+      Object.entries(variables).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+    // stdin holds data, so a stand-in that reads it shows whether the script closed it.
+    stdin: new TextEncoder().encode("stdin that must not reach the dump\n"),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { code: result.exitCode, out: result.stdout.toString(), err: result.stderr.toString() };
+}
+
+/** The calls of one tool. */
+const of = (calls: Call[], tool: string) => calls.filter((call) => call.tool === tool);
+/** What each healthchecks ping said: the path after the check's URL, and the note. */
+const pings = (calls: Call[]) =>
+  of(calls, "curl")
+    .filter((call) => call.argv.includes("--data-raw"))
+    .map((call) => ({
+      path:
+        /^url = "https:\/\/hc\.invalid\/[^/"]+(\/[a-z]+)?"\n$/u.exec(call.stdin ?? "")?.[1] ?? "",
+      note: call.argv[call.argv.indexOf("--data-raw") + 1],
+    }));
+/** The bucket keys uploaded, in order. */
+const uploads = (calls: Call[]) =>
+  of(calls, "curl")
+    .filter((call) => call.argv.includes("--upload-file"))
+    .map((call) => (call.argv.at(-1) ?? "").replace("https://bucket.invalid/", ""));
+/** The last line of a script's output. */
+const lastLine = (out: string) => out.trimEnd().split("\n").at(-1) ?? "";
+/** The value after each occurrence of a flag in an argument list. */
+const valuesAfter = (argv: string[], flag: string) =>
+  argv.flatMap((arg, index) => (arg === flag ? [argv[index + 1] ?? ""] : []));
+/** No call's arguments or environment hold the mark. */
+function expectNoValues(calls: Call[]): void {
+  expect(calls.length).toBeGreaterThan(0);
+  for (const call of calls) {
+    const seen = [...call.argv, ...[...call.env].map(([name, value]) => `${name}=${value}`)];
+    expect({ tool: call.tool, leaked: seen.filter((item) => item.includes(MARK)) }).toEqual({
+      tool: call.tool,
+      leaked: [],
+    });
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// ops/backup.sh's Compose path, unchanged until production moves.
 
 /** A host's .env in the forms the script meets: a multi-line quoted CA, every secret set. */
 const ENV = [
@@ -66,14 +165,162 @@ const ENV = [
 ].join("\n");
 
 /**
- * The dump's image on a Quadlet host: Compose's name and tag, fully qualified, and pinned by the
- * image index digest, since the container reads the database secrets and can reach the network.
+ * A sandbox shaped like the production host's clone (~/tarubot): the real ops/backup.sh copied in
+ * (a copy, not a link, since the script finds its clone from its own resolved path), the release's
+ * age recipients and the given .env (none when null).
  */
-const PG_IMAGE =
-  "docker.io/library/postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15";
+function clone(name: string, env: string | null = ENV) {
+  const base = join(scratch, name);
+  const home = join(base, "tarubot");
+  const sim = join(base, "sim");
+  for (const directory of [
+    join(home, "ops"),
+    join(sim, "calls"),
+    join(sim, "knob"),
+    join(base, "tmp"),
+  ])
+    mkdirSync(directory, { recursive: true });
+  copyFileSync(root("ops/backup.sh"), join(home, "ops/backup.sh"));
+  chmodSync(join(home, "ops/backup.sh"), 0o755);
+  copyFileSync(root("ops/age-recipients.txt"), join(home, "ops/age-recipients.txt"));
+  if (env !== null) writeFileSync(join(home, ".env"), env, { mode: 0o600 });
+  const run = (args: string[]) =>
+    spawn([join(home, "ops/backup.sh"), ...args], {
+      PATH: `${STUBS}:/usr/bin:/bin`,
+      HOME: base,
+      TMPDIR: join(base, "tmp"),
+      LC_ALL: "C",
+      BACKUP_SIM: sim,
+      BACKUP_SIM_NOW: String(NOW),
+    });
+  return { run, calls: () => recorded(sim) };
+}
 
-/** The Quadlet path's one `podman run`, exactly (ops/backup.sh; interfaces §12). */
-const dumpArgv = (stamp: string) => [
+/** ops/deploy.sh's pattern for the line that names the uploaded dump. */
+const backupDone = () => {
+  const match = /^readonly BACKUP_DONE='([^']+)'$/mu.exec(
+    readFileSync(root("ops/deploy.sh"), "utf8"),
+  );
+  if (!match?.[1]) throw new Error("ops/deploy.sh has no BACKUP_DONE line");
+  return new RegExp(match[1], "u");
+};
+
+describe("ops/backup.sh with no argument (production's Compose host)", () => {
+  test("runs the Compose dump, and never Podman", () => {
+    const box = clone("compose");
+    const result = box.run([]);
+    expect(result).toMatchObject({ code: 0, err: "" });
+    const calls = box.calls();
+    expect(of(calls, "docker").map((call) => call.argv)).toEqual([
+      [
+        "compose",
+        "-f",
+        "docker-compose.production.yml",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "backup",
+      ],
+    ]);
+    expect(of(calls, "podman")).toEqual([]);
+    expect(uploads(calls)).toEqual([
+      `daily/tarubot-${STAMP}.dump.age`,
+      `env/tarubot-env-${STAMP}.age`,
+    ]);
+    expect(lastLine(result.out)).toMatch(backupDone());
+  });
+
+  test("no setting's value reaches an argument or an environment variable of any tool", () => {
+    const box = clone("compose-values");
+    expect(box.run([]).code).toBe(0);
+    const calls = box.calls();
+    expectNoValues(calls);
+    // The control: the credentials and the ping URL are read, and reach curl on stdin only.
+    const configs = of(calls, "curl").map((call) => call.stdin ?? "");
+    expect(configs.some((config) => config.includes(`${MARK}-access:${MARK}-secret`))).toBe(true);
+    expect(configs.some((config) => config.includes(`${MARK}-ping`))).toBe(true);
+  });
+
+  test("any argument but quadlet exits 64 before it reads a setting or sends anything", () => {
+    const cases = [["compose"], ["podman"], ["quadlet", "staging"], ["quadlet", "quadlet"], [""]];
+    cases.forEach((args, index) => {
+      // No .env at all: reading a setting would put sed's complaint on stderr.
+      const box = clone(`usage-${index}`, null);
+      expect({ args, ...box.run(args) }).toEqual({
+        args,
+        code: 64,
+        out: "",
+        err: "usage: backup.sh [quadlet]\n",
+      });
+      expect(box.calls()).toEqual([]);
+    });
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// tarubot-backup on a Quadlet host.
+
+/** The five settings as bot.yml stores them, each value followed by the newline its copy gains. */
+const SECRETS: Record<string, string> = {
+  "backup-storage-endpoint": "bucket.invalid",
+  "backup-storage-region": "region-1",
+  "backup-storage-access-key": `${MARK}-access`,
+  "backup-storage-secret-key": `${MARK}-secret`,
+  "healthchecks-backup-url": `https://hc.invalid/${MARK}-ping`,
+};
+
+/**
+ * A sandbox home for tarubot-backup: the release's age recipients where bot.yml puts them, the
+ * Podman secrets the stand-in answers `secret inspect` from (with `secrets` changing or, as
+ * undefined, removing them), and a private runtime directory.
+ */
+function home(name: string, secrets: Record<string, string | undefined> = {}) {
+  const base = join(scratch, name);
+  const sim = join(base, "sim");
+  const runtime = join(base, "runtime");
+  for (const directory of [
+    join(base, "home/.config/tarubot"),
+    join(sim, "calls"),
+    join(sim, "knob"),
+    join(sim, "secrets"),
+    join(base, "tmp"),
+  ])
+    mkdirSync(directory, { recursive: true });
+  mkdirSync(runtime, { mode: 0o700 });
+  copyFileSync(
+    root("ops/age-recipients.txt"),
+    join(base, "home/.config/tarubot/age-recipients.txt"),
+  );
+  for (const [secret, value] of Object.entries({ ...SECRETS, ...secrets }))
+    if (value !== undefined) writeFileSync(join(sim, "secrets", secret), `${value}\n`);
+  /** Make the dump fail, or come out too small. */
+  const knob = (which: "podman" | "small") => writeFileSync(join(sim, "knob", which), "");
+  const run = (args: string[] = [], extra: Record<string, string | undefined> = {}) =>
+    spawn(["bash", BACKUP, ...args], {
+      PATH: `${STUBS}:/usr/bin:/bin`,
+      HOME: join(base, "home"),
+      TMPDIR: join(base, "tmp"),
+      LC_ALL: "C",
+      BACKUP_SIM: sim,
+      BACKUP_SIM_NOW: String(NOW),
+      XDG_RUNTIME_DIR: runtime,
+      ...extra,
+    });
+  return { base, runtime, knob, run, calls: () => recorded(sim) };
+}
+
+/** The program tarubot-backup's DUMP gives the container's shell, from its heredoc. */
+const dumpProgram = async () => {
+  const found = /^DUMP=\$\(\n {2}cat <<'SH'\n([\s\S]*?)\nSH\n\)\nreadonly DUMP$/mu.exec(
+    await read("ops/ansible/files/bot/tarubot-backup"),
+  )?.[1];
+  if (found === undefined) throw new Error("no DUMP heredoc in tarubot-backup");
+  return found;
+};
+
+/** The one `podman run`, exactly. */
+const dumpArgv = (stamp: string, program: string) => [
   "run",
   "--rm",
   "--name",
@@ -100,317 +347,171 @@ const dumpArgv = (stamp: string) => [
   "sh",
   PG_IMAGE,
   "-c",
-  'exec pg_dump --format=custom --no-owner --no-privileges "$(cat /run/secrets/database_url)"',
+  program,
 ];
 
-/** One recorded call of a stand-in. */
-interface Call {
-  tool: string;
-  argv: string[];
-  env: Map<string, string>;
-  /** podman: "eof", "data" or "open"; curl: the --config text; otherwise null. */
-  stdin: string | null;
+/** One successful run, shared by the tests that read its calls. */
+let shared: ReturnType<typeof runShared> | undefined;
+function runShared() {
+  const box = home("shared");
+  return { box, result: box.run(), calls: box.calls() };
 }
-
-/** A NUL-separated list, as the stand-ins write it. */
-const fields = (text: string) => text.split("\0").slice(0, -1);
-
-/**
- * A sandbox shaped like a host's clone (~/tarubot): the real ops/backup.sh copied in (a copy, not a
- * link, since the script finds its clone from its own resolved path), the release's age
- * recipients, the secrets.sh stand-in linked in as ops/quadlet/secrets.sh, and the given .env (none
- * when null). Its own HOME, TMPDIR and private runtime directory keep the run inside it.
- */
-function sandbox(name: string, env: string | null = ENV) {
-  const base = join(scratch, name);
-  const clone = join(base, "tarubot");
-  const sim = join(base, "sim");
-  const runtime = join(base, "runtime");
-  for (const directory of [
-    join(clone, "ops/quadlet"),
-    join(sim, "calls"),
-    join(sim, "knob"),
-    join(base, "home"),
-    join(base, "tmp"),
-  ])
-    mkdirSync(directory, { recursive: true });
-  mkdirSync(runtime, { mode: 0o700 });
-  copyFileSync(root("ops/backup.sh"), join(clone, "ops/backup.sh"));
-  chmodSync(join(clone, "ops/backup.sh"), 0o755);
-  copyFileSync(root("ops/age-recipients.txt"), join(clone, "ops/age-recipients.txt"));
-  symlinkSync(join(STUBS, "secrets.sh"), join(clone, "ops/quadlet/secrets.sh"));
-  if (env !== null) writeFileSync(join(clone, ".env"), env, { mode: 0o600 });
-
-  /** Make a stand-in fail: podman (the dump) or secrets (the sync). */
-  const knob = (which: "podman" | "secrets") => writeFileSync(join(sim, "knob", which), "");
-
-  /**
-   * Run the script as the timer does, with only the sandbox's variables; `undefined` leaves one
-   * out. stdin holds data, so a stand-in that reads it shows whether the script closed it.
-   */
-  const run = (args: string[], extra: Record<string, string | undefined> = {}) => {
-    const variables: Record<string, string | undefined> = {
-      PATH: `${STUBS}:/usr/bin:/bin`,
-      HOME: join(base, "home"),
-      TMPDIR: join(base, "tmp"),
-      LC_ALL: "C",
-      BACKUP_SIM: sim,
-      BACKUP_SIM_NOW: String(NOW),
-      XDG_RUNTIME_DIR: runtime,
-      ...extra,
-    };
-    const result = Bun.spawnSync([join(clone, "ops/backup.sh"), ...args], {
-      env: Object.fromEntries(
-        Object.entries(variables).filter(
-          (entry): entry is [string, string] => entry[1] !== undefined,
-        ),
-      ),
-      stdin: new TextEncoder().encode("stdin that must not reach the dump\n"),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    return { code: result.exitCode, out: result.stdout.toString(), err: result.stderr.toString() };
-  };
-
-  /** Every recorded call, in the order the calls started. */
-  const calls = (): Call[] =>
-    readdirSync(join(sim, "calls"))
-      .sort()
-      .map((id) => {
-        const directory = join(sim, "calls", id);
-        const env = new Map<string, string>();
-        for (const entry of fields(readFileSync(join(directory, "env"), "utf8"))) {
-          const at = entry.indexOf("=");
-          env.set(entry.slice(0, at), entry.slice(at + 1));
-        }
-        const stdin = join(directory, "stdin");
-        return {
-          tool: readFileSync(join(directory, "tool"), "utf8"),
-          argv: fields(readFileSync(join(directory, "argv"), "utf8")),
-          env,
-          stdin: existsSync(stdin) ? readFileSync(stdin, "utf8") : null,
-        };
-      });
-
-  return { clone, runtime, knob, run, calls };
-}
-
-/** The calls of one tool. */
-const of = (calls: Call[], tool: string) => calls.filter((call) => call.tool === tool);
-/** What each healthchecks.io ping said: the path after the check's URL, and the note. */
-const pings = (calls: Call[]) =>
-  of(calls, "curl")
-    .filter((call) => call.argv.includes("--data-raw"))
-    .map((call) => ({
-      path:
-        /^url = "https:\/\/hc\.invalid\/[^/"]+(\/[a-z]+)?"\n$/u.exec(call.stdin ?? "")?.[1] ?? "",
-      note: call.argv[call.argv.indexOf("--data-raw") + 1],
-    }));
-/** The bucket keys uploaded, in order. */
-const uploads = (calls: Call[]) =>
-  of(calls, "curl")
-    .filter((call) => call.argv.includes("--upload-file"))
-    .map((call) => (call.argv.at(-1) ?? "").replace("https://bucket.invalid/", ""));
-/** The last line of the script's output. */
-const lastLine = (out: string) => out.trimEnd().split("\n").at(-1) ?? "";
-
-/** ops/deploy.sh's pattern for the line that names the uploaded dump (either runtime). */
-const backupDone = () => {
-  const match = /^readonly BACKUP_DONE='([^']+)'$/mu.exec(
-    readFileSync(root("ops/deploy.sh"), "utf8"),
-  );
-  if (!match?.[1]) throw new Error("ops/deploy.sh has no BACKUP_DONE line");
-  return new RegExp(match[1], "u");
+const sharedRun = () => {
+  shared ??= runShared();
+  return shared;
 };
-
-/** One successful Quadlet run, shared by the tests that read its calls. */
-let quadlet: ReturnType<typeof runQuadlet> | undefined;
-function runQuadlet() {
-  const box = sandbox("quadlet");
-  return { box, result: box.run(["quadlet"]), calls: box.calls() };
-}
-const quadletRun = () => {
-  quadlet ??= runQuadlet();
-  return quadlet;
-};
-/** The shared run's one podman call; fails when there isn't exactly one. */
+/** The shared run's one dump; fails when there isn't exactly one. */
 const dumpCall = () => {
-  const [call, ...more] = of(quadletRun().calls, "podman");
-  if (!call || more.length > 0) throw new Error("expected exactly one podman call");
-  return call;
+  const runs = of(sharedRun().calls, "podman").filter((call) => call.argv[0] === "run");
+  if (runs.length !== 1 || !runs[0]) throw new Error("expected exactly one podman run");
+  return runs[0];
 };
-/** The value after each occurrence of a flag in an argument list. */
-const valuesAfter = (argv: string[], flag: string) =>
-  argv.flatMap((arg, index) => (arg === flag ? [argv[index + 1] ?? ""] : []));
 
-describe("ops/backup.sh picks its runtime from its argument", () => {
-  test("with no argument it runs today's Compose dump, and never Podman or secrets.sh", () => {
-    const box = sandbox("compose");
-    // The Compose path never needs a runtime directory, even when the user has none.
-    const result = box.run([], { XDG_RUNTIME_DIR: undefined, BACKUP_SIM_UID: NO_RUNTIME_UID });
-    expect(result).toMatchObject({ code: 0, err: "" });
-    const calls = box.calls();
-    expect(of(calls, "docker").map((call) => call.argv)).toEqual([
-      [
-        "compose",
-        "-f",
-        "docker-compose.production.yml",
-        "run",
-        "--rm",
-        "--no-deps",
-        "-T",
-        "backup",
-      ],
-    ]);
-    expect(calls.filter((call) => call.tool === "podman" || call.tool === "secrets.sh")).toEqual(
-      [],
-    );
-    expect(uploads(calls)).toEqual([
-      `daily/tarubot-${STAMP}.dump.age`,
-      `env/tarubot-env-${STAMP}.age`,
-    ]);
-    expect(lastLine(result.out)).toMatch(backupDone());
+describe("tarubot-backup", () => {
+  test("is bash in strict mode with a private umask", async () => {
+    const script = await read("ops/ansible/files/bot/tarubot-backup");
+    expect(script).toStartWith("#!/usr/bin/env bash\n");
+    expect(script).toContain("set -Eeuo pipefail");
+    expect(script).toContain("umask 077");
+    expect(Bun.spawnSync(["bash", "-n", BACKUP]).exitCode).toBe(0);
   });
 
-  test("`quadlet` syncs the two database secrets, then runs one hardened pg_dump container", () => {
-    const { box, result, calls } = quadletRun();
+  test("reads its five settings from Podman's secrets, then runs one hardened pg_dump into age", async () => {
+    const { result, calls } = sharedRun();
     expect(result).toMatchObject({ code: 0, err: "" });
-    // Only DATABASE_URL and DATABASE_CA_CERT: a blank Discord token never stops a backup.
-    expect(of(calls, "secrets.sh").map((call) => call.argv)).toEqual([
-      ["sync", join(box.clone, ".env"), "DATABASE_URL", "DATABASE_CA_CERT"],
-    ]);
+    // The ping URL first, so every later failure can report itself, then the bucket's four.
+    expect(
+      of(calls, "podman")
+        .filter((call) => call.argv[0] === "secret")
+        .map((call) => call.argv),
+    ).toEqual(
+      [
+        "healthchecks-backup-url",
+        "backup-storage-endpoint",
+        "backup-storage-region",
+        "backup-storage-access-key",
+        "backup-storage-secret-key",
+      ].map((name) => [
+        "secret",
+        "inspect",
+        "--showsecret",
+        "--format",
+        "{{.SecretData}}",
+        `tarubot-${name}`,
+      ]),
+    );
     const dump = dumpCall();
-    expect(dump.argv).toEqual(dumpArgv(STAMP));
-    // deploy.sh's backup wait finds the run by this label.
-    expect(valuesAfter(dump.argv, "--label")).toEqual(["io.tarubot.role=backup"]);
-    // The secret mounts are read-only only because the container is.
-    expect(dump.argv).toContain("--read-only");
+    expect(dump.argv).toEqual(dumpArgv(STAMP, await dumpProgram()));
     // stdin is closed: nothing of the script's input reaches the container.
     expect(dump.stdin).toBe("eof");
-    // The ping, then the secrets, then the dump, never Docker.
-    const order = calls.map((call) => call.tool);
-    expect(order[0]).toBe("curl");
-    expect(order.indexOf("secrets.sh")).toBeLessThan(order.indexOf("podman"));
+    // The dump streams into age, for the recipients bot.yml installed, never onto the disk.
+    expect(of(calls, "age").map((call) => call.argv.slice(0, 3))).toEqual([
+      [
+        "--encrypt",
+        "--recipients-file",
+        expect.stringMatching(/\/\.config\/tarubot\/age-recipients\.txt$/u),
+      ],
+    ]);
     expect(of(calls, "docker")).toEqual([]);
     expect(pings(calls)).toEqual([
       { path: "/start", note: "backup starting" },
-      {
-        path: "",
-        note: expect.stringMatching(
-          new RegExp(`^daily/tarubot-${STAMP}\\.dump\\.age: 8192 bytes; env/`, "u"),
-        ),
-      },
+      { path: "", note: `daily/tarubot-${STAMP}.dump.age: 8192 bytes` },
     ]);
-    expect(uploads(calls)).toEqual([
-      `daily/tarubot-${STAMP}.dump.age`,
-      `env/tarubot-env-${STAMP}.age`,
-    ]);
-    // The last line is the one deploy.sh reads, naming the object it uploaded to daily/.
-    const line = lastLine(result.out);
-    expect(line).toMatch(
-      new RegExp(`^\\S+ backup ok: tarubot-${STAMP} \\(8192 bytes, settings \\d+ bytes\\)$`, "u"),
+    // Only the dump, with https:// added to the endpoint; no settings copy any more.
+    expect(uploads(calls)).toEqual([`daily/tarubot-${STAMP}.dump.age`]);
+    expect(
+      of(calls, "curl")
+        .filter((call) => call.argv.includes("--upload-file"))
+        .map((call) => valuesAfter(call.argv, "--aws-sigv4")),
+    ).toEqual([["aws:amz:region-1:s3"]]);
+    expect(lastLine(result.out)).toMatch(
+      new RegExp(`^\\S+ backup ok: tarubot-${STAMP} \\(8192 bytes\\)$`, "u"),
     );
-    expect(backupDone().exec(line)?.[1]).toBe(STAMP);
   });
 
   test("no setting's value reaches an argument or an environment variable of any tool", () => {
-    const compose = sandbox("compose-values");
-    expect(compose.run([]).code).toBe(0);
-    for (const calls of [quadletRun().calls, compose.calls()]) {
-      expect(calls.length).toBeGreaterThan(0);
-      for (const call of calls) {
-        const seen = [...call.argv, ...[...call.env].map(([name, value]) => `${name}=${value}`)];
-        expect({ tool: call.tool, leaked: seen.filter((item) => item.includes(MARK)) }).toEqual({
-          tool: call.tool,
-          leaked: [],
-        });
-      }
-      // The control: the credentials and the ping URL are read, and reach curl on stdin only.
-      const configs = of(calls, "curl").map((call) => call.stdin ?? "");
-      expect(configs.some((config) => config.includes(`${MARK}-access:${MARK}-secret`))).toBe(true);
-      expect(configs.some((config) => config.includes(`${MARK}-ping`))).toBe(true);
-    }
+    const { calls } = sharedRun();
+    expectNoValues(calls);
+    // The control: the credentials and the ping URL are read, and reach curl on stdin only.
+    const configs = of(calls, "curl").map((call) => call.stdin ?? "");
+    expect(configs.some((config) => config.includes(`${MARK}-access:${MARK}-secret`))).toBe(true);
+    expect(configs.some((config) => config.includes(`${MARK}-ping`))).toBe(true);
   });
 
-  test("the tools see the runtime directory the caller set", () => {
-    // The user manager sets it for the timer, and deploy.sh's worker exports it.
-    const { box } = quadletRun();
-    expect(dumpCall().env.get("XDG_RUNTIME_DIR")).toBe(box.runtime);
+  test("the tools see the runtime directory the user manager set", () => {
+    expect(dumpCall().env.get("XDG_RUNTIME_DIR")).toBe(sharedRun().box.runtime);
   });
 
-  test("any other argument exits 64 before it reads a setting or sends anything", () => {
-    const cases = [["compose"], ["podman"], ["quadlet", "staging"], ["quadlet", "quadlet"], [""]];
-    cases.forEach((args, index) => {
-      // No .env at all: reading a setting would put sed's complaint on stderr.
-      const box = sandbox(`usage-${index}`, null);
-      expect({ args, ...box.run(args) }).toEqual({ args, code: 64, out: "", err: USAGE });
-      expect(box.calls()).toEqual([]);
+  test("on the 1st a copy also goes to monthly/", () => {
+    const box = home("first");
+    expect(box.run([], { BACKUP_SIM_NOW: String(FIRST) }).code).toBe(0);
+    expect(uploads(box.calls())).toEqual([
+      "daily/tarubot-20261001T043000Z.dump.age",
+      "monthly/tarubot-20261001T043000Z.dump.age",
+    ]);
+  });
+
+  test("an endpoint with https:// is used as it is, and without a ping URL nothing is pinged", () => {
+    const box = home("no-ping", {
+      "backup-storage-endpoint": "https://bucket.invalid/",
+      "healthchecks-backup-url": undefined,
     });
+    expect(box.run().code).toBe(0);
+    expect(uploads(box.calls())).toEqual([`daily/tarubot-${STAMP}.dump.age`]);
+    expect(pings(box.calls())).toEqual([]);
+  });
+
+  test("any argument exits 64 before it reads a setting or sends anything", () => {
+    for (const [index, args] of [["quadlet"], ["--dry-run"], [""]].entries()) {
+      const box = home(`usage-${index}`);
+      expect({ args, ...box.run(args) }).toEqual({
+        args,
+        code: 64,
+        out: "",
+        err: "usage: tarubot-backup\n",
+      });
+      expect(box.calls()).toEqual([]);
+    }
   });
 });
 
-describe("ops/backup.sh quadlet's failures", () => {
-  test("without XDG_RUNTIME_DIR a missing /run/user directory fails at settings", () => {
-    expect(existsSync(`/run/user/${NO_RUNTIME_UID}`)).toBe(false);
-    const box = sandbox("no-runtime");
-    const result = box.run(["quadlet"], {
-      XDG_RUNTIME_DIR: undefined,
-      BACKUP_SIM_UID: NO_RUNTIME_UID,
-    });
+describe("tarubot-backup's failures", () => {
+  test("a missing setting fails at settings, before the start ping, naming the setting only", () => {
+    const box = home("missing", { "backup-storage-region": undefined });
+    const result = box.run();
     expect(result.code).toBe(1);
-    expect(result.err).toContain(`XDG_RUNTIME_DIR is not set, and /run/user/${NO_RUNTIME_UID}`);
+    expect(result.err).toContain("BACKUP_STORAGE_REGION is empty or missing");
     expect(result.err).toContain("backup failed at: settings");
+    expect(result.out + result.err).not.toContain(MARK);
     const calls = box.calls();
-    // Nothing started: no /start ping, no secrets, no dump.
     expect(pings(calls)).toEqual([{ path: "/fail", note: "backup failed at: settings" }]);
-    expect(calls.map((call) => call.tool)).toEqual(["curl"]);
+    expect(of(calls, "podman").filter((call) => call.argv[0] === "run")).toEqual([]);
   });
 
-  test("without XDG_RUNTIME_DIR the user's own private /run/user directory is used, and only that", () => {
-    // The machine's real directory decides which way this goes: it passes only when it is this
-    // user's own, mode 700, and then the dump gets it.
-    const uid = process.getuid?.() ?? -1;
-    const directory = `/run/user/${uid}`;
-    let usable = false;
-    try {
-      const status = lstatSync(directory);
-      usable = status.isDirectory() && status.uid === uid && (status.mode & 0o777) === 0o700;
-    } catch {
-      usable = false;
-    }
-    const box = sandbox("own-runtime");
-    const result = box.run(["quadlet"], { XDG_RUNTIME_DIR: undefined });
-    if (usable) {
-      expect(result.code).toBe(0);
-      expect(of(box.calls(), "podman")[0]?.env.get("XDG_RUNTIME_DIR")).toBe(directory);
-    } else {
-      expect(result.code).toBe(1);
-      expect(result.err).toContain("backup failed at: settings");
-      expect(of(box.calls(), "podman")).toEqual([]);
-    }
-  });
-
-  test("a failed secrets sync stops before the dump and pings /fail naming secrets", () => {
-    const box = sandbox("secrets-fail");
-    box.knob("secrets");
-    const result = box.run(["quadlet"]);
+  test("an endpoint that isn't https is refused at settings", () => {
+    const box = home("http", { "backup-storage-endpoint": "http://bucket.invalid" });
+    const result = box.run();
     expect(result.code).toBe(1);
-    // secrets.sh names the setting, never its value.
-    expect(result.err).toContain("secrets: DATABASE_URL is required and empty");
-    expect(result.err).toContain("backup failed at: secrets");
-    const calls = box.calls();
-    expect(pings(calls)).toEqual([
-      { path: "/start", note: "backup starting" },
-      { path: "/fail", note: "backup failed at: secrets" },
-    ]);
-    expect(of(calls, "podman")).toEqual([]);
-    expect(uploads(calls)).toEqual([]);
+    expect(result.err).toContain("BACKUP_STORAGE_ENDPOINT must use https.");
+    expect(uploads(box.calls())).toEqual([]);
+  });
+
+  test("without XDG_RUNTIME_DIR a missing /run/user directory fails before anything runs", () => {
+    expect(existsSync(`/run/user/${NO_RUNTIME_UID}`)).toBe(false);
+    const box = home("no-runtime");
+    const result = box.run([], { XDG_RUNTIME_DIR: undefined, BACKUP_SIM_UID: NO_RUNTIME_UID });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain(
+      `/run/user/${NO_RUNTIME_UID} is not this user's private directory`,
+    );
+    // No secret can be read yet, so nothing is pinged.
+    expect(box.calls()).toEqual([]);
   });
 
   test("a failed pg_dump fails the run at dump, although age finished", () => {
-    const box = sandbox("dump-fail");
+    const box = home("dump-fail");
     box.knob("podman");
-    const result = box.run(["quadlet"]);
+    const result = box.run();
     expect(result.code).toBe(1);
     expect(result.err).toContain("backup failed at: dump");
     const calls = box.calls();
@@ -421,6 +522,18 @@ describe("ops/backup.sh quadlet's failures", () => {
     ]);
     expect(uploads(calls)).toEqual([]);
     expect(result.out).not.toContain("backup ok:");
+  });
+
+  test("a dump of 4096 bytes or less fails at the size guard", () => {
+    const box = home("small");
+    box.knob("small");
+    const result = box.run();
+    expect(result.code).toBe(1);
+    expect(pings(box.calls()).at(-1)).toEqual({
+      path: "/fail",
+      note: "backup failed at: dump size (100 bytes)",
+    });
+    expect(uploads(box.calls())).toEqual([]);
   });
 });
 
@@ -445,32 +558,27 @@ const composeBackup = async () => {
   return compose.services.backup;
 };
 
-describe("the Quadlet dump against Compose's backup service", () => {
+describe("tarubot-backup's dump against Compose's backup service and the release's other files", () => {
   test("the same image, TLS mode, pg_dump options and hardening", async () => {
     const backup = await composeBackup();
     const argv = dumpCall().argv;
-    // Compose's short name, fully qualified the way Docker resolves it, and pinned by digest on
-    // the Quadlet side only (Compose's own tag-only reference is a follow-up for the Compose-path
-    // cleanup, docs/OPEN_ITEMS.md).
-    expect(valuesAfter(argv, "--entrypoint")).toEqual(["sh"]);
     const image = argv[argv.indexOf("--entrypoint") + 2] ?? "";
     const [named, digest] = image.split("@");
     expect(named).toBe(`docker.io/library/${backup.image}`);
     expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    expect(backup.image).not.toContain("@");
     expect(valuesAfter(argv, "--env")).toContain(`PGSSLMODE=${backup.environment.PGSSLMODE}`);
-    // The same pg_dump call; only where the URL comes from differs.
-    const options = (command: string) => /pg_dump( --[^"]+) "/u.exec(command)?.[1];
+    // The same pg_dump options; only where the connection comes from differs.
+    const options = (command: string) =>
+      /exec pg_dump((?: --[a-z-]+(?:=[a-z]+)?)+)/u.exec(command)?.[1];
     expect(options(argv.at(-1) ?? "")).toBe(options(backup.entrypoint.join(" ")));
     expect(options(argv.at(-1) ?? "")).toBe(" --format=custom --no-owner --no-privileges");
-    // read_only, cap_drop: [ALL] and no-new-privileges, as Podman spells them.
     expect(backup.read_only).toBe(true);
     expect(argv).toContain("--read-only");
     expect(backup.cap_drop).toEqual(["ALL"]);
     expect(argv).toContain("--cap-drop=all");
     expect(backup.security_opt).toEqual(["no-new-privileges:true"]);
     expect(argv).toContain("--security-opt=no-new-privileges");
-    // The log driver the verification kept: `none`, as Compose's, so Podman stores no plaintext.
+    // `none`, as Compose's, so Podman stores no plaintext.
     expect(backup.logging.driver).toBe("none");
     expect(argv).toContain("--log-driver=none");
     // Nothing else gets in: no mount, capability, device, network or privilege flag.
@@ -491,91 +599,62 @@ describe("the Quadlet dump against Compose's backup service", () => {
       expect({
         flag,
         present: argv.some((arg) => arg === flag || arg.startsWith(`${flag}=`)),
-      }).toEqual({
-        flag,
-        present: false,
-      });
+      }).toEqual({ flag, present: false });
+    // The secrets as files instead of Compose's environment and /tmp tmpfs.
+    expect(backup.tmpfs).toEqual(["/tmp:size=1m,mode=0700"]);
+    expect(argv).toContain("--read-only-tmpfs=false");
+    // The URL is read from its file inside the container, and pg_dump's line ends with its
+    // options: no connection argument.
+    expect(argv.at(-1)).toContain("u=$(cat /run/secrets/database_url)");
+    expect(argv.at(-1)).toMatch(/\nexec pg_dump --format=custom --no-owner --no-privileges$/u);
   });
 
-  test("the documented differences: secrets as files, the CA from its mount, no tmpfs", async () => {
-    const backup = await composeBackup();
-    const argv = dumpCall().argv;
-    // Compose passes the URL and CA in the environment and writes the CA to a private /tmp tmpfs.
-    expect(Object.keys(backup.environment).sort()).toEqual([
-      "DATABASE_CA_CERT",
-      "DATABASE_URL",
-      "PGSSLMODE",
-      "PGSSLROOTCERT",
-    ]);
-    expect(backup.environment.PGSSLROOTCERT).toBe("/tmp/ca.crt");
-    expect(backup.tmpfs).toEqual(["/tmp:size=1m,mode=0700"]);
-    // Podman mounts both as secret files instead, so the job writes no file and needs no tmpfs.
-    expect(valuesAfter(argv, "--env")).toEqual([
-      "PGSSLMODE=verify-full",
-      "PGSSLROOTCERT=/run/secrets/database_ca_cert",
-    ]);
-    expect(valuesAfter(argv, "--secret").map((value) => value.split(",")[0])).toEqual([
+  test("its PostgreSQL image line is byte-equal to ops/backup.sh's", async () => {
+    const line = (text: string) => /^readonly PG_IMAGE=.*$/mu.exec(text)?.[0];
+    const ours = line(await read("ops/ansible/files/bot/tarubot-backup"));
+    expect(ours).toBe(`readonly PG_IMAGE=${PG_IMAGE}`);
+    expect(ours).toBe(line(await read("ops/backup.sh")));
+  });
+
+  test("its two secrets are the bot unit's database secrets, at the same targets", async () => {
+    const unit = parseUnit(
+      (
+        await renderStaging(`sha256:${"0".repeat(64)}`, {
+          applicationId: deployments.devbot.applicationId,
+          registrationScope: deployments.devbot.registrationScope,
+        })
+      ).container,
+      "tarubot.container",
+    );
+    const options = (value: string) => {
+      const [name, ...rest] = value.split(",");
+      const settings: Record<string, string | undefined> = Object.fromEntries(
+        rest.map((option) => option.split("=", 2) as [string, string]),
+      );
+      return { name: name ?? "", settings };
+    };
+    const mounted = new Map(
+      valuesOf(unit, "Container", "Secret").map((value) => {
+        const secret = options(value);
+        return [secret.name, secret.settings] as const;
+      }),
+    );
+    const backup = valuesAfter(dumpCall().argv, "--secret").map(options);
+    expect(backup.map((secret) => secret.name)).toEqual([
       "tarubot-database-url",
       "tarubot-database-ca-cert",
     ]);
-    expect(argv).toContain("--read-only-tmpfs=false");
-    expect(argv.at(-1)).toContain('"$(cat /run/secrets/database_url)"');
-  });
-});
-
-/** A `--secret` or `Secret=` value's options, by name, after the secret's own name. */
-const secretOptions = (value: string) => {
-  const [name, ...options] = value.split(",");
-  const settings: Record<string, string | undefined> = Object.fromEntries(
-    options.map((option) => option.split("=", 2) as [string, string]),
-  );
-  return { name: name ?? "", options: settings };
-};
-
-describe("the Quadlet dump against the release's other files", () => {
-  test("its two secrets are the bot unit's database secrets, at the same targets", async () => {
-    const unit = parseUnit(
-      await read("ops/quadlet/units/tarubot.container"),
-      "units/tarubot.container",
-    );
-    const mounted = new Map(
-      valuesOf(unit, "Container", "Secret").map((value) => {
-        const secret = secretOptions(value);
-        return [secret.name, secret.options] as const;
-      }),
-    );
-    const backup = valuesAfter(dumpCall().argv, "--secret").map(secretOptions);
-    expect(backup).toHaveLength(2);
-    for (const { name, options } of backup) {
+    for (const { name, settings } of backup) {
       const bot = mounted.get(name);
       expect({ name, bot: bot !== undefined }).toEqual({ name, bot: true });
-      expect(options.type).toBe("mount");
-      expect(options.type).toBe(bot?.type);
-      expect(options.target).toBe(bot?.target);
-      expect(options.mode).toBe(bot?.mode);
+      expect(settings.type).toBe(bot?.type);
+      expect(settings.target).toBe(bot?.target);
+      expect(settings.mode).toBe(bot?.mode);
       // The bot reads its copies as the image's bun user; pg_dump runs as the postgres image's
       // root, Podman's default owner for a secret file.
       expect(bot?.uid).toBe("1000");
-      expect(options.uid).toBeUndefined();
-      expect(options.gid).toBeUndefined();
+      expect(settings.uid).toBeUndefined();
     }
-  });
-
-  test("each synced setting is the secret the dump mounts, by secrets.sh's naming rule", () => {
-    // tarubot- and the setting's name in lower case with dashes (ops/quadlet/secrets.sh).
-    const synced = of(quadletRun().calls, "secrets.sh")[0]?.argv.slice(2) ?? [];
-    expect(synced.map((name) => `tarubot-${name.toLowerCase().replaceAll("_", "-")}`)).toEqual(
-      valuesAfter(dumpCall().argv, "--secret").map((value) => secretOptions(value).name),
-    );
-    const script = readFileSync(root("ops/quadlet/secrets.sh"), "utf8");
-    expect(script).toContain("tarubot-database-ca-cert");
-  });
-
-  test("ops/deploy.sh calls it as `quadlet` within the service's time limit, and waits on its unit", () => {
-    const deploy = readFileSync(root("ops/deploy.sh"), "utf8");
-    expect(deploy).toMatch(/timeout 900 "\$ROOT\/ops\/backup\.sh" quadlet /u);
-    expect(deploy).toContain("--filter label=io.tarubot.role=backup");
-    expect(deploy).toContain("systemctl --user is-active tarubot-backup.service");
   });
 });
 
@@ -606,55 +685,111 @@ function unitLines(text: string, file: string): string[] {
   return lines;
 }
 
-describe("the release's backup units (ops/systemd/)", () => {
-  const service = () =>
-    unitLines(readFileSync(root("ops/systemd/tarubot-backup.service"), "utf8"), "service");
-  const timer = () =>
-    unitLines(readFileSync(root("ops/systemd/tarubot-backup.timer"), "utf8"), "timer");
+describe("tarubot-backup's units (ops/ansible/files/bot/)", () => {
+  const service = async () =>
+    unitLines(await read("ops/ansible/files/bot/tarubot-backup.service"), "service");
+  const timer = async () =>
+    unitLines(await read("ops/ansible/files/bot/tarubot-backup.timer"), "timer");
 
-  test("the directory holds exactly the service and its timer", () => {
-    expect(filesUnder("ops/systemd")).toEqual(["tarubot-backup.service", "tarubot-backup.timer"]);
-  });
-
-  test("the service is one run of `backup.sh quadlet`, with no environment of its own", () => {
-    expect(service()).toEqual([
+  test("the service is one run of tarubot-backup, with no environment of its own", async () => {
+    expect(await service()).toEqual([
       "[Unit] Description=TaruBot's daily encrypted database backup",
       "[Unit] Wants=podman-user-wait-network-online.service",
       "[Unit] After=podman-user-wait-network-online.service",
       "[Service] Type=oneshot",
-      "[Service] ExecStart=%h/tarubot/ops/backup.sh quadlet",
+      "[Service] ExecStart=%h/.local/bin/tarubot-backup",
       "[Service] TimeoutStartSec=900",
     ]);
-    // The script reads .env itself; a unit setting would put the values in Podman's environment.
-    expect(service().some((line) => /\] Environment(File)?=/u.test(line))).toBe(false);
-    // The timer starts it; it has no [Install] of its own.
-    expect(service().some((line) => line.startsWith("[Install]"))).toBe(false);
-    // ExecStart runs the script straight from the clone, so it must stay executable.
-    expect(statSync(root("ops/backup.sh")).mode & 0o111).toBe(0o111);
+    // The script reads Podman's secrets itself; a unit setting would put values in its environment.
+    expect((await service()).some((line) => /\] Environment(File)?=/u.test(line))).toBe(false);
   });
 
-  test("the timer starts it at 04:30 UTC every day and catches up after downtime", () => {
-    expect(timer()).toEqual([
+  test("the timer starts it at 04:30 UTC every day and catches up after downtime", async () => {
+    expect(await timer()).toEqual([
       "[Timer] OnCalendar=*-*-* 04:30:00 UTC",
       "[Timer] Persistent=true",
       "[Install] WantedBy=timers.target",
     ]);
     // With no Unit=, the timer starts the service of its own name.
-    expect(timer().some((line) => line.includes("Unit="))).toBe(false);
+    expect((await timer()).some((line) => line.includes("Unit="))).toBe(false);
+  });
+});
+
+/**
+ * The dump container's program (tarubot-backup's DUMP), run by bash in POSIX mode with a stand-in
+ * pg_dump that prints its arguments and libpq's variables. The image runs it with BusyBox sh; the
+ * lab ran these same URLs there, and a real dump with a percent-encoded password
+ * (docs/VERIFICATION.md). bash stands in because it also expands \xHH in printf's %b.
+ */
+describe("tarubot-backup's dump program", () => {
+  const run = async (url: string) => {
+    const dir = join(scratch, `dump-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(join(dir, "database_url"), url);
+    writeFileSync(
+      join(dir, "bin", "pg_dump"),
+      `#!/bin/sh\nprintf '%s\\n' "argv=$*" "host=\${PGHOST-unset}" "port=\${PGPORT-unset}" "user=\${PGUSER-unset}" "password=\${PGPASSWORD-unset}" "database=\${PGDATABASE-unset}"\n`,
+    );
+    chmodSync(join(dir, "bin", "pg_dump"), 0o755);
+    const program = (await dumpProgram()).replace(
+      "/run/secrets/database_url",
+      join(dir, "database_url"),
+    );
+    const result = Bun.spawnSync(["bash", "--posix", "-c", program], {
+      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, LC_ALL: "C" },
+      stdin: "ignore",
+    });
+    return {
+      code: result.exitCode,
+      out: result.stdout.toString().trimEnd().split("\n"),
+      err: result.stderr.toString(),
+    };
+  };
+
+  test("hands every part of the URL to libpq's environment, decoded, and none to pg_dump's arguments", async () => {
+    const cases: [string, string[]][] = [
+      [
+        "postgresql://tarubot_staging:p%40ss%2Fw%3Aord%25x@db.example.org:27520/tarubot_staging?sslmode=verify-full",
+        ["db.example.org", "27520", "tarubot_staging", "p@ss/w:ord%x", "tarubot_staging"],
+      ],
+      [
+        "postgres://tarubot_staging:plain@db.example.org/tarubot_staging",
+        ["db.example.org", "unset", "tarubot_staging", "plain", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging:pw@[2001:db8::5]:27520/tarubot_staging",
+        ["2001:db8::5", "27520", "tarubot_staging", "pw", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging:a\\b%41B%zz:c@db.example.org:27520/tarubot%5Fstaging#x",
+        ["db.example.org", "27520", "tarubot_staging", "a\\bAB%zz:c", "tarubot_staging"],
+      ],
+      [
+        "postgresql://tarubot_staging@db.example.org:27520/tarubot_staging",
+        ["db.example.org", "27520", "tarubot_staging", "unset", "tarubot_staging"],
+      ],
+    ];
+    for (const [url, [host, port, user, password, database]] of cases) {
+      const r = await run(url);
+      expect({ url, code: r.code, err: r.err, out: r.out }).toEqual({
+        url,
+        code: 0,
+        err: "",
+        out: [
+          "argv=--format=custom --no-owner --no-privileges",
+          `host=${host}`,
+          `port=${port}`,
+          `user=${user}`,
+          `password=${password}`,
+          `database=${database}`,
+        ],
+      });
+    }
   });
 
-  test("the files name no host or address", () => {
-    for (const file of ["tarubot-backup.service", "tarubot-backup.timer"]) {
-      const text = readFileSync(root(`ops/systemd/${file}`), "utf8");
-      // A dotted name is a unit, a file or a release; anything else (a domain) would be a host.
-      const dotted = [...text.matchAll(/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/gu)].map((m) => m[0]);
-      const known = /\.(service|timer|target|sh|ts|md)$|^\d+\.\d+\.\d+$/u;
-      expect({ file, hosts: dotted.filter((name) => !known.test(name)) }).toEqual({
-        file,
-        hosts: [],
-      });
-      expect(text).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/u);
-      expect(text).not.toMatch(/[0-9a-f]*::[0-9a-f]|(?:[0-9a-f]{1,4}:){3,}[0-9a-f]{1,4}/iu);
-    }
+  test("refuses anything but a postgresql:// URL, naming no value", async () => {
+    const r = await run("mysql://user:secret@db.example.org/db");
+    expect({ code: r.code, out: r.out }).toEqual({ code: 2, out: [""] });
+    expect(r.err).toBe("DATABASE_URL is not a postgresql:// URL.\n");
   });
 });

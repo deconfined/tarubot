@@ -7,25 +7,19 @@
  * for the bot, its tools and its health check, and only /tmp/ca.crt for the backup job. These pin
  * the settings, and that no overlay file loosens them again.
  *
- * The Podman hosts run the bot as a rootless Quadlet unit (#50, ops/quadlet/), which must carry the
- * same hardening as Compose's bot service. The last tests pin that mapping, that its only mounts
- * are the secrets (2.33.0), read-only files only the bot's user reads, and that no target's drop-in
- * loosens it; tests/unit/quadlet.test.ts pins the rest of the unit.
+ * The Podman hosts run the bot as a rootless Quadlet unit (#50), which must carry the same hardening
+ * as Compose's bot service. Since #62 the release's ops/ansible/bot.yml renders it from
+ * ops/ansible/templates/bot/tarubot.container.j2, one file with no drop-ins. The last tests read
+ * staging's rendering (tests/fixtures/bot-render.ts) and pin that mapping, and that its only mounts
+ * are the secrets, read-only files only the bot's user reads; tests/unit/quadlet.test.ts pins the
+ * rest of the unit, and tests/unit/bot-play.test.ts tarubot-tool's matching flags.
  */
 import { describe, expect, test } from "bun:test";
 import { YAML } from "bun";
 import { z } from "zod";
-import {
-  directoriesUnder,
-  filesUnder,
-  keysOf,
-  parseUnit,
-  QUADLET,
-  root,
-  single,
-  unit,
-  valuesOf,
-} from "../fixtures/quadlet.js";
+import { deployments } from "../../src/config/deployment.js";
+import { renderStaging } from "../fixtures/bot-render.js";
+import { filesUnder, keysOf, parseUnit, single, valuesOf } from "../fixtures/quadlet.js";
 
 /** Read a repository file relative to this test. */
 const read = (path: string) => Bun.file(new URL(`../../${path}`, import.meta.url)).text();
@@ -127,6 +121,18 @@ test("no overlay file loosens the hardening", async () => {
   }
 });
 
+/** Staging's rendered unit, as bot.yml installs it. */
+const unit = async () =>
+  parseUnit(
+    (
+      await renderStaging(`sha256:${"0".repeat(64)}`, {
+        applicationId: deployments.devbot.applicationId,
+        registrationScope: deployments.devbot.registrationScope,
+      })
+    ).container,
+    "tarubot.container",
+  );
+
 describe("the Quadlet unit (#50)", () => {
   test("carries the bot's Compose hardening, one setting for each", async () => {
     const compose = await serviceOf("docker-compose.production.yml", "tarubot");
@@ -169,9 +175,9 @@ describe("the Quadlet unit (#50)", () => {
   });
 
   test("its only mounts are the secrets: read-only files that only the bot's bun user reads", async () => {
-    // Secret= (2.33.0) is the one mount the unit has, and each is a file of its own under
-    // /run/secrets, owned by uid and gid 1000 (the image's bun user) with mode 0400. Podman makes
-    // the mount read-only only because the container is (ReadOnly=true, pinned above).
+    // Secret= is the one mount the unit has, and each is a file of its own under /run/secrets,
+    // owned by uid and gid 1000 (the image's bun user) with mode 0400. Podman makes the mount
+    // read-only only because the container is (ReadOnly=true, pinned above).
     const secret =
       /^tarubot-[a-z-]+,type=mount,target=\/run\/secrets\/[a-z_]+,uid=1000,gid=1000,mode=0400$/u;
     const values = valuesOf(await unit(), "Container", "Secret");
@@ -179,33 +185,16 @@ describe("the Quadlet unit (#50)", () => {
     for (const value of values) expect(value).toMatch(secret);
   });
 
-  test("no target's drop-in loosens the hardening", async () => {
-    // Quadlet merges every tarubot.container.d/*.conf it finds in a linked directory into the unit,
-    // so a drop-in could switch ReadOnly off or hand a capability back, as a Compose overlay could.
-    // Drop-ins live only in the target directories; none sits under units/, which every host links.
-    const dropIns = filesUnder(QUADLET).filter((path) => /\.d\/[^/]+$/u.test(path));
-    expect(dropIns.length).toBeGreaterThan(0);
-    expect(directoriesUnder(QUADLET).filter((path) => path.startsWith("units/"))).toEqual([]);
-    for (const path of dropIns) {
-      expect(path).not.toStartWith("units/");
-      const lines = parseUnit(await Bun.file(root(`${QUADLET}/${path}`)).text(), path);
-      // A drop-in may add only its target's list and, on production, the GitHub App key's secret,
-      // mounted exactly as the unit mounts its own.
-      const production = path.startsWith("production/");
-      for (const line of lines)
-        expect({ path, section: line.section, key: line.key }).toEqual({
-          path,
-          section: "Container",
-          key: production && line.key === "Secret" ? "Secret" : "EnvironmentFile",
-        });
-      expect(valuesOf(lines, "Container", "Secret")).toEqual(
-        production
-          ? [
-              "tarubot-github-app-private-key,type=mount,target=/run/secrets/github_app_private_key,uid=1000,gid=1000,mode=0400",
-            ]
-          : [],
-      );
-      expect(valuesOf(lines, "Container", "EnvironmentFile")).toHaveLength(1);
-    }
+  test("the release ships no drop-in, and bot.yml installs only the one unit", async () => {
+    // Quadlet merges every tarubot.container.d/*.conf beside the unit into it, so a drop-in could
+    // switch ReadOnly off or hand a capability back, as a Compose overlay could.
+    const quadlet = /\.(container|volume|network|kube|image|build|pod)$|\.container\.d\//u;
+    expect(filesUnder("ops/ansible").filter((path) => quadlet.test(path))).toEqual([]);
+    const play = await read("ops/ansible/bot.yml");
+    expect(play.match(/\/\.config\/containers\/systemd\/[^"\s]+/gu)).toEqual([
+      "/.config/containers/systemd/tarubot.container",
+      "/.config/containers/systemd/tarubot.container",
+      "/.config/containers/systemd/tarubot.container",
+    ]);
   });
 });

@@ -1,6 +1,8 @@
-# Omit repository metadata and local build/test working state.
+# Omit repository metadata and local build/test working state, including OpenTofu's provider
+# downloads from a local `tofu init` (#62).
 .git
 **/.git
+**/.terraform
 .serena
 .cache
 node_modules
@@ -18,10 +20,6 @@ artifacts
 **/*.env
 # The non-secret templates are unit-tested inside the build stage; the runtime stages never copy them.
 !.env.example
-# So are the Quadlet unit's setting lists (#50), which hold names and fixed public values only.
-!ops/quadlet/units/tarubot.env
-!ops/quadlet/production/target.env
-!ops/quadlet/staging/target.env
 tarubot_backup.sql
 *.log
 .DS_Store

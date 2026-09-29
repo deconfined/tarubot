@@ -17,12 +17,15 @@
  * Since 2.33.0 the deploy plan verifies the signature with `gh attestation verify` before either
  * deploy job (tests/unit/deploy-workflow.test.ts pins its flags).
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
 import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
+
+// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
+setDefaultTimeout(120_000);
 
 /** A repository path, resolved relative to this test. */
 const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));

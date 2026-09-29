@@ -1,0 +1,25 @@
+# TaruBot's daily database backup on a Quadlet host (#50; #62), as a systemd user service of the
+# tarubot user: tarubot-backup.timer starts it every night, a preflight starts it once, and
+# `systemctl --user start tarubot-backup.service` runs one by hand (it waits, and fails when the
+# backup fails). `journalctl --user -u tarubot-backup` shows its runs. ops/ansible/bot.yml installs
+# it into ~/.config/systemd/user from the release it deploys.
+#
+# It runs ~/.local/bin/tarubot-backup, whose one-off `podman run` dump streams into age; the dump is
+# never a Quadlet unit, whose container output would go to a log. tests/unit/backup-quadlet.test.ts
+# pins this file. Comments stay on their own lines: systemd has no inline comments.
+
+[Unit]
+Description=TaruBot's daily encrypted database backup
+# The dump reaches the managed database, the image registry and the bucket, so it waits for the
+# network as the bot's Quadlet unit does (Podman's user-level wait unit).
+Wants=podman-user-wait-network-online.service
+After=podman-user-wait-network-online.service
+
+[Service]
+# One run per start: systemd reports it activating while it runs, then inactive or failed.
+Type=oneshot
+# The script reads its settings from Podman's secrets itself, so this unit sets no environment:
+# nothing secret enters the service's environment, which Podman and conmon would inherit.
+ExecStart=%h/.local/bin/tarubot-backup
+# Fifteen minutes for the dump and the uploads.
+TimeoutStartSec=900

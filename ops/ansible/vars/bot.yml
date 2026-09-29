@@ -1,0 +1,92 @@
+---
+# bot.yml's fixed values (#62). Each release deploys with its own copy of bot.yml and of this
+# file, so a rollback brings back that release's unit and settings. Nothing here is secret, and
+# nothing here names a host or a Discord ID. .github/workflows/host.yml's Bot step and
+# tests/unit/bot-play.test.ts and deploy-workflow.test.ts keep the names below in step.
+
+# The one repository the bot runs from. The unit, tarubot-tool and the image file accept nothing
+# else, so no setting can make a host run another package.
+tb_image_repository: ghcr.io/deconfined/tarubot
+
+# The six extra vars host.yml passes (-e NAME=value), all public. bot.yml checks each one before
+# it reads anything else.
+tb_inputs:
+  - tarubot_target
+  - tarubot_action
+  - tarubot_version
+  - tarubot_commit
+  - tarubot_digest
+  - tarubot_result
+
+# What bot.yml does. host.yml's fourth action, configure, runs site.yml only and never this play.
+tb_actions:
+  - deploy
+  - bot
+  - preflight
+
+# Every secret any target reads: exactly the environment variables host.yml's Bot step exports
+# from the job's GitHub environment, each from the secret tb_secret_source names for it, or else
+# from the secret of the same name. bot.yml reads them only with lookup('ansible.builtin.env',
+# NAME), in no_log tasks. src/config/secrets.ts's FILE_SETTINGS plus the backup's five.
+tb_secret_env:
+  - BACKUP_STORAGE_ACCESS_KEY
+  - BACKUP_STORAGE_ENDPOINT
+  - BACKUP_STORAGE_REGION
+  - BACKUP_STORAGE_SECRET_KEY
+  - DATABASE_CA_CERT
+  - DATABASE_URL
+  - DISCORD_TOKEN
+  - GITHUB_APP_PRIVATE_KEY
+  - GITHUB_REPORTS_TOKEN
+  - HEALTHCHECKS_BACKUP_URL
+  - HEALTHCHECKS_PING_URL
+
+# The GitHub secret behind each tb_secret_env name that GitHub won't take as a secret's name (it
+# refuses every name that starts with GITHUB_). host.yml's Bot step maps each one back, as in
+# `GITHUB_REPORTS_TOKEN: secrets.REPORTS_GITHUB_TOKEN`, so the variable, the Podman secret and the
+# NAME_FILE line keep the bot's own name. The refusals name the secret the owner sets.
+tb_secret_source:
+  GITHUB_APP_PRIVATE_KEY: SUGGEST_APP_PRIVATE_KEY
+  GITHUB_REPORTS_TOKEN: REPORTS_GITHUB_TOKEN
+
+# The PEMs, the only values that may span lines. Every other value must be one run of
+# non-whitespace characters: a stray space or newline (as `gh secret set < file` leaves) is
+# refused as malformed-secret, because src/config/secrets.ts strips only the one newline Podman's
+# copy gains.
+tb_multiline_secrets:
+  - DATABASE_CA_CERT
+  - GITHUB_APP_PRIVATE_KEY
+
+# What a preflight needs besides the backup's settings: the database's URL and CA, enough for
+# migrate.js and one backup before any Discord token exists.
+tb_preflight_secrets:
+  - DATABASE_CA_CERT
+  - DATABASE_URL
+
+# Fixed on every target, as in docker-compose.production.yml. Values stay quoted strings: the
+# settings file holds them as text, and tests/fixtures/bot-render.ts refuses anything else.
+tb_base_settings:
+  HEALTH_PORT: "3000"
+  ENABLE_EFFECTS: "true"
+
+# The health wait after a restart: up to 36 checks 5 s apart (three minutes, past the unit's 60 s
+# start period), then 60 s more before the bot must still be the same healthy container.
+tb_health:
+  retries: 36
+  delay: 5
+  settle: 60
+
+# The tidy step removes TaruBot release images older than this that no container uses: those whose
+# org.opencontainers.image.source label (publish.yml sets it on every release) is this, so the
+# backup's pinned PostgreSQL image stays.
+tb_prune_until: 168h
+tb_image_source: https://github.com/deconfined/tarubot
+
+# Run with `bun -e` in the release image (no network, no secret): it prints the application and
+# the registration scope the image's own src/config/deployment.ts gives the target's
+# TARUBOT_ENVIRONMENT, so no Discord ID is copied into this repository's Ansible files.
+# YAML folds it into one line.
+tb_identity_script: >-
+  const{resolveDeployment:r}=await import("/app/dist/src/config/deployment.js");
+  const d=r({TARUBOT_ENVIRONMENT:process.env.TARUBOT_ENVIRONMENT});
+  console.log(JSON.stringify({applicationId:d.applicationId,registrationScope:d.registrationScope}))

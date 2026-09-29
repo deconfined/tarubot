@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.35.0 channel visibility without Administrator",
-  "objective": "2.35.0 (#46) adds /setup overrides (a dry run by default) and a visibility section in /config validate, so TaruBot can see every channel and drop Administrator. Officers are alerted when a channel goes unseen and told when it returns. There is no migration and nothing changes for members.",
+  "title": "Session: 2.36.0 the simple pipeline",
+  "objective": "2.36.0 (#62) moves staging onto the simple pipeline: OpenTofu builds the VM, cloud-init sets its keys, Ansible from a GitHub runner configures it and deploys the bot, and GitHub environments hold the secrets. There is no bot change and no migration; production keeps its Compose path.",
   "user": [
-    "On a throwaway server (Community on, one public #chat, one public officer channel), add DevBot with 105630518288 plus Administrator, then set TEST_GUILD_ID to it.",
-    "Work the private, forum, voice and stage cases: run /setup overrides dry and then confirm:true, /config validate, a deliberate deny, and Administrator off then on."
+    "Before merging: delete STAGING_DEPLOY_ENABLED and staging's old deploy key and variables; retire the old staging host.",
+    "After merging: create the infra-plan and infra environments, run the import-only apply, build staging, pin its host key, then configure and preflight it."
   ],
   "assistant": [
-    "Build DevBot at 2.35.0 (no migration), register the guild commands, and confirm 21 roots and 47 paths.",
-    "Verify the officer alert about six minutes after a channel is hidden and the recovery line, readiness visibility {missing, onboardingPending}, then restore the throwaway."
+    "Build DevBot at 2.36.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",
+    "Read the staging runs' logs (read-only), grep them for names, addresses and secrets, and record the verification."
   ],
   "bot": [
-    "Post the missing-visibility officer alert when a managed or saved channel is hidden, and the restored line when it clears.",
+    "Run 2.35.0 in production until the 2.36.0 deploy; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

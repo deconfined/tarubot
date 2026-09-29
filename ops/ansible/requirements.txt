@@ -1,17 +1,23 @@
-# ansible-core for running TaruBot's host playbook from a workstation (#50), pinned with hashes to
-# 2.16.19: the 2.16 series AlmaLinux 10.2's AppStream ships to the hosts, at the release with the
-# CVE-2026-11332 fix (AlmaLinux backports it into its own 2.16.16-2.el10_2.1, which PyPI doesn't
-# have). Python 3.12, as on the hosts. Install into a fresh virtual environment:
+# ansible-core for the controller of TaruBot's playbooks (#62), pinned with hashes: the GitHub
+# runner in the Deploy workflow's host job (.github/workflows/host.yml), or the owner's machine for
+# a hand run while Actions is down. The hosts carry no Ansible, only Python. ansible-core 2.21 is
+# the newest stable series on PyPI; it needs Python 3.12 or newer on the controller (the runner's
+# and AlmaLinux 10's) and drives the hosts' Python 3.12. requirements-lint.txt pins the same
+# ansible-core. The host job installs it with:
 #
-#   python3.12 -m venv ~/tarubot-ansible
-#   ~/tarubot-ansible/bin/pip install --require-hashes --no-deps -r ops/ansible/requirements.txt
+#   python3 -m venv "$RUNNER_TEMP/ansible"
+#   "$RUNNER_TEMP/ansible/bin/pip" install --no-deps --require-hashes \
+#     -r ops/ansible/requirements.txt
 #
-# Regenerate when the hosts' AppStream series moves or a 2.16 release fixes a security advisory:
-#   uv pip compile --generate-hashes --python-version 3.12 --no-header --no-annotate \
-#     <(echo ansible-core==X.Y.Z) -o ops/ansible/requirements.txt   (then restore this header)
-ansible-core==2.16.19 \
-    --hash=sha256:5125f26412039ffb99a3a7723618535ab80e6ef38944aa2453997350388f4ef4 \
-    --hash=sha256:d7a32ba0f96f9c6582b7ff159a4a6f0e694662cfc4840497c88fed63bf58cd14
+# This file counts as runtime in the Deploy plan: it feeds staging's Configure. Regenerate it for a
+# new ansible-core release (and requirements-lint.txt with it), with uv in a scratch directory:
+#
+#   printf 'ansible-core==X.Y.Z\n' > in.txt
+#   uv pip compile --generate-hashes --python-version 3.12 --no-header --no-annotate in.txt \
+#     -o ops/ansible/requirements.txt   (then restore this header)
+ansible-core==2.21.4 \
+    --hash=sha256:81a9329f4f12cfa5008dcab5d1bf23ae69b7effc08c0f00048ab2461147ae95a \
+    --hash=sha256:ebe74d9c8fadcb41ad2151e031bf1e785e3098aaa015019b4e19a0a96f0dcc4f
 cffi==2.1.1 \
     --hash=sha256:046bfc24911b37851ee1b51aab8bffe713d89c68c6a057b09484ce9fd5f69b4e \
     --hash=sha256:06c72bb76605a4b0cd0aad6930b69d4baf7dd5d806cfc409b824191099700e66 \
@@ -333,6 +339,6 @@ pyyaml==6.0.3 \
     --hash=sha256:f7057c9a337546edc7973c0d3ba84ddcdf0daa14533c2065749c9075001090e6 \
     --hash=sha256:fa160448684b4e94d80416c0fa4aac48967a969efe22931448d853ada8baf926 \
     --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
-resolvelib==1.0.1 \
-    --hash=sha256:04ce76cbd63fded2078ce224785da6ecd42b9564b1390793f64ddecbe997b309 \
-    --hash=sha256:d2da45d1a8dfee81bdd591647783e340ef3bcb104b54c383f70d422ef5cc7dbf
+resolvelib==1.2.1 \
+    --hash=sha256:7d08a2022f6e16ce405d60b68c390f054efcfd0477d4b9bd019cc941c28fad1c \
+    --hash=sha256:fb06b66c8da04172d9e72a21d7d06186d8919e32ae5ab5cdf5b9d920be805ac2

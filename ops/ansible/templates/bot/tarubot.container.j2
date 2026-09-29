@@ -1,0 +1,76 @@
+# TaruBot as a rootless Quadlet unit under the tarubot user's systemd (#50; #62 moved it into the
+# release's ops/ansible/bot.yml). Podman's generator turns the installed copy,
+# ~/.config/containers/systemd/tarubot.container, into tarubot.service. bot.yml renders this
+# template into ~/.config/tarubot/candidate/ first, checks it with Quadlet's dry run and only then
+# installs it, so a rollback installs that release's own unit. tests/unit/quadlet.test.ts and
+# tests/unit/container-hardening.test.ts keep it in step with the bot's service in
+# docker-compose.production.yml, and CI runs Podman's generator over the test renderer's copy
+# (tests/fixtures/bot-render.ts). Comments stay on their own lines, because systemd has no inline
+# comments, and every Jinja block tag sits alone on its line, the subset that renderer supports.
+
+[Unit]
+Description=TaruBot
+# Docker's unless-stopped policy never gives up, and neither does this: no start rate limit.
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=tarubot
+# The one repository at the digest the Deploy plan verified and bot.yml pulled and checked.
+Image={{ tb_image_repository }}@{{ tarubot_digest }}
+# A start or a reboot never contacts GHCR.
+Pull=never
+# The container gets only this file's settings (Podman's env-file format, read literally). bot.yml
+# writes it together with this unit, just before the restart.
+EnvironmentFile=%h/.config/tarubot/tarubot.env
+# The secrets reach the bot as files, never as environment variables, which every dependency in
+# the process could read. bot.yml writes each Podman secret from the job's environment; the
+# settings file's NAME_FILE lines tell the bot where each one is. Each file belongs to the image's
+# bun user (uid and gid 1000) and only it may read it. The mount is read-only only because the
+# container is (ReadOnly=true): Podman bind-mounts its per-container copy of the secret and adds ro
+# to that mount only for a read-only container.
+{% for mount in tb_mounts %}
+Secret={{ mount.secret }},type=mount,target=/run/secrets/{{ mount.target }},uid=1000,gid=1000,mode=0400
+{% endfor %}
+# Nothing from Podman's own environment or a containers.conf default passes through.
+EnvironmentHost=false
+HttpProxy=false
+# Container hardening (2.30.3, #51), as in docker-compose.production.yml: a read-only root with no
+# tmpfs at all. ReadOnlyTmpfs= defaults to true, which would mount writable tmpfs on /dev, /dev/shm,
+# /run, /tmp and /var/tmp; false mounts none and leaves /dev/shm read-only too.
+ReadOnly=true
+ReadOnlyTmpfs=false
+DropCapability=all
+NoNewPrivileges=true
+# Compose's health check, with the same exec array (JSON, without Docker's CMD word) and timings.
+# Podman runs it from a transient systemd timer, which needs the user's lingering.
+HealthCmd=["bun","-e","const r=await fetch('http://localhost:3000/health/ready');process.exit(r.ok?0:1)"]
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=3
+# A new bot waits, unready, for the writer lease while the previous one stops.
+HealthStartPeriod=60s
+# An unhealthy bot keeps running, as under Docker; only an exit makes systemd restart it.
+HealthOnFailure=none
+# Compose's stop_grace_period, below TimeoutStopSec so systemd never kills `podman rm` itself.
+StopTimeout=30
+# The container's output goes to the user journal, where a removed container's lines stay.
+LogDriver=journald
+
+[Service]
+# Before every start, crash restarts and reboots included: migrate.js in this unit's own image,
+# with the same settings and secrets, after systemd has stopped the previous container (which frees
+# the writer lease). Pending migrations apply in one transaction; with none it changes nothing.
+# A failure stops the start, and Restart= tries again.
+ExecStartPre=%h/.local/bin/tarubot-tool --image {{ tb_image_repository }}@{{ tarubot_digest }} migrate.js
+# The migration and the start together.
+TimeoutStartSec=15min
+Restart=always
+RestartSec=1s
+# Restarts back off from 1 s to 60 s over six steps.
+RestartSteps=6
+RestartMaxDelaySec=60s
+TimeoutStopSec=60
+
+[Install]
+# Generated units can't be enabled; the generator applies this at every daemon-reload and boot.
+WantedBy=default.target

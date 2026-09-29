@@ -7,9 +7,16 @@
 - The production application **TaruBot**, `965294750741692416`, is no longer in this guild (404 in the 2.13.0 rollout).
 - DevBot's isolated PostgreSQL database is `tarubot_dev`.
 - `docker-compose.devbot.yml` supplies the development database and requires explicit test-guild scope.
-- **The staging host** ([#50](https://github.com/deconfined/tarubot/issues/50)) will take DevBot over at the DevBot move, as a rootless Quadlet unit against its own `tarubot_staging` database under the `staging` tool profile ([HOSTING.md](HOSTING.md#staging-host-50)). The 2.32.0 playbook configured that host on 2026-09-26, but no bot runs there, and it holds no DevBot token. 2.33.0 brings what a bot there needs (the Quadlet deploy path, the Deploy workflow's staging job, Podman secrets, the backup timer and the playbook's `start` tag); the move follows 2.34.0's pull unit and the rebuild from cloud-init and OpenTofu. It is a planned stop, dump and restore, then the start tag, with DevBot's token reset so it never runs in two places ([HOSTING.md](HOSTING.md#owner-steps-before-the-move)). After it, staging takes every merge production is asked about, and each staging run registers the commands in this guild. Until then DevBot runs here as below, and its local `devbot` profile is unchanged.
-- **2.34.0 changes nothing in DevBot's procedure either:** it adds the staging host's pull unit and no bot code. At the DevBot move, the pull unit on staging is paused around the start tag ([HOSTING.md](HOSTING.md#owner-steps-before-the-move)).
-- **2.33.0 changes nothing in DevBot's procedure.** DevBot's `.env` keeps the plain settings; the `NAME_FILE` forms are for Quadlet hosts (and optional elsewhere). Updating DevBot to 2.33.0 is a restart with no migration and no command change.
+- **The staging host** ([#50](https://github.com/deconfined/tarubot/issues/50), [#62](https://github.com/deconfined/tarubot/issues/62)) takes DevBot over at the DevBot move, planned as **2.36.2**, as a rootless Quadlet unit against its own `tarubot_staging` database under the `staging` tool profile ([HOSTING.md](HOSTING.md#staging-host-50)). Since 2.36.0 that host runs on the simple pipeline: OpenTofu builds it, the Deploy workflow configures it and deploys the bot with each release's own `bot.yml`, and every secret, DevBot's token included, lives in the `staging` GitHub environment. The move's new shape ([HOSTING.md](HOSTING.md#not-yet)):
+  1. staging's other secrets and a `preflight` on the rebuilt host first;
+  2. local DevBot moves to that same release and stops, and the schema heads are checked equal;
+  3. @deconfined restores its database on the staging host;
+  4. @deconfined resets DevBot's token in the Developer Portal and puts the new one only into the `staging` environment, so it never runs in two places, then dispatches a `bot` run;
+  5. at least a week of soak, then a patch retires local DevBot.
+
+  After it, staging deploys every merge at once, before production's approval, and each staging run registers the commands in this guild; that is where changes are tried (#62 answer 6). Until then DevBot runs here as below, and its local `devbot` profile is unchanged.
+- **2.36.0 changes nothing in DevBot's procedure:** no bot change, no migration and no command change. DevBot still runs 2.34.0 (the 2.35.0 update and rehearsal were skipped), so its next update, on @deconfined's go-ahead, goes to 2.36.0 or later with the standard steps and the 2.35.0 checks below. The 2.33.0 start tag and the 2.34.0 pull unit, which the older plan for the move used, are gone.
+- **2.33.0 changes nothing in DevBot's procedure.** DevBot's `.env` keeps the plain settings; the `NAME_FILE` forms are for the staging container (and optional elsewhere).
 
 Use the development overlay consistently for this running instance:
 
@@ -626,6 +633,8 @@ DevBot has no backup service (that is production's `backup`). After the producti
 - A read-only `docker inspect` later the same morning showed the bot on `ghcr.io/deconfined/tarubot:2.34.0` with that image ID, healthy.
 
 ### 2.35.0 update procedure (#46) — pending
+
+**Not run at 2.35.0.** @deconfined deployed 2.35.0 to production on 2026-09-28 and ran its least-privilege steps there directly, so neither this update nor the rehearsal below ran, and DevBot stayed on 2.34.0. Its next update goes to 2.36.0 or later: the steps below still apply, with that version's tag (2.36.0 changes no command and no schema).
 
 2.35.0 ([#46](https://github.com/deconfined/tarubot/issues/46), branch `feat/setup-overrides-2.35.0` from `3bd1d0c`) splits `/setup` into `/setup onboarding` and `/setup overrides` (both dry runs unless `confirm:true`), adds `/config validate`'s "TaruBot's role" and "Visibility" sections, the officer alert about missing channel overrides and readiness's `visibility` counts, and starts new servers with the role layout off. No migration: the schema stays `010_status_notices.sql`. The update runs in this VM's own checkout, and each step that stops, starts or registers needs @deconfined's go-ahead.
 

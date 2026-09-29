@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The detachment check for tests/unit/deploy-script.test.ts: start the stand-in worker through
 # ops/deploy.sh's real launch while holding the run lock, then hang up this whole process group,
-# as sshd's session teardown would. Env: DEPLOY_SCRIPT, DEPLOY_STATE, DEPLOY_SELF, REQUEST, and
-# DEPLOY_MODE (the forced command's words, which launch appends).
+# as sshd's session teardown would. Env: DEPLOY_SCRIPT, DEPLOY_STATE, DEPLOY_SELF, REQUEST. The
+# Compose mode: the forced command has no words, so launch appends none.
 #
 # The hangup waits (60 s at most) until the stand-in has written stub-started, which it does after
 # setsid has exec'd it, in its own session when launch detaches it. Hanging up earlier could reach
@@ -13,8 +13,7 @@ set -Eeuo pipefail
 # shellcheck source=/dev/null
 source "$DEPLOY_SCRIPT"
 STATE=$DEPLOY_STATE SELF=$DEPLOY_SELF
-read -r -a words <<<"${DEPLOY_MODE-}"
-set_mode "${words[@]}"
+set_mode
 parse_request "$REQUEST"
 RUN=$STATE/runs/$R
 mkdir -p "$RUN"

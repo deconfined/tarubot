@@ -16,8 +16,8 @@
 # (wrong). Two knobs act from the first `up` on and are used up by it: ps_after_up (fail: ps
 # fails; two: ps lists a second container; none: ps lists nothing, until the next `up`) and
 # inspect_after_up (fail: the container that `up` created can't be inspected). Every call is also
-# appended to $SIM/runtime as "docker <arguments>", where the Quadlet stubs log theirs, so a test
-# can show that each runtime's path calls only its own tools.
+# appended to $SIM/runtime as "docker <arguments>", where the not-compose stand-in logs any call to
+# a Quadlet tool, so a test can show that the Compose path calls docker alone.
 set -euo pipefail
 S=$SIM
 printf 'docker %s\n' "$*" >>"$S/runtime"

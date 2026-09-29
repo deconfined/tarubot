@@ -1,69 +1,12 @@
 ---
-# Example host settings for TaruBot's host playbook (#50), passed with -e @host.yml. These are the
-# playbook's only settings; site.yml refuses a run where one is missing or malformed. Copy the file
-# outside the repository and replace the placeholders. Public keys aren't secrets, but they stay out
-# of the public repository. On a host the pull unit manages (2.34.0) this file is
-# /etc/tarubot/host.yml, owned by root with mode 600, and an operator's copy for hand runs must
-# match it: the pull unit's next run applies the host's own copy again.
+# site.yml's one setting (#62), for a hand run from the owner's machine while Actions is down:
 #
-# Keep the file in this plain form, which the pull unit reads without a YAML library before Ansible
-# reads it: printable ASCII and line feeds only; only the keys below, each once, in one document;
-# after a key's colon nothing (a list follows), [], a quoted string or one word without spaces, and
-# an optional comment, never continued on the next line; values with spaces quoted; lists in block
-# form; and no anchors, aliases, tags, merge keys, block scalars or flow mappings. The pull unit
-# stops (needs-you settings) at anything else. A key a later release adds goes in only once the
-# host runs that release.
+#   ansible-playbook -i INVENTORY site.yml -e @host.example.yml
+#
+# or, the same, -e tarubot_role=staging. The Configure step of .github/workflows/host.yml passes it
+# with -e itself. site.yml reads no secrets and has no other settings: cloud-init owns the
+# hostname, root's keys and root's password, and bot.yml takes the bot's settings.
 
-# staging or production. Staging reboots itself after updates that need it; production never
-# reboots on its own, and its automatic updates skip the container stack and ansible-core.
+# staging or production. The two differ only in when dnf-automatic runs: staging at 06:00 UTC
+# (plus up to an hour), production at 10:00 UTC.
 tarubot_role: staging
-
-# The host's name: one lowercase DNS label or name, at most 64 characters.
-tarubot_hostname: tarubot-staging.example.org
-
-# The deploy key's public line, without options: the playbook adds restrict and the forced command
-# (ops/deploy.sh in this role's mode). Empty writes no deploy line.
-tarubot_deploy_key_public: ""
-# tarubot_deploy_key_public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_ME tarubot-deploy-github"
-
-# Operator keys for the tarubot user, one public key line each, without options.
-tarubot_operator_keys: []
-# tarubot_operator_keys:
-#   - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_ME operator@workstation"
-
-# root's break-glass keys, one public key line each, without options. A FIDO key (sk-...) gets
-# verify-required, so every use needs its PIN or biometric. Keys outside the playbook's block in
-# /root/.ssh/authorized_keys stay; an empty list removes only the block.
-tarubot_root_keys: []
-# tarubot_root_keys:
-#   - "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t_REPLACE_ME break-glass"
-
-# The pull unit's signers (2.34.0, question 14): one public key line each, ssh-ed25519 or
-# sk-ssh-ed25519@openssh.com, without options. A merged pull request's head that changes
-# ops/ansible/ must carry an SSH signature by one of these keys, or the pull unit stops before it
-# (needs-you unsigned-host-change). The pull unit reads them from this file at every run (the
-# playbook also writes them to /etc/tarubot/allowed_signers for people); the repository never names
-# them. Empty stops the pull unit at any host change (needs-you no-signers). To rotate a key, edit
-# this list as root on each host: the next poll checks against the new list, after it has
-# re-applied the commit it already runs with the edited settings.
-tarubot_allowed_signers: []
-# tarubot_allowed_signers:
-#   - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_ME signer@workstation"
-
-# Not settings, and never kept in this file: these go on the command line of a single run
-# (site.yml's header). A start variable kept here would ask every run, the pull unit's included, to
-# start the bot.
-#   -e tarubot_start_version=X.Y.Z -e tarubot_start_digest=sha256:<64 hex digits>
-#       The first start, without --skip-tags start: a release and its image index digest, both
-#       verified on the workstation with gh attestation verify first. Both or neither; the start
-#       refuses a host where the bot has run before. On a host the pull unit manages, pause the
-#       unit first (tarubot-host-config pause REASON), as for every hand run.
-#   -e tarubot_host_lock_held=true
-#       Only for a caller that already holds /run/tarubot/host.lock, such as the pull unit, so the
-#       play's own user-manager commands don't wait on their caller. The run checks that something
-#       holds the lock, and the start refuses the flag.
-#   -e tarubot_source=... -e tarubot_commit=... -e tarubot_run=... -e tarubot_pull_role=...
-#   -e tarubot_pull_signers=...
-#       The pull unit's own run variables: who ran the playbook (pull, bootstrap or emergency),
-#       the commit, its run id, and the role and the signers' digest it read from this file. A
-#       hand run passes none of them (tarubot_source is then manual).

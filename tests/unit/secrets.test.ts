@@ -1,6 +1,7 @@
 /**
  * File-delivered secrets (2.33.0, #50): on a Quadlet host the six secrets arrive as Podman secrets
- * mounted as files, and NAME_FILE names each file (ops/quadlet/README.md "Secrets"). These pin the
+ * mounted as files, and NAME_FILE names each file (since #62 the staging container's, written by
+ * ops/ansible/bot.yml from the job's environment; tests/unit/bot-play.test.ts). These pin the
  * resolver in src/config/secrets.ts and every reader that goes through it:
  * - the rules: the file's text less one newline, both forms refused, an empty NAME_FILE unset,
  *   failures that name settings only, and process.env never written;
@@ -126,7 +127,7 @@ describe("the resolver", () => {
     const path = `${SECRET_DIR}/discord_token`;
     const read = (text: string) =>
       secretSetting({ DISCORD_TOKEN_FILE: path }, "DISCORD_TOKEN", files({ [path]: text }));
-    // secrets.sh writes the value and one newline.
+    // bot.yml's `podman secret create` gets the value on stdin, with the newline Ansible adds.
     expect(read(`${TOKEN}\n`)).toBe(TOKEN);
     // A value's own final newline survives, and a file without one is taken as it is.
     expect(read(`${CA}\n\n`)).toBe(`${CA}\n`);
@@ -347,7 +348,7 @@ describe("configuration()", () => {
         expect(configuration({ ...env, DATABASE_CA_CERT_FILE: paths.ca })).toEqual(
           PLAIN_CONFIGURATION,
         );
-        // secrets.sh's empty value (a lone newline) is no CA at all.
+        // An empty value, a lone newline, is no CA at all.
         expect(() => configuration({ ...env, DATABASE_CA_CERT_FILE: paths.empty })).toThrow(
           "DATABASE_CA_CERT: required",
         );
