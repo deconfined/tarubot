@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.7 existing database adoption guards",
-  "objective": "Implement import-only adoption of existing managed PostgreSQL using exact owner-supplied settings and durable verification. Rehearse host behavior only in newly created disposable Proxmox guests; preserve production Compose and approval jobs and keep replacement activation fenced.",
+  "title": "Session: 2.36.8 durable SSH trust foundation",
+  "objective": "Implement owner-fenced one-shot SSH enrollment, durable encrypted trust generations, owned SSHFP publication and fresh local DNSSEC evidence checks. Keep operational adapters and release activation fenced; continue only new marked disposable-lab rehearsals.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Test import-only plans and one-field mutations, preserve the access-control state address, and verify intent/saved-plan/no-change completion using invented evidence.",
+    "Exercise canonical Ed25519/SSHFP, owner authorization, one-shot observation, journal/readback failures, rotation, DNS publication and freshness with invented records.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.36.7**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.8**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.8 — Durable SSH trust foundation
+
+- Add a separate per-target encrypted trust journal, canonical Ed25519/SSHFP checks and owner-fenced one-shot enrollment generations. Persist intent and consumption before observing keys, retain immutable linked history, and refuse missing, stale, conflicting or interrupted evidence.
+- Bind exact owned SSHFP publication, pinned local DNSSEC evidence and independent successful enrollment-run evidence before connection authority. Exercise storage/readback failures and expiry across awaited operations. Operational adapters and activation remain fenced; no live enrollment or DNS edit is performed.
 
 ## 2.36.7 — Existing database adoption guards
 
