@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.13 scoped descriptor transport",
-  "objective": "Implement target-isolated descriptor storage and separate sealing/consumption factories. Keep private authority and fresh-connection integration pending and release activation fenced; the exact disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.14 authenticated private sealing receipts",
+  "objective": "Bind private descriptors to GitHub-signed producer identity and exact public successful-job evidence. Keep token transport, owner-anchor/host integration and activation pending; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise exact descriptor paths, target/routing/passphrase isolation, consumer write refusal, native credential scope and bounded persistence/readback failure handling using invented evidence.",
+    "Exercise actual RSA signatures over invented issuer tokens, every private receipt/job binding, distinct job/check-run and repository IDs, wrong environment, token/receipt expiry and interrupted asynchronous verification.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

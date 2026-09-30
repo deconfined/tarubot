@@ -1,5 +1,10 @@
 /** Invented GitHub/private sealing evidence only; no API, workflow, credential or host operation. */
 import { describe, expect, test } from "bun:test";
+import { generateKeyPairSync, sign } from "node:crypto";
+import {
+  AppliedTargetOidcAuthenticator,
+  appliedTargetOidcAudience,
+} from "../../scripts/target-sealing-oidc.js";
 import {
   appliedTargetJobPaths,
   readAppliedTargetProducerJob,
@@ -17,6 +22,7 @@ import type {
 const api = "https://api.github.com/repos/deconfined/tarubot";
 const instant = 1_800_000_000_000;
 const owner = { login: "deconfined", id: 123456 };
+const repositoryId = 234567;
 type Value = Record<string, unknown>;
 function present<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("missing-invented-fixture");
@@ -79,8 +85,8 @@ function fixture(mode: "apply" | "no-changes" = "no-changes") {
     // Push actors need not be the repository owner; protected private writer authentication is separate.
     actor: { login: "invented-contributor", id: 987654 },
     triggering_actor: owner,
-    repository: { full_name: "deconfined/tarubot", fork: false, owner },
-    head_repository: { full_name: "deconfined/tarubot", fork: false, owner },
+    repository: { id: repositoryId, full_name: "deconfined/tarubot", fork: false, owner },
+    head_repository: { id: repositoryId, full_name: "deconfined/tarubot", fork: false, owner },
     url: `${api}/actions/runs/12345`,
     referenced_workflows: [
       {
@@ -105,6 +111,7 @@ function fixture(mode: "apply" | "no-changes" = "no-changes") {
     name: String(appliedTargetJobPaths[mode]),
     run_url: run.url,
     url: `${api}/actions/jobs/102`,
+    check_run_url: `${api}/check-runs/987654`,
     status: "completed",
     conclusion: "success",
     steps: [
@@ -148,6 +155,7 @@ function fixture(mode: "apply" | "no-changes" = "no-changes") {
   const invoke = (overrides: Partial<Parameters<typeof readAppliedTargetProducerJob>[1]> = {}) =>
     readAppliedTargetProducerJob(request, {
       owner_id: owner.id,
+      repository_id: repositoryId,
       get,
       verifySealingReceipt: verify,
       now: () => instant,
@@ -211,8 +219,10 @@ describe("exact private applied-target producer job", () => {
       expect(f.sealingSeen[0]?.request).toEqual(f.request);
       expect(f.sealingSeen[0]?.writer).toMatchObject({
         repository_owner_id: owner.id,
+        repository_id: repositoryId,
         job_path: appliedTargetJobPaths[mode],
         job_id: 102,
+        check_run_id: 987654,
         attempt: 1,
         reusable_workflow_commit: f.request.receipt.release.config_commit,
       });
@@ -309,6 +319,8 @@ describe("exact private applied-target producer job", () => {
     for (const overrides of [
       { owner_id: 0 },
       { owner_id: Number.MAX_SAFE_INTEGER + 1 },
+      { repository_id: 0 },
+      { repository_id: Number.MAX_SAFE_INTEGER + 1 },
       { token: "Bearer secret\n" },
       { verifySealingReceipt: undefined as unknown as VerifyAppliedTargetSealing },
     ]) {
@@ -334,6 +346,7 @@ describe("exact private applied-target producer job", () => {
     const original = structuredClone(f.request);
     const deps = {
       owner_id: owner.id,
+      repository_id: repositoryId,
       get: f.get,
       verifySealingReceipt: f.verify,
       now: () => instant,
@@ -863,5 +876,135 @@ describe("private sealing authentication and bounded direct transport", () => {
     expect(JSON.stringify(proof)).not.toContain(token);
     expect(JSON.stringify(f.sealingSeen)).not.toContain(token);
     expect(object(proof).token).toBeUndefined();
+  });
+  test("repository IDs and the exact check-run link are independent fixed authority before private verification", async () => {
+    for (const change of [
+      (f: ReturnType<typeof fixture>) => {
+        object(f.run.repository).id = repositoryId + 1;
+      },
+      (f: ReturnType<typeof fixture>) => {
+        delete object(f.run.head_repository).id;
+      },
+      ...[
+        "",
+        `${api}/check-runs/0987654`,
+        `${api}/check-runs/987654?invented=true`,
+        `${api}/check-runs/987654#invented`,
+        `${api}/check-runs/9007199254740992`,
+        `${api}/check-runs/../987654`,
+        "https://example.org/check-runs/987654",
+      ].map((url) => (f: ReturnType<typeof fixture>) => {
+        f.job.check_run_url = url;
+      }),
+      (f: ReturnType<typeof fixture>) => {
+        delete object(f.job).check_run_url;
+      },
+    ]) {
+      const f = fixture();
+      change(f);
+      await refusal(f.invoke());
+      expect(f.sealingSeen).toEqual([]);
+    }
+    for (const change of ["repository", "check-run"]) {
+      const f = fixture();
+      await refusal(
+        f.invoke({
+          verifySealingReceipt: async (r) => {
+            const receipt = await f.verify(r);
+            if (change === "repository") object(f.run.repository).id = repositoryId + 1;
+            else f.job.check_run_url = `${api}/check-runs/987655`;
+            return receipt;
+          },
+        }),
+      );
+      expect(f.sealingSeen).toHaveLength(1);
+    }
+  });
+  test("actual RSA receipt authentication composes with successful public producer evidence", async () => {
+    // The key belongs only to this invented issuer fixture, never GitHub or a deployment host.
+    const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const kid = "invented-producer-sealing-key";
+    const key = { ...pair.publicKey.export({ format: "jwk" }), kid, alg: "RS256", use: "sig" };
+    for (const mode of ["apply", "no-changes"] as const) {
+      for (const wrongCheckRun of [false, true]) {
+        const f = fixture(mode);
+        let tokenReads = 0;
+        let keyReads = 0;
+        const authenticator = new AppliedTargetOidcAuthenticator(
+          {
+            owner_id: owner.id,
+            repository_id: repositoryId,
+            subjects: {
+              apply: "repo:deconfined/tarubot:environment:infra-auto",
+              "no-changes": "repo:deconfined/tarubot:environment:infra-plan",
+            },
+          },
+          {
+            now: () => instant,
+            readToken: async (r) => {
+              tokenReads++;
+              expect(r.writer.job_id).toBe(102);
+              expect(r.writer.check_run_id).toBe(987654);
+              expect(r.writer.repository_id).toBe(repositoryId);
+              const environment = mode === "apply" ? "infra-auto" : "infra-plan";
+              const header = Buffer.from(
+                JSON.stringify({ alg: "RS256", typ: "JWT", kid }),
+              ).toString("base64url");
+              const payload = Buffer.from(
+                JSON.stringify({
+                  iss: "https://token.actions.githubusercontent.com",
+                  aud: appliedTargetOidcAudience(r),
+                  sub: `repo:deconfined/tarubot:environment:${environment}`,
+                  repository: "deconfined/tarubot",
+                  repository_owner: "deconfined",
+                  repository_id: String(repositoryId),
+                  repository_owner_id: String(owner.id),
+                  ref: "refs/heads/main",
+                  ref_type: "branch",
+                  ref_protected: "true",
+                  event_name: "push",
+                  sha: r.writer.head_commit,
+                  run_id: r.writer.run,
+                  run_attempt: "1",
+                  workflow_ref: r.writer.publication_workflow_ref,
+                  workflow_sha: r.request.receipt.release.commit,
+                  job_workflow_ref: r.writer.reusable_workflow_ref,
+                  job_workflow_sha: r.writer.reusable_workflow_commit,
+                  environment,
+                  check_run_id: String(wrongCheckRun ? r.writer.job_id : r.writer.check_run_id),
+                  head_ref: "",
+                  base_ref: "",
+                  jti: "invented-sealing-token",
+                  iat: instant / 1000 - 1,
+                  nbf: instant / 1000 - 1,
+                  exp: instant / 1000 + 300,
+                }),
+              ).toString("base64url");
+              const bytes = `${header}.${payload}`;
+              return `${bytes}.${sign("RSA-SHA256", Buffer.from(bytes), pair.privateKey).toString("base64url")}`;
+            },
+            get: async (r) => {
+              keyReads++;
+              expect(r.url).toBe("https://token.actions.githubusercontent.com/.well-known/jwks");
+              expect(r.method).toBe("GET");
+              expect(r.headers.Authorization).toBeUndefined();
+              return {
+                status: 200,
+                url: r.url,
+                headers: { "content-type": "application/json" },
+                body: Buffer.from(JSON.stringify({ keys: [key] })),
+              };
+            },
+          },
+        );
+        const request = f.invoke({ verifySealingReceipt: (r) => authenticator.verify(r) });
+        if (wrongCheckRun) await refusal(request);
+        else expect((await request).conclusion).toBe("success");
+        expect(tokenReads).toBe(1);
+        expect(keyReads).toBe(1);
+        // A correctly signed JWT naming the Actions job ID cannot replace its check-run ID.
+        expect(f.seen).toHaveLength(wrongCheckRun ? 4 : 8);
+      }
+    }
   });
 });

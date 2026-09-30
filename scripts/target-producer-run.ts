@@ -181,6 +181,7 @@ function json(bytes: Uint8Array): unknown {
 export interface AppliedTargetWriterIdentity {
   repository: "deconfined/tarubot";
   repository_owner_id: number;
+  repository_id: number;
   publication_workflow_ref: typeof publication;
   ref: "refs/heads/main";
   event: "push";
@@ -191,6 +192,8 @@ export interface AppliedTargetWriterIdentity {
   reusable_workflow_commit: string;
   job_path: string;
   job_id: number;
+  /** Independent REST check-run identity; never infer equality with the Actions job ID. */
+  check_run_id: number;
   critical_step: AppliedTargetJobProof["critical_step"];
 }
 export interface AppliedTargetSealingRequest {
@@ -369,6 +372,7 @@ export async function readAppliedTargetProducerJob(
   expected: AppliedTargetJobRequest,
   dependencies: {
     owner_id: number;
+    repository_id: number;
     verifySealingReceipt: VerifyAppliedTargetSealing;
     get?: GitHubReader;
     token?: string;
@@ -379,6 +383,8 @@ export async function readAppliedTargetProducerJob(
     const request = requestContract(snapshot(expected));
     const ownerId = dependencies.owner_id;
     integer(ownerId);
+    const repositoryId = dependencies.repository_id;
+    integer(repositoryId);
     const verifySealingReceipt = dependencies.verifySealingReceipt;
     requireProducer(typeof verifySealingReceipt === "function");
     const get = dependencies.get ?? directGet;
@@ -561,6 +567,7 @@ export async function readAppliedTargetProducerJob(
         const owner = object(repo.owner);
         requireProducer(
           repo.full_name === repository &&
+            repo.id === repositoryId &&
             repo.fork === false &&
             owner.login === "deconfined" &&
             owner.id === ownerId,
@@ -602,6 +609,16 @@ export async function readAppliedTargetProducerJob(
     const verifyJob = (value: unknown) => {
       const job = object(value);
       integer(job.id);
+      // GitHub's signed OIDC check_run_id names this link, which is independent of job.id.
+      const checkRunPrefix = `${api}${prefix}/check-runs/`;
+      requireProducer(
+        typeof job.check_run_url === "string" && job.check_run_url.startsWith(checkRunPrefix),
+      );
+      const checkRunText = job.check_run_url.slice(checkRunPrefix.length);
+      requireProducer(/^[1-9][0-9]{0,15}$/u.test(checkRunText));
+      const checkRunId = Number(checkRunText);
+      integer(checkRunId);
+      requireProducer(job.check_run_url === `${api}${prefix}/check-runs/${checkRunId}`);
       requireProducer(
         job.name === jobPath &&
           job.run_id === Number(release.publication_run) &&
@@ -625,6 +642,7 @@ export async function readAppliedTargetProducerJob(
       );
       return {
         id: job.id,
+        check_run_id: checkRunId,
         critical_step: {
           name: request.job.critical_step,
           number: critical[0]?.number as number,
@@ -684,6 +702,7 @@ export async function readAppliedTargetProducerJob(
     const writer: AppliedTargetWriterIdentity = {
       repository,
       repository_owner_id: ownerId,
+      repository_id: repositoryId,
       publication_workflow_ref: publication,
       ref: "refs/heads/main",
       event: "push",
@@ -694,6 +713,7 @@ export async function readAppliedTargetProducerJob(
       reusable_workflow_commit: release.config_commit,
       job_path: jobPath,
       job_id: firstJobs.selected.id,
+      check_run_id: firstJobs.selected.check_run_id,
       critical_step: firstJobs.selected.critical_step,
     };
     const sealingRequest: AppliedTargetSealingRequest = { request, writer };

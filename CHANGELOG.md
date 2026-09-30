@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.13**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.14**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.14 — GitHub-signed private descriptor receipts
+
+- Authenticate private sealing receipts with GitHub RS256 signatures and an exact receipt/job audience, reviewed subjects and bounded signed expiry. Bind actual repository and check-run identities independently of Actions job IDs; require successful producer-job evidence separately.
+- Keep automatic Apply isolated to the proposed `infra-auto` scope. Preserve the owner-reviewed Infrastructure environment and refuse its tokens as automatic release authority.
+- Keep private token transport, owner-anchor/host workflow integration and activation pending. No token is minted, owner gate changed or live operation performed by these offline checks.
 
 ## 2.36.13 — Scoped descriptor transport
 
