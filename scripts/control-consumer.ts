@@ -344,10 +344,12 @@ export function guardedControlStore(
         throw new Error("control-consumer-read-failed");
       }
     },
-    async write(path: string, value: Uint8Array): Promise<void> {
+    async write(path: string, value: Uint8Array, beforeWrite?: () => void): Promise<void> {
       try {
+        const fence = beforeWrite;
         requireConsumer(
-          typeof path === "string" &&
+          (fence === undefined || typeof fence === "function") &&
+            typeof path === "string" &&
             allowed.test(path) &&
             value instanceof Uint8Array &&
             value.length > 0 &&
@@ -355,7 +357,12 @@ export function guardedControlStore(
         );
         const snapshot = Uint8Array.from(value);
         const ticket = await check();
-        await within(ticket, () => write(path, snapshot));
+        await within(ticket, () => {
+          // A journal execution capability must still be live AFTER the awaited owner check.
+          // This is an internal denial fence, never caller-supplied approval or a storage lock.
+          requireConsumer(fence?.() === undefined);
+          return write(path, snapshot, fence);
+        });
         await check(ticket);
       } catch {
         // A late guard/ack failure may follow persistence; this never grants retry authority.

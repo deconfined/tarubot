@@ -19,6 +19,8 @@ concurrency:
   queue: max
 jobs:
   plan:
+    # Public execution readers bind this exact reusable job path, never a suffix.
+    name: Plan infrastructure
     if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -77,6 +79,7 @@ jobs:
         if: always()
         run: rm -rf -- "${RUNNER_TEMP:?}/tofu"
   apply:
+    name: Apply infrastructure
     needs: plan
     if: github.ref == 'refs/heads/main' && github.run_attempt == '1' && needs.plan.outputs.decision == 'safe'
     runs-on: ubuntu-24.04

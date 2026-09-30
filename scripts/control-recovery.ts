@@ -7,11 +7,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
-  InfrastructureJournal,
   RecordCodec,
   privateDigest,
   stateEvidence,
   verifyAppliedPlan,
+  validateInfrastructureBaselineLinks,
   type ControlStore,
   type RunIdentity,
 } from "./infra-control.js";
@@ -479,11 +479,9 @@ export class ControlRecovery {
     requireRecovery(o.schema === 1 && o.target === this.#options.target);
     time(o.observed_at);
     const used = new Set<string>();
-    let headOverride: Uint8Array | null = null;
     const view: ControlStore = {
       read: async (key) => {
         used.add(key);
-        if (key === this.#currentKey() && headOverride) return Uint8Array.from(headOverride);
         const record = loaded.get(key);
         requireRecovery(record !== undefined);
         return Uint8Array.from(record.bytes);
@@ -496,14 +494,32 @@ export class ControlRecovery {
     if (this.#options.target === "infra") {
       requireRecovery(head.baseline === desired && head.pending === null);
       const state = stateEvidence(o.state);
-      const journal = new InfrastructureJournal(view, this.#codec);
-      const snapshot = await journal.inspect(state);
-      requireRecovery(snapshot.generation === desired && snapshot.inputs !== null);
+      // Selected history is structural evidence here, not ordinary reader authority. The
+      // surrounding recovery still requires independent outcome, owner fence and final run.
+      const structural = (id: string, expectedState: unknown) => {
+        const value = (path: string) => {
+          used.add(path);
+          const record = loaded.get(path);
+          requireRecovery(record !== undefined);
+          return record.value;
+        };
+        return validateInfrastructureBaselineLinks({
+          generation: id,
+          current: { baseline: id, pending: null },
+          intent: value(`intents/${id}`),
+          baseline: value(`baselines/${id}`),
+          completion: value(`completed/${id}`),
+          state: expectedState,
+        });
+      };
+      used.add(this.#currentKey());
+      const baseline = structural(desired, state);
       requireRecovery(
-        classifyPlan(o.plan, snapshot.inputs, snapshot.inputs).decision === "no-changes",
+        classifyPlan(o.plan, baseline.intent.inputs, baseline.intent.inputs).decision ===
+          "no-changes",
       );
       verifyAppliedPlan(o.plan, o.shown_state);
-      // InfrastructureJournal validates a completed generation's links; recovery additionally
+      // Pure link validation checks a completed generation; recovery additionally
       // traverses each predecessor and requires the next intent's exact before-state evidence.
       const seen = new Set<string>();
       let id: string | null = desired;
@@ -513,8 +529,7 @@ export class ControlRecovery {
         seen.add(id);
         const b = object(loaded.get(`baselines/${id}`)?.value);
         const i = object(b.intent);
-        headOverride = this.#codec.seal("current", { baseline: id, pending: null });
-        await journal.inspect(b.state as Parameters<InfrastructureJournal["inspect"]>[0]);
+        structural(id, b.state);
         inputs(i.inputs);
         if (nextBefore !== null) requireRecovery(isDeepStrictEqual(nextBefore, b.state));
         const before = object(i.before);

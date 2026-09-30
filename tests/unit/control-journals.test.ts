@@ -1,3 +1,4 @@
+import { verifyInventedBaselineRun, baselineRunFixture } from "../fixtures/infra/baseline-run.js";
 /** Factory tests use invented native streams/GitHub responses and genuine encrypted histories. */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -34,6 +35,8 @@ const repairGeneration = "11111111-1111-4111-8111-111111111111";
 const revision = "22222222-2222-4222-8222-222222222222";
 const trustGeneration = "33333333-3333-4333-8333-333333333333";
 const run = { commit: "b".repeat(40), run: "12345" };
+// Ordinary baseline execution and the independent repair run are distinct source jobs.
+const baselineRun = { commit: "b".repeat(40), run: "23456" };
 const pin: ValidatorPin = {
   name: "unbound",
   version: "1.26.1",
@@ -179,6 +182,8 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
       },
     ],
   };
+  if (target === "infra")
+    Object.assign(data, baselineRunFixture({ kind: "baseline", run: baselineRun }).data);
   const seen: GitHubReadRequest[] = [];
   const get: GitHubReader = async (input) => {
     seen.push(structuredClone(input));
@@ -254,11 +259,13 @@ async function ordinaryHistory(
     };
     const journal = factoryJournal
       ? (factoryJournal as InfrastructureJournal)
-      : new InfrastructureJournal(store, codec(f));
+      : new InfrastructureJournal(store, codec(f), {
+          verifyBaselineRun: verifyInventedBaselineRun,
+        });
     const ticket = await journal.begin(
       await journal.inspect(evidence),
       values,
-      run,
+      baselineRun,
       "f".repeat(64),
       "baseline",
     );
@@ -266,9 +273,12 @@ async function ordinaryHistory(
     return {
       desired: ticket.generation,
       inspect: async (replacement?: ControlStore) =>
-        (replacement ? new InfrastructureJournal(replacement, codec(f)) : journal).inspect(
-          evidence,
-        ),
+        (replacement
+          ? new InfrastructureJournal(replacement, codec(f), {
+              verifyBaselineRun: verifyInventedBaselineRun,
+            })
+          : journal
+        ).inspect(evidence),
     };
   }
   const target = f.target;
@@ -592,6 +602,145 @@ async function refused(operation: Promise<unknown>): Promise<void> {
 }
 
 describe("mandatory owner-guarded ordinary journal factories", () => {
+  test("actual final baseline ACK uncertainty cannot be reused through a fresh factory when its original run failed, queued or reran", async () => {
+    for (const mode of ["failure", "queued", "attempt2"]) {
+      const f = nativeFixture();
+      f.afterWrite(async (path) => {
+        if (
+          path === "current" &&
+          object(codec(f).open(path, present(f.store.data.get(path)))).pending === null
+        )
+          throw new Error("invented final acknowledgement lost after persistence");
+      });
+      await expect(ordinaryHistory(f, f.store, f.make())).rejects.toThrow(
+        "control-consumer-write-failed",
+      );
+      const current = object(codec(f).open("current", present(f.store.data.get("current"))));
+      expect(current.pending).toBeNull();
+      expect(f.store.data.has(`completed/${String(current.baseline)}`)).toBe(true);
+      const original = object(f.data[`${api}/actions/runs/${baselineRun.run}`]);
+      if (mode === "failure") original.conclusion = "failure";
+      if (mode === "queued") original.status = "queued";
+      if (mode === "attempt2") original.run_attempt = 2;
+      await expect(inspectFactory(f)).rejects.toThrow("invalid-infrastructure-baseline-run");
+      expect(
+        ordinaryCalls(f).filter((call) => call.method === "write" && call.key.endsWith("/current")),
+      ).toHaveLength(3);
+    }
+  });
+  test("fresh factory readers refuse failed original baseline jobs and later Apply authenticates its exact predecessor", async () => {
+    const f = nativeFixture();
+    const history = await ordinaryHistory(f);
+    const b = object(
+      codec(f).open(
+        `baselines/${history.desired}`,
+        present(f.store.data.get(`baselines/${history.desired}`)),
+      ),
+    );
+    const state = b.state as Snapshot["state"];
+    const source = object(f.data[`${api}/actions/runs/${baselineRun.run}`]);
+    source.conclusion = "failure";
+    await expect((f.make() as InfrastructureJournal).inspect(state)).rejects.toThrow(
+      "invalid-infrastructure-baseline-run",
+    );
+    expect(ordinaryCalls(f).filter((call) => call.method === "write")).toHaveLength(0);
+    source.conclusion = "success";
+    const nextRun = { commit: "c".repeat(40), run: "34567" };
+    const execution = baselineRunFixture({ kind: "apply", run: nextRun }, { automatic: true });
+    Object.assign(f.data, execution.data);
+    const journal = f.make() as InfrastructureJournal;
+    const snapshot = await journal.inspect(state);
+    const at = f.seen.length;
+    const ticket = await journal.begin(
+      snapshot,
+      object(b.intent).inputs as Value,
+      nextRun,
+      "d".repeat(64),
+      "apply",
+    );
+    expect(
+      f.seen.slice(at).some((get) => get.url === `${api}/actions/runs/${baselineRun.run}`),
+    ).toBe(true);
+    expect(f.seen.slice(at).some((get) => get.url === `${api}/actions/runs/${nextRun.run}`)).toBe(
+      false,
+    );
+    const after = { ...state, serial: state.serial + 1, digest: "c".repeat(64) };
+    await journal.finish(ticket, after);
+    expect(execution.run.status).toBe("in_progress");
+    const reopened = await (f.make() as InfrastructureJournal).inspect(after);
+    expect(reopened.generation).toBe(ticket.generation);
+    expect(f.seen.some((get) => get.url === `${api}/actions/runs/${nextRun.run}`)).toBe(true);
+  });
+  test("original execution proof expiry during a held owner check blocks the raw PUT even after a later operation", async () => {
+    const f = nativeFixture();
+    const history = await ordinaryHistory(f);
+    const baseline = object(
+      codec(f).open(
+        `baselines/${history.desired}`,
+        present(f.store.data.get(`baselines/${history.desired}`)),
+      ),
+    );
+    const state = baseline.state as Snapshot["state"];
+    let oldPath: string | undefined;
+    let variableReads = 0;
+    let held = false;
+    let signalHeld!: () => void;
+    let releaseHeld!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseHeld = resolve;
+    });
+    f.beforeRead(async (path) => {
+      if (oldPath === undefined && path.startsWith("intents/") && !f.store.data.has(path))
+        oldPath = path;
+    });
+    const nativeGet = f.dependencies.get;
+    f.dependencies.get = async (request) => {
+      // The absence read's post-owner check has four variable reads. Its final response
+      // approaches the original proof deadline; the NEXT owner check has its own fresh clock.
+      if (oldPath && request.url.endsWith("/variables/CONTROL_OWNER_ANCHOR")) {
+        if (++variableReads === 4) f.clock.now = instant + 29_990;
+      }
+      if (oldPath && variableReads === 4 && request.url === api && !held) {
+        held = true;
+        signalHeld();
+        await release;
+      }
+      return nativeGet(request);
+    };
+    const journal = f.make() as InfrastructureJournal;
+    const snapshot = await journal.inspect(state);
+    const old = journal.begin(
+      snapshot,
+      { next: "old" },
+      { commit: "c".repeat(40), run: "34567" },
+      "d".repeat(64),
+      "apply",
+    );
+    await entered;
+    f.clock.now = instant + 30_001;
+    expect(ordinaryCalls(f).filter((call) => call.method === "write")).toHaveLength(0);
+    // A later operation obtains a DIFFERENT native proof. It cannot renew the held closure.
+    const next = await journal.begin(
+      snapshot,
+      { next: "new" },
+      { commit: "d".repeat(40), run: "45678" },
+      "e".repeat(64),
+      "apply",
+    );
+    const written = ordinaryCalls(f).filter((call) => call.method === "write").length;
+    expect(written).toBe(2);
+    releaseHeld();
+    await expect(old).rejects.toThrow("control-consumer-write-failed");
+    expect(ordinaryCalls(f).filter((call) => call.method === "write")).toHaveLength(written);
+    expect(f.store.data.has(present(oldPath))).toBe(false);
+    expect(codec(f).open("current", present(f.store.data.get("current")))).toEqual({
+      baseline: history.desired,
+      pending: next.generation,
+    });
+  });
   test("missing/unknown authority refuses before constructing native storage or reading GitHub", () => {
     const f = nativeFixture();
     const mutations = [

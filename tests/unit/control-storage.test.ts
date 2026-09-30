@@ -120,6 +120,39 @@ function fake() {
 }
 
 describe("scoped native control storage", () => {
+  test("captured denial fence runs after routing preparation immediately before the SDK mutation", async () => {
+    const f = fake();
+    const store = createControlStorage(configuration(), { createClient: f.factory });
+    const bytes = Uint8Array.from([1, 2]);
+    let clock = 10;
+    const deny = () => {
+      if (clock >= 20) throw new Error("invented private expired proof");
+    };
+    f.changeUrl(() => {
+      clock = 20;
+      bytes[0] = 9;
+    });
+    await expect(store.write("current", bytes, deny)).rejects.toThrow(
+      "control-storage-write-failed",
+    );
+    expect(f.calls.filter((call) => call.method === "write")).toHaveLength(0);
+    expect(f.writes).toHaveLength(0);
+    clock = 19;
+    f.changeUrl(() => {
+      bytes[0] = 8;
+    });
+    await store.write("current", bytes, deny);
+    expect(f.writes).toEqual([Uint8Array.from([9, 2])]);
+    const count = f.calls.length;
+    await expect(store.write("current", bytes, true as unknown as () => void)).rejects.toThrow(
+      "invalid-control-storage",
+    );
+    expect(f.calls).toHaveLength(count);
+    await expect(store.write("current", bytes, async () => {})).rejects.toThrow(
+      "control-storage-write-failed",
+    );
+    expect(f.calls.filter((call) => call.method === "write")).toHaveLength(1);
+  });
   test("constructor configuration is snapshotted before accessor side effects can substitute authority", () => {
     const f = fake();
     const config = configuration();

@@ -17,6 +17,7 @@ import {
 import type { VersionedControlStore } from "./control-recovery.js";
 import { createControlStorage, type ControlStorageConfig } from "./control-storage.js";
 import { InfrastructureJournal, RecordCodec } from "./infra-control.js";
+import { createInfrastructureBaselineRunVerifier } from "./infra-baseline-run.js";
 import { TrustJournal, type TargetRole, type ValidatorPin } from "./ssh-trust.js";
 import type { GitHubReader } from "./trust-run.js";
 
@@ -196,7 +197,17 @@ export function createControlJournal(
     const store = guardedControlStore(raw, guard);
     const journal =
       c.target === "infra"
-        ? new InfrastructureJournal(store, new RecordCodec(c.passphrase, c.backend))
+        ? new InfrastructureJournal(store, new RecordCodec(c.passphrase, c.backend), {
+            // Capture actual native evidence, never a caller-selected approval/receipt callback.
+            verifyBaselineRun: createInfrastructureBaselineRunVerifier(
+              {
+                owner_id: c.owner.owner_id,
+                repository_id: c.owner.repository_id,
+                token: c.owner.token,
+              },
+              { ...(get === undefined ? {} : { get }), ...(now === undefined ? {} : { now }) },
+            ),
+          })
         : new TrustJournal(store, {
             target: c.target,
             backend: c.backend,

@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.19 private host bridge framing",
-  "objective": "Frame one private binary exchange with bounded ordered channels, complete request delivery and immediate uncertainty fencing. Keep bridge authorization, Ansible integration and activation pending; the disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.20 original baseline execution evidence",
+  "objective": "Reject reuse of a completed infrastructure baseline until its original writer job has fresh successful execution evidence and the exact encrypted records reopen unchanged. Keep activation pending; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise invented duplex streams, fragmentation, strict metadata, nonce/sequence/channel mismatches, exact byte and pending-frame caps, request acknowledgement and EOF, physical expiry, held uncertainty close and late continuations without contacting a host.",
+    "Exercise invented GitHub and encrypted storage responses for exact manual and automatic writer identities, failed final acknowledgements, queued/failed/rerun jobs, approval changes, opaque proof forgery, expiry and journal changes during verification; contact no real host or provider.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

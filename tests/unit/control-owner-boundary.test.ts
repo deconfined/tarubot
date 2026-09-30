@@ -1,3 +1,4 @@
+import { verifyInventedBaselineRun } from "../fixtures/infra/baseline-run.js";
 /** Invented GitHub configuration/run evidence and encrypted histories; no real credentials/API. */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -250,7 +251,9 @@ async function ordinaryHistory(f: Fixture, store: VersionedControlStore = f.stor
       hosts: {},
       database_ids: {},
     };
-    const journal = new InfrastructureJournal(store, codec(f));
+    const journal = new InfrastructureJournal(store, codec(f), {
+      verifyBaselineRun: verifyInventedBaselineRun,
+    });
     const ticket = await journal.begin(
       await journal.inspect(evidence),
       values,
@@ -262,9 +265,12 @@ async function ordinaryHistory(f: Fixture, store: VersionedControlStore = f.stor
     return {
       desired: ticket.generation,
       inspect: async (replacement?: ControlStore) =>
-        (replacement ? new InfrastructureJournal(replacement, codec(f)) : journal).inspect(
-          evidence,
-        ),
+        (replacement
+          ? new InfrastructureJournal(replacement, codec(f), {
+              verifyBaselineRun: verifyInventedBaselineRun,
+            })
+          : journal
+        ).inspect(evidence),
     };
   }
   const target = f.target;

@@ -1,3 +1,4 @@
+import { verifyInventedBaselineRun, baselineRunFixture } from "../fixtures/infra/baseline-run.js";
 /** Invented encrypted storage/state only; fault injection never contacts a backend or provider. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -67,7 +68,9 @@ class MemoryStore implements ControlStore {
 }
 async function established() {
   const store = new MemoryStore();
-  const journal = new InfrastructureJournal(store, codec);
+  const journal = new InfrastructureJournal(store, codec, {
+    verifyBaselineRun: verifyInventedBaselineRun,
+  });
   const snapshot = await journal.inspect(before);
   const ticket = await journal.begin(snapshot, inputs, run, binding, "baseline");
   await journal.finish(ticket, before);
@@ -167,7 +170,9 @@ describe("single-writer journal transitions", () => {
   });
   test("baseline establishment is explicit; ordinary Apply cannot learn a missing baseline", async () => {
     const store = new MemoryStore();
-    const journal = new InfrastructureJournal(store, codec);
+    const journal = new InfrastructureJournal(store, codec, {
+      verifyBaselineRun: verifyInventedBaselineRun,
+    });
     const snapshot = await journal.inspect(before);
     expect(snapshot).toEqual({ generation: null, state: before, inputs: null });
     await expect(journal.begin(snapshot, inputs, run, binding, "apply")).rejects.toThrow();
@@ -395,7 +400,9 @@ describe("private phase adapter", () => {
   function runner() {
     const directory = mkdtempSync(join(scratch, "runner-"));
     const store = new MemoryStore();
-    const journal = new InfrastructureJournal(store, codec);
+    const journal = new InfrastructureJournal(store, codec, {
+      verifyBaselineRun: verifyInventedBaselineRun,
+    });
     const write = (name: string, value: unknown) =>
       writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
     writeFileSync(
@@ -560,11 +567,17 @@ describe("scoped infrastructure journal factory", () => {
       repair: { mode: "never-repaired" },
     };
     const observed = 1_800_000_000_000;
+    const nextRun = { commit: run.commit, run: "5678" };
+    const executionData = {
+      ...baselineRunFixture({ kind: "baseline", run }).data,
+      ...baselineRunFixture({ kind: "apply", run: nextRun }).data,
+    };
     const journal = infrastructureJournal(directory, environment(), {
       now: () => observed,
       async get(request) {
         requests.push(structuredClone(request));
         const data: Record<string, unknown> = {
+          ...executionData,
           [api]: {
             id: 234567,
             full_name: "deconfined/tarubot",
@@ -641,7 +654,7 @@ describe("scoped infrastructure journal factory", () => {
     });
     const snapshot = await journal.inspect(before);
     expect(snapshot).toEqual({ generation: previous, inputs, state: before });
-    const ticket = await journal.begin(snapshot, inputs, run, binding, "apply");
+    const ticket = await journal.begin(snapshot, inputs, nextRun, binding, "apply");
     await journal.finish(ticket, after);
     expect(await journal.inspect(after)).toEqual({
       generation: ticket.generation,

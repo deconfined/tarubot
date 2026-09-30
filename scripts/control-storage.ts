@@ -195,7 +195,9 @@ class NativeControlStore implements ScopedControlStore {
       throw new Error("control-storage-read-failed");
     }
   }
-  async write(path: string, value: Uint8Array): Promise<void> {
+  async write(path: string, value: Uint8Array, beforeWrite?: () => void): Promise<void> {
+    const fence = beforeWrite;
+    requireStorage(fence === undefined || typeof fence === "function");
     const key = this.#key(path);
     requireStorage(
       value instanceof Uint8Array && value.byteLength > 0 && value.byteLength <= maximumBytes,
@@ -203,6 +205,9 @@ class NativeControlStore implements ScopedControlStore {
     const bytes = Uint8Array.from(value);
     try {
       this.#assertClient(key);
+      // A denial-only journal fence runs after synchronous routing/presign preparation too.
+      // No await separates this check from initiation; an in-flight PUT remains uncertain.
+      requireStorage(fence?.() === undefined);
       await this.#client.write(key, bytes, { type: "application/octet-stream", retry: 0 });
     } catch {
       // An acknowledgement failure may follow a successful write; leave the journal fenced.

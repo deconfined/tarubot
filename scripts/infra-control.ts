@@ -8,10 +8,67 @@ import {
   scryptSync,
 } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import {
+  assertInfrastructureBaselineRunProof,
+  withinInfrastructureBaselineRunProof,
+  type InfrastructureBaselineRunRequest,
+  type InfrastructureBaselineRunProof,
+  type VerifyInfrastructureBaselineRun,
+} from "./infra-baseline-run.js";
 
 type ObjectValue = Record<string, unknown>;
 const domain = "tarubot-infra-control-v1";
 const limit = 2 * 1024 * 1024;
+
+/** Caller-owned private data is captured before awaits, without getters or shared references. */
+function capturePrivate(value: unknown): unknown {
+  let nodes = 0,
+    bytes = 0;
+  const ancestors = new Set<object>();
+  const copy = (input: unknown, depth: number): unknown => {
+    requireRecord(++nodes <= 65_536 && depth <= 32);
+    if (input === null || typeof input === "boolean") return input;
+    if (typeof input === "number") {
+      requireRecord(Number.isFinite(input));
+      return input;
+    }
+    if (typeof input === "string") {
+      bytes += Buffer.byteLength(input);
+      requireRecord(bytes <= limit);
+      return input;
+    }
+    requireRecord(input !== null && typeof input === "object" && !ancestors.has(input));
+    requireRecord(Object.getOwnPropertySymbols(input).length === 0);
+    ancestors.add(input);
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    let result: unknown;
+    if (Array.isArray(input)) {
+      requireRecord(input.length <= 65_536 && Object.keys(descriptors).length === input.length + 1);
+      result = Array.from({ length: input.length }, (_, index) => {
+        const item = descriptors[String(index)];
+        requireRecord(item?.enumerable === true && Object.hasOwn(item, "value"));
+        return copy(item.value, depth + 1);
+      });
+    } else {
+      requireRecord(
+        Object.getPrototypeOf(input) === Object.prototype || Object.getPrototypeOf(input) === null,
+      );
+      const data: ObjectValue = {};
+      for (const [key, item] of Object.entries(descriptors)) {
+        requireRecord(item.enumerable === true && Object.hasOwn(item, "value"));
+        bytes += Buffer.byteLength(key);
+        requireRecord(bytes <= limit);
+        Object.defineProperty(data, key, { value: copy(item.value, depth + 1), enumerable: true });
+      }
+      result = data;
+    }
+    ancestors.delete(input);
+    return result;
+  };
+  const result = copy(value, 0);
+  requireRecord(Buffer.byteLength(JSON.stringify(result)) <= limit);
+  return result;
+}
 
 /** Transport errors, JSON and provider data never become public diagnostics. */
 function requireRecord(condition: unknown): asserts condition {
@@ -102,6 +159,51 @@ interface Baseline {
   intent: Intent;
   state: StateEvidence;
 }
+interface ExecutionBoundary {
+  proof: InfrastructureBaselineRunProof;
+  request: InfrastructureBaselineRunRequest;
+}
+function validateIntent(value: unknown): asserts value is Intent {
+  const i = exact(value, ["generation", "previous", "kind", "run", "binding", "inputs", "before"]);
+  generation(i.generation);
+  if (i.previous !== null) generation(i.previous);
+  requireRecord(i.previous !== i.generation && (i.kind === "apply" || i.kind === "baseline"));
+  requireRecord((i.kind === "baseline") === (i.previous === null));
+  validateRun(i.run);
+  digest(i.binding);
+  object(i.inputs);
+  validateState(i.before);
+}
+/**
+ * Pure consistency validation for already decrypted selected history. No store, key, execution
+ * proof or ordinary-journal authority is returned. Owner-fenced recovery separately verifies
+ * its actual remote outcome, owner fence and final repair run before consumers may resume.
+ */
+export function validateInfrastructureBaselineLinks(value: unknown): Baseline {
+  const data = exact(capturePrivate(value), [
+    "generation",
+    "current",
+    "intent",
+    "baseline",
+    "completion",
+    "state",
+  ]);
+  generation(data.generation);
+  validateState(data.state);
+  const h = exact(data.current, ["baseline", "pending"]);
+  requireRecord(h.baseline === data.generation && h.pending === null);
+  const b = exact(data.baseline, ["intent", "state"]);
+  validateIntent(data.intent);
+  validateState(b.state);
+  requireRecord(
+    data.intent.generation === data.generation && isDeepStrictEqual(b.intent, data.intent),
+  );
+  requireRecord(isDeepStrictEqual(b.state, data.state));
+  requireRecord(
+    isDeepStrictEqual(data.completion, { generation: data.generation, baseline: privateDigest(b) }),
+  );
+  return b as unknown as Baseline;
+}
 export interface Ticket {
   generation: string;
   binding: string;
@@ -110,7 +212,8 @@ export interface Ticket {
 /** GET null means a definite absent key only, never permission denial or an ambiguous failure. */
 export interface ControlStore {
   read(key: string): Promise<Uint8Array | null>;
-  write(key: string, bytes: Uint8Array): Promise<void>;
+  /** Trusted wrappers invoke this synchronous fence after awaited checks, before raw mutation. */
+  write(key: string, bytes: Uint8Array, beforeWrite?: () => void): Promise<void>;
 }
 
 /** Authenticated encryption binds ciphertext to both backend and object path (no cross-key replay). */
@@ -167,20 +270,46 @@ export class InfrastructureJournal {
   // Trusted dependency capabilities remain caller-owned; instance shadows cannot replace them.
   readonly #store: ControlStore;
   readonly #codec: RecordCodec;
-  constructor(store: ControlStore, codec: RecordCodec) {
+  readonly #verify: VerifyInfrastructureBaselineRun | undefined;
+  constructor(
+    store: ControlStore,
+    codec: RecordCodec,
+    dependencies: { verifyBaselineRun?: VerifyInfrastructureBaselineRun } = {},
+  ) {
     this.#store = store;
     this.#codec = codec;
+    const verify = dependencies.verifyBaselineRun;
+    requireRecord(verify === undefined || typeof verify === "function");
+    this.#verify = verify;
   }
   async #read(path: string): Promise<unknown | null> {
     const bytes = await this.#store.read(path);
     return bytes === null ? null : this.#codec.open(path, bytes);
   }
-  async #persist(path: string, value: unknown, historical = false): Promise<void> {
+  async #within<T>(boundary: ExecutionBoundary | null, work: () => Promise<T>): Promise<T> {
+    if (boundary === null) return work();
+    return withinInfrastructureBaselineRunProof(boundary.proof, boundary.request, () => {
+      // Recheck at the actual invocation, including a queued mutation, after scheduling.
+      assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+      return work();
+    });
+  }
+  async #persist(
+    path: string,
+    value: unknown,
+    historical = false,
+    boundary: ExecutionBoundary | null = null,
+  ): Promise<void> {
     // Refusing an existing history key is a safety check, NOT atomic conditional creation.
-    if (historical) requireRecord((await this.#store.read(path)) === null);
+    if (historical)
+      requireRecord((await this.#within(boundary, () => this.#store.read(path))) === null);
     const bytes = this.#codec.seal(path, value);
-    await this.#store.write(path, bytes);
-    const readback = await this.#store.read(path);
+    const beforeWrite =
+      boundary === null
+        ? undefined
+        : () => assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+    await this.#within(boundary, () => this.#store.write(path, bytes, beforeWrite));
+    const readback = await this.#within(boundary, () => this.#store.read(path));
     requireRecord(readback !== null && Buffer.from(bytes).equals(Buffer.from(readback)));
   }
   async #head(): Promise<Head | null> {
@@ -193,47 +322,85 @@ export class InfrastructureJournal {
     return h as unknown as Head;
   }
   #validateIntent(value: unknown): asserts value is Intent {
-    const i = exact(value, [
-      "generation",
-      "previous",
-      "kind",
-      "run",
-      "binding",
-      "inputs",
-      "before",
-    ]);
-    generation(i.generation);
-    if (i.previous !== null) generation(i.previous);
-    requireRecord(i.kind === "apply" || i.kind === "baseline");
-    requireRecord((i.kind === "baseline") === (i.previous === null));
-    validateRun(i.run);
-    digest(i.binding);
-    object(i.inputs);
-    validateState(i.before);
+    validateIntent(value);
   }
-  async #baseline(id: string): Promise<Baseline> {
-    const b = exact(await this.#read(`baselines/${id}`), ["intent", "state"]);
-    this.#validateIntent(b.intent);
-    validateState(b.state);
-    requireRecord(b.intent.generation === id);
-    requireRecord(isDeepStrictEqual(await this.#read(`intents/${id}`), b.intent));
-    requireRecord(
-      isDeepStrictEqual(await this.#read(`completed/${id}`), {
-        generation: id,
-        baseline: privateDigest(b),
-      }),
-    );
-    return b as unknown as Baseline;
+  async #structural(state: StateEvidence, boundary: ExecutionBoundary | null = null) {
+    const records = new Map<string, Uint8Array>();
+    const read = async (path: string) => {
+      const value = await this.#within(boundary, () => this.#store.read(path));
+      if (value === null) return null;
+      requireRecord(value instanceof Uint8Array && value.length > 0 && value.length <= limit + 32);
+      const bytes = Uint8Array.from(value);
+      records.set(path, bytes);
+      return this.#codec.open(path, bytes);
+    };
+    const current = await read("current");
+    if (current === null)
+      return {
+        records,
+        snapshot: { generation: null, state, inputs: null } as Snapshot,
+        request: null,
+      };
+    const head = exact(current, ["baseline", "pending"]);
+    generation(head.baseline);
+    requireRecord(head.pending === null);
+    const id = head.baseline;
+    const intent = await read(`intents/${id}`),
+      baseline = await read(`baselines/${id}`),
+      completion = await read(`completed/${id}`);
+    const linked = validateInfrastructureBaselineLinks({
+      generation: id,
+      current,
+      intent,
+      baseline,
+      completion,
+      state,
+    });
+    return {
+      records,
+      snapshot: { generation: id, state, inputs: linked.intent.inputs } as Snapshot,
+      request: {
+        kind: linked.intent.kind,
+        run: linked.intent.run,
+      } as InfrastructureBaselineRunRequest,
+    };
   }
   /** Missing baseline is review-required; missing referenced history or any pending intent stops. */
+  async #inspection(state: StateEvidence) {
+    const first = await this.#structural(state);
+    if (first.request === null) return { snapshot: first.snapshot, boundary: null };
+    const verify = this.#verify;
+    requireRecord(verify);
+    // GET evidence proves ORIGINAL execution only; these exact private records remain locally
+    // bound by their authenticated backend/path bytes, never by an echoed GitHub hash claim.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let proof: InfrastructureBaselineRunProof;
+    try {
+      proof = await Promise.race([
+        Promise.resolve().then(() =>
+          verify(capturePrivate(first.request) as InfrastructureBaselineRunRequest),
+        ),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("invalid-control-record")), 60_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    assertInfrastructureBaselineRunProof(proof, first.request);
+    const boundary = { proof, request: first.request };
+    const final = await this.#structural(state, boundary);
+    requireRecord(
+      isDeepStrictEqual(first.snapshot, final.snapshot) &&
+        isDeepStrictEqual(first.records, final.records),
+    );
+    assertInfrastructureBaselineRunProof(proof, first.request);
+    return { snapshot: capturePrivate(first.snapshot) as Snapshot, boundary };
+  }
   async inspect(state: StateEvidence): Promise<Snapshot> {
+    state = capturePrivate(state) as StateEvidence;
     validateState(state);
-    const head = await this.#head();
-    if (head === null) return { generation: null, state, inputs: null };
-    requireRecord(head.pending === null && head.baseline !== null);
-    const baseline = await this.#baseline(head.baseline);
-    requireRecord(isDeepStrictEqual(baseline.state, state));
-    return { generation: head.baseline, state, inputs: baseline.intent.inputs };
+    return (await this.#inspection(state)).snapshot;
   }
   async begin(
     snapshot: Snapshot,
@@ -242,10 +409,20 @@ export class InfrastructureJournal {
     binding: string,
     kind: "apply" | "baseline",
   ): Promise<Ticket> {
+    const captured = capturePrivate({ snapshot, inputs, run, binding, kind }) as {
+      snapshot: Snapshot;
+      inputs: ObjectValue;
+      run: RunIdentity;
+      binding: string;
+      kind: "apply" | "baseline";
+    };
+    ({ snapshot, inputs, run, binding, kind } = captured);
     validateRun(run);
     digest(binding);
     object(inputs);
-    requireRecord(isDeepStrictEqual(await this.inspect(snapshot.state), snapshot));
+    validateState(snapshot.state);
+    const inspected = await this.#inspection(snapshot.state);
+    requireRecord(isDeepStrictEqual(inspected.snapshot, snapshot));
     requireRecord(
       kind === "baseline" ? snapshot.generation === null : snapshot.generation !== null,
     );
@@ -259,12 +436,21 @@ export class InfrastructureJournal {
       before: snapshot.state,
     };
     this.#validateIntent(intent);
-    await this.#persist(`intents/${intent.generation}`, intent, true);
+    await this.#persist(`intents/${intent.generation}`, intent, true, inspected.boundary);
     // A crash after this reference is persisted requires owner reconciliation, even before Apply.
-    await this.#persist("current", { baseline: snapshot.generation, pending: intent.generation });
+    await this.#persist(
+      "current",
+      { baseline: snapshot.generation, pending: intent.generation },
+      false,
+      inspected.boundary,
+    );
+    if (inspected.boundary)
+      assertInfrastructureBaselineRunProof(inspected.boundary.proof, inspected.boundary.request);
     return { generation: intent.generation, binding };
   }
   async finish(ticket: Ticket, state: StateEvidence): Promise<void> {
+    const captured = capturePrivate({ ticket, state }) as { ticket: Ticket; state: StateEvidence };
+    ({ ticket, state } = captured);
     generation(ticket.generation);
     digest(ticket.binding);
     validateState(state);
@@ -294,7 +480,10 @@ export class InfrastructureJournal {
     );
     await this.#persist("current", { baseline: intent.generation, pending: null });
     // Reopen all links, not merely the last write, before downstream use is permitted.
-    await this.inspect(state);
+    // This current writer JOB has not finished yet. Structural reopen supplies no downstream
+    // authority; subsequent ordinary inspect/begin independently require its final success.
+    const reopened = await this.#structural(state);
+    requireRecord(reopened.snapshot.generation === ticket.generation);
   }
 }
 

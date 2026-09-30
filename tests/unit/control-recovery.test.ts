@@ -1,3 +1,4 @@
+import { verifyInventedBaselineRun } from "../fixtures/infra/baseline-run.js";
 /** Invented versioned encrypted objects exercise actual journals; no provider, host or network. */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -176,7 +177,9 @@ function authorization(
 async function infraFixture() {
   const store = new Versions();
   const codec = new RecordCodec(passphrase, backend);
-  const journal = new InfrastructureJournal(store, codec);
+  const journal = new InfrastructureJournal(store, codec, {
+    verifyBaselineRun: verifyInventedBaselineRun,
+  });
   const values = {
     ...JSON.parse(
       readFileSync(new URL("../../ops/tofu/examples/example.tfvars.json", import.meta.url), "utf8"),

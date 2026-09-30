@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.19**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.20**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.20 — Original baseline execution evidence
+
+- Require fresh evidence that the original infrastructure writer job succeeded before reusing a completed baseline, including when its final pointer persisted but acknowledgement failed.
+- Bind a native private execution proof to the exact original run and reopen the same encrypted journal records before returning. Finish validates structural links privately while its writer job is still running; ordinary readers cannot bypass the execution check.
+- Capture the real reader in the owner-guarded factory and establish exact reusable Plan/Apply job names. Public workflow evidence proves execution under the trusted journal-writer contract; it does not attest private state hashes or authorize activation.
 
 ## 2.36.19 — Private host bridge framing
 

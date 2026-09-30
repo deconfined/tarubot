@@ -1,3 +1,4 @@
+import { verifyInventedBaselineRun } from "../fixtures/infra/baseline-run.js";
 /** Complete invented imports and interrupted completion; no provider credentials or remote state. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -248,7 +249,9 @@ describe("private adoption journal completion", () => {
       },
     };
     const passphrase = "invented adoption control passphrase with sufficient entropy";
-    const journal = new InfrastructureJournal(store, new RecordCodec(passphrase, "a".repeat(64)));
+    const journal = new InfrastructureJournal(store, new RecordCodec(passphrase, "a".repeat(64)), {
+      verifyBaselineRun: verifyInventedBaselineRun,
+    });
     const raw = {
       version: 4,
       terraform_version: "1.12.6",

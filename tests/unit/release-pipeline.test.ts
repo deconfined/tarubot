@@ -25,6 +25,7 @@ import {
   verifyReleaseProvenance,
 } from "../../scripts/release-policy.js";
 import { boundIndex, scanCommands, scanner } from "../../scripts/release-scan.js";
+import { verifyInventedBaselineRun } from "../fixtures/infra/baseline-run.js";
 import { releaseInputs, releasePlan } from "../fixtures/infra/release.js";
 
 const root = (path: string) => new URL(`../../${path}`, import.meta.url);
@@ -36,6 +37,7 @@ const workflow = (name: string) =>
 /** Validate inspected fields rather than casting arbitrary YAML into a workflow type. */
 const jobSchema = z
   .object({
+    name: z.string().optional(),
     needs: z.union([z.string(), z.array(z.string())]).optional(),
     if: z.string().optional(),
     uses: z.string().optional(),
@@ -272,7 +274,10 @@ describe("automatic infrastructure adapter", () => {
         objects.set(key, Uint8Array.from(value));
       },
     };
-    const journal = new InfrastructureJournal(store, codec);
+    // Invented REST evidence still passes the native parser and opaque proof validation.
+    const journal = new InfrastructureJournal(store, codec, {
+      verifyBaselineRun: verifyInventedBaselineRun,
+    });
     const first = await journal.inspect(stateEvidence(rawState));
     await journal.finish(
       await journal.begin(
@@ -502,6 +507,11 @@ describe("replacement workflow graph and acceptance execution", () => {
     });
     expect(job("release-infra", "plan").environment).toBe("infra-plan");
     expect(job("release-infra", "apply").environment).toBe("infra-auto");
+    // Execution attribution depends on the whole REST job path across both reusable callers.
+    expect(job("publish", "release").name).toBe("Replacement release orchestration");
+    expect(job("release", "infrastructure").uses).toBe("./.github/workflows/release-infra.yml");
+    expect(job("release-infra", "plan").name).toBe("Plan infrastructure");
+    expect(job("release-infra", "apply").name).toBe("Apply infrastructure");
     expect(job("release-infra", "apply").if).toContain("needs.plan.outputs.decision == 'safe'");
     expect(job("release-infra", "apply").steps.find((s) => s.id === "apply")?.run).not.toContain(
       "plan",
