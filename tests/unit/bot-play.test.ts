@@ -1547,7 +1547,8 @@ describe("the templar cases (tests/fixtures/bot-asserts.json)", () => {
     const hosts = strings(JSON.parse(text))
       .flatMap((value) => [...value.matchAll(/:\/\/(?:[^@/\s]*@)?([a-z0-9.-]*)/giu)])
       .map((match) => match[1] ?? "")
-      .filter((host) => host !== "" && !host.endsWith("example.org"));
+      // example.org itself or a name under it; a bare suffix match would let "evilexample.org" by.
+      .filter((host) => host !== "" && host !== "example.org" && !host.endsWith(".example.org"));
     expect(hosts).toEqual([]);
   });
 
