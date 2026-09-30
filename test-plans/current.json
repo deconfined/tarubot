@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.4 Linode single-writer pipeline specification",
-  "objective": "Record Linode as the initial pipeline target without mandatory conditional object writes. Specify serialized journals/baselines/trust, verified persistence and owner-fenced recovery; no automatic lane, database adoption, SSH enrollment or live operation is activated.",
+  "title": "Session: 2.36.5 durable infrastructure control records",
+  "objective": "Implement encrypted single-writer operation journals and applied-input baselines with verified persistence and interrupted-write refusal. Integrate an owner-enabled path into reviewed infrastructure jobs; do not enable automatic Apply, adopt a database, enroll hosts or operate live systems.",
   "user": [
-    "Review docs/PIPELINE.md for the single-writer boundary, incomplete-operation fencing and remaining implementation milestones.",
-    "Keep current owner approval gates intact; any hand recovery must exclude running/queued automation. No host, database or credential move is requested."
+    "Review journal/baseline setup and recovery prerequisites; activation requires private versioned storage and owner-reviewed initial baseline establishment.",
+    "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Check internal navigation, formatting, version/startup-plan consistency and existing infrastructure safety contracts with invented data.",
-    "Leave workflows, the documentation site and frozen production Compose untouched; hold no environment secrets or operate live infrastructure."
+    "Test encrypted storage, wrong bindings, stale/missing records, exact readback and interruptions around Apply and baseline/pointer completion using invented data.",
+    "Run quality/build/unit/contract and infrastructure phase checks. Preserve frozen production Compose and hold no live environment secrets."
   ],
   "bot": [
     "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
-    "Continue existing behavior; this specification update triggers no migration, deployment or new Discord action."
+    "Continue existing behavior; local infrastructure tooling adds no migration, deployment or new Discord action."
   ]
 }

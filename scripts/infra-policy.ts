@@ -1,6 +1,6 @@
 /** Credential-free policy and private handoff binding. Never print provider-controlled values. */
 import { createHash, createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -397,13 +397,27 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
     .update(readFileSync(join(directory, "plan.bin")))
     .digest("hex");
   const binding = {
-    domain: "tarubot-infra-handoff-v1",
+    domain: "tarubot-infra-handoff-v2",
     digest,
     backend: readFileSync(join(directory, "backend.hcl"), "utf8"),
     inputs: JSON.parse(readFileSync(join(directory, "values.tfvars.json"), "utf8")),
     policy: createHash("sha256")
       .update(readFileSync(import.meta.path))
       .digest("hex"),
+    controlCode: ["infra-control.ts", "infra-control-cli.ts"].map((name) =>
+      createHash("sha256")
+        .update(readFileSync(new URL(name, import.meta.url)))
+        .digest("hex"),
+    ),
+    control: existsSync(join(directory, "control-context.json"))
+      ? JSON.parse(readFileSync(join(directory, "control-context.json"), "utf8"))
+      : null,
+    shownPlan: existsSync(join(directory, "plan.json"))
+      ? JSON.parse(readFileSync(join(directory, "plan.json"), "utf8"))
+      : null,
+    baseline: existsSync(join(directory, "baseline-inputs.json"))
+      ? JSON.parse(readFileSync(join(directory, "baseline-inputs.json"), "utf8"))
+      : null,
     commit: environment.GITHUB_SHA,
     run: environment.GITHUB_RUN_ID,
   };
@@ -418,8 +432,15 @@ if (import.meta.main) {
     else {
       requireEvidence(command === "classify");
       const read = (name: string) => JSON.parse(readFileSync(join(directory, name), "utf8"));
-      // No baseline is wired into the live workflow yet: this is advisory, never write permission.
-      console.log(JSON.stringify(classifyPlan(read("plan.json"), read("values.tfvars.json"))));
+      const baseline = existsSync(join(directory, "baseline-inputs.json"))
+        ? read("baseline-inputs.json")
+        : undefined;
+      // Persisted evidence enables classification, not unattended write authority.
+      console.log(
+        JSON.stringify(
+          classifyPlan(read("plan.json"), read("values.tfvars.json"), baseline ?? undefined),
+        ),
+      );
     }
   } catch {
     console.log("::error::Infrastructure policy input or binding is invalid; nothing was applied.");

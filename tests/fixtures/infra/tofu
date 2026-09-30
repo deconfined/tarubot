@@ -12,7 +12,11 @@ printf '%s\n' "$@" >"$STUB/calls/$n"
 [[ ${1-} == -chdir=* ]] || exit 64
 sub=${2-}
 case $sub in
-  show) cat -- "$STUB/plan.json" ;;
+  show)
+    if (($# == 3)) && [[ -f $STUB/applied-state.json ]]; then cat -- "$STUB/applied-state.json";
+    else cat -- "$STUB/plan.json"; fi
+    ;;
+  state) cat -- "$STUB/state.json" ;;
   plan | apply)
     if [[ $sub == plan ]]; then
       for a in "$@"; do
@@ -20,6 +24,7 @@ case $sub in
       done
     fi
     if [[ -f $STUB/$sub.jsonl ]]; then cat -- "$STUB/$sub.jsonl"; fi
+    if [[ $sub == apply && -f $STUB/state.after.json ]]; then cp -- "$STUB/state.after.json" "$STUB/state.json"; fi
     ;;
   init) echo "OpenTofu has been successfully initialized!" ;;
   *) exit 64 ;;

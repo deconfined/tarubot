@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.4**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.5**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.5 — Durable infrastructure control records
+
+- Add encrypted, backend/path-bound operation journals and applied-input baselines with exact write/readback verification. Refuse pending operations, missing referenced records, stale generations and state/baseline mismatches without claiming distributed locking.
+- Add owner-enabled integration with the existing reviewed Apply, including verified post-Apply state and a separately approved, no-change `baseline` dispatch. Bind the private baseline, control generation and full plan JSON into the Plan-to-Apply handoff; classification remains advisory.
+- Cover storage faults, interrupted pointer/completion writes, hostile data, encryption binding and the reviewed phase sequence with invented fixtures. No automatic lane, live activation, database adoption, SSH enrollment or production-path change.
 
 ## 2.36.4 — Linode single-writer pipeline specification
 

@@ -152,7 +152,7 @@ Each milestone is a coherent signed commit/version change with tests. Code avail
 | --- | --- | --- |
 | 1. Specification | This document and contributor/deployment links | Documented; no runtime change |
 | 2. Safety foundation | Full-plan classifier, adversarial fixtures, plan/backend/input binding; reviewed lane intact | Implemented locally; classification advisory, activation not performed |
-| 3. Durable control records | Serialized operation journals, applied-input baselines, verified pointers and interrupted-write fencing | Pending; no native S3 lock requirement |
+| 3. Durable control records | Serialized operation journals, applied-input baselines, verified pointers and interrupted-write fencing | Implemented locally, owner-enabled reviewed path; real backend/plan-shape rehearsal and recovery tooling pending |
 | 4. Database adoption | Import-only v2 cluster configuration and independent guards | Pending; no agent-run live import |
 | 5. Enrollment | Serialized durable TOFU, DNS-only SSHFP writer, local DNSSEC validation | Pending prerequisites/tests |
 | 6. Staging delivery | Reusable infrastructure flow, owner-enabled safe lane, recovery fixes, exact-release acceptance | Pending |
@@ -169,7 +169,11 @@ Owner-authorized disposable-lab rehearsal precedes activation: TLS database/S3, 
 
 ### Remaining inputs and prerequisites
 
-The classifier (`scripts/infra-policy.ts`) has no provider/network access or package dependency. The workflow reports its decision but grants no automatic write authority. Its pure API needs an independently persisted applied-input baseline to allow even a no-change plan; baseline persistence and real-provider plan-shape rehearsal remain prerequisites for the automatic lane. The handoff binding is enforced in the current reviewed lane and checked again immediately before Apply. Run its invented-data tests with `bun test tests/unit/infra-policy.test.ts tests/unit/infra.test.ts`.
+The classifier (`scripts/infra-policy.ts`) has no provider/network access or package dependency. The workflow reports its decision but grants no automatic write authority. The owner-enabled control adapter (`scripts/infra-control-cli.ts`) now supplies the independently persisted applied-input baseline. Native Bun S3 writes AES-256-GCM records with a separately domain-derived scrypt key under `tarubot/control/v1/infra/`; it requires neither conditional writes nor package installation. Backend/path binding prevents cross-backend/object replay. Readback and expected-generation checks do not provide mutual exclusion.
+
+The reviewed workflow's `baseline` operation requires existing state, a complete recognized no-change plan and the owner's `infra` approval; it does not invoke provider Apply. Ordinary journaled Apply refuses a missing baseline. After successful Apply, same-lineage advanced state and known planned resource/output values must verify before baseline completion. Decrypted state and plan JSON remain private temporary evidence. Pending references stop subsequent runs, including after a stale-plan failure; there is no automatic journal repair or replay. An orphan intent written before pending publication authorizes no provider mutation.
+
+Activation remains an owner step: verify private versioned storage, scoped permissions and real-provider plan/state shapes before enabling `TOFU_CONTROL_RECORDS_ENABLED` in both infrastructure environments. The variable defaults off. The handoff binds activation, baseline/state generation, full show JSON and controller code and is checked immediately before writes. The replacement release orchestration will reuse these components, not accumulate legacy workflow branches. Run invented-data tests with `bun test tests/unit/infra-control.test.ts tests/unit/infra-policy.test.ts tests/unit/infra.test.ts`.
 
 - Owner's private cluster baseline, supported v2 schema/import behavior and state mapping; no agent credential/state retrieval.
 - Owner creation/readback of the safe-apply gate and scoped credentials; no environment setup as a code side effect.

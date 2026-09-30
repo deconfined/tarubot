@@ -109,7 +109,17 @@ The plan refuses to go on:
 
 There is no state lock. Runs serialize through the workflow's `infra` concurrency group, and a [hand run](#a-hand-run-when-actions-is-down) must never overlap one. The Plan job plans with `-lock=false` as well, because its state key is read-only and could never write a lock: the backend configures none today (no `use_lockfile`), and the flag keeps a later one from making Plan write.
 
-The [next pipeline specification](../../docs/PIPELINE.md#plan-transfer-credentials-and-concurrency) retains this Linode single-writer boundary rather than requiring conditional object writes or a new locking service. Its durable journals/baselines and automatic SSH enrollment are not implemented yet; the current workflow remains dispatch-only with owner-approved Apply and manual host-key pinning.
+The [next pipeline specification](../../docs/PIPELINE.md#plan-transfer-credentials-and-concurrency) retains this Linode single-writer boundary rather than requiring conditional object writes or a new locking service. Durable journals/baselines have an owner-enabled reviewed path below; automatic SSH enrollment remains pending. The workflow stays dispatch-only with owner-approved Apply and manual host-key pinning.
+
+### Durable control records (owner-enabled)
+
+Before activation, the owner verifies bucket privacy/versioning/retention, recovery copies, state-key access to `tarubot/control/v1/infra/`, and the pinned tool's real state/plan shapes. The same passphrase protects these records through a separate scrypt/AES-256-GCM domain; never publish records or private state exports. Recovery tooling and real-backend rehearsal remain pending; do not enable this solely because offline tests passed.
+
+With automation fenced, set `TOFU_CONTROL_RECORDS_ENABLED=true` in both `infra-plan` and `infra`, then dispatch `operation=baseline`. It must show a complete no-change plan for existing state and waits for the existing `infra` approval. Establishment writes only encrypted control records, never provider/state changes. A second establishment cannot replace the baseline. Leave destroy/access-removal/replace switches off.
+
+Enabled Plan reads the current applied-input baseline. Enabled Apply persists intent and its pending reference before applying the reviewed file, verifies resulting state and advances the baseline only on success. Missing baseline, stale state/generation, missing history, failed persistence or a pending operation stops the path. State exports and full JSON are private runner files, not artifacts. The only artifact remains the encrypted saved plan.
+
+Do not retry a failed Apply to clear its journal, switch records off as a recovery shortcut, delete its pending reference, or restore only the newest object. The owner must fence writers and reconcile actual provider/state outcomes and linked record generations before resuming. An intent persisted before its pending reference may be orphaned without any provider write; uncertain outcomes still require investigation. The journal is not a lock. Automatic Apply remains disabled.
 
 ## The first apply
 
