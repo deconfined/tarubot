@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.36.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.2**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.2 — Self-contained pipeline specification
+
+- Document the proposed release-integrated pipeline, existing-cluster import, narrow automatic policy, credential/state boundaries, durable SSH TOFU with DNSSEC SSHFP, staging acceptance and migration-aware recovery.
+- Record the accepted initial SSH TOFU risk, remaining technical/owner prerequisites and ordered implementation milestones. Link the specification from current contributor and deployment references; no environment, live infrastructure or runtime behavior changes.
 
 ## 2.36.1 — Task-focused contributor documentation
 

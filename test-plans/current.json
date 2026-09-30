@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.1 documentation cleanup",
-  "objective": "Consolidate contributor setup and checks, shorten internal references, and preserve approved decisions and evidence in Git. No bot behavior, migration or pipeline change; the documentation site stays unchanged. This release does not complete outstanding live acceptance.",
+  "title": "Session: 2.36.2 pipeline specification",
+  "objective": "Make the proposed infrastructure/release pipeline implementable without session history. Record safety, existing-cluster adoption, durable SSH TOFU, acceptance and recovery. No runtime change or live operation; production Compose and current approval gates stay intact.",
   "user": [
-    "Review CONTRIBUTING.md and docs/README.md: setup, checks and the task links should be easy to find.",
-    "Confirm the shortened constraints/runbooks preserve the approved safety boundaries; prior manual acceptance remains owed unless explicitly completed or waived."
+    "Review docs/PIPELINE.md for agreed requirements, safe-auto-apply limits and the accepted initial TOFU interception risk.",
+    "Review the ordered milestones and owner prerequisites; this documentation does not activate the pipeline or complete live acceptance."
   ],
   "assistant": [
-    "Check internal links, immutable archive references and the verbatim confirmed deployment rules.",
-    "Run source-quality, unit/contract, build and version checks; leave shared DevBot, production and infrastructure untouched."
+    "Check internal navigation, version bookkeeping and unchanged deployment authority/production pins.",
+    "Verify the documentation milestone locally and begin the tested safety foundation; hold no environment secrets and operate no live infrastructure."
   ],
   "bot": [
     "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
-    "Continue the existing behavior; documentation cleanup triggers no migration or new Discord action."
+    "Continue existing behavior; this specification triggers no migration, deployment or new Discord action."
   ]
 }

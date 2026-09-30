@@ -30,7 +30,7 @@ The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.
 
 > Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
 
-The implemented pipeline still requires owner approval for infrastructure Apply and production deployment. Production's Compose path remains frozen until its separately reviewed move. The existing managed database cluster is not replaced or newly provisioned by the current module. The proposed release-integrated safe-auto-apply pipeline is future work, not permission to bypass today's gates.
+The implemented pipeline still requires owner approval for infrastructure Apply and production deployment. Production's Compose path remains frozen until its separately reviewed move. The existing managed database cluster is not replaced or newly provisioned by the current module. The [release-integrated safe-auto-apply specification](docs/PIPELINE.md) records future work, not permission to bypass today's gates.
 
 ## Approval references
 

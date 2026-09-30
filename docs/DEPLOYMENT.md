@@ -1,6 +1,6 @@
 # Deployment
 
-This is the **implemented** pipeline. Production still uses Docker Compose; staging has the OpenTofu/Ansible/rootless Quadlet path. A green run with skipped steps, `no-host` or `configured` does not prove staging is running DevBot. Check the target job and its actual result. The proposed release-integrated infrastructure/safe-auto-apply design is separate work.
+This is the **implemented** pipeline. Production still uses Docker Compose; staging has the OpenTofu/Ansible/rootless Quadlet path. A green run with skipped steps, `no-host` or `configured` does not prove staging is running DevBot. Check the target job and its actual result. The [release-integrated infrastructure/safe-auto-apply specification](PIPELINE.md) is separate work, with explicit milestones and activation prerequisites.
 
 ## Release flow
 

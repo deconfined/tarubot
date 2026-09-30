@@ -13,6 +13,7 @@ Start with [CONTRIBUTING.md](../CONTRIBUTING.md) for setup, tests and the change
 | Build and test a Discord reply | [REPLIES](REPLIES.md) |
 | Prepare a development session | [DEV_GUILD](DEV_GUILD.md), [TEST_PLANS](TEST_PLANS.md) |
 | Change CI or update dependencies | [CI_CD](CI_CD.md) |
+| Implement the next infrastructure/release pipeline | [PIPELINE](PIPELINE.md) |
 
 ## Maintainer runbooks
 
@@ -28,6 +29,6 @@ Use GitHub issues for backlog and PRs for implementation/review. Record automate
 
 Outstanding acceptance from the previous records includes live visibility/override checks and the staging pipeline's healthy deploy, command-registration, timer and restore-drill paths. See [#46](https://github.com/deconfined/tarubot/issues/46) and [#62](https://github.com/deconfined/tarubot/issues/62); the [archived verification record](archive/README.md#verification-and-acceptance) preserves what was and was not exercised. These checks are not declared complete by this cleanup.
 
-The next pipeline work is separate: adoption of the existing PostgreSQL cluster, release-integrated infrastructure planning, narrowly gated safe auto-apply, and genuinely tested staging before production approval. Automated SSH trust/SSHFP remains design work. None of those changes is implemented by the documentation cleanup.
+The [pipeline specification](PIPELINE.md) records the next design, safety policy, database adoption, durable SSH TOFU/SSHFP, recovery gaps and implementation milestones. It separates proposed/implemented paths from owner activation; no resumed session is needed to recover those requirements.
 
 Historical rollout plans and verification diaries are in the [archive](archive/README.md), not the onboarding path. Current instructions should live in one place; link to them rather than copying them into handoff files.
