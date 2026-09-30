@@ -1,63 +1,80 @@
 ---
 # TaruBot's bot deploy (#62): the release's own playbook, run by .github/workflows/host.yml's Bot
 # step from a checkout of the release commit, as root over SSH from a GitHub-hosted runner, after
-# main's site.yml has configured the host. The bot runs as a rootless Quadlet unit of the tarubot
-# user, so a rollback deploys with that release's own bot.yml, unit template and settings.
+# main's site.yml has configured the host. host.yml is the Deploy workflow's one host job, for
+# staging and, since 2.37.0, prod. The bot runs as a rootless Quadlet unit of the tarubot user, so
+# a rollback deploys with that release's own bot.yml, unit template and settings.
 #
-#   ansible-playbook -i INVENTORY bot.yml -e tarubot_target=staging -e tarubot_action=ACTION
+#   ansible-playbook -i INVENTORY bot.yml -e tarubot_target=staging|prod -e tarubot_action=ACTION
 #     -e tarubot_version=X.Y.Z -e tarubot_commit=COMMIT -e tarubot_digest=sha256:DIGEST
 #     -e tarubot_result=/absolute/path/on/the/runner.json
 #
 # The inventory's one host is `target`. ACTION is deploy (every automatic run), bot (a rollback, a
 # rotation or a first start) or preflight (a new host before its Discord token exists). host.yml's
-# fourth action, configure, never runs this play.
+# other actions, configure and infra, never run this play.
 #
 # Three plays:
 #   1. As root, find the tarubot account site.yml creates. Without it the run is refused.
 #   2. As tarubot, one block of phases, each ending the run early by setting tb_result:
 #        checks      the inputs, the target's declared settings, and the secrets: present, well
-#                    formed, and the database this target's (names and booleans only);
+#                    formed, the backup's URLs on HTTPS, /suggest's client ID on a target that
+#                    runs /suggest, and the database this target's (names and booleans only);
 #        live        the installed unit's image, its version and its migrations' image;
 #        decide      configured (a deploy with no Discord token, on a host that runs no bot),
 #                    refused, or superseded (a deploy older than live);
 #        image       pull the release by digest and prove its version and commit labels;
 #        migrations  compare the live and target images' migration lists: a rollback across a
-#                    migration is refused, and the pending ones are named;
+#                    migration is refused while the live bot runs (when it doesn't, the older
+#                    release's own migrate.js decides at the restart), and the ones the live image
+#                    lacks are named (every one on a first start, whatever the database holds);
 #        identity    the application and test guild the release image reports for the target,
 #                    and DISCORD_TOKEN's application checked against them;
+#        settings    the release's own configuration() and tool guard (dist/scripts/deploy-check.js)
+#                    over exactly the settings and secrets the bot will get, in a throwaway
+#                    container with no network, before anything is written or stopped;
 #        secrets     each required value into its Podman secret, over stdin;
 #        files       tarubot-tool, the backup script and units, the age recipients;
 #        preflight   (preflight only) migrate.js must print Schema ready., then one backup, and
 #                    the nightly backup timer;
 #        unit        render the candidate unit, check it with Quadlet's dry run, then write the
 #                    settings, the unit and the image file back to back;
-#        restart     systemd stops the old bot, runs migrate.js in the new image, starts it;
+#        restart     systemd stops the old bot, runs migrate.js in the new image, starts it; the
+#                    restore point goes to ~/.config/tarubot/recovery-point, even when the start
+#                    fails, before the restart's own result is checked;
 #        health      healthy within three minutes, and still the same healthy container a minute
 #                    later, running the release's image;
 #        timer       the nightly backup timer;
 #        commands    register.js in the target's scope, then commands.js list;
 #        tidy        remove week-old TaruBot release images no container uses.
-#      Before the secrets phase nothing is written to the host but image pulls. A failure anywhere
-#      lands in the rescue, which records the phase, and the outcome and reason a task that can
-#      fail declares in its own vars (tb_outcome, tb_reason). Nothing is ever put back: an
-#      unhealthy release fails the run, and the owner rolls back by dispatching the previous one.
+#      Before the secrets phase nothing is written to the host but image pulls. The one value that
+#      reaches the host sooner is the settings phase's: the settings and secrets pass on stdin into
+#      a network-less, read-only --rm container, and are never written. A failure anywhere lands in
+#      the rescue, which records the phase, and the outcome and reason a task that can fail
+#      declares in its own vars (tb_outcome, tb_reason). Nothing is ever put back: an unhealthy
+#      release fails the run, and the owner rolls back by dispatching the previous one.
 #   3. On the runner, write the result JSON (public fields only) to tarubot_result, then fail the
 #      run unless the outcome is deployed, superseded, configured or preflight-ok. Ansible runs
 #      this play after the rescue and after play 1's unreachable check, but not when the host
 #      becomes unreachable during play 2 (Ansible then has no host left and stops): host.yml's
 #      summary then says there is no result file.
 #
-# Secrets. host.yml's Bot step exports exactly vars/bot.yml tb_secret_env from the job's GitHub
-# environment (two from secrets of other names, tb_secret_source). This play reads them only with lookup('ansible.builtin.env', NAME), only in no_log
-# tasks, and keeps only names and booleans from them (tb_token_absent, tb_missing, tb_malformed,
-# tb_db_ok, tb_token_ok); the one other use is a secret's own stdin. no_log censors a task's result
-# but not the [ERROR] line of an exception raised while templating, which can quote the value, so
-# those expressions use only operations that can't raise on any string (==, !=, split, first,
-# length, `is match`, and b64decode after its own guards). The refusals are plain assert tasks
-# over those names and booleans, so the names reach the public log and the values never do.
-# Every task that runs bun, tarubot-tool, podman exec or logs, podman container inspect or
-# journalctl carries no_log too: their output names guilds or holds the container's environment.
-# There is no debug task, no diff and no meta: end_*. tests/unit/bot-play.test.ts pins these rules.
+# Secrets. host.yml's Bot step exports exactly vars/bot.yml tb_secret_env and tb_setting_env from
+# the job's GitHub environment (three from secrets of other names, tb_secret_source and
+# tb_setting_source). This play reads them only with lookup('ansible.builtin.env', NAME), or
+# query() for several, only in no_log tasks, and keeps only names and booleans from them
+# (tb_token_absent, tb_missing, tb_malformed, tb_db_ok, tb_token_ok, tb_backup_url_ok,
+# tb_backup_endpoint_ok, tb_client_ok). The other uses: a secret's own stdin; the settings
+# check's stdin; and tb_client_id, /suggest's client ID (a public identifier, not a secret), kept
+# only once it has matched its pattern and only on a target with tarubot_suggest. no_log censors
+# a task's result but not the [ERROR] line of an exception raised while templating, which can
+# quote the value, so those expressions use only operations that can't raise on any string (==,
+# !=, in, split, first, length, `is match`, b64decode after its own guards, and zip, combine and
+# to_json to build the check's stdin). The refusals are plain assert tasks over those names and
+# booleans, so the names reach the public log and the values never do. Every task that runs bun,
+# tarubot-tool, podman exec or logs, podman container inspect or journalctl carries no_log too:
+# their output names guilds or holds the container's environment. There is no debug task, no diff
+# and no meta: end_*. tests/unit/bot-play.test.ts pins these rules, and tests/fixtures/bot-asserts.py
+# evaluates the refusals' own expressions with ansible-core's templar in CI.
 
 - name: Find the tarubot account, as root
   hosts: target
@@ -147,11 +164,66 @@
               ansible.builtin.include_vars:
                 file: "{{ playbook_dir }}/vars/targets/{{ tarubot_target }}.yml"
 
+            # /suggest runs only where the target says so (vars/targets/prod.yml), and its client
+            # ID then comes from the environment, never from the target's plain settings.
+            - name: Check the target's /suggest switch
+              ansible.builtin.assert:
+                that:
+                  - tarubot_suggest | default(false) is boolean
+                  - not (tarubot_suggest | default(false) and 'GITHUB_APP_CLIENT_ID' in tarubot_settings)
+                fail_msg: >-
+                  vars/targets/{{ tarubot_target }}.yml's tarubot_suggest must be true or false, and
+                  a target with /suggest leaves GITHUB_APP_CLIENT_ID out of tarubot_settings.
+                quiet: true
+
+            # The refusals below name each setting by the environment secret behind it: its own
+            # name, or vars/bot.yml tb_secret_source's and tb_setting_source's for the three
+            # GitHub won't take.
+            - name: Start the lists of missing and malformed settings
+              ansible.builtin.set_fact:
+                tb_missing: []
+                tb_malformed: []
+                tb_secret_names: >-
+                  {{ dict((tb_secret_env + tb_setting_env) | zip(tb_secret_env + tb_setting_env))
+                     | combine(tb_secret_source, tb_setting_source) }}
+                tb_client_ok: true
+                tb_client_id: ""
+
+            # /suggest's client ID, on a target that runs /suggest, for deploy and bot (a preflight
+            # starts no bot). A client ID isn't secret, but it arrives as an environment secret
+            # (SUGGEST_APP_CLIENT_ID), so it is read like one: tb_client_ok is a boolean, and
+            # tb_client_id keeps the value only once it matched the pattern. The split comparison
+            # refuses surrounding whitespace, such as the trailing newline `$` alone lets through.
+            - name: Check /suggest's client ID, and keep it only when well formed
+              ansible.builtin.set_fact:
+                tb_client_ok: >-
+                  {{ lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID') == ''
+                     or (lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID') is match('^[A-Za-z0-9._-]{1,64}$')
+                         and lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID').split()
+                             == [lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID')]) }}
+                tb_client_id: >-
+                  {{ lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID')
+                     if (lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID') is match('^[A-Za-z0-9._-]{1,64}$')
+                         and lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID').split()
+                             == [lookup('ansible.builtin.env', 'GITHUB_APP_CLIENT_ID')])
+                     else '' }}
+              when:
+                - tarubot_suggest | default(false)
+                - tarubot_action != 'preflight'
+              no_log: true
+
+            # The secrets the bot's container mounts: the target's for deploy and bot, plus the
+            # GitHub App's key once /suggest has a client ID; the database's two for a preflight.
+            - name: Work out which secrets the container mounts
+              ansible.builtin.set_fact:
+                tb_container_secrets: >-
+                  {{ tb_preflight_secrets if tarubot_action == 'preflight'
+                     else tarubot_secrets + (['GITHUB_APP_PRIVATE_KEY'] if tb_client_id != '' else []) }}
+
+            # Every action also needs the backup's settings, which only tarubot-backup reads.
             - name: Work out which secrets this action needs
               ansible.builtin.set_fact:
-                tb_required: >-
-                  {{ (tb_preflight_secrets if tarubot_action == 'preflight' else tarubot_secrets)
-                     + tarubot_backup_settings }}
+                tb_required: "{{ tb_container_secrets + tarubot_backup_settings }}"
 
             - name: Check that the Bot step exports every name the target declares
               ansible.builtin.assert:
@@ -166,14 +238,6 @@
               ansible.builtin.set_fact:
                 tb_token_absent: "{{ tarubot_action == 'deploy' and lookup('ansible.builtin.env', 'DISCORD_TOKEN') == '' }}"
               no_log: true
-
-            # The refusals below name each setting by the environment secret behind it: its own
-            # name, or vars/bot.yml tb_secret_source's for the two GitHub won't take.
-            - name: Start the lists of missing and malformed settings
-              ansible.builtin.set_fact:
-                tb_missing: []
-                tb_malformed: []
-                tb_secret_names: "{{ dict(tb_secret_env | zip(tb_secret_env)) | combine(tb_secret_source) }}"
 
             # A deploy with no token is decided below (configured, or refused on a host that
             # runs a bot), so the token isn't listed as missing then.
@@ -202,6 +266,19 @@
                   lookup('ansible.builtin.env', item).split() | length == 0
                   or (item not in tb_multiline_secrets
                       and lookup('ansible.builtin.env', item).split() != [lookup('ansible.builtin.env', item)])
+              no_log: true
+
+            # The backup's check URL and bucket endpoint carry its traffic (the check's pings, the
+            # signed upload), so both must use HTTPS: the check URL always, the endpoint whenever
+            # it names a scheme (tarubot-backup adds https:// to a bare host name, and refuses any
+            # other scheme only at 04:30, long after the deploy looked fine). Booleans only; an
+            # empty value is the missing list's, and whitespace the malformed list's.
+            - name: Check that the backup's URLs use HTTPS (booleans only)
+              ansible.builtin.set_fact:
+                tb_backup_url_ok: "{{ lookup('ansible.builtin.env', 'HEALTHCHECKS_BACKUP_URL') is match('^https://[^/?#]') }}"
+                tb_backup_endpoint_ok: >-
+                  {{ lookup('ansible.builtin.env', 'BACKUP_STORAGE_ENDPOINT') is match('^https://[^/?#]')
+                     or '://' not in lookup('ansible.builtin.env', 'BACKUP_STORAGE_ENDPOINT') }}
               no_log: true
 
             # One regular expression match, which can't raise on any value. A parser such as
@@ -340,6 +417,35 @@
                   These values in the {{ tarubot_target }} environment hold whitespace, a stray
                   space or newline (only the PEMs may span lines):
                   {{ tb_malformed | map('extract', tb_secret_names) | join(', ') }}.
+                quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: malformed-secret
+
+            - name: Refuse a /suggest client ID that isn't one
+              ansible.builtin.assert:
+                that:
+                  - tb_client_ok
+                fail_msg: >-
+                  {{ tb_secret_names.GITHUB_APP_CLIENT_ID }} in the {{ tarubot_target }} environment
+                  must be the GitHub App's client ID (letters, digits, dots, underscores and hyphens,
+                  at most 64 characters), or be empty to leave /suggest off.
+                quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: malformed-secret
+
+            - name: Refuse backup URLs that don't use HTTPS
+              ansible.builtin.assert:
+                that:
+                  - tb_backup_url_ok
+                  - tb_backup_endpoint_ok
+                fail_msg: >-
+                  These values in the {{ tarubot_target }} environment must use https:// (the
+                  storage endpoint may also be a bare host name):
+                  {{ ((['HEALTHCHECKS_BACKUP_URL'] if not tb_backup_url_ok else [])
+                  + (['BACKUP_STORAGE_ENDPOINT'] if not tb_backup_endpoint_ok else []))
+                  | map('extract', tb_secret_names) | join(', ') }}.
                 quiet: true
               vars:
                 tb_outcome: refused
@@ -492,16 +598,40 @@
                 fail_msg: "{{ tb_ref }} has no /app/migrations/NNN_name.sql files."
                 quiet: true
 
-            # The older image's migrate.js would refuse the newer schema only after systemd had
-            # stopped the bot, so this is refused before anything is written.
-            - name: Refuse a rollback across a migration
+            # Read-only: whether the live bot runs. A crash loop (a migration that failed in
+            # ExecStartPre, or a start that fails) shows as activating, never as active.
+            - name: Read whether the live bot runs
+              ansible.builtin.command:
+                argv: [systemctl, --user, show, tarubot.service, --property=ActiveState]
+              register: tb_live_state
+              changed_when: false
+              failed_when: false
+              when: tb_live_ref != ''
+
+            # While the live bot runs, the database holds its migrations, and the older image's
+            # migrate.js would refuse that schema only after systemd had stopped the bot: refused
+            # here, before anything is written. While it doesn't run (its start failed, as when its
+            # migration failed and committed nothing, or @deconfined stopped it for a restore),
+            # nothing is left to stop, so the older release's own migrate.js decides at the
+            # restart. With nothing pending, its schema check refuses a database that holds a newer
+            # migration without writing anything, and the run ends restart-failed with the bot down
+            # as it already was; otherwise the older release starts. A state that can't be read,
+            # or any other than these four, counts as running.
+            - name: Refuse a rollback across a migration while the live bot runs
               ansible.builtin.assert:
                 that:
-                  - tb_live_migrations | difference(tb_target_migrations) | length == 0
+                  - >-
+                    tb_live_migrations | difference(tb_target_migrations) | length == 0
+                    or (tb_live_state.rc | default(1) == 0
+                        and tb_live_state.stdout_lines | default([]) | length == 1
+                        and tb_live_state.stdout_lines | default(['-']) | first
+                            is match('^ActiveState=(inactive|failed|activating|deactivating)$'))
                 fail_msg: >-
-                  The live release ({{ tb_previous }}) has migrations {{ tarubot_version }} lacks:
+                  The live release ({{ tb_previous }}) is running, and has migrations
+                  {{ tarubot_version }} lacks:
                   {{ tb_live_migrations | difference(tb_target_migrations) | sort | join(', ') }}.
-                  Deploy a fix release, or restore from before the migration.
+                  Deploy a fix release, or stop the bot and restore from before the migration,
+                  then dispatch this again.
                 quiet: true
               vars:
                 tb_outcome: refused
@@ -569,24 +699,26 @@
                 fail_msg: The release image reports no managed identity for {{ tarubot_target }}.
                 quiet: true
 
-            # The container's settings, in tarubot.env's order: the fixed ones, the target's, then
-            # the identity (TEST_GUILD_ID empty for a global registration). The secrets it mounts
-            # are the target's for deploy and bot, and the database's two for a preflight.
+            # The container's settings, in tarubot.env's order: the fixed ones, the target's,
+            # /suggest's client ID on a target that runs /suggest (empty for a preflight, or when
+            # the environment has none), then the identity (TEST_GUILD_ID empty for a global
+            # registration). The secrets it mounts are tb_container_secrets, one NAME_FILE line and
+            # one Secret= line each.
             - name: Assemble the container's settings and mounts
               ansible.builtin.set_fact:
                 tb_env: >-
                   {{ (tb_base_settings | dict2items(key_name='name'))
                      + (tarubot_settings | dict2items(key_name='name'))
+                     + ([{'name': 'GITHUB_APP_CLIENT_ID', 'value': tb_client_id}] if tarubot_suggest | default(false) else [])
                      + [{'name': 'DISCORD_APPLICATION_ID', 'value': tb_identity.applicationId},
                         {'name': 'TEST_GUILD_ID',
                          'value': '' if tb_identity.registrationScope == 'global' else tb_identity.registrationScope}] }}
                 tb_files: >-
-                  {{ dict((tb_preflight_secrets if tarubot_action == 'preflight' else tarubot_secrets)
-                          | zip((tb_preflight_secrets if tarubot_action == 'preflight' else tarubot_secrets) | map('lower')))
+                  {{ dict(tb_container_secrets | zip(tb_container_secrets | map('lower')))
                      | dict2items(key_name='name', value_name='path') }}
                 tb_mounts: >-
-                  {{ dict(tarubot_secrets | map('lower') | map('replace', '_', '-') | map('regex_replace', '^', 'tarubot-')
-                          | zip(tarubot_secrets | map('lower')))
+                  {{ dict(tb_container_secrets | map('lower') | map('replace', '_', '-') | map('regex_replace', '^', 'tarubot-')
+                          | zip(tb_container_secrets | map('lower')))
                      | dict2items(key_name='secret', value_name='target') }}
               no_log: true
 
@@ -615,6 +747,67 @@
               vars:
                 tb_outcome: refused
                 tb_reason: token-application-mismatch
+
+        # ------------------------------------------------------------------------------------
+        # The release's own startup check and tool guard (scripts/deploy-check.ts) over exactly
+        # what the bot will get: tb_env, tarubot.env's plain lines, and the values of the secrets
+        # it mounts, by their plain names. It runs configuration() and the guard for migrate.js and
+        # register.js on deploy and bot, and the guard for migrate.js on a preflight, and prints
+        # only {"ok":true} or the name of the check that refused. The values pass on stdin into a
+        # throwaway container of the release image, with no network, a read-only root, no
+        # capabilities and no log, and are never written: the one exception to "nothing reaches the
+        # host before the secrets phase". A setting the bot or its tools would refuse at start thus
+        # stops the deploy before any write, and before the running bot stops.
+        - name: Settings
+          when: tb_result is not defined
+          block:
+            - name: Start the settings step
+              ansible.builtin.set_fact:
+                tb_step: settings
+
+            - name: Check the settings with the release's own configuration and tool guard
+              ansible.builtin.command:
+                argv:
+                  - podman
+                  - run
+                  - --rm
+                  - -i
+                  - --pull=never
+                  - --network=none
+                  - --read-only
+                  - --env-host=false
+                  - --cap-drop=all
+                  - --security-opt=no-new-privileges
+                  - --log-driver=none
+                  - --entrypoint
+                  - bun
+                  - "{{ tb_image_id }}"
+                  - "{{ tb_settings_check }}"
+                stdin: >-
+                  {{ {'action': tarubot_action,
+                      'env': (tb_env | items2dict(key_name='name', value_name='value'))
+                             | combine(dict(tb_container_secrets | zip(query('ansible.builtin.env', *tb_container_secrets))))}
+                     | to_json }}
+              register: tb_check
+              changed_when: false
+              failed_when: false
+              no_log: true
+
+            # The label is one of three fixed words, so nothing else of the output reaches the log.
+            - name: Refuse settings the release itself refuses
+              ansible.builtin.assert:
+                that:
+                  - tb_check.rc == 0
+                  - tb_check.stdout is match('^[{]"ok":true[}]$')
+                fail_msg: >-
+                  {{ tarubot_version }}'s own checks refuse the {{ tarubot_target }} settings
+                  ({{ tb_check.stdout | default('') | regex_search('(configuration|migrate|register)(?="[}]$)')
+                  | default('settings', true) }}): the bot or its tools would refuse them at start.
+                  Nothing was written, and the running bot wasn't touched.
+                quiet: true
+              vars:
+                tb_outcome: refused
+                tb_reason: settings-invalid
 
         # ------------------------------------------------------------------------------------
         # The first write. Each value goes to Podman on the command's stdin, never in its
@@ -833,7 +1026,9 @@
         # ------------------------------------------------------------------------------------
         # systemd stops the old container (freeing the writer lease), runs migrate.js in the new
         # image (ExecStartPre), then starts the bot. If the runner disappears, systemd still
-        # finishes the restart.
+        # finishes the restart. The restore point, the moment a database restore goes back to, is
+        # kept on the host (~/.config/tarubot/recovery-point) and in the result whatever the
+        # restart's own outcome, and only then is the restart checked.
         - name: Restart
           when:
             - tb_result is not defined
@@ -843,35 +1038,94 @@
               ansible.builtin.set_fact:
                 tb_step: restart
 
+            # The host's clock just before the restart, while the old bot still runs: before
+            # anything this deploy's migrate.js could commit.
+            - name: Read the time before the restart
+              ansible.builtin.command:
+                argv: [date, -u, "+%Y-%m-%dT%H:%M:%S.%6NZ"]
+              register: tb_before
+              changed_when: false
+              failed_when: >-
+                tb_before.rc != 0
+                or tb_before.stdout is not match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$')
+
+            # A failure is registered rather than raised, so the restore point below is written
+            # even when the new release doesn't start; "Require the restart to have succeeded"
+            # then fails the run.
             - name: Restart the bot
               ansible.builtin.systemd_service:
                 name: tarubot.service
                 state: restarted
                 scope: user
-              vars:
-                tb_reason: restart-failed
+              register: tb_restart
+              ignore_errors: true
 
-            # The old instance's stop, before migrate.js could commit: the point a restore goes
-            # back to. Empty on a first start.
-            - name: Read when the previous instance stopped
+            # systemd keeps only the latest of each timestamp. InactiveEnterTimestamp is the old
+            # instance's stop only while the instance this restart started is still up and systemd
+            # hasn't restarted it on its own (a manual start resets NRestarts to 0). After a failed
+            # start it is the failure's time, after migrate.js ran (verified on systemd 257).
+            - name: Read the unit's state after the restart
               ansible.builtin.command:
                 argv:
                   - systemctl
                   - --user
                   - show
                   - tarubot.service
+                  - --property=ActiveState
+                  - --property=NRestarts
                   - --property=InactiveEnterTimestamp
-                  - --value
                   - --timestamp=us+utc
-              register: tb_inactive
+              register: tb_after
               changed_when: false
+              failed_when: false
 
-            - name: Keep it as the restore point
+            # "Wed 2026-09-30 00:26:23.131772 UTC" becomes 2026-09-30T00:26:23.131772Z (the date
+            # and time groups joined by T, then Z appended at the end); anything else is -.
+            - name: Take the InactiveEnterTimestamp it shows
+              ansible.builtin.set_fact:
+                tb_stopped: >-
+                  {{ ((tb_after.stdout | default('')
+                       | regex_findall('^InactiveEnterTimestamp=[A-Za-z]+ ([0-9]{4}-[0-9]{2}-[0-9]{2}) '
+                                       ~ '([0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}) UTC$', multiline=True)
+                       | map('join', 'T') | map('regex_replace', '$', 'Z') | list) + ['-']) | first }}
+
+            # The old instance's stop when systemd still holds it (restarted, up, no automatic
+            # restart since, and after the time read above), so the old bot's last writes are kept;
+            # otherwise (a failed start, a bot that already exited, a first start) the time before
+            # the restart. Either comes before anything this deploy's migrate.js could commit.
+            - name: Keep the restore point
               ansible.builtin.set_fact:
                 tb_restore_point: >-
-                  {{ (tb_inactive.stdout.split()[1] ~ 'T' ~ tb_inactive.stdout.split()[2] ~ 'Z')
-                     if tb_inactive.stdout is match('^[A-Za-z]+ [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6} UTC$')
-                     else '-' }}
+                  {{ tb_stopped
+                     if (tb_restart is not failed
+                         and 'ActiveState=active' in (tb_after.stdout_lines | default([]))
+                         and 'NRestarts=0' in (tb_after.stdout_lines | default([]))
+                         and tb_stopped is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$')
+                         and tb_stopped >= tb_before.stdout)
+                     else tb_before.stdout }}
+
+            - name: Write the restore point where the host keeps it
+              ansible.builtin.copy:
+                content: "{{ tb_restore_point }}\n"
+                dest: "{{ tb_home }}/.config/tarubot/recovery-point"
+                mode: "0600"
+
+            - name: Require the restart to have succeeded
+              ansible.builtin.assert:
+                that:
+                  - tb_restart is not failed
+                # The way back is the release live before, when there was one: bot.yml lets that
+                # rollback through while this bot is down, and its migrate.js refuses the schema,
+                # without writing, only if this release's migration committed.
+                fail_msg: >-
+                  systemd couldn't restart the bot on {{ tarubot_version }}: migrate.js in
+                  ExecStartPre, or the container's start, failed (the host's journal says which). The
+                  restore point before it is in ~/.config/tarubot/recovery-point and this run's
+                  result.{{ (' To go back, dispatch ' ~ tb_previous ~ ' with action=bot.')
+                  if tb_previous != '-' else '' }}
+                quiet: true
+              vars:
+                tb_reason: restart-failed
 
         # ------------------------------------------------------------------------------------
         # Every automatic restart makes a new container (Quadlet runs it with --rm), so the same
@@ -1063,7 +1317,7 @@
     tb_target: "{{ hostvars['target'] }}"
     tb_outcomes: [deployed, superseded, configured, refused, unhealthy, failed, preflight-ok]
     tb_steps:
-      [checks, live, image, migrations, identity, secrets, files, preflight, unit, restart, health, timer, commands, tidy]
+      [checks, live, image, migrations, identity, settings, secrets, files, preflight, unit, restart, health, timer, commands, tidy]
   tasks:
     - name: Check that the result goes to an absolute path on the runner
       ansible.builtin.assert:

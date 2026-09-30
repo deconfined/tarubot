@@ -2,7 +2,7 @@
 
 - **Status:** Draft for owner review
 - **Prepared:** 2026-09-21
-- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments"); 2026-09-29 (owner pipeline decisions on issue #62; see "Approved pipeline amendments")
+- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments"); 2026-09-29 (owner pipeline decisions on issue #62; see "Approved pipeline amendments"); 2026-09-29 (owner decisions for one deployment path, after the review of a Codex branch; see "Approved unified-pipeline amendments")
 - **Deliverable:** A TypeScript Discord bot for Final Fantasy XIV Free Companies
 
 ### Approved implementation amendments (2026-09-21)
@@ -277,7 +277,7 @@ The plan also leaves out roles given on joining or rejoining the server, people 
 
 Issue #41 asked for production deploys from GitHub Actions over SSH, the last part of the robust-host follow-up of 2026-09-25 (see "Approved hosting amendment"). The owner approved the [plan](https://github.com/deconfined/tarubot/issues/41#issuecomment-5843136740) and answered its ten questions in the [decision comment](https://github.com/deconfined/tarubot/issues/41#issuecomment-5843517579): "Yes" to questions 1 to 8, "Warning" to question 9, and to question 10 "Yes. Itemize what fine-tune permissions are required on the new token." Release 2.30.0 implements them with `.github/workflows/deploy.yml` and `ops/deploy.sh`, with no bot change and no migration. They supersede conflicting text elsewhere in this document, for automated deploys only; the manual procedure in [docs/HOSTING.md](docs/HOSTING.md) is unchanged.
 
-**Since 2026-09-29** ("Approved pipeline amendments (2026-09-29)" below), the host-side mechanics here apply only to production's Compose host, until 2.37.0 moves production to the new pipeline: the host's own approval check, the dump before a migration, the automatic restore, the forced command and decision 5's quiet message. The rule for agents in this section stands word for word, widened by those amendments, and decision 7 is reworded there.
+**Since 2026-09-29** ("Approved pipeline amendments (2026-09-29)" below), the host-side mechanics here apply only to production's Compose host, until @deconfined's cutover moves production to the new pipeline (owner steps on 2.37.0 or later; "Approved unified-pipeline amendments (2026-09-29)"): the host's own approval check, the dump before a migration, the automatic restore, the forced command and decision 5's quiet message. The rule for agents in this section stands word for word, widened by those amendments, and decision 7 is reworded there.
 
 **The owner's GitHub approval is the go-ahead (decisions 1, 2, 4 and 6).** The owner's own approval of a `production` deployment in the GitHub web or mobile interface authorizes what that run's plan lists:
 - moving the Linode host to the named release, whose image digest the plan names, or, with `rollback`, back to it from the named live release, never across a migration;
@@ -385,7 +385,7 @@ Nothing in this step trusts the host's own network.
 
 **Agents and the hosts (question 5).** Agents never approve deploys for either target; never change any deploy environment, its secrets or variables, or either enable switch; never hold either deploy key; never enable, disable, cancel or re-run the Deploy workflow; and never push a workflow that does any of these. Claude runs the playbook in check mode against staging freely, and applies it to staging under a standing go-ahead that covers the build phase only. Starting the bot, stopping DevBot, reboots and the DevBot move each need the owner's go-ahead. Production playbook runs stay the owner's alone, and the production inventory and root key stay off the operator VM. On dispatching, the owner kept the SSH-deploy agent rule's clause ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and withdrew question 5's "never dispatch" on 2026-09-27 ([#50](https://github.com/deconfined/tarubot/issues/50#issuecomment-5852502546)): agents dispatch the Deploy workflow, for either target, only when the owner asks in that session. AGENTS.md quotes that rule unchanged.
 
-**Implementation notes (2.33.0).** How 2.33.0 carries out the decisions above; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#staging-host-50) has the detail.
+**Implementation notes (2.33.0).** How 2.33.0 carries out the decisions above; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#staging-and-prod-hosts-50-62) has the detail.
 - **The release split.** Item 2 of "Releases" ships in two releases: 2.33.0 the runtime half (`ops/deploy.sh`'s Quadlet modes, the staging deploy target, the provenance check, Podman secrets, the Quadlet backup and the first start), and 2.34.0 the pull unit. The later items take the next free numbers.
 - **The workflow's name.** `.github/workflows/deploy.yml` is displayed as "Deploy" (it was "Deploy production"). The quoted rule's "the Deploy production workflow" means that file, for both targets; the hosts check its path, not its name.
 - **Staging dispatches (questions 4 and 5).** Staging has no approval, so the plan and the staging host accept a staging dispatch only when both the run's actor and its triggering actor are the owner's account, by login and account id. A GitHub App or a workflow token is refused, so an agent could dispatch staging only with a credential of the owner's own, and only when the owner asks in that session.
@@ -481,6 +481,8 @@ Their first answers the same day are recorded in the issue:
 The agent's plan went through two review rounds. @deconfined answered its six questions and cut five of its pieces ([recorded on #62](https://github.com/deconfined/tarubot/issues/62#issuecomment-5883718678)), then gave the go-ahead for 2.36.0 in the session: "Go for it."
 
 These amendments supersede conflicting text in "Approved SSH-deploy amendments (2026-09-26)", "Approved staging amendments (2026-09-26)" and elsewhere in this document. They take effect release by release: staging from 2.36.0, production from 2.37.0. Until production moves, its Compose host keeps its deploy path and the SSH-deploy amendments' host-side mechanics.
+
+**Since 2.37.0** ("Approved unified-pipeline amendments (2026-09-29)" below), part of this section is superseded: `infra.yml` and the `infra` environment, the second copy of `TOFU_VARS`, trust on first use from @deconfined's own machine into `TARGET_HOST_KEY`, the plan by dispatch only, the per-target concurrency groups, the `notify` job's end at 2.37.0 and the release list. Production moves at @deconfined's cutover, owner steps on 2.37.0 or later, not with the release itself. That section lists exactly what changes.
 
 **The four layers.** Each has one owner:
 - **OpenTofu** builds each host (`ops/tofu/`): the Linode with disk encryption, its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list.
@@ -588,7 +590,7 @@ It also means:
 5. **Nothing prints a new host's key.** Kept. @deconfined pins it with `ssh-keyscan -q` from their own machine into `TARGET_HOST_KEY`, because internet scanners index host keys by address and a key in a public log would lead to the host. The alternative was an Apply that prints the key encrypted to `ops/age-recipients.txt`.
 6. **No real plan on pull requests.** Kept. Answer 2 said OpenTofu plans on pull requests. Pull requests get only secret-free checks (`fmt`, `validate`, `tofu test` against mock providers, and cloud-init's schema over the rendered user data); the real plan runs only by dispatch from `main`, inside `infra-plan`, because pull-request code must never see the state passphrase or any token in a repository whose logs are public. `infra-plan` accepts only `main` too, so pull-request code still never reaches them.
 
-**Implementation notes (2.36.0).** How 2.36.0 carries these out; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#the-simple-pipeline-2360) has the detail.
+**Implementation notes (2.36.0).** How 2.36.0 carries these out; none changes a decision. [docs/HOSTING.md](docs/HOSTING.md#the-simple-pipeline) has the detail.
 - **Production is untouched.** `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts` and `deploy.yml`'s `deploy` and `notify` jobs are byte-identical to 2.35.0's, pinned by SHA-256 in `tests/unit/deploy-workflow.test.ts`. The new `action` input is staging's until 2.37.0, and a production rollback still uses `rollback` and `from`.
 - **Each release deploys with its own `bot.yml`.** The Bot step checks out the commit named by the image's own revision label, which must equal the plan's commit, and runs that release's `bot.yml` with `main`'s `ansible.cfg` and ansible-core. Six `-e` names and eleven secret names form the interface, pinned by tests. Staging takes 2.36.0 or later (`STAGING_MIN_RELEASE`).
 - **Every refusal comes before any write.** Nothing reaches the host before the secrets phase except an image pull. The checks cover:
@@ -608,6 +610,169 @@ It also means:
 - **No state lock.** Linode's conditional writes are unverified, so the `infra` concurrency group serializes runs, and a hand run must never overlap one.
 - **The saved plan's values are infra's.** A saved plan applies the values it was planned with (`infra-plan`'s `TOFU_VARS`) and writes the state to the bucket it was planned against, so the four shared settings must match exactly. Apply refuses a plan made with a `TOFU_VARS` other than its own, since a key or hash set in one copy alone changes no line of the change list.
 - **Tools.** OpenTofu comes from a checksum pinned from its signature-verified `SHA256SUMS`, the runner's ansible-core from PyPI pinned by hash, and EPEL is installed the normal way, for `age` only.
+
+### Approved unified-pipeline amendments (2026-09-29)
+
+2.36.0 merged on 2026-09-29 at 14:14 UTC ([PR #63](https://github.com/deconfined/tarubot/pull/63), `b7ab3bc`). Later that day a Codex agent proposed a different 2.37.0 on branch `feat/environment-pipeline`, commit `ce3ded7` ("Add one environment build and deployment pipeline"), which was never merged. It added a dispatch-only **Build and deploy** workflow that:
+- rebuilt and re-signed the image on every dispatch;
+- planned and applied OpenTofu inside the environment's own job, with no plan shown first;
+- pinned a new host's key automatically, by Linode instance, in the state bucket;
+- deployed with a second bot playbook.
+
+Claude reviewed it read-only. Among other things, the review found:
+- an unapproved staging run that could change the database access list production uses;
+- a readiness wait that could never fail;
+- release tags moved by every dispatch;
+- no rollback, no paging and no approval summary;
+- a guard that blocked every module-wide OpenTofu change.
+
+It recommended rebuilding one path from 2.36.0's parts and keeping the branch's good pieces. @deconfined then answered four of its questions on 2026-09-29, in the session's questions tool. Three answers are decisions 1 to 3 below. The fourth had Claude build the result as a new branch, `feat/unified-pipeline-2.37.0` from `b7ab3bc`, rather than fix the Codex branch; its commit credits Codex's `ce3ded7` for the parts it ports.
+
+These amendments supersede conflicting text in "Approved pipeline amendments (2026-09-29)" (listed under "What this supersedes" below), in "Approved SSH-deploy amendments (2026-09-26)" and "Approved staging amendments (2026-09-26)", and in the Codex branch's unmerged "Environment pipeline follow-up (2026-09-29)". Whatever those sections decided that isn't named here stands.
+
+**The decisions.** Decisions 1 to 3 quote @deconfined's answers by their labels:
+1. **"Plan first, one click."**
+   - One dispatch, and a plan job with read-only tokens and no approval.
+   - Then one production approval, which applies exactly that saved plan, configures the host and deploys.
+   - Staging's bot deploys stay approval-free.
+   - Any infrastructure apply, for either environment, runs only behind an approval, and only when the plan has changes.
+   - Infrastructure write tokens never sit in an unapproved environment; that is what let the Codex branch's staging run change the access list.
+2. **"One path from 2.36.0's parts."**
+   - One entry point, built from what is proven: `tofu-ci.sh`'s phases, `host.yml`'s connection step with the automatic pin, and the release's own `bot.yml`, into which the Codex playbook's good parts are ported.
+   - No `ops/pipeline/infra.sh` and no second bot playbook.
+   - The old separate entries (`infra.yml`, `deploy.yml`'s `deploy-staging` job, and `host.yml` as a path of its own) are retired in this release or folded into the one entry point, so there are fewer moving parts than in 2.36.0.
+3. **"Once, on merge."**
+   - `publish.yml` builds and signs each release once.
+   - Staging deploys that digest automatically on merge, and production deploys the same verified digest after @deconfined's approval.
+   - A version input covers rollback.
+   - No workflow ever pushes a release's tags again.
+4. **Naming,** decided by @deconfined earlier the same day: every name that carries an environment says `prod` or `staging`.
+   - The new path says `prod`: the GitHub environment `prod` (not `production`), `TARUBOT_ENVIRONMENT=prod`, the deploy target `prod`, `ops/ansible/vars/targets/prod.yml`, the OpenTofu hosts key and role `prod`, and a `prod` profile in `src/config/deployment.ts`, whose database is `tarubot_prod` and whose restore is `tarubot_prod_restore`.
+   - `production` survives only in the frozen Compose path, whose tool profile, accepting `tarubot`, stays until the cleanup.
+   - @deconfined renames production's database and role from `tarubot` to `tarubot_prod` inside the cutover window; this release's code does no more than accept the new names, in the `prod` profile alone.
+5. **The automatic first-use pin,** which @deconfined confirmed in the Codex session. It is ported with the review's three fixes:
+   - a pending pin, stored right after the scan, so a failed first run retries on the same instance;
+   - only the owning environment writes its pin, or the limit is recorded (it is recorded below);
+   - IPv6 first, with the IPv4 fallback GitHub's hosted runners need.
+
+   There is one pin store. It replaces the owner's `ssh-keyscan` into `TARGET_HOST_KEY`.
+6. **What stays and what is ported.**
+   - **Kept:** rollback, by a version input; paging, through Pushover; the maintenance-window warning; and an approval summary worth reading.
+   - **Ported from Codex:** the `host_connection` output, the in-image settings check before any write or shutdown, the recovery-point file, production's `/suggest` key handling, a preparation run (2.36.0's `action=preflight`) and the `.dockerignore` hardening. The commit credits Codex's `ce3ded7`.
+7. **Production's Compose path stays byte-identical until @deconfined's cutover:** `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts`, and `deploy.yml`'s Compose `deploy` and `notify` jobs, pinned by SHA-256 in `tests/unit/deploy-workflow.test.ts`. The cleanup release, 2.38.0, removes them after the cutover.
+8. **@deconfined's standing preferences,** which the build and every review fix follow:
+   - "a Discord bot, not a SCIF": conventional, simple mechanisms;
+   - no per-run self-checks of @deconfined's own settings (they cut the ruleset and environment self-checks twice);
+   - every secret in GitHub environments;
+   - agents never hold keys or environment secrets, never approve, reject, re-run or cancel runs, never change environments, and dispatch only when asked;
+   - the public repository and its Actions logs name no host, domain, address or account ID;
+   - one Discord application never runs in two places;
+   - applied migrations are never edited;
+   - IPv6 first.
+
+   A review fix never brings back something @deconfined cut.
+
+**How 2.37.0 carries them out.** None of this changes a decision. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the runbook, and [docs/HOSTING.md](docs/HOSTING.md#the-simple-pipeline) and [docs/CI_CD.md](docs/CI_CD.md#deploy-workflow) have the detail.
+- **One entry point: the existing Deploy workflow** (`.github/workflows/deploy.yml`). Its file name, run name and Compose job stay, because the live Compose host's `ops/deploy.sh` checks the run's path, its title and its "Deploy" job. `infra.yml` is deleted.
+- **One host job.** `host.yml` stays as Deploy's one reusable host job, and nothing triggers it on its own. Deploy calls it three ways, each in one environment:
+  - **Infrastructure,** in `prod`: it adopts and applies the saved plan and writes the pins that plan listed, and nothing else;
+  - **Staging,** in `staging`: it connects, runs Configure, then the release's own `bot.yml`;
+  - **Prod,** in `prod`: it adopts the saved plan, applies it when it has changes, writes the pins it listed, runs Configure, then the release's own `bot.yml`, all in one job, so one approval covers it.
+
+  Every call shares its environment's concurrency group (`host-prod` or `host-staging`, `queue: max`), so no two applies, pin writes or runs on one host overlap on the unlocked state. The review's own option for this was "Deploy with production added to `host.yml`".
+- **The plan comes first.** `infra.yml`'s Plan job becomes Deploy's **Infrastructure plan** job, in the read-only `infra-plan` environment, with no approval. It writes the change list, and each host's pin status, to the run summary before anything waits. Its Apply job becomes `host.yml`'s apply steps, in `prod`. A pure infrastructure change is a dispatch with `action=infra`.
+- **The credentials.**
+  - The write tokens (Linode, Cloudflare, and the state bucket's read/write key) live only in `prod`, which requires @deconfined's approval.
+  - There is no `infra` environment.
+  - `staging` holds no infrastructure credential but a read-only key for the state bucket, used only to read its pin.
+  - `TOFU_VARS` has one copy, in `infra-plan`. The approving job takes the values from the saved plan itself: OpenTofu 1.12.6's `show -json` of an encrypted saved plan carries every variable's value, sensitive ones included (verified in the build).
+- **Prod.** A prod request, whether a dispatch or an automatic one once the Compose switch is off, runs the Plan job (public data), then the Infrastructure plan (read-only, no approval), then asks for one `prod` approval. The approved job:
+  1. adopts the saved plan, whose SHA-256 and change list must match;
+  2. applies it only if it has changes;
+  3. writes the pins it listed;
+  4. runs Configure at `config_commit`;
+  5. runs the release's `bot.yml`, which registers the commands globally.
+
+  `action=bot`, the rollback lever, never plans.
+- **Staging.** Bot deploys, Configure and preflight never plan and never wait. Only `action=infra` or `rebuild=true` plans. The Infrastructure job then waits for `prod`'s approval, and only when the plan has changes or pins to write, because every apply changes the state both hosts share and production's database access list.
+- **Rollback** is `version=<older> action=bot`, for either target. `bot.yml` refuses a rollback across a migration while the live bot runs. While it doesn't (its start failed, as when its migration failed and committed nothing), the older release's own `migrate.js` decides at the restart: it starts on the schema it knows, and refuses a newer one without writing anything. Prod's floor is 2.37.0, staging's 2.36.0.
+- **`rebuild`** replaces the target's own instance, `linode_instance.host["staging"]` or `["prod"]`, and alone allows only that replace and the removal of that instance's two old access-list entries; `allow_destroy` and `allow_access_removal` stay for anything else. A `-N` host can be built, but neither rebuilt by the input nor deployed.
+- **A merge:**
+  1. `publish.yml` builds and signs once. It loses its `workflow_dispatch` trigger and refuses to push when the version tag or the `sha-` tag already exists; only a registry 404 counts as absent.
+  2. Deploy runs from `workflow_run`, and its plan verifies the provenance by exact identity, as before.
+  3. Staging deploys that digest at once.
+  4. Production waits for @deconfined's approval of the same digest. While `DEPLOY_ENABLED` is exactly `true`, as it is today, that is the byte-identical Compose `Deploy` job in `production`; once @deconfined turns it off inside the cutover window, it is the Prod job in `prod`.
+  5. A new **Report** job, in `notify`, pages the new path's prod and infrastructure outcomes. Compose's `notify` stays byte-identical and last in the file.
+- **Host keys.** The automatic first-use pin replaces `TARGET_HOST`, `TARGET_HOST_KEY` and the owner's `ssh-keyscan` step (`ops/tofu/ci/host.sh`).
+  - The one pin store is an object per host key beside the state, `tarubot/pins/<key>.json`, keyed by the Linode instance and carrying the host's addresses.
+  - Only approved `prod` jobs write pins, and only for the hosts the approved plan listed.
+  - A pin is stored right after the scan, before any login, and the key pinned for an instance is never replaced.
+  - Scans and logins try IPv6 first and fall back to IPv4. When both families answer a scan, their keys must agree.
+  - Every host job connects with the addresses its pin carries, so a prod deploy or rollback needs no OpenTofu run, and the unapproved `staging` job needs only a read-only key, never the state passphrase.
+  - Every other Object Storage key is limited to its own bucket (a step of @deconfined's), so only `prod`'s approval-gated key and @deconfined can write a pin.
+- **The ported pieces.**
+  - `ops/tofu/outputs.tf`'s sensitive `host_connection` (instance ID and both addresses) replaces `addresses`.
+  - The in-image settings check is `scripts/deploy-check.ts`, which reuses `migrate.js`'s and `register.js`'s own tool scopes. It is the one exception to "nothing reaches the host before the secrets phase": the values pass on stdin into a network-less, read-only `--rm` container and are never written.
+  - The restore point is written to `~/.config/tarubot/recovery-point` before the restart's result is judged.
+  - Production's `/suggest` client ID (`SUGGEST_APP_CLIENT_ID`) and key are optional together.
+  - The backup's URLs must use HTTPS.
+  - `.dockerignore` gains the state, plan, values and dump patterns.
+- **Not added:** `ops/pipeline/*`, a second playbook, a per-run self-check, a workflow-level concurrency group, and a cross-environment OpenTofu guard. The owner approves the whole plan, whichever host it touches. The Deploy plan's per-run environment check (`gate()`, from 2.30.0) is removed, with its `actions: read` permission (decision 8). The Compose host still checks the approval itself.
+- **The review's findings, resolved:**
+  - B1: no unapproved write token exists, and a rebuild's allowance is exact: its own instance's replace and that instance's two old access-list entries.
+  - B2: `bot.yml`'s health asserts stay, and CI evaluates the new asserts with ansible-core's templar.
+  - B3: each release is built once.
+  - B4: rollback is a `version` input.
+  - B5: the plan summary, the maintenance-window warning and Report.
+  - B6: @deconfined approves the whole plan.
+  - B7 and B8: one path per target, one pin store and one playbook.
+  - B9: the run's title shows a rebuild.
+  - B10: tests for each piece.
+
+**What this supersedes.**
+- **In "Approved pipeline amendments (2026-09-29)":**
+  - answer 2's `infra.yml` and `infra` environment. OpenTofu is planned by Deploy's Infrastructure plan job in `infra-plan`, and applied in `prod` jobs after @deconfined's approval;
+  - confirmed item 4's two environments with the same four shared settings. `TOFU_VARS` lives only in `infra-plan`, and the state's passphrase, bucket and endpoint in `infra-plan` and `prod`. Apply's compare against a second copy of `TOFU_VARS` becomes `adopt`, which takes the values from the saved plan;
+  - confirmed item 5's and "Cut from the design"'s trust on first use from @deconfined's own machine into `TARGET_HOST_KEY`. The approving job's runner now trusts a new host's key on first use and stores it in the pin store. Nothing prints a host key still;
+  - confirmed item 6's "the real plan runs only by dispatch from `main`". Automatic prod requests after the cutover plan too, still only from `main`'s own workflow file, in `infra-plan`. Pull-request code still never sees a token or the passphrase;
+  - answer 1's cutover. The environment is `prod`, the database and role are renamed in the window, and the preflight there is optional ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), Phase 6);
+  - decision 7's per-target groups. The groups are per environment (`host-staging`, `host-prod`), and the Infrastructure call shares `host-prod`. Reject stale requests rather than approving them, as before;
+  - "decision 5's quiet message goes with the `notify` job at 2.37.0". `notify` stays for the Compose host until 2.38.0, and Report sends the new path's messages;
+  - "the `infra` concurrency group serializes runs" and "the saved plan's values are infra's", from the implementation notes;
+  - the release list (below).
+- **In "Approved SSH-deploy amendments (2026-09-26)":** "until 2.37.0 moves production" now reads "until the cutover". The host-side mechanics there serve the Compose host until then.
+- **In the Codex branch's unmerged text:**
+  - its choice 3, one approval given before any plan exists, is superseded by decision 1;
+  - its choice 2, the automatic pin, is kept with decision 5's fixes;
+  - its choice 1, Linode only, stands, as @deconfined's provider decision already said;
+  - none of its own mechanics land: the build per dispatch, `pipeline.yml`, `ops/pipeline/`, `ops/ansible/deploy.yml`, `vars/targets/production.yml`, the public `deploy/pipeline` site page, the cross-environment guard, and `production` as a new environment's name.
+
+**The release list** (proposed, question 4 below). 2.36.1 and 2.36.2 can't follow 2.37.0:
+1. 2.37.0: this release, one path;
+2. 2.37.1: CrowdSec, simplified, once staging shows a clean second Configure;
+3. the DevBot move: owner steps on 2.37.0 or later, with no release of its own;
+4. the prod cutover: owner steps ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), Phase 6), after the DevBot move's soak;
+5. 2.38.0: the cleanup, after a settled week.
+
+**Accepted risks.**
+- **The pin store stands behind every connection.** Any key that can write the state bucket could redirect a deploy, and the secrets it carries, to another machine. So every other Object Storage key is limited to its own bucket, and only `prod`'s approval-gated key and @deconfined can write a pin.
+- **Prod's approved jobs write every pin, staging's included, and staging only reads them.** Staging's owning environment has no reviewer, and giving it a write key would put an infrastructure write credential in an unapproved environment. An approved job writes only the pins its approved plan listed.
+- **Staging holds a read-only key for the state bucket,** which reads the encrypted state as well as the pins.
+- **The first pin is trust on first use from GitHub's runner,** right after the build.
+- **The saved plan is public for a day,** pins-only runs included. The state passphrase, at least 32 random characters, is all that protects it.
+- **A waiting prod approval holds `host-prod`** until it is approved or rejected, so every later prod job, a rollback included, and every Infrastructure job, staging-side applies and pins among them, waits behind it. The runbook's rollback and cutover steps reject or order requests accordingly ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) steps 4.2 and 6.2.1).
+- **An expired read-only token blocks automatic prod requests** until it is rotated. The way out is a prod `action=bot` dispatch, which doesn't plan.
+- **The fallback week shares the database password and the heartbeat URL** between the old and the new host, until @deconfined rotates both.
+- The risks accepted earlier the same day stand: `infra-plan`'s read-only Linode token can read the cluster's admin credentials, and no run checks the environments' settings, `prod`'s and `staging`'s included.
+
+**For @deconfined to confirm in the pull request.** The build made four choices that need @deconfined's answer. Each is built as recommended, and each is proposed until @deconfined confirms it.
+1. **The wording of the rule for agents** (below).
+2. **`DEPLOY_ENABLED` picks production's path in automatic runs until 2.38.0.** Exactly `true` asks for the Compose job, as today, and anything else asks for `prod`. @deconfined turns it off inside the cutover window, and the fallback turns it back on. Before the cutover, turning it off to pause the Compose host sends automatic runs to `prod`, whose requests @deconfined then rejects. The alternative: automatic runs never ask for `prod` in 2.37.0, and 2.38.0 makes prod automatic.
+3. **Staging-side applies wait for `prod`'s approval,** with the write tokens only in `prod` and no `infra` environment. The alternative keeps an approval-gated `infra` environment for staging's applies, which needs a second copy of the write tokens, the state key and the passphrase, and a second concurrency group joined to prod's.
+4. **The release list** above. The alternative keeps the DevBot move as a patch release of its own, 2.37.2.
+
+**Proposed, for @deconfined to confirm** (question 1: the agent rule's wording for the one path, pending @deconfined's confirmation in the pull request). It would replace the widened rule of 2026-09-29, which names the Infrastructure workflow and `infra`; the SSH-deploy rule of 2026-09-26 stays verbatim while the Compose path lives. Until @deconfined confirms it, both confirmed rules apply as written, and Claude sessions also follow this wording, which only adds limits:
+> Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never enable or disable the Deploy or Publish containers workflow; never approve, reject, bypass, cancel or re-run a Deploy or Publish containers run or any of its jobs; never change the `staging`, `prod`, `production`, `notify` or `infra-plan` environments, their secrets or their variables, or `DEPLOY_ENABLED`; and dispatch Deploy only when the owner asks in that session.
 
 ## 1. Purpose and interpretation
 

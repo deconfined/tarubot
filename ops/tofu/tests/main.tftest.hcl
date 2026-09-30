@@ -1,4 +1,5 @@
-# OpenTofu's own tests of the module (2.36.0, issue #62), run by CI's "Infrastructure checks" job:
+# OpenTofu's own tests of the module (2.36.0, issue #62; prod names and host_connection since
+# 2.37.0), run by CI's "Infrastructure checks" job:
 #
 #   tofu -chdir=ops/tofu test -var-file=examples/example.tfvars.json
 #
@@ -10,15 +11,20 @@
 #   - no rendering carries a host key or any private key, and every one seeds verify-required;
 #   - the instance's settings, the firewall's rules and the unproxied records;
 #   - each access list: exactly the hosts' CIDR entries plus db_allow_extra (a set, so membership);
-#   - the validations and the Configure-key precondition refuse bad values.
+#   - host_connection, which ops/tofu/ci/host.sh pin reads: sensitive, the instance ID a string,
+#     the IPv6 address bare;
+#   - the host keys and roles are staging and prod (production, the Compose path's word, is
+#     refused), and the validations and the Configure-key precondition refuse bad values.
 
 # The addresses a mocked Linode reports, from the documentation ranges. The provider reports the
 # IPv6 SLAAC address with its /128, as the Linode API does. Firewall IDs are numbers in the API,
-# and the instance takes one, so the mock's must parse as one.
+# and the instance takes one, so the mock's must parse as one. The instance ID is an invented
+# number, which host_connection must hand on as a string.
 mock_provider "linode" {
   override_resource {
     target = linode_instance.host
     values = {
+      id   = "12345678"
       ipv4 = ["192.0.2.10"]
       ipv6 = "2001:db8:1::10/128"
     }
@@ -151,6 +157,24 @@ run "the_example_host" {
     condition     = output.hosts == { staging = "staging" }
     error_message = "The hosts output must map each host key to its role."
   }
+
+  # host.sh pin reads host_connection from a private file: it must stay sensitive, carry the
+  # instance ID as a string (compared with the pin's) and the IPv6 address without its /128.
+  assert {
+    condition     = issensitive(output.host_connection)
+    error_message = "The host_connection output must be sensitive."
+  }
+
+  assert {
+    condition = nonsensitive(output.host_connection) == {
+      staging = {
+        instance_id = "12345678"
+        ipv6        = "2001:db8:1::10"
+        ipv4        = "192.0.2.10"
+      }
+    }
+    error_message = "host_connection must map each host key to its instance ID as a string, its bare IPv6 address and its IPv4 address."
+  }
 }
 
 run "the_example_host_with_a_root_hash" {
@@ -167,9 +191,9 @@ run "the_example_host_with_a_root_hash" {
   }
 }
 
-# Two hosts and no extra entries: the list is every host's IPv6 /128 and IPv4 /32, nothing else,
-# and each host's firewall label fits Linode's 32 characters: the production label's first 29
-# characters end in '-', which is dropped before "-fw" is added.
+# Two hosts, staging and prod, and no extra entries: the list is every host's IPv6 /128 and
+# IPv4 /32, nothing else, and each host's firewall label fits Linode's 32 characters: the prod
+# label's first 29 characters end in '-', which is dropped before "-fw" is added.
 run "two_hosts_share_the_access_list" {
   command = plan
 
@@ -182,17 +206,17 @@ run "two_hosts_share_the_access_list" {
         type   = "g6-standard-1"
         role   = "staging"
       }
-      production = {
-        label  = "tarubot-production-long-name-01"
-        fqdn   = "production.example.org"
+      prod = {
+        label  = "tarubot-prod-with-a-long-name-01"
+        fqdn   = "prod.example.org"
         region = "us-east"
         type   = "g6-standard-2"
-        role   = "production"
+        role   = "prod"
       }
     }
     configure_keys = {
-      staging    = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0002 configure-staging"
-      production = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-production"
+      staging = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0002 configure-staging"
+      prod    = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-prod"
     }
     db_allow_extra = []
   }
@@ -205,15 +229,28 @@ run "two_hosts_share_the_access_list" {
 
   assert {
     condition = (
-      linode_firewall.host["production"].label == "tarubot-production-long-name-fw"
-      && length(linode_firewall.host["production"].label) <= 32
+      linode_firewall.host["prod"].label == "tarubot-prod-with-a-long-name-fw"
+      && length(linode_firewall.host["prod"].label) <= 32
     )
     error_message = "A long host label must be cut to fit the firewall's 32 characters."
   }
 
   assert {
-    condition     = strcontains(base64decode(linode_instance.host["production"].metadata[0].user_data), "configure-production")
+    condition = (
+      strcontains(base64decode(linode_instance.host["prod"].metadata[0].user_data), "configure-prod")
+      && !strcontains(base64decode(linode_instance.host["prod"].metadata[0].user_data), "configure-staging")
+    )
     error_message = "Each host must get its own role's Configure key."
+  }
+
+  assert {
+    condition     = output.hosts == { staging = "staging", prod = "prod" }
+    error_message = "The hosts output must map each host key, prod included, to its role."
+  }
+
+  assert {
+    condition     = keys(nonsensitive(output.host_connection)) == ["prod", "staging"]
+    error_message = "host_connection must hold every host."
   }
 }
 
@@ -233,10 +270,63 @@ run "refuses_a_role_that_differs_from_its_key" {
   command = plan
   variables {
     hosts = {
-      staging = { label = "tarubot-staging", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "production" }
+      staging = { label = "tarubot-staging", fqdn = "staging.example.org", region = "us-east", type = "g6-standard-1", role = "prod" }
     }
   }
   expect_failures = [var.hosts]
+}
+
+# production names only the Compose path (2.37.0): the new host is prod, as key and role.
+run "refuses_a_production_host" {
+  command = plan
+  variables {
+    hosts = {
+      production = { label = "tarubot-production", fqdn = "production.example.org", region = "us-east", type = "g6-standard-1", role = "production" }
+    }
+    configure_keys = {
+      staging = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0002 configure-staging"
+    }
+  }
+  expect_failures = [var.hosts]
+}
+
+run "refuses_a_numbered_production_host" {
+  command = plan
+  variables {
+    hosts = {
+      production-2 = { label = "tarubot-production-2", fqdn = "production-2.example.org", region = "us-east", type = "g6-standard-1", role = "production" }
+    }
+  }
+  expect_failures = [var.hosts]
+}
+
+run "refuses_a_production_configure_key" {
+  command = plan
+  variables {
+    configure_keys = {
+      staging    = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0002 configure-staging"
+      production = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-production"
+    }
+  }
+  expect_failures = [var.configure_keys]
+}
+
+# A numbered prod host takes prod's Configure key.
+run "accepts_a_numbered_prod_host" {
+  command = plan
+  variables {
+    hosts = {
+      prod-2 = { label = "tarubot-prod-2", fqdn = "prod-2.example.org", region = "us-east", type = "g6-standard-1", role = "prod" }
+    }
+    configure_keys = {
+      prod = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-prod"
+    }
+  }
+
+  assert {
+    condition     = strcontains(base64decode(linode_instance.host["prod-2"].metadata[0].user_data), "configure-prod")
+    error_message = "A prod-N host must get prod's Configure key."
+  }
 }
 
 run "refuses_a_short_label" {
@@ -333,7 +423,7 @@ run "refuses_a_host_without_its_configure_key" {
   command = plan
   variables {
     configure_keys = {
-      production = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-production"
+      prod = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0003 configure-prod"
     }
   }
   expect_failures = [linode_instance.host]

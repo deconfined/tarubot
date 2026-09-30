@@ -17,8 +17,11 @@
  *
  *   bun tests/fixtures/bot-render.ts OUTDIR
  *
- * writes OUTDIR/staging/tarubot.container, tarubot.env and vars.json (exactly the variables the
- * two templates receive), for a sample digest and placeholder identity values.
+ * writes tarubot.container, tarubot.env and vars.json (exactly the variables the two templates
+ * receive), for a sample digest and placeholder identity values, into one directory per render:
+ * - OUTDIR/staging: staging's deploy;
+ * - OUTDIR/prod: prod's deploy with /suggest's client ID set, so the app's key is mounted (2.37.0);
+ * - OUTDIR/prod-no-client: prod's deploy without one, so neither the key nor a client ID.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,6 +44,16 @@ export const PLACEHOLDER_IDENTITY: Identity = {
   applicationId: "APPLICATION_ID_FROM_THE_IMAGE",
   registrationScope: "TEST_GUILD_ID_FROM_THE_IMAGE",
 };
+/** Prod's placeholders: the production application registers globally (no test guild). */
+export const PLACEHOLDER_PROD_IDENTITY: Identity = {
+  applicationId: "APPLICATION_ID_FROM_THE_IMAGE",
+  registrationScope: "global",
+};
+/** A placeholder /suggest client ID of the pattern bot.yml checks (^[A-Za-z0-9._-]{1,64}$). */
+export const PLACEHOLDER_CLIENT_ID = "CLIENT_ID_FROM_THE_ENVIRONMENT";
+
+/** The targets bot.yml deploys (ops/ansible/vars/targets/<target>.yml). */
+export type Target = "staging" | "prod";
 
 /** A parsed template: text lines with substitutions, and the two block forms. */
 type Node =
@@ -161,15 +174,34 @@ function entries(value: unknown, what: string): { name: string; value: string }[
 }
 
 /**
- * The variables bot.yml gives the two templates on staging for a deploy or bot action, computed the
- * way its "Assemble the container's settings and mounts" task does from vars/bot.yml and
- * vars/targets/staging.yml: the fixed settings, the target's, then the identity (TEST_GUILD_ID
- * empty for a global registration); one NAME_FILE line and one mount per declared secret.
+ * The variables bot.yml gives the two templates for a deploy or bot action on a target, computed
+ * the way its "Work out which secrets the container mounts" and "Assemble the container's settings
+ * and mounts" tasks do from vars/bot.yml and vars/targets/<target>.yml:
+ * - tb_env: the fixed settings, the target's, /suggest's client ID when the target runs /suggest
+ *   (tarubot_suggest; empty when the environment has none), then the identity (TEST_GUILD_ID
+ *   empty for a global registration);
+ * - one NAME_FILE line and one mount per secret the container gets: the target's, plus
+ *   GITHUB_APP_PRIVATE_KEY once /suggest has a client ID.
+ * `clientId` is the environment's GITHUB_APP_CLIENT_ID, as bot.yml keeps it once well formed; a
+ * target without /suggest never reads it.
  */
-export async function stagingVars(digest: string, identity: Identity): Promise<TemplateVars> {
+export async function targetVars(
+  target: Target,
+  digest: string,
+  identity: Identity,
+  clientId = "",
+): Promise<TemplateVars> {
   const bot = await mapping("ops/ansible/vars/bot.yml");
-  const target = await mapping("ops/ansible/vars/targets/staging.yml");
-  const secrets = names(target.tarubot_secrets, "tarubot_secrets");
+  const vars = await mapping(`ops/ansible/vars/targets/${target}.yml`);
+  const suggest = vars.tarubot_suggest ?? false;
+  if (typeof suggest !== "boolean") throw new Error("tarubot_suggest is not a boolean");
+  if (suggest && !/^[A-Za-z0-9._-]{1,64}$/u.test(clientId) && clientId !== "")
+    throw new Error("the client ID doesn't match bot.yml's pattern");
+  const kept = suggest ? clientId : "";
+  const secrets = [
+    ...names(vars.tarubot_secrets, "tarubot_secrets"),
+    ...(kept !== "" ? ["GITHUB_APP_PRIVATE_KEY"] : []),
+  ];
   return {
     tb_image_repository: bot.tb_image_repository,
     tarubot_digest: digest,
@@ -179,7 +211,8 @@ export async function stagingVars(digest: string, identity: Identity): Promise<T
     })),
     tb_env: [
       ...entries(bot.tb_base_settings, "tb_base_settings"),
-      ...entries(target.tarubot_settings, "tarubot_settings"),
+      ...entries(vars.tarubot_settings, "tarubot_settings"),
+      ...(suggest ? [{ name: "GITHUB_APP_CLIENT_ID", value: kept }] : []),
       { name: "DISCORD_APPLICATION_ID", value: identity.applicationId },
       {
         name: "TEST_GUILD_ID",
@@ -190,9 +223,18 @@ export async function stagingVars(digest: string, identity: Identity): Promise<T
   };
 }
 
-/** The rendered staging unit and settings file, and the variables they came from. */
-export async function renderStaging(digest: string, identity: Identity) {
-  const vars = await stagingVars(digest, identity);
+/** Staging's variables (staging has no /suggest). */
+export const stagingVars = (digest: string, identity: Identity) =>
+  targetVars("staging", digest, identity);
+
+/** A target's rendered unit and settings file, and the variables they came from. */
+export async function renderTarget(
+  target: Target,
+  digest: string,
+  identity: Identity,
+  clientId = "",
+) {
+  const vars = await targetVars(target, digest, identity, clientId);
   const template = (name: string) => Bun.file(root(`ops/ansible/templates/bot/${name}`)).text();
   return {
     vars,
@@ -201,6 +243,32 @@ export async function renderStaging(digest: string, identity: Identity) {
   };
 }
 
+/** The rendered staging unit and settings file, and the variables they came from. */
+export const renderStaging = (digest: string, identity: Identity) =>
+  renderTarget("staging", digest, identity);
+
+/** The CLI's renders: a directory name, the target, its placeholder identity and client ID. */
+export const RENDERS = [
+  { directory: "staging", target: "staging", identity: PLACEHOLDER_IDENTITY, clientId: "" },
+  {
+    directory: "prod",
+    target: "prod",
+    identity: PLACEHOLDER_PROD_IDENTITY,
+    clientId: PLACEHOLDER_CLIENT_ID,
+  },
+  {
+    directory: "prod-no-client",
+    target: "prod",
+    identity: PLACEHOLDER_PROD_IDENTITY,
+    clientId: "",
+  },
+] as const satisfies readonly {
+  directory: string;
+  target: Target;
+  identity: Identity;
+  clientId: string;
+}[];
+
 // The CLI: bun tests/fixtures/bot-render.ts OUTDIR
 if (import.meta.main) {
   const out = process.argv[2];
@@ -208,10 +276,12 @@ if (import.meta.main) {
     console.error("usage: bun tests/fixtures/bot-render.ts OUTDIR");
     process.exit(64);
   }
-  const rendered = await renderStaging(SAMPLE_DIGEST, PLACEHOLDER_IDENTITY);
-  const directory = join(out, "staging");
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, "tarubot.container"), rendered.container);
-  writeFileSync(join(directory, "tarubot.env"), rendered.env);
-  writeFileSync(join(directory, "vars.json"), `${JSON.stringify(rendered.vars, null, 2)}\n`);
+  for (const { directory, target, identity, clientId } of RENDERS) {
+    const rendered = await renderTarget(target, SAMPLE_DIGEST, identity, clientId);
+    const path = join(out, directory);
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, "tarubot.container"), rendered.container);
+    writeFileSync(join(path, "tarubot.env"), rendered.env);
+    writeFileSync(join(path, "vars.json"), `${JSON.stringify(rendered.vars, null, 2)}\n`);
+  }
 }

@@ -4,7 +4,7 @@ Production TaruBot has run on a **Linode Docker host with Linode managed Postgre
 
 The cutover first went live on DigitalOcean App Platform, then moved the same evening, with about 90 seconds of downtime, because **the Lodestone refuses DigitalOcean's addresses**: HTTP 403 at the edge, within milliseconds. From App Platform, Nodestone could not refresh profiles, verify claims or read the roster. Linode's addresses get HTTP 200. [MIGRATION.md](MIGRATION.md#record-of-the-2026-09-24-cutover) has the record. [APP_PLATFORM.md](APP_PLATFORM.md) records the App Platform setup, retired in 2.21.0; the owner has since deleted the app and its cluster (recorded 2026-09-26).
 
-A second Linode, the [staging host](#staging-host-50) (#50), runs on AlmaLinux with rootless Podman. Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) it is built and run by [the simple pipeline](#the-simple-pipeline-2360): OpenTofu builds it, cloud-init sets its credentials, the Deploy workflow configures it and deploys the bot with Ansible from a GitHub runner, and every secret lives in a GitHub environment. Production moves to the same pipeline in 2.37.0; until then, the sections before "Staging host" describe it as it runs.
+A second Linode, the [staging host](#staging-and-prod-hosts-50-62) (#50), runs on AlmaLinux with rootless Podman. Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) it is built and run by [the simple pipeline](#the-simple-pipeline), one path since 2.37.0: OpenTofu builds it, cloud-init sets its credentials, the Deploy workflow configures it and deploys the bot with Ansible from a GitHub runner, and every secret lives in a GitHub environment. Production moves to the same path at @deconfined's cutover, onto a new `prod` host (owner steps on 2.37.0 or later; [DEPLOYMENT.md](DEPLOYMENT.md) Phase 6). Until then, the sections before "Staging and prod hosts" describe it as it runs.
 
 ## Layout
 
@@ -16,8 +16,8 @@ A second Linode, the [staging host](#staging-host-50) (#50), runs on AlmaLinux w
 | Database | Linode managed PostgreSQL `tarubot-pgsql`, PostgreSQL 18, us-iad-2. Use the **direct port 27520**, never the 27521 pool, which can't hold the writer lease. The login and database are `tarubot`, and `tarubot` owns the database. The admin login `akmadmin` is for provisioning only; the tool guard refuses it. The allow list holds the host and the operator's address. |
 | Settings copy | Encrypted with `age` in `~/tarubot-cutover/env-backups/` on the operator machine (2.23.0; see "Settings copy"). |
 | Backups | A daily encrypted dump at 04:30 UTC, and a settings copy, uploaded to Linode Object Storage `tarubot-backups` (2.24.0; see "Backups and recovery"). |
-| Deploys | The **Deploy** workflow's production job (the workflow was named "Deploy production" until 2.33.0) deploys each published release over SSH once the owner approves it in GitHub (2.30.0; see [Automated deploys](#automated-deploys-2300)). Since 2.33.0 its plan first verifies the image's signed build provenance ([Provenance check](#provenance-check-2330)). The manual procedure under [Updating to a release](#updating-to-a-release) stays for work by hand. |
-| Operator tools | Run from a clean clone of the deployed release on the operator machine, as `prod dist/scripts/<tool>.js`, with `~/tarubot-cutover/production.env` ([MIGRATION.md](MIGRATION.md#e0-conventions) E0). That file points at the Linode database, with its CA in `DATABASE_CA_CERT`. |
+| Deploys | The **Deploy** workflow's production job (the workflow was named "Deploy production" until 2.33.0) deploys each published release over SSH once the owner approves it in GitHub (2.30.0; see [Automated deploys](#automated-deploys-2300)). Since 2.33.0 its plan first verifies the image's signed build provenance ([Provenance check](#provenance-check-2330)). The manual procedure under [Updating to a release](#updating-to-a-release) stays for work by hand. At @deconfined's cutover the `prod` host takes over ([Staging and prod hosts](#staging-and-prod-hosts-50-62)). |
+| Operator tools | Run from a clean clone of the deployed release on the operator machine, as `prod dist/scripts/<tool>.js`, with `~/tarubot-cutover/production.env` ([MIGRATION.md](MIGRATION.md#e0-conventions) E0). That file points at the Linode database, with its CA in `DATABASE_CA_CERT`. After @deconfined's cutover renames the database, the `production` profile refuses it: tools then run on the prod host through [`tarubot-tool`](#tarubot-tool), or from that file switched to the `prod` names ([DEPLOYMENT.md](DEPLOYMENT.md) step 6.3). |
 
 ## Everyday checks
 
@@ -36,7 +36,7 @@ Readiness must report `database`, `writerLease`, `discord` and `effects` as true
 - `selectors` shows the live selector commit (`source: upstream`) or the bundled set.
 - `parsing` and `waiting` count parses running and requests waiting for a parse slot.
 
-**Retrying a job.** After fixing what a failed or blocked job needs, retry it from the operator machine with `prod dist/scripts/retry.js GUILD_ID JOB_ID` (`prod` is [MIGRATION.md](MIGRATION.md#e0-conventions) E0). What the tool retries and refuses is on the documentation site's [monitoring page](../site/src/content/docs/deploy/monitoring.md#jobs-that-need-attention).
+**Retrying a job.** After fixing what a failed or blocked job needs, retry it from the operator machine with `prod dist/scripts/retry.js GUILD_ID JOB_ID` (`prod` is [MIGRATION.md](MIGRATION.md#e0-conventions) E0). After the cutover, retry it on the prod host instead, as root: `run0 --user=tarubot sh -c '~/.local/bin/tarubot-tool retry.js GUILD_ID JOB_ID'` (or from the operator machine once `production.env` names the `prod` profile, [DEPLOYMENT.md](DEPLOYMENT.md) step 6.3). What the tool retries and refuses is on the documentation site's [monitoring page](../site/src/content/docs/deploy/monitoring.md#jobs-that-need-attention).
 
 ## Container hardening
 
@@ -158,17 +158,17 @@ Afterwards the workflow deploys forward as usual: the older release's `ops/deplo
 
 ## Automated deploys (2.30.0)
 
-Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"), the **Deploy** workflow (`.github/workflows/deploy.yml`, named "Deploy production" until 2.33.0) deploys each published release to this host once @deconfined approves it in GitHub. That approval is the go-ahead for a production deploy. What agents may and may not do around it is REQUIREMENTS.md's "Agent rule" (verbatim in AGENTS.md), which @deconfined confirmed in full on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)): among its clauses, Claude sessions never approve, reject or bypass a deployment and never hold the deploy key. The rule's "Deploy production workflow" is this file, whatever its display name. The workflow's jobs, environments and settings are in [CI_CD.md](CI_CD.md#deploy-workflow); this section is the host side and what to do. Since 2.33.0 the same workflow also has a staging job, which needs no approval; since 2.36.0 it calls `host.yml` ([The simple pipeline](#the-simple-pipeline-2360)). Production's path described here doesn't change until 2.37.0, apart from the [provenance check](#provenance-check-2330) in the plan.
+Since 2.30.0 (issue #41; REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"), the **Deploy** workflow (`.github/workflows/deploy.yml`, named "Deploy production" until 2.33.0) deploys each published release to this host once @deconfined approves it in GitHub. That approval is the go-ahead for a production deploy. What agents may and may not do around it is REQUIREMENTS.md's "Agent rule" (verbatim in AGENTS.md), which @deconfined confirmed in full on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)): among its clauses, Claude sessions never approve, reject or bypass a deployment and never hold the deploy key. The rule's "Deploy production workflow" is this file, whatever its display name. The workflow's jobs, environments and settings are in [CI_CD.md](CI_CD.md#deploy-workflow); this section is the host side and what to do. Since 2.33.0 the same workflow also has a staging job, which needs no approval; since 2.36.0 it calls `host.yml`, and since 2.37.0 it is the one path for the infrastructure and the new hosts too ([The simple pipeline](#the-simple-pipeline)). Production's Compose path described here doesn't change until @deconfined's cutover to the `prod` host, apart from the [provenance check](#provenance-check-2330) in the plan.
 
 ### A deploy
 
-1. Merge the release as today. Try it on staging before you approve production (#62 answer 6): the same run's **Deploy staging** job deploys it there at once, and after the DevBot move DevBot runs it there. Until then, trying it on local DevBot stays manual.
-2. When "Publish containers" finishes, a Deploy run plans the release, and GitHub asks you to review its `production` deployment. A merge that changes only documentation, tests, CI, the version, the settings templates, `ops/tofu/` (which reaches the hosts only through the Infrastructure workflow) or ansible-lint's pins (`ops/ansible/requirements-lint.txt`) asks nothing; a quiet Pushover message says so. Since 2.36.0 `ops/ansible/requirements.txt` counts as runtime: it is staging's Ansible. The plan first verifies the image's signed provenance, and an image that fails it is never planned ([Provenance check](#provenance-check-2330)).
+1. Merge the release as today. Try it on staging before you approve production (#62 answer 6): the same run's **Staging** job deploys it there at once, and after the DevBot move DevBot runs it there. Until then, trying it on local DevBot stays manual.
+2. When "Publish containers" finishes, a Deploy run plans the release, and GitHub asks you to review its `production` deployment (while `DEPLOY_ENABLED` is exactly `true`). A merge that changes only documentation, tests, CI, the version, the settings templates, `ops/tofu/` (which reaches the hosts only through the Deploy workflow's Infrastructure plan and a `prod` approval) or ansible-lint's pins (`ops/ansible/requirements-lint.txt`) asks nothing; a quiet Pushover message says so. Since 2.36.0 `ops/ansible/requirements.txt` counts as runtime: it is the new hosts' Ansible. The plan first verifies the image's signed provenance, and an image that fails it is never planned ([Provenance check](#provenance-check-2330)).
 3. Open the run and read its summary: the targets (production, and staging beside it), the version, commit and image digest, the "Provenance verified" line, the migration files, the host-side changes in this merge (files under `ops/`, the production Compose file and `production.env.example`: on this Docker host they run as a docker-group user, which is root-equivalent here; on the staging host, Configure runs `ops/ansible/site.yml` as root and the release's `ops/ansible/bot.yml` runs the bot as the unprivileged `tarubot` user, at once, beside your approval request), warnings for the Tuesday maintenance window and the daily backup, and the changelog. The migrations and host-side lists cover this merge only. If production is older than the previous release, the releases in between come too: the summary links the history of the host-side files up to the target for that case. GitHub's compare API lists at most 300 files, so a merge (or a rollback's range) of 300 files or more is refused as `compare-too-large` rather than planned from a list that may be cut short: deploy that release by hand ([Updating to a release](#updating-to-a-release)).
 4. **Review deployments** → tick `production` → **Approve and deploy**, or **Reject**. Approval comments are public, like the summary.
 5. One Pushover message reports the outcome.
 
-**By hand:** **Run workflow** on `main` with a version, and `target` left at `production`. The live version is re-verified and its commands registered again (`already-live`), which is also the retry after `commands-failed`. A rollback ticks `rollback` and names the live version in `from`; it goes only to an older release (2.32.0 or later, which carry provenance; older ones [by hand](#rolling-back-to-a-release-without-provenance-before-2320)) on the same schema. The same approval follows. The run is titled `Deploy <version>` (or `… rollback from <from>`), and the production host refuses every title that ends in ` to staging`. Leave `action` at `deploy`: its other values are staging's until 2.37.0, and a production dispatch with one fails the plan as `action`.
+**By hand:** **Run workflow** on `main` with a version, and `target` left at `production`. The live version is re-verified and its commands registered again (`already-live`), which is also the retry after `commands-failed`. A rollback ticks `rollback` and names the live version in `from`; it goes only to an older release (2.32.0 or later, which carry provenance; older ones [by hand](#rolling-back-to-a-release-without-provenance-before-2320)) on the same schema. The same approval follows. The run is titled `Deploy <version>` (or `… rollback from <from>`), and the production host refuses every title that ends in ` to staging` or ` to prod`. Leave `action` at `deploy`, and `rebuild` off: the other actions and rebuilds are for staging and prod, and a production dispatch with one fails the plan as `action` or `rebuild`.
 
 Several requests may wait at once. Approve the newest; an older one approved later ends as `superseded` and changes nothing. Reject stale requests, or let them expire after 30 days.
 
@@ -238,7 +238,7 @@ The deploy never prunes images, so the previous release stays available. Past ma
 
 **Refusal reasons:** `not-approved` (includes a re-run, and a run cancelled or a Deploy job ended before the first change), `approval-unverified` (GitHub's API didn't answer; anonymous calls are limited to 60 an hour per address, and a run makes five), `busy` (another deploy over 5 minutes, or a backup running over 5 minutes), `too-many-runs` (four workers already running: look for stray requests in `entry.log`), `clone-not-clean`, `env-file`, `log-level`, `host`, `bot-not-running`, `manual-change-in-progress` (the pin isn't the running release), `live-unknown`, `fetch-failed`, `not-on-main`, `version-mismatch`, `below-floor`, `commit-mismatch`, `not-descendant`, `applied-migration-changed`, `live-changed` (a rollback's `from` isn't live), `rollback-not-older`, `rollback-across-migration`, `pull-failed`, `digest-mismatch` (the tag moved after the plan), `label-mismatch`, `clone-reset`, `compose-config` (the host's `.env` lacks a setting the new Compose file requires), `missing-tool` (`jq` or `curl`), `worker-not-started`, and `unexpected-error` when nothing had changed yet (after a change it is `needs-you`). `not-approved`, `approval-unverified`, `missing-tool` and `worker-not-started` start over on the next request for the same run.
 
-**Plan refusals** reach no host: the plan job fails with an error that names the check, and for a production run the Pushover message names the reason. `unattested` (the [provenance check](#provenance-check-2330)), `gate` (no requested target's environment passed its gate), `action` (a production dispatch with an action other than `deploy`), `staging-rollback` (a staging dispatch with `rollback` or `from`), `below-floor` (a staging run below 2.36.0, the first release whose own `bot.yml` deploys staging), `target`, `version`, `version-mismatch`, `from`, `image`, `digest-mismatch` (the version and `sha-` tags name different images), `not-on-main`, `compare`, `compare-too-large`, `applied-migration-changed`, `rollback-not-older` and `rollback-across-migration`. `paused` isn't a failure: production's switch is off, so nothing is planned for it. Staging has no switch since 2.36.0.
+**Plan refusals** reach no host: the plan job fails with an error that names the check, and for a production run the Pushover message names the reason. `unattested` (the [provenance check](#provenance-check-2330)), `action` (a production dispatch with an action other than `deploy`), `rebuild` (a rebuild of production, or with `action=bot`), `rollback-target` (a staging or prod dispatch with `rollback` or `from`; before 2.37.0, `staging-rollback`), `allow` (`allow_destroy` or `allow_access_removal` on a run that doesn't plan), `below-floor` (a staging run below 2.36.0 or a prod run below 2.37.0, the first releases whose own `bot.yml` deploys each host), `config-commit`, `target`, `version`, `version-mismatch`, `from`, `image`, `digest-mismatch` (the version and `sha-` tags name different images), `not-on-main`, `compare`, `compare-too-large`, `applied-migration-changed`, `rollback-not-older` and `rollback-across-migration`. `paused` isn't a failure: production's switch is off, so nothing is planned for it. Staging has no switch since 2.36.0. 2.37.0 removed the plan's per-run environment check and its refusal `gate`.
 
 **When no result arrives** the workflow reports: `host-key` (the host key changed: check the host before updating `DEPLOY_KNOWN_HOSTS`), `key-rejected`, `known-hosts` or `no-key` (the deploy environment's settings), `unreachable` (every attempt for 80 minutes failed before sshd answered, so nothing started), `bad-request` (the host refused the command format), or `outcome-unknown` (the host may have been reached, or the run outlasted the reconnect window). With `outcome-unknown`, the host's run directory is authoritative: the worker carries on alone, and `runs/<run id>/public.log` ends with its result.
 
@@ -266,10 +266,10 @@ A host reboot, the OOM killer or a kill ends the worker without a result. The ne
 
 ### Pause, stop and kill
 
-- **Pause:** delete the repository variable `DEPLOY_ENABLED` (Settings → Secrets and variables → Actions → Variables → Repository variables, or `gh variable delete DEPLOY_ENABLED`). Nothing new plans, and a request already waiting ends `refused` `paused` if you approve it. Pushover still reports that, and any other outcome of a run that planned while the switch was on: the plan decides whether a run gets a message when it starts, never when notify runs. Setting it back to `true` (`gh variable set DEPLOY_ENABLED --body true`) resumes. This holds only while the `production` environment has no `DEPLOY_ENABLED` of its own: inside the deploy job such a copy overrides the repository variable, so a waiting request would still go ahead ([setup](#setting-it-up-owner) step 12).
-- **Pause staging:** since 2.36.0 staging has no switch. Add a required reviewer to the `staging` environment; its runs then wait for that reviewer. Pausing production leaves staging running, and the plan runs either way.
-- **Stop:** `gh workflow disable deploy.yml` (both targets; an owner step).
-- **Kill:** delete the deploy key's line from `authorized_keys`, or the `production` environment's `DEPLOY_SSH_KEY` secret. On staging, delete the `staging` environment's `ANSIBLE_SSH_KEY`, or its key line in root's `authorized_keys`.
+- **Pause:** delete the repository variable `DEPLOY_ENABLED` (Settings → Secrets and variables → Actions → Variables → Repository variables, or `gh variable delete DEPLOY_ENABLED`). Nothing new plans for the Compose host, and a request already waiting ends `refused` `paused` if you approve it. Pushover still reports that, and any other outcome of a run that planned while the switch was on: the plan decides whether a run gets a message when it starts, never when notify runs. Setting it back to `true` (`gh variable set DEPLOY_ENABLED --body true`) resumes. Since 2.37.0, while the switch is off an automatic run asks for the `prod` host instead: before the cutover, reject those requests (there is no prod bot to deploy yet). This holds only while the `production` environment has no `DEPLOY_ENABLED` of its own: inside the deploy job such a copy overrides the repository variable, so a waiting request would still go ahead ([setup](#setting-it-up-owner) step 12).
+- **Pause staging:** since 2.36.0 staging has no switch. Add a required reviewer to the `staging` environment; its runs then wait for that reviewer. Pausing production leaves staging running, and the plan runs either way. The `prod` host needs no switch: rejecting its requests pauses it (a request left waiting holds `host-prod`, and every later prod job waits behind it).
+- **Stop:** `gh workflow disable deploy.yml` (every target, and the infrastructure; an owner step).
+- **Kill:** delete the deploy key's line from `authorized_keys`, or the `production` environment's `DEPLOY_SSH_KEY` secret. On staging or prod, delete that environment's `ANSIBLE_SSH_KEY`, or its key line in root's `authorized_keys`.
 - **Cancelling a run in GitHub stops a host run only before its first change,** when the host checks the run again (`refused` `not-approved`, nothing changed). After that it finishes on its own, and its result stays in its run directory.
 - **Don't approve while you work by hand.** Automated runs refuse while the bot is stopped or the pin differs from the running release, but not every manual step shows.
 
@@ -345,7 +345,7 @@ The cluster's weekly maintenance runs Tuesdays from 19:00 UTC for up to 4 hours.
 
 ### Daily dumps
 
-`ops/backup.sh` runs at 04:30 UTC from the `tarubot` user's crontab on this host (staging runs its own `tarubot-backup` from a systemd user timer: [Backups on staging](#backups-on-staging)):
+`ops/backup.sh` runs at 04:30 UTC from the `tarubot` user's crontab on this host (staging and prod run their own `tarubot-backup` from a systemd user timer: [Backups on staging and prod](#backups-on-staging-and-prod)):
 1. `pg_dump` runs in the pinned PostgreSQL 18 image, through the production Compose file's `backup` service. The service sits behind a profile, so `up` never starts it. It uses the bot's database URL and CA. Its logging is off, because a logging driver would copy the unencrypted dump on stdout to disk.
 2. The dump streams straight into `age`, encrypted for [`ops/age-recipients.txt`](../ops/age-recipients.txt). No unencrypted dump touches the disk, and the host can't decrypt what it wrote.
 3. `curl` uploads it with SigV4 signing to `daily/`, and also to `monthly/` on the 1st.
@@ -412,11 +412,11 @@ Compare the result with `check-restore.js`, then stop the bot and point `DATABAS
 
 **Before a manual migration** keep taking an independent `pg_dump` on the operator machine, as in the migration procedure above. Running `~/tarubot/ops/backup.sh` on the host right before also puts a fresh copy off-site. An automated deploy runs `ops/backup.sh` on the host after it stops the bot and names the object (`daily/tarubot-<UTC time>.dump.age`) in its result; that extra run also resets the "TaruBot backups" check's daily timer, which the 04:30 run then keeps as usual. The 2026-09-24 cutover left `pre-activation.dump` and `move-to-linode.dump` in `~/tarubot-cutover/work/backups/`; @deconfined had them and the other plaintext pre-deploy dumps there deleted on 2026-09-27, since the encrypted daily copies supersede them.
 
-**Restore checks:** `check-restore.js` compares a restored copy with the source. The production profile accepts `tarubot` on another host, such as a new cluster, or `tarubot_restore` on the same host.
+**Restore checks:** `check-restore.js` compares a restored copy with the source. The production profile accepts `tarubot` on another host, such as a new cluster, or `tarubot_restore` on the same host. After the cutover the `prod` profile takes the same rule under the prod names: `tarubot_prod` on another host, or `tarubot_prod_restore` on the same host.
 
 ## Settings copy (off the host)
 
-The production host's `.env` is the one thing a rebuild can't recreate from Git, so an encrypted copy is kept off the host (since 2.23.0). Staging has no `.env` since 2.36.0: its secrets are in the `staging` environment and its settings in `ops/ansible/vars/targets/staging.yml`. The copy goes with production's `.env` at the cleanup release (2.38.0). `scripts/host-env-backup.ts` runs on the operator machine. It reads `~/tarubot/.env` over SSH from the host named by `--host` (required) and encrypts it with [`age`](https://age-encryption.org) for the public keys in [`ops/age-recipients.txt`](../ops/age-recipients.txt). It writes only the encrypted file, to `~/tarubot-cutover/env-backups/tarubot-env-<UTC time>.age` (mode 600). The settings never touch the operator machine's disk or the terminal.
+The production host's `.env` is the one thing a rebuild can't recreate from Git, so an encrypted copy is kept off the host (since 2.23.0). Staging has no `.env` since 2.36.0, and the `prod` host never has one: their secrets are in the `staging` and `prod` environments and their settings in `ops/ansible/vars/targets/`. The copy goes with production's `.env` at the cleanup release (2.38.0). `scripts/host-env-backup.ts` runs on the operator machine. It reads `~/tarubot/.env` over SSH from the host named by `--host` (required) and encrypts it with [`age`](https://age-encryption.org) for the public keys in [`ops/age-recipients.txt`](../ops/age-recipients.txt). It writes only the encrypted file, to `~/tarubot-cutover/env-backups/tarubot-env-<UTC time>.age` (mode 600). The settings never touch the operator machine's disk or the terminal.
 
 ```sh
 bun run host:env-backup -- --host tarubot@<production host> --identity ~/tarubot-cutover/age/tarubot.key
@@ -428,7 +428,7 @@ bun run host:env-backup -- --host tarubot@<production host> --identity ~/tarubot
 
 ## Rebuilding the host
 
-This is production's Compose runbook, until 2.37.0 moves production to the new pipeline (staging's is [Rebuilding staging](#rebuilding-staging)). Use it when the host is lost, compromised, or being replaced. The data lives in the managed database, so a rebuild loses nothing: the new bot picks up its state from PostgreSQL. Budget about an hour, most of it waiting for DNS.
+This is production's Compose runbook, until @deconfined's cutover moves production to the `prod` host (the new hosts' is [Rebuilding a host](#rebuilding-a-host)). Use it when the host is lost, compromised, or being replaced. The data lives in the managed database, so a rebuild loses nothing: the new bot picks up its state from PostgreSQL. Budget about an hour, most of it waiting for DNS.
 
 You need the latest settings copy and the `age` key (above), access to Linode, the domain's DNS, and the healthchecks.io check.
 
@@ -478,87 +478,128 @@ You need the latest settings copy and the `age` key (above), access to Linode, t
 10. **Restore the backup schedule:** add the database's new access-list entry first (step 5), then follow "Setting it up" under Daily dumps. The first run should turn the "TaruBot backups" check green.
 11. **Retire the old host.** Delete the old Linode and remove its database access entry. Update the Layout table above, and take a fresh settings copy (`bun run host:env-backup -- --host tarubot@<production host>`).
 
-## Staging host (#50)
+## Staging and prod hosts (#50, #62)
 
-The staging host is a second Linode. It runs AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under the `tarubot` account, no Docker, and its own database and role on the managed cluster.
+The staging host is a second Linode, and the `prod` host a third, which replaces production's Compose host at @deconfined's cutover. Both run AlmaLinux 10 with SELinux enforcing, the bot as a rootless Quadlet unit under the `tarubot` account, no Docker, and their own database and role on the managed cluster.
 
-Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) the simple pipeline below builds and runs it. @deconfined's decisions are in REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)", which replace much of "Approved staging amendments (2026-09-26)". Production moves to the same pipeline in 2.37.0; until then everything above this section still describes it.
+Since 2.36.0 ([#62](https://github.com/deconfined/tarubot/issues/62)) the simple pipeline below builds and runs staging, and since 2.37.0 it is one path for both hosts. @deconfined's decisions are in REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)" and "Approved unified-pipeline amendments (2026-09-29)", which replace much of "Approved staging amendments (2026-09-26)". [DEPLOYMENT.md](DEPLOYMENT.md) is the runbook: what @deconfined does against what runs by itself, with every approval marked.
 
-**State at 2.36.0.** @deconfined retires the hand-built staging host of 2.32.0 to 2.34.0, with its pull unit, before 2.36.0 merges ([Owner steps for 2.36.0](#owner-steps-for-2360)); the Infrastructure workflow builds its replacement. **No bot runs on staging until the DevBot move** (2.36.2): the `staging` environment holds no `DISCORD_TOKEN`, so a `deploy` there only configures the host. One Discord application must never run in two places.
+**State at 2.37.0.**
+- **Staging:** the hand-built staging host of 2.32.0 to 2.34.0, with its pull unit, was retired before 2.36.0 merged. The Deploy workflow builds its replacement once @deconfined has done [DEPLOYMENT.md](DEPLOYMENT.md)'s Phase 0 and approves Phase 1. **No bot runs on staging until the DevBot move** (owner steps on 2.37.0 or later): the `staging` environment holds no `DISCORD_TOKEN`, so a `deploy` there only configures the host.
+- **Prod:** built and cut over by @deconfined (Phase 6), after the DevBot move's soak. Until then everything above this section still describes production.
 
-### The simple pipeline (2.36.0)
+One Discord application must never run in two places.
 
-[DEPLOYMENT.md](DEPLOYMENT.md) walks the whole process as step tables, what @deconfined does against what runs by itself, from building a host to a deployed release. Four layers, each with one owner:
+### The simple pipeline
+
+Four layers, each with one owner:
 
 | Layer | What it does | Where |
 | --- | --- | --- |
-| OpenTofu | Builds the Linode (disk encryption), its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list. | `ops/tofu/`, planned by `.github/workflows/infra.yml` in the read-only `infra-plan` environment and applied in `infra` after @deconfined's approval ([Infrastructure](#infrastructure-opentofu)) |
+| OpenTofu | Builds the Linode (disk encryption), its Cloud Firewall, its DNS A and AAAA records, and each database cluster's whole access list. | `ops/tofu/`, planned by Deploy's **Infrastructure plan** job in the read-only `infra-plan` environment and applied only in a `prod` job after @deconfined's approval ([Infrastructure](#infrastructure-opentofu)) |
 | cloud-init | At first boot only: the hostname, root's public keys, root's optional console password hash (locked without one), password SSH off, `python3-libselinux`, and a one-line sshd drop-in that enforces `verify-required`. | `ops/tofu/cloud-init.yaml.tftpl`, rendered into the Linode's user data |
-| Ansible | **Configure:** `ops/ansible/site.yml` from `main`'s head, as root. **Bot:** the release's own `ops/ansible/bot.yml`, which deploys the bot as the `tarubot` user. | `.github/workflows/host.yml`, on a GitHub-hosted runner over SSH |
-| GitHub environments | Every secret and every approval. | `staging`, `production`, `infra-plan`, `infra` and `notify` |
+| Ansible | **Configure:** `ops/ansible/site.yml` from `main`'s head, as root. **Bot:** the release's own `ops/ansible/bot.yml`, which deploys the bot as the `tarubot` user. | `.github/workflows/host.yml`, Deploy's one reusable host job, on a GitHub-hosted runner over SSH |
+| GitHub environments | Every secret and every approval. | `infra-plan`, `staging`, `prod` and `notify` (and `production` for the Compose host until 2.38.0) |
+
+The Deploy workflow is the one entry point. `host.yml` is never triggered on its own:
 
 ```
-merge to main ─► Publish containers (build, push, sign provenance)
+merge to main ─► Publish containers (built and signed once; refuses an existing version or sha- tag)
                └─► Deploy (re-runs refused)
-                    Plan            public data only: version, commit, digest, provenance, the staging action,
-                                    main's head (config_commit), the schema head
-                    Deploy staging  host.yml in `staging`: Configure (main's site.yml), then Bot (the release's bot.yml)
-                                    at once, no approval
-                    Deploy          production's Compose job (ops/deploy.sh), after @deconfined's approval (until 2.37.0)
-                    Notify          Pushover, about production only
+                    Plan                 public data only: version, commit, digest, provenance, the targets,
+                                         main's head (config_commit), the schema head, what approving does
+                    Infrastructure plan  infra-plan, read-only, no approval: the change list and the host keys
+                                         to pin (a prod request but action=bot, action=infra, or a rebuild)
+                    Infrastructure       host.yml in prod, after approval: apply and pin, nothing else
+                                         (action=infra or a staging rebuild, with changes or keys to pin)
+                    Staging              host.yml in staging, no approval: Configure, then the release's bot.yml
+                    Prod                 host.yml in prod, one approval: apply and pin if the plan asks,
+                                         then Configure and the release's bot.yml
+                    Report               Pushover from notify, about prod and the infrastructure
+                    Deploy, Notify       production's Compose job and its message, until 2.38.0
 ```
 
 Nothing on a host pulls, polls or judges releases. systemd starts the bot and runs `migrate.js` before each start. [CI_CD.md](CI_CD.md#deploy-workflow) has the workflows' side: jobs, inputs, environments and CI.
 
-**Actions.** Every automatic run is a `deploy`. A dispatch names an `action`, which is staging's alone in 2.36.0 (a production dispatch with anything but `deploy` fails the plan as `action`):
+**Which runs ask for what.** An automatic run deploys staging, and asks for production: the Compose host while the repository variable `DEPLOY_ENABLED` is exactly `true`, and `prod` otherwise. @deconfined turns it off inside the cutover window. A dispatch names its `target` and `action`:
 
-| `action` | Configure | What `bot.yml` does | Requires | Version rule |
-| --- | --- | --- | --- | --- |
-| `deploy` | yes | everything ([below](#bot-deploys-and-the-result)) | the five bot secrets and the five backup settings; without `DISCORD_TOKEN`, on a host that runs no bot, it ends `configured` | older than the live release: `superseded`, nothing changed |
-| `bot` | no | everything | the same, with no exception | any release at or above 2.36.0; refused across a migration |
-| `configure` | yes | nothing | nothing | none: the version is ignored |
-| `preflight` | yes | the database and backup secrets, `migrate.js` and one backup; no bot | `DATABASE_URL`, `DATABASE_CA_CERT` and the backup settings | refused where a bot unit exists |
+| `action` | Plans OpenTofu | Configure | What `bot.yml` does | Requires | Version rule |
+| --- | --- | --- | --- | --- | --- |
+| `deploy` | prod: yes; staging: only with `rebuild` | yes | everything ([below](#bot-deploys-and-the-result)) | the five bot secrets and the five backup settings (prod: and `/suggest`'s pair, or neither); without `DISCORD_TOKEN`, on a host that runs no bot, it ends `configured` | older than the live release: `superseded`, nothing changed |
+| `bot` | never | no | everything | the same, with no exception | any release at or above the host's floor (staging 2.36.0, prod 2.37.0); refused across a migration while the live bot runs |
+| `configure` | as `deploy` | yes | nothing | nothing | none: the version is ignored |
+| `preflight` | as `deploy` | yes | the database and backup secrets, `migrate.js` and one backup; no bot | `DATABASE_URL`, `DATABASE_CA_CERT` and the backup settings | refused where a bot unit exists |
+| `infra` | yes, for every host | no host step | nothing | nothing on a host | none: the version is ignored |
 
-**By hand** (@deconfined, or an agent only when @deconfined asks in that session): **Run workflow** on `main` with `target` = `staging`, a version and an action. The run is titled `Deploy <version> to staging`, or `Deploy <version> <action> to staging` for any action but `deploy`. The plan refuses:
-- `rollback` and `from` for staging, as `staging-rollback`: staging goes back with `action=bot` and the older version;
-- a staging release below 2.36.0, the first whose own `bot.yml` deploys staging, as `below-floor`.
+Everything prod does waits for one approval of `prod`. On staging only the **Infrastructure** job of a rebuild waits, and only when the plan has changes or keys to pin.
 
-**Pausing staging.** There is no switch. @deconfined adds a required reviewer to the `staging` environment, and staging runs then wait there.
+**By hand** (@deconfined, or an agent only when @deconfined asks in that session): **Run workflow** on `main` with a version, `target` (`staging`, `prod`, or `production` for the Compose host) and an action. The run is titled `Deploy <version> to <target>`, with the action when it isn't `deploy` and `(rebuild)` for a rebuild. The plan refuses:
+- `rollback` and `from` outside `production`, as `rollback-target`: staging and prod go back with `action=bot` and the older version;
+- any action but `deploy` for `production`, as `action`, and `rebuild` with `bot` or for `production`, as `rebuild`;
+- `allow_destroy` or `allow_access_removal` on a run that doesn't plan, as `allow`;
+- a release below the host's floor, as `below-floor` (2.36.0 for staging, 2.37.0 for prod, the first releases whose own `bot.yml` deploys them).
 
-**One run at a time.** The host job holds one concurrency group per target (`host-staging`) with `queue: max`: a newer run waits for the one on the host, and every waiting run keeps its place in order. Without `queue: max`, GitHub keeps only one waiting run per group and cancels it when another arrives, which could drop a dispatched rollback. Re-runs are refused (first attempts only), so a retry is a new dispatch. A run whose staging job fails never holds production up, and production's result is always its own **Deploy** job's.
+**Pausing.** There is no switch. For staging, @deconfined adds a required reviewer to the `staging` environment, and staging runs then wait there. For prod, rejecting its requests pauses it. Reject rather than leave a request waiting: a waiting request holds `host-prod` (below).
 
-**What reaches the public log.** The host's name, its pinned key and root's Configure key are secrets of the environment, so Actions masks them. The host job's first step masks every address the name resolves to before anything else prints, and ssh runs with `LogLevel=FATAL`, so a host key other than the pinned one ends in "Host key verification failed." without ssh printing that key's fingerprint. Nothing runs with `-v` or `--diff`, and every task that touches a secret or runs a bot tool is `no_log`. The run's summary shows only the result's public fields.
+**One run at a time.** `host.yml` holds one concurrency group per environment, `host-staging` or `host-prod`, with `queue: max`. The Infrastructure call and the Prod call share `host-prod`, so no two applies or pin writes overlap on the unlocked state, and a newer run waits for the one on a host. Every waiting run keeps its place in order. Without `queue: max`, GitHub keeps only one waiting run per group and cancels it when another arrives, which could drop a dispatched rollback or an approved apply. A request waiting for its `prod` approval holds `host-prod` until it is approved or rejected. Every later `prod` job waits behind it, a rollback included, and so does every Infrastructure job, staging's applies and pins among them: reject a stale request before dispatching a rollback. Re-runs are refused (first attempts only), so a retry is a new dispatch. Staging never holds prod up, and prod never waits for staging.
+
+**What reaches the public log.** Nothing a run prints names a host, a domain or an address.
+- The hosts' addresses, instance IDs, keys and fingerprints are read from the pin store or OpenTofu's output, and `ops/tofu/ci/host.sh` masks each before anything else prints.
+- The values inside `TOFU_VARS`, or the saved plan's copy of them, are masked by `tofu-ci.sh` first.
+- ssh runs with `LogLevel=FATAL`, so a host key other than the pinned one ends in "Host key verification failed." without ssh printing that key's fingerprint.
+- Nothing runs with `-v` or `--diff`, and every task that touches a secret or runs a bot tool is `no_log`.
+
+The run's summary shows only the result's public fields, the change list's actions and resource addresses, and one line per host key.
 
 ### Infrastructure (OpenTofu)
 
-[ops/tofu/README.md](../ops/tofu/README.md) is the runbook: what the module builds, the `infra-plan` and `infra` environments and `TOFU_VARS`, the first apply, rebuilds, hand runs and upgrades. In short:
+[ops/tofu/README.md](../ops/tofu/README.md) is the module's reference: what it builds, `TOFU_VARS`, hand runs and upgrades. In short:
 
-- **What it builds.** For each entry in `hosts` (keyed `staging` or `production`), a Linode on `linode/almalinux10` with disk encryption, its Cloud Firewall (inbound SSH and ICMP from anywhere, everything else dropped) and unproxied A and AAAA records. For each database cluster, the cluster's whole access list: every host's IPv6 `/128` and IPv4 `/32`, then `db_allow_extra`, with `prevent_destroy`. It never builds host keys, SSHFP records or the clusters themselves.
-- **One dispatch, one approval** (REQUIREMENTS.md, confirmed item 4). Dispatch **Infrastructure** from `main` with `operation=apply`. Its Plan job runs in `infra-plan`, with read-only tokens, a read-only state key and no approval; its summary lists each change as `ACTION ADDRESS`, with `+N -M` on access lists. If that is what you meant, approve the Apply job in `infra`; if not, reject it. Apply never plans: it fetches the Plan job's saved plan (a one-day artifact, encrypted by OpenTofu), refuses unless its SHA-256 and change list are the Plan job's and it was planned with `infra`'s own `TOFU_VARS`, and applies exactly that plan, which OpenTofu refuses as stale if the state changed since. `operation=plan` stops after the Plan job. A delete or replace needs `allow_destroy`, and an access-list removal `allow_access_removal`.
+- **What it builds.** For each entry in `hosts` (keyed `staging` or `prod`, optionally `-N`), a Linode on `linode/almalinux10` with disk encryption, its Cloud Firewall (inbound SSH and ICMP from anywhere, everything else dropped) and unproxied A and AAAA records. For each database cluster, the cluster's whole access list: every host's IPv6 `/128` and IPv4 `/32`, then `db_allow_extra`, with `prevent_destroy`. It never builds host keys, SSHFP records or the clusters themselves. Its sensitive `host_connection` output (each host's instance ID, IPv6 and IPv4) feeds the pin step.
+- **The plan comes first** (REQUIREMENTS.md "Approved unified-pipeline amendments (2026-09-29)", decision 1). The **Infrastructure plan** job runs in `infra-plan` with read-only tokens, a read-only state key, the one copy of `TOFU_VARS` and no approval, at `main`'s head. Its summary lists each change as `ACTION ADDRESS`, with `+N -M` on access lists, then one line per host key ([Host keys](#host-keys)). It keeps the encrypted saved plan as a one-day artifact only when there is something to apply or pin.
+- **One approval applies exactly that plan.** The approving job, **Infrastructure** or **Prod**, in `prod`, never plans. It adopts the saved plan only if its SHA-256 and change list are the ones shown, takes the values from the plan itself (`tofu show -json`), applies it only if it has changes, and OpenTofu refuses it as stale if the state changed since. Only `prod` holds the write tokens.
+- **The guards.** A delete or replace needs `allow_destroy`, an access-list removal `allow_access_removal`, and a change the list can't name is refused. A `rebuild` alone allows exactly its own instance's replace (`linode_instance.host["<target>"]`) and the removal of that instance's two old access-list entries, and nothing else. It covers only the plain `staging` and `prod` keys.
 - **After any apply that touches an access list,** check production's readiness: the heartbeat check and `/sync status`.
-- **State** lives in a private Object Storage bucket, encrypted by OpenTofu with a passphrase only the `infra-plan` and `infra` environments and @deconfined hold; the same passphrase encrypts the saved plan, which anyone signed in to GitHub can download from the public repository while its artifact is kept. There is no state lock, so a hand run must never overlap a workflow run; the Plan job plans with `-lock=false`, since its state key is read-only.
-- **User data applies only when a Linode is created.** A new root key, Configure key or hash reaches a host only through a rebuild ([Rebuilding staging](#rebuilding-staging)).
+- **State** lives in a private Object Storage bucket (`tarubot/infra.tfstate`), encrypted by OpenTofu with a passphrase that only `infra-plan`, `prod` and @deconfined hold. The same passphrase encrypts the saved plan, which anyone signed in to GitHub can download from the public repository while its artifact is kept. There is no state lock: `host-prod` serializes the applies, a hand run must never overlap a Deploy run, and the plan runs with `-lock=false`, since its state key is read-only.
+- **User data applies only when a Linode is created.** A new root key, Configure key or hash reaches a host only through a rebuild ([Rebuilding a host](#rebuilding-a-host)).
 
-**Pinning a new host key (trust on first use).** Nothing prints a host's key: scanners index host keys by address. After every build or rebuild, @deconfined pins it from their own machine, once the name resolves to the new addresses:
+### Host keys
 
-```sh
-ssh-keyscan -q -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TARGET_HOST_KEY --env staging
-```
+Each host makes its own Ed25519 key at first boot, and nothing prints it: scanners index host keys by address. The approving job pins it on first use (`ops/tofu/ci/host.sh`; REQUIREMENTS.md "Approved unified-pipeline amendments (2026-09-29)", decision 5). This replaces 2.36.0's `TARGET_HOST`, `TARGET_HOST_KEY` and @deconfined's `ssh-keyscan`.
 
-`-q` keeps `ssh-keyscan`'s banner line out of the secret. To check the key first, compare `ssh-keyscan -q -t ed25519 <name> 2>/dev/null | ssh-keygen -lf -` with the Ed25519 fingerprint cloud-init printed on the Lish console. Until the new key is pinned, every run for that host fails at its first connection with "Host key verification failed.". At `LogLevel=FATAL` a host that is down, or has port 22 closed, ends UNREACHABLE with no reason either, so check that it is up first.
+- **The pin store** is one object per host key beside the state: `tarubot/pins/<key>.json`, holding the key (`ssh-ed25519 …`), the Linode instance ID and the host's IPv4 and IPv6 addresses. A pin belongs to one instance.
+- **The plan lists what needs a pin** (`host.sh status`). There is one line per host:
+  - `<key>: pinned`;
+  - `<key>: new host — approving trusts its host key on first use`, for a host the plan creates or replaces;
+  - `<key>: no pin for its current instance — approving trusts its host key on first use`;
+  - `<key>: addresses changed — approving updates its pin, not its key`.
+
+  A prod request looks at prod's own hosts, a staging rebuild at staging's, and `action=infra` at every host, and every host the plan creates or replaces is listed whatever the scope. A host outside the request's scope without a matching pin gets a warning naming `action=infra`, and is left alone.
+- **The approved job writes exactly the pins its plan listed** (`host.sh pin`):
+  1. It first checks each host's instance against the adopted plan, and refuses "the host changed since the plan; dispatch again" otherwise.
+  2. A new instance is scanned, IPv6 first, then IPv4 (GitHub's hosted runners have no IPv6), for up to 5 minutes. When both families answer, their keys must agree, or nothing is stored.
+  3. The pin is stored at once, before any login. So if the first Configure then fails (a wrong Configure key, a slow boot), the next run uses the same pin and never scans again.
+  4. The key pinned for an instance is never replaced. Only its addresses are ever updated, without a scan.
+- **Only `prod` writes pins.** The read/write state key is in `prod`, which @deconfined approves; `infra-plan` and `staging` read the pins with the read-only key. Every other Object Storage key is limited to its own bucket (DEPLOYMENT.md step 0.3), since any key that can write the state bucket could redirect a deploy.
+- **Connecting** (`host.sh connect`, every host job):
+  - It reads the environment's pin, writes the Configure key and a `known_hosts` of the one line `target <key>`, and probes the host as root, IPv6 first, then IPv4.
+  - Only the pinned Ed25519 key is accepted. A mismatch fails at once with reason `host-key`, and never falls back to the other family. A refused Configure key is `key-rejected`, and a host that never answered is `unreachable`.
+  - With no pin for the host, or no store settings in the environment, an automatic run on staging ends green (`no-host`, with a notice); a prod job and every dispatch fail.
+- **Retiring a host:** no run deletes a pin. After the approved `action=infra` that destroys the host, @deconfined deletes its pin object with their own bucket credentials ([DEPLOYMENT.md](DEPLOYMENT.md) step 4.12). Until then, every run for that host fails at connect as `unreachable` (or `host-key`, if its address was reused), and a staging merge is red rather than `no-host`.
+- **Re-pinning** a host whose key changed outside a Deploy run: delete its pin object with your own bucket credentials, dispatch `action=infra`, and approve the plan that says "no pin for its current instance".
 
 ### Configure
 
-`ops/ansible/site.yml` is plain host configuration: one play, run by the host job as root over SSH from `main`'s head (the plan's `config_commit`), with one input, `-e tarubot_role=staging` or `production`. It reads no secret. cloud-init owns the hostname, root's keys and root's password, and the playbook never writes them. Every automatic run and every `deploy`, `configure` and `preflight` dispatch runs it; `bot` skips it.
+`ops/ansible/site.yml` is plain host configuration: one play, run by the host job as root over SSH from `main`'s head (the plan's `config_commit`), with one input, `-e tarubot_role=staging` or `prod`. It reads no secret. cloud-init owns the hostname, root's keys and root's password, and the playbook never writes them. Every automatic run and every `deploy`, `configure` and `preflight` dispatch runs it; `bot` and `infra` skip it.
 
 In order, it:
 1. waits for `cloud-init status --wait` (done, or degraded);
 2. refuses anything but AlmaLinux 10 on x86_64 with SELinux enforcing, or an unknown role;
 3. **on a new host** (no `tarubot` account yet), upgrades every package and reboots once;
 4. installs Podman, crun, passt, container-selinux, acl, chrony, dnf-automatic, dnf-plugins-core, polkit, `python3-libselinux` and sudo, then EPEL and `age` from it (`state: present`: Configure never upgrades after a host's first run);
-5. configures dnf-automatic as the hosts' only updater: all updates (`upgrade_type = default`), applied daily, with a reboot when one needs it (`shutdown -r +5`). Staging keeps the timer's default, 06:00 UTC plus up to an hour; production's drop-in moves it to 10:00 UTC;
+5. configures dnf-automatic as the hosts' only updater: all updates (`upgrade_type = default`), applied daily, with a reboot when one needs it (`shutdown -r +5`). Staging keeps the timer's default, 06:00 UTC plus up to an hour; prod's drop-in (`files/dnf-automatic-timer-prod.conf`) moves it to 10:00 UTC;
 6. sets UTC and chrony; the sysctl drop-in (`kernel.yama.ptrace_scope=1`, `dev.tty.legacy_tiocsti=0`, and no temporary IPv6 addresses, so the address on the access list stays the one in use); rpcbind stopped and masked; a persistent journal with one file per user; and the IPv6 boot wait, which holds `network-online.target` until the host has a global IPv6 address and a default route (60 s at most, never failing);
-7. installs sshd's drop-in `00-tarubot.conf` over cloud-init's seed, checked on its own and then with the whole configuration before a reload, and asserts the effective settings with `sshd -T`: passwords, keyboard-interactive and GSSAPI off, root by key only, `AllowUsers root`, `PubkeyAuthOptions verify-required`, no forwarding of any kind, no `~/.ssh/rc`, and the one Ed25519 host key (the key `TARGET_HOST_KEY` pins);
+7. installs sshd's drop-in `00-tarubot.conf` over cloud-init's seed, checked on its own and then with the whole configuration before a reload, and asserts the effective settings with `sshd -T`: passwords, keyboard-interactive and GSSAPI off, root by key only, `AllowUsers root`, `PubkeyAuthOptions verify-required`, no forwarding of any kind, no `~/.ssh/rc`, and the one Ed25519 host key (the key the pin store holds);
 8. limits `su` to the wheel group (`pam_wheel.so use_uid` in `/etc/pam.d/su`), and installs a polkit rule that refuses every request from any subject but root. The wheel group has no members on these hosts, so root's console password, if cloud-init set one, works only at the Lish console: not for `su`, `pkexec` or `run0` from another account, and never over SSH;
 9. creates the `tarubot` account (umask 0022 through its GECOS, no groups, password locked, no SSH login) and enables lingering, so its user manager runs the bot and the backup timer with nobody logged in.
 
@@ -566,7 +607,7 @@ A second run reports `changed=0`. A failure fails the host job before the bot st
 
 **Acting on the host.** Log in as root with the FIDO2 key (it asks for the PIN and a touch) or the operator key, if `root_keys` holds one, then use `run0 --user=tarubot`. `tarubot` has no SSH login. Under SELinux a `run0` service can't execute a file in a home directory (status 203/EXEC), so wrap commands in a shell: `run0 --user=tarubot sh -c '…'`. Never use plain `su` or `runuser` from a root terminal: they hand `tarubot`'s code root's terminal.
 
-**A hand run while Actions is down.** From @deconfined's own machine, never an agent's, with the pinned ansible-core (`pip install --no-deps --require-hashes -r ops/ansible/requirements.txt` in a virtual environment) and the FIDO2 key. `inventory.example.yml` shows the inventory (the one host is `target`, reached as root with `HostKeyAlias=target`, and its known-hosts line is `target <TARGET_HOST_KEY>`), and `host.example.yml` holds the role:
+**A hand run while Actions is down.** From @deconfined's own machine, never an agent's, with the pinned ansible-core (`pip install --no-deps --require-hashes -r ops/ansible/requirements.txt` in a virtual environment) and the FIDO2 key. `inventory.example.yml` shows the inventory: the one host is `target`, reached as root with `HostKeyAlias=target`, and its known-hosts line is `target <the pin's host_key>`, read from the pin store with your own bucket credentials. `host.example.yml` holds the role:
 
 ```sh
 cd ops/ansible
@@ -576,55 +617,59 @@ ansible-playbook -i /path/outside/any/checkout/inventory.yml site.yml -e @host.e
 
 ### Bot deploys and the result
 
-The host job's Bot step runs **the release's own** `ops/ansible/bot.yml`, from a checkout of the commit named by the image's own revision label, which must equal the plan's commit. It uses `main`'s `ansible.cfg` and ansible-core, and gets the eleven secret names of `vars/bot.yml`'s `tb_secret_env` from the environment, in this step only (two of them from secrets named otherwise, `tb_secret_source`: `REPORTS_GITHUB_TOKEN` and, for production from 2.37.0, `SUGGEST_APP_PRIVATE_KEY`). So a rollback deploys with that release's own playbook, unit template and settings (question 7).
+The host job's Bot step runs **the release's own** `ops/ansible/bot.yml`, from a checkout of the commit named by the image's own revision label, which must equal the plan's commit. It uses `main`'s `ansible.cfg` and ansible-core, and gets the environment's values in this step only: the eleven secret names of `vars/bot.yml`'s `tb_secret_env` and, since 2.37.0, the one plain setting of `tb_setting_env`, `GITHUB_APP_CLIENT_ID`. Three come from secrets named otherwise (`tb_secret_source`, `tb_setting_source`), because GitHub refuses a secret name that starts with `GITHUB_`: `REPORTS_GITHUB_TOKEN`, and prod's `SUGGEST_APP_PRIVATE_KEY` and `SUGGEST_APP_CLIENT_ID`. So a rollback deploys with that release's own playbook, unit template and settings (question 7).
 
 `bot.yml` runs as root only to find the `tarubot` account, then as `tarubot` through these phases. Any phase can end the run:
 
 | Phase | What it does |
 | --- | --- |
-| checks | The inputs; the target's declared settings; each required secret, present and well formed (a single-line value must be one run of non-whitespace characters, and only the two PEMs may span lines); and `DATABASE_URL`, which must be `postgresql://tarubot_staging:<password>@<host>[:<port>]/tarubot_staging`, the password percent-encoded and the host a DNS name (or an IPv4 address: the database driver can't use an IPv6 literal). That check is one regular-expression match: a URL parser can raise on a malformed value, and the exception's text, which quotes it, reaches the public log even from a `no_log` task. Refusals name settings, never values. |
+| checks | The inputs and the target's declared settings, then each required secret, present and well formed. A single-line value must be one run of non-whitespace characters; only the two PEMs may span lines. `HEALTHCHECKS_BACKUP_URL` must be `https://`, and `BACKUP_STORAGE_ENDPOINT` `https://` or a bare host (`malformed-secret`). On prod (`tarubot_suggest`), a set `SUGGEST_APP_CLIENT_ID` must look like a client ID (`malformed-secret`) and makes `SUGGEST_APP_PRIVATE_KEY` required (`missing-secret`); both empty leave `/suggest` off. `DATABASE_URL` must be `postgresql://<user>:<password>@<host>[:<port>]/<database>` with this target's names: `tarubot_staging` for both on staging, and the user `tarubot_prod` with `tarubot_prod` or `tarubot_prod_restore` on prod. The password is percent-encoded, and the host is a DNS name (or an IPv4 address: the database driver can't use an IPv6 literal). That check is one regular-expression match: a URL parser can raise on a malformed value, and the exception's text, which quotes it, reaches the public log even from a `no_log` task. Refusals name settings, never values. |
 | live | The installed unit's `Image=` line and that image's version: the live release, or none. |
 | decide | `configured` (a `deploy` without `DISCORD_TOKEN` on a host with no bot unit; nothing is written), or a refusal: `missing-secret`, `malformed-secret`, `database-not-this-target`, `bot-exists` (a preflight where a unit exists), or `superseded` (a `deploy` older than live). |
 | image | Pulls `ghcr.io/deconfined/tarubot@<digest>` and requires its version and revision labels to be the plan's (`image-mismatch`). |
-| migrations | Lists `/app/migrations` in the live and the target image, with no network. A file the live image has and the target lacks is a rollback across a migration (`rollback-across-migration`). It names the files the start will apply, and warns (`db-maintenance-window`) in the cluster's Tuesday 19:00-23:00 UTC maintenance. |
-| identity | Asks the release image for the target's application and test guild (`resolveDeployment`, no network, no secret), and checks that `DISCORD_TOKEN` belongs to that application (`token-application-mismatch`). |
+| migrations | Lists `/app/migrations` in the live and the target image, with no network. A file the live image has and the target lacks is a rollback across a migration. While the live bot runs (`systemctl --user show`, read-only: `ActiveState` isn't inactive, failed, activating or deactivating, or can't be read), that is refused (`rollback-across-migration`), since the database holds the migration. While it doesn't (its start failed, as when its migration failed and committed nothing), the rollback goes on, and the older release's own `migrate.js` decides at the restart: it refuses a database that holds a newer migration without writing anything (`restart-failed`, the bot down as before), and otherwise starts. It names the files the target image has and the live one lacks: every file on a first start, even when the database already holds them, and `migrate.js` applies only those the database lacks. When it names any in the cluster's Tuesday 19:00-23:00 UTC maintenance window, it warns (`db-maintenance-window`), and prod's Report says the run fell in that window, never that a migration ran. |
+| identity | Asks the release image for the target's application and registration scope (`resolveDeployment`, no network, no secret), and checks that `DISCORD_TOKEN` belongs to that application (`token-application-mismatch`). |
+| settings | Since 2.37.0: the release's own `configuration()` and tool guard, for `migrate.js` and for `register.js` in the target's scope (only `migrate.js` for a preflight), over exactly the settings and secrets the bot will get (`dist/scripts/deploy-check.js`). It runs in a throwaway `--rm` container of the release image with no network, a read-only root and no capabilities, with the values on its standard input, and prints only which check refused (`settings-invalid`). It is the one exception to "nothing reaches the host before the secrets phase": the values are never written. |
 | secrets | Writes each required value into its Podman secret, `tarubot-<name>`, with `podman secret create --replace` and the value on standard input. Nothing ever deletes a Podman secret. |
 | files | `tarubot-tool`, `tarubot-backup`, the backup's two units and `age-recipients.txt`. |
 | preflight | Only for `preflight`: the settings file and the image file, `migrate.js` (it must print `Schema ready.`, or `schema-not-ready`), then one backup (`backup-failed`), then the nightly backup timer, so the backup check keeps hearing from the host. Ends `preflight-ok`. |
 | unit | Renders the unit as a candidate and runs Quadlet's own dry run over it (`unit-invalid`). Then, back to back, it writes the settings file, the unit and the image file, and reloads the user manager, so a bot that restarts meanwhile never meets another release's settings. |
-| restart | `systemctl --user restart tarubot.service`, always: systemd stops the old container (freeing the writer lease), runs `migrate.js` in the new image as `ExecStartPre`, then starts the bot (`restart-failed`). The **restore point** is when the old instance stopped (`InactiveEnterTimestamp`), before any migration committed. |
+| restart | `systemctl --user restart tarubot.service`, always: systemd stops the old container (freeing the writer lease), runs `migrate.js` in the new image as `ExecStartPre`, then starts the bot. The **restore point** is when the old instance stopped (`InactiveEnterTimestamp`), before any migration committed, or the time just before the restart when systemd no longer holds that. Since 2.37.0 it is written to `~/.config/tarubot/recovery-point` (0600) before the restart's own result is judged, so a failed start keeps it (`restart-failed`). |
 | health | Healthy within 3 minutes (36 checks, 5 s apart), then 60 s later still healthy, as the same container on the release's image (`not-healthy`, `image-mismatch`). |
 | timer | Enables and starts `tarubot-backup.timer`. |
-| commands | `register.js --guild <test guild>` for staging, then `commands.js list` (`register-failed`). |
+| commands | `register.js` in the target's scope (`--guild <test guild>` for staging, `--global` for prod), then `commands.js list` (`register-failed`). |
 | tidy | Removes TaruBot release images (those with the repository's `org.opencontainers.image.source` label) older than a week that no container uses; the backup's pinned PostgreSQL image stays. Ends `deployed`. |
 
-Before the secrets phase nothing is written to the host but image pulls. Nothing is ever put back: a release that doesn't turn healthy stays, and the run fails. A task that can fail with a named outcome or reason (the codes below) declares them in its own `vars`, and the play's rescue reads them from the failed task; any other failure is `failed` with reason `-`.
+Before the secrets phase nothing is written to the host but image pulls. Nothing is ever put back: a release that doesn't turn healthy stays, and the run fails. A task that can fail with a named outcome or reason (the codes below) declares them in its own `vars`, and the play's rescue reads them from the failed task; any other failure is `failed` with reason `-`. CI evaluates the refusals' own expressions with ansible-core's templar (`tests/fixtures/bot-asserts.py`).
 
-**The result.** The last play writes a result file on the runner, and the job's summary prints it: `outcome`, `action`, `version`, `previous`, `restore_point`, `migrations`, `schema_head`, `step`, `reason` and `warnings`, each as plain characters. When the host becomes unreachable while `bot.yml` runs, Ansible stops before that play, and the summary says there is no result file: the phase shows only in the run's log. The summary decides nothing; the job is green when its steps are, which `bot.yml`'s last play arranges only for these:
+**The result.** The last play writes a result file on the runner, and the job's summary prints it: `outcome`, `action`, `version`, `previous`, `restore_point`, `migrations`, `schema_head`, `step`, `reason` and `warnings`, each as plain characters. `migrations` is what the migrations phase named, not what `migrate.js` applied: on a first start it lists every file of the release. When the host becomes unreachable while `bot.yml` runs, Ansible stops before that play, and the summary says there is no result file: the phase shows only in the run's log. The summary decides nothing; the job is green when its steps are, which `bot.yml`'s last play arranges only for these:
 
 | Outcome | Meaning | What to do |
 | --- | --- | --- |
 | `deployed` | The release runs, healthy, with its commands registered. | Nothing. |
 | `superseded` | A newer release is live. Nothing changed. | Nothing. |
-| `configured` | Configure ran; for `deploy`, no bot runs here and the environment has no `DISCORD_TOKEN`. | Nothing, before the DevBot move. |
+| `configured` | Configure ran; for `deploy`, no bot runs here and the environment has no `DISCORD_TOKEN`. | Nothing, before the DevBot move (staging) or the cutover (prod). |
 | `preflight-ok` | The database answered `Schema ready.`, and one backup reached the bucket. | Nothing. |
-| `no-host` | An automatic run, and the environment has no `TARGET_HOST`. A dispatch fails instead. | Nothing, before staging is built. |
+| `no-host` | An automatic run on staging, and the pin store has no pin for it yet. A prod job or a dispatch fails instead. | Nothing, before staging is built. |
 
 And red for these:
 
 | Outcome | Meaning | What to do |
 | --- | --- | --- |
-| `refused` | A check failed before anything was written; `reason` names it: `no-account` (Configure never ran), `missing-secret`, `malformed-secret`, `database-not-this-target`, `token-application-mismatch`, `image-mismatch`, `bot-exists` or `rollback-across-migration`. | Fix the secret or the request, then dispatch again. |
+| `refused` | A check failed before anything was written; `reason` names it: `no-account` (Configure never ran), `missing-secret`, `malformed-secret`, `database-not-this-target`, `token-application-mismatch`, `settings-invalid`, `image-mismatch`, `bot-exists` or `rollback-across-migration` (the live bot runs). | Fix the secret or the request, then dispatch again. |
 | `unhealthy` | The release was installed and restarted, but isn't healthy. It stays in place; the summary names the rollback. | Read the journal, then [roll back](#rolling-back) or fix forward. |
-| `failed` | A step failed; `step` and `reason` say which (`unit-invalid`, `restart-failed`, `register-failed`, `schema-not-ready`, `backup-failed`, or `-` for an unexpected error). | Read the step's log in the run, then the host's journal. |
+| `failed` | A step failed; `step` and `reason` say which (`unit-invalid`, `restart-failed`, `register-failed`, `schema-not-ready`, `backup-failed`; before `bot.yml`, the connection's `host-key`, `key-rejected`, `unreachable`, `pin-store`, `configure-key` or `no-host`; or `-` for an unexpected error). | Read the step's log in the run, then the host's journal. After `restart-failed` the bot is down; the summary names the rollback. |
+
+For the Infrastructure job, the outcome is `applied`, `pinned`, `unchanged` or `failed` with the step; Report pages prod's and the infrastructure's outcomes.
 
 **Files on the host,** all owned by `tarubot`:
 
 | Path | What |
 | --- | --- |
 | `~/.config/containers/systemd/tarubot.container` (0644) | The Quadlet unit: the image by digest, `Pull=never`, the settings file, one `Secret=` mount per secret (`/run/secrets/<name>`, uid 1000, mode 0400), a read-only root with no capabilities and `no-new-privileges`, the health check, and `ExecStartPre` running `migrate.js` through `tarubot-tool` with the unit's own image. `TimeoutStartSec=15min`, `Restart=always`. |
-| `~/.config/tarubot/tarubot.env` (0600) | The plain settings (`TARUBOT_ENVIRONMENT=staging`, public test replies, `/suggest` off, the application and test guild the image reported) and one `NAME_FILE=/run/secrets/<name>` line per secret. No secret value. |
+| `~/.config/tarubot/tarubot.env` (0600) | The plain settings and one `NAME_FILE=/run/secrets/<name>` line per secret. No secret value. Staging: `TARUBOT_ENVIRONMENT=staging`, public test replies, `/suggest` off, the application and test guild the image reported. Prod: `TARUBOT_ENVIRONMENT=prod`, no test replies, `GITHUB_APP_CLIENT_ID` (set or empty), and the application the image reported. |
 | `~/.config/tarubot/image` (0600) | The live image reference, for `tarubot-tool` without `--image`. |
+| `~/.config/tarubot/recovery-point` (0600) | The last run's restore point, an ISO timestamp (2.37.0). |
 | `~/.config/tarubot/candidate/` (0700) | Where the unit is dry-run before it is installed. |
 | `~/.config/tarubot/age-recipients.txt` | The release's `ops/age-recipients.txt`, for the backup. |
 | `~/.local/bin/tarubot-tool`, `~/.local/bin/tarubot-backup` | The one-off tool wrapper and the backup script. |
@@ -645,31 +690,32 @@ If `systemctl --user` can't reach the user manager from that session, set `XDG_R
 
 ### Rolling back
 
-Dispatch **Deploy** with `target=staging`, `action=bot` and the previous version. `bot` skips Configure, so a rollback needs no package mirror. That release's own `bot.yml` checks the migrations before anything stops: across a migration it is refused `rollback-across-migration`, and the way back is a fix release, or a restore ([Backups on staging](#backups-on-staging)). An `unhealthy` run's summary names the exact dispatch.
+Dispatch **Deploy** with `target=staging` or `prod`, `action=bot` and the previous version (prod waits for @deconfined's approval; nothing plans). On prod, reject any request still waiting for its approval first: it holds `host-prod`, and the rollback would wait behind it. `bot` skips Configure, so a rollback needs no package mirror. That release's own `bot.yml` checks the migrations before anything stops. Across a migration while the live bot runs, it is refused `rollback-across-migration`: the way back is a fix release, or stopping the bot and restoring from before the migration ([Backups](#backups-on-staging-and-prod)), then this dispatch again. While the live bot doesn't run, as after a release whose migration failed at start and committed nothing, the rollback goes ahead and the older release's own `migrate.js` decides: it starts on the schema it knows, and refuses a newer one without writing anything (`restart-failed`). An `unhealthy` or `restart-failed` run's summary and Report's message name the exact dispatch. Prod takes 2.37.0 or later, staging 2.36.0 or later.
 
-Production rolls back through its Compose path until 2.37.0 ([Updating to a release](#updating-to-a-release)).
+Production rolls back through its Compose path until the cutover ([Automated deploys](#automated-deploys-2300)).
 
 ### Rotating a secret
 
-@deconfined sets the new value in the `staging` environment, then dispatches the live version with `action=bot`:
+@deconfined sets the new value in the `staging` or `prod` environment, then dispatches the live version with `action=bot` (prod: and approves it):
 - **A value that can coexist with the old one** (a token or a key): set it, dispatch, and revoke the old one once the run is `deployed`.
 - **The database password** can't coexist: set the secret, change the password, then dispatch at once.
 - **One secret per dispatch,** so a failure names its cause.
-- **Single-line values** must carry no stray whitespace, or the run refuses them as `malformed-secret`. `gh secret set NAME --env staging < file` keeps a file's final newline, so strip it first, for example with `tr -d '\n' < file | gh secret set NAME --env staging`.
+- **Single-line values** must carry no stray whitespace, or the run refuses them as `malformed-secret`. `gh secret set NAME --env <env> < file` keeps a file's final newline, so strip it first, for example with `tr -d '\n' < file | gh secret set NAME --env <env>`.
 - **`DATABASE_URL`'s password is percent-encoded**, as in any URL: a `@`, `/`, `?`, `#`, `:` or `%` in it is written `%40`, `%2F`, `%3F`, `%23`, `%3A` or `%25`. The run refuses a URL with a raw `@`, `/`, `?` or `#` in the password as `database-not-this-target`, naming only the setting.
-- **The Configure key or root's keys** live in user data too, so they change through a rebuild (`TOFU_VARS`, then [Rebuilding staging](#rebuilding-staging)). Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key; then set the new `ANSIBLE_SSH_KEY`. Make a new Configure key as owner step 5 does: without a passphrase (ssh runs in batch mode and could never unlock one; the host job refuses such a key), straight into the environment.
+- **The Configure key or root's keys** live in user data too, so they change through a rebuild (`TOFU_VARS`, then [Rebuilding a host](#rebuilding-a-host)). Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key; then set the new `ANSIBLE_SSH_KEY`. Make a new Configure key as [DEPLOYMENT.md](DEPLOYMENT.md) step 0.6 does: without a passphrase (ssh runs in batch mode and could never unlock one; the host job refuses such a key), straight into the environment.
+- **The infrastructure tokens:** the read-only Linode token, with its short expiry, in `infra-plan`; the write tokens in `prod`. Set the new one and revoke the old; the next run uses it. An expired read-only token fails the Infrastructure plan, which holds up automatic prod requests: until it is rotated, a prod `action=bot` dispatch deploys without a plan.
 
-### Backups on staging
+### Backups on staging and prod
 
-Staging backs up to its own bucket with its own key and its own healthchecks.io check, never production's (question 3 of the staging amendments).
+Each host backs up to its own bucket with its own key and its own healthchecks.io check, never another host's (question 3 of the staging amendments). Each backup key is limited to its own bucket.
 
-- **The script.** `~/.local/bin/tarubot-backup` is `ops/backup.sh`'s Quadlet path without a `.env`. It reads the bucket's endpoint, region and key, and the check's URL, from their Podman secrets (`podman secret inspect --showsecret`), never into an argument or an environment variable. A one-off `podman run` of the pinned PostgreSQL 18 image runs `pg_dump`, as hardened as Compose's backup service, with only the database's URL and CA mounted and `--log-driver=none`, so Podman keeps no copy of the plaintext. The container's shell hands the URL's parts (host, port, user, the decoded password, database) to `pg_dump` as libpq's `PG*` environment, so the password never sits in its arguments, which every user on the host can read. The dump streams into `age` for `age-recipients.txt`, then `curl` uploads it with SigV4 to `daily/`, and to `monthly/` on the 1st. A result of 4096 bytes or less is refused. There is no `env/` copy: staging has no `.env`.
-- **The schedule.** `tarubot-backup.timer`, 04:30 UTC daily, `Persistent=true`. The first healthy deploy enables it, and so does a preflight, after its one backup: the new backup check then keeps hearing from the host every night, before the DevBot move as after it, and never goes down unnoticed.
+- **The script.** `~/.local/bin/tarubot-backup` is `ops/backup.sh`'s Quadlet path without a `.env`. It reads the bucket's endpoint, region and key, and the check's URL, from their Podman secrets (`podman secret inspect --showsecret`), never into an argument or an environment variable. A one-off `podman run` of the pinned PostgreSQL 18 image runs `pg_dump`, as hardened as Compose's backup service, with only the database's URL and CA mounted and `--log-driver=none`, so Podman keeps no copy of the plaintext. The container's shell hands the URL's parts (host, port, user, the decoded password, database) to `pg_dump` as libpq's `PG*` environment, so the password never sits in its arguments, which every user on the host can read. The dump streams into `age` for `age-recipients.txt`, then `curl` uploads it with SigV4 to `daily/`, and to `monthly/` on the 1st. A result of 4096 bytes or less is refused. There is no `env/` copy: the new hosts have no `.env`.
+- **The schedule.** `tarubot-backup.timer`, 04:30 UTC daily, `Persistent=true`. The first healthy deploy enables it, and so does a preflight, after its one backup: the new backup check then keeps hearing from the host every night, and never goes down unnoticed.
 - **The check** hears `/start`, then success with the size, or `/fail` naming the step. The script's last line is `<time> backup ok: tarubot-<stamp> (<n> bytes)`.
 - **By hand:** `run0 --user=tarubot sh -c 'systemctl --user start tarubot-backup.service'`, which waits for the run. Logs: `journalctl --user -u tarubot-backup`.
-- **Restore drill,** on @deconfined's machine: fetch the newest `daily/` object from staging's bucket, decrypt it with the `age` key, `pg_restore` it into a scratch local PostgreSQL, and count rows. The staging tool profile refuses a restore target, so there is no `check-restore.js` on staging.
+- **Restore drill,** on @deconfined's machine: fetch the newest `daily/` object from the host's bucket, decrypt it with the `age` key, `pg_restore` it into a scratch local PostgreSQL, and count rows. The staging tool profile refuses a restore target, so there is no `check-restore.js` on staging; the `prod` profile takes production's restore rule under the prod names.
 - **Retention:** the bucket's lifecycle rules from `ops/bucket-lifecycle.xml`, as production's.
-- **Point-in-time recovery** of the managed cluster covers staging's database too. A run's restore point is the moment the old instance stopped.
+- **Point-in-time recovery** of the managed cluster covers both hosts' databases. A run's restore point is the moment the old instance stopped, also kept in `~/.config/tarubot/recovery-point`.
 
 ### tarubot-tool
 
@@ -681,15 +727,15 @@ tarubot-tool [--image ghcr.io/deconfined/tarubot@sha256:<digest>] TOOL.js [ARG..
 
 - **The image.** Without `--image`, the live one from `~/.config/tarubot/image`. The unit's `ExecStartPre` always passes its own `Image=`, so a crash restart never runs another release's `migrate.js`. Only `ghcr.io/deconfined/tarubot` by digest is accepted.
 - **The tool** is a script in the image's `dist/scripts/`, such as `migrate.js` or `commands.js`. The container is `--read-only`, with no capabilities, `no-new-privileges`, no host environment and no name, so it never collides with the unit's own run. Its output streams through, and its exit status is the tool's. The wrapper prints names and paths, never a value.
-- **As root on the host:** `run0 --user=tarubot sh -c '~/.local/bin/tarubot-tool migrate.js'` prints `Schema ready.` when the schema is current; `commands.js list` reads the registrations back. The tool guard's staging profile applies to every tool.
+- **As root on the host:** `run0 --user=tarubot sh -c '~/.local/bin/tarubot-tool migrate.js'` prints `Schema ready.` when the schema is current; `commands.js list` reads the registrations back. The host's tool profile (`staging` or `prod`) applies to every tool.
 
-### Rebuilding staging
+### Rebuilding a host
 
-For a lost, broken or outdated host, or a new key or root hash:
-1. Dispatch **Infrastructure** `operation=apply` with `replace=linode_instance.host["staging"]`, `allow_destroy` and `allow_access_removal`. The Plan job shows the instance's `replace`, updates of its two records and `+2 -2` on the access list, since the old addresses leave it. Approve the Apply job, then check production's readiness.
-2. [Pin the new host's key](#infrastructure-opentofu) once its name resolves to the new addresses.
-3. Dispatch **Deploy** `target=staging`, `action=configure`: the first Configure upgrades the host and reboots it. Dispatch it again: its PLAY RECAP must show `changed=0`.
-4. Dispatch `action=deploy` with the live version. Its secrets are already in the environment, and `migrate.js` finds nothing pending on the database, which the rebuild didn't touch. Before the DevBot move a `deploy` ends `configured`; a `preflight` proves the database and backup instead.
+For a lost, broken or outdated host, or a new key or root hash. A rebuild replaces the instance, so the bot on it stops when the apply deletes the old one:
+1. Dispatch **Deploy** with `target=<staging|prod>`, `rebuild=true` and `version=<live release>`. On a host that runs a bot (prod, or staging after the DevBot move), use `action=deploy`: the same run then configures the new host and starts the bot again. Otherwise use `action=configure` (or `infra` to rebuild only). The Infrastructure plan shows the instance's `replace`, updates of its two records and `+2 -2` on the access list, since the old addresses leave it, and "`<key>`: new host — approving trusts its host key on first use". A rebuild alone allows exactly that; anything else in the plan still needs `allow_destroy` or `allow_access_removal`.
+2. Approve `prod`. The approved job applies, pins the new instance's key, and, unless the action is `infra`, the first Configure follows: for staging the **Staging** job runs it without an approval of its own (prod runs it in the same job), and with `deploy` the release's `bot.yml` after it. The first Configure upgrades the host and reboots it. The bot's secrets are already in the environment, and `migrate.js` finds nothing pending on the database, which the rebuild didn't touch. Before the DevBot move a staging `deploy` ends `configured`; a `preflight` proves the database and backup instead. Check production's readiness.
+3. After a `configure` rebuild of a host that ran a bot, dispatch `action=bot` with the live version at once (`action=deploy` after an `infra` one): until then the host runs no bot.
+4. Dispatch `action=configure` again: its PLAY RECAP must show `changed=0`.
 
 ### The staging database and role (2026-09-27)
 
@@ -713,64 +759,62 @@ REVOKE CONNECT, TEMPORARY ON DATABASE tarubot FROM PUBLIC;
 
 Each database's access list then names only its owner (`CTc`), `akmadmin` (`c`) and `_akmadmin_monitor` (`Tc`). `\password` keeps the password out of the statement text. `has_database_privilege` confirms that `tarubot_staging` can't connect to `tarubot`, that `tarubot` can't connect to `tarubot_staging`, and that PUBLIC holds neither. The staging tool profile and `bot.yml`'s database check accept exactly these names.
 
-**The same rule for every later database on the cluster:** revoke PUBLIC's `CONNECT` and `TEMPORARY` as soon as it is created, and grant `CONNECT` only to the roles that need it. That includes `tarubot_restore` ("Restoring a dump" above). The tool guard checks only the maintenance tools. The bot itself is held back only by these grants: a database it can connect to is one where it can take the writer-lease lock (advisory locks belong to one database), and a staging bot holding it in a database production is repointed at would keep production unready.
+**The same rule for every later database on the cluster:** revoke PUBLIC's `CONNECT` and `TEMPORARY` as soon as it is created, and grant `CONNECT` only to the roles that need it. That includes `tarubot_restore` and `tarubot_prod_restore` ("Restoring a dump" above). In the lab, creating a database owned by an application role took `GRANT <role> TO <admin> WITH SET TRUE` first, as above. The tool guard checks only the maintenance tools. The bot itself is held back only by these grants: a database it can connect to is one where it can take the writer-lease lock (advisory locks belong to one database), and a staging bot holding it in a database production is repointed at would keep production unready.
 
 The cluster's access list is OpenTofu's since 2.36.0: the first apply imports it with every entry it had, the production Compose host's included, in `db_allow_extra`.
 
+### The prod database and role (the cutover)
+
+Production's database and role are `tarubot` until @deconfined renames them to `tarubot_prod` inside the cutover window ([DEPLOYMENT.md](DEPLOYMENT.md), step 6.2.2), while no bot runs. The `prod` profile and `bot.yml`'s check accept only the new names, and the Compose `production` profile only the old ones, so each host refuses the other's database.
+
+The rename, as the cluster's admin, connected to another database (a database in use can't be renamed):
+
+```sql
+SELECT pid, usename, application_name FROM pg_stat_activity WHERE datname = 'tarubot';
+-- End any stray session: SELECT pg_terminate_backend(<pid>);
+GRANT tarubot TO akmadmin;   -- only if the rehearsal (step 6.1.1) needed it
+ALTER DATABASE tarubot RENAME TO tarubot_prod;
+ALTER DATABASE tarubot_restore RENAME TO tarubot_prod_restore;   -- if it exists
+ALTER ROLE tarubot RENAME TO tarubot_prod;
+```
+
+- **What the lab showed:** `ALTER DATABASE … RENAME` needs the database's owner, so an admin with `CREATEDB` and `CREATEROLE` but no superuser was refused ("must be owner of database tarubot") while it held only the automatic admin option on the role it had created. After `GRANT tarubot TO <admin>`, both databases and the role were renamed.
+- **Another role's session** (unverified: the lab has no provider monitor). The rename refuses while any session is in the database ("is being accessed by other users"), and the provider's monitoring role, `_akmadmin_monitor`, holds `CONNECT` on `tarubot` and may connect on its own schedule. [DEPLOYMENT.md](DEPLOYMENT.md) step 6.1.1 watches for it. The way through, as the owning role (as for the grant in [The staging database and role](#the-staging-database-and-role-2026-09-27): `SET ROLE tarubot` if the admin can, or connected as `tarubot` to another database): `REVOKE CONNECT ON DATABASE tarubot FROM _akmadmin_monitor;`, then end its session or wait for it to end, and rename. Afterwards, as `tarubot_prod`, `GRANT CONNECT ON DATABASE tarubot_prod TO _akmadmin_monitor;`. Ending another role's session needs membership in that role or in `pg_signal_backend`; if the admin can't end it and it doesn't end, go back as step 6.2.2 says.
+- **The password:** a SCRAM password keeps working under the new name. An MD5 one is cleared by the rename ("MD5 password cleared because of role rename"): set a new password, then use it in prod's `DATABASE_URL`.
+- **The grants** on the database move with it, since they belong to the database, not its name.
+- **The fallback** renames both back, in the same way. If the cutover set a new password (an MD5 one was cleared), the Compose host's `.env` still holds the old one: set the role's password again if renaming back cleared it, and put the current password, percent-encoded, into that `.env`'s `DATABASE_URL` before starting Compose ([DEPLOYMENT.md](DEPLOYMENT.md) step 6.3F).
+
+### Owner steps for 2.37.0
+
+[DEPLOYMENT.md](DEPLOYMENT.md) lists them in order, with every approval marked:
+- Phase 0 is the one-time setup: the ruleset, the state bucket and its two keys, the key scoping, the tokens, the passphrase, the `infra-plan`, `staging` and `prod` environments with their secrets and the Configure keys, `TOFU_VARS` in `infra-plan` only, the one read-back, and the import-only first apply.
+- Phase 1 builds staging, Phase 2 gives it its secrets, a preflight, the restore drill and the DevBot move, and Phase 6 is the prod cutover.
+
+Agents never create or change an environment, never read its secrets or variables, never hold a host key or a key to the pin store, and never approve a run (REQUIREMENTS.md "Approved unified-pipeline amendments (2026-09-29)"). A read-only look at an environment's protection rules is allowed.
+
 ### Owner steps for 2.36.0
 
-In this order, each @deconfined's. Agents never create or change an environment, never read its secrets or variables, never hold a host key and never approve a run (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)"); a read-only look at an environment's protection rules is allowed.
+Held, then replaced by 2.37.0's. Before 2.36.0 merged, @deconfined retired the hand-built staging host with its pull unit, and removed the staging-only Ansible key. 2.36.0 then merged as [PR #63](https://github.com/deconfined/tarubot/pull/63) (`b7ab3bc`, 2026-09-29): Deploy run 36582146138 restarted production onto it through the unchanged Compose path after @deconfined's approval, and its staging job ended green, with no host yet.
 
-1. **Before anything else, in GitHub:** make sure the repository variable `STAGING_DEPLOY_ENABLED` is gone (it was never set; delete it if it exists), so the old staging job stays off and no merge can aim it at a host you are deleting. Then delete the `staging` environment's `DEPLOY_SSH_KEY` secret and its `DEPLOY_HOST` and `DEPLOY_KNOWN_HOSTS` variables, and confirm that `staging` accepts only `main` and has no required reviewer.
-2. **Retire the old staging host before merging,** because its pull unit would stop at the new merge and page:
-   - delete that Linode and its Cloud Firewall;
-   - delete its A and AAAA records, and any SSHFP records left;
-   - remove its two entries from the database's access list in Cloud Manager;
-   - delete its pull-unit healthchecks.io check;
-   - delete the staging-only Ansible key from the agent VM, or ask the agent to.
-3. **Review the 2.36.0 pull request.** It changes what runs as root on staging and adds `infra.yml`. Merge it with a merge commit. Production's Deploy run then asks you to approve a restart of about 7 seconds onto 2.36.0 through the unchanged Compose path, with no bot change: approve it or leave it. Its **Deploy staging** job ends green with "no host in the staging environment".
-4. **The Protect Main ruleset:** require review from code owners, 1 approval, and dismissal of stale approvals on push. Keep signed commits, merge commits only, `CI result` and the CodeQL gate. If you ever author a pull request yourself, add yourself as a bypass actor in "pull requests only" mode, since GitHub never counts an author's own approval. In the repository's Actions settings, turn off "Allow GitHub Actions to create and approve pull requests".
-5. **On your own machine, prepare:**
-   - a private Object Storage bucket for OpenTofu's state, and two access keys limited to it: one read-only (for `infra-plan`) and one read/write (for `infra`);
-   - two Linode personal access tokens with an expiry: one with Linodes, Firewalls, Databases and Events all read-only (for `infra-plan`), and one with Linodes, Firewalls and Databases read/write and Events read-only (for `infra`). Give the read-only one a short expiry, such as 90 days, and renew it when it lapses: Databases read-only also shows each cluster's admin user and password, and no narrower scope exists, so it is as sensitive as the database's admin password and runs without an approval (a risk you accepted on 2026-09-29; REQUIREMENTS.md "Accepted risks");
-   - two Cloudflare API tokens on the one zone: one with Zone Read and DNS Read (for `infra-plan`), and one with DNS edit (for `infra`);
-   - a state passphrase of 32 or more random characters, kept in your password manager. The workflow and the module refuse a shorter one: it is all that protects the saved plan, which anyone signed in to GitHub can download for a day;
-   - staging's Configure key pair, made in memory with no passphrase (ssh runs in batch mode and could never unlock one), its private half straight into the `staging` environment, and only its public half printed, for step 6:
+The rest was held for 2.37.0, which replaces it with [DEPLOYMENT.md](DEPLOYMENT.md)'s Phases 0 to 2:
+- the ruleset;
+- the bucket, tokens and passphrase;
+- the environments;
+- the first apply;
+- the staging build;
+- the host-key pin;
+- staging's values.
 
-     ```sh
-     d=$(mktemp -d /dev/shm/ck.XXXXXX) && ssh-keygen -q -t ed25519 -N '' -C tarubot-configure-staging -f "$d/k" \
-       && gh secret set ANSIBLE_SSH_KEY --env staging < "$d/k" && cat "$d/k.pub"; rm -rf -- "${d:?}"
-     ```
-
-     Until `TARGET_HOST` exists, runs end `no-host` before they read the key;
-   - optionally, root's console password hash: `mkpasswd -m yescrypt`, or `openssl passwd -6`.
-6. **The `infra-plan` and `infra` environments** ([ops/tofu/README.md](../ops/tofu/README.md#the-infra-plan-and-infra-environments)), in Settings → Environments, both with deployment branches "Selected branches and tags" and the one branch rule `main`, and no wait timer. A new environment starts with no branch rule, and `infra-plan`'s is the only thing between another branch's code and its secrets:
-   - **`infra-plan`:** no required reviewers, so a plan never waits. Its secrets: `LINODE_READ_TOKEN`, `CLOUDFLARE_READ_TOKEN`, `TOFU_STATE_READ_ACCESS_KEY` and `TOFU_STATE_READ_SECRET_KEY` (the read-only ones from step 5), and the four shared ones below.
-   - **`infra`:** required reviewer `deconfined` only; "Prevent self-review" **off**; "Allow administrators to bypass configured protection rules" **off**. Its secrets: `LINODE_WRITE_TOKEN`, `CLOUDFLARE_WRITE_TOKEN`, `TOFU_STATE_WRITE_ACCESS_KEY` and `TOFU_STATE_WRITE_SECRET_KEY` (the write ones), and the four shared ones below.
-   - **In both, with exactly the same values:** `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_PASSPHRASE`, and `TOFU_VARS` ([ops/tofu/README.md](../ops/tofu/README.md#tofu_vars)). The saved plan records `infra-plan`'s bucket and endpoint, and the apply writes the new state there, so `infra`'s read/write key must be for that same bucket; Apply decrypts with its own passphrase, and refuses a plan made with a `TOFU_VARS` other than its own. `TOFU_VARS` holds:
-     - `hosts` = `{}`;
-     - `database_ids` = `{"primary": <id>}`;
-     - `db_allow_extra` = exactly the access list Cloud Manager shows now, in its CIDR form, including the production Compose host's IPv4 and IPv6;
-     - `root_keys` = your FIDO2 line (with `verify-required`) and an optional operator key;
-     - `configure_keys.staging` = the Configure key's public half;
-     - `root_password_hash` and `cloudflare_zone_id`.
-   - **Then read both back once,** before the first dispatch, and again after any change to either. For each of `infra-plan` and `infra`, `gh api repos/deconfined/tarubot/environments/<name> --jq .deployment_branch_policy` must show `protected_branches` false and `custom_branch_policies` true, and `gh api repos/deconfined/tarubot/environments/<name>/deployment-branch-policies --jq '[.branch_policies[] | {name, type}]'` exactly one entry, `main` of type `branch`. For `infra`, `gh api repos/deconfined/tarubot/environments/infra --jq '{can_admins_bypass, rules: [.protection_rules[] | select(.type == "required_reviewers") | {prevent_self_review, reviewers: [.reviewers[] | .type + " " + .reviewer.login]}]}'` must show `can_admins_bypass` false and one rule, `prevent_self_review` false, with the one reviewer `User deconfined`. No run checks these settings again: like the ruleset, they are yours to keep right (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)").
-7. **The first apply, import only.** Dispatch **Infrastructure** with `operation=apply`. The Plan job runs without an approval, and its summary must show only `import linode_database_access_controls.db["primary"] +0 -0`; anything else means a value is wrong, so reject the Apply job, fix `TOFU_VARS` in both environments and dispatch again. Approve the Apply job only for exactly that line.
-8. **Build staging.** Add the `staging` entry to `TOFU_VARS`' `hosts` in both environments (role `staging`; the label is the Linode's display name, so leave the domain out of it). Dispatch `operation=apply`: the Plan job must show creates for the firewall, the instance and the A and AAAA records, and one access-list update that only adds entries (`+2 -0`). Approve the Apply job. Then check production's readiness: the heartbeat, and `/sync status`.
-9. **Pin the new host's key** from your own machine ([above](#infrastructure-opentofu)), then set `TARGET_HOST` (the DNS name) in the `staging` environment (`ANSIBLE_SSH_KEY` went in at step 5).
-10. **Configure it:** dispatch **Deploy** with `target=staging`, `action=configure` and `version=2.36.0`. The first run upgrades the host and reboots it. Dispatch it again: its PLAY RECAP (host `target`) must show `changed=0`.
-11. **Staging's values** in the `staging` environment, all new and staging-only: `DATABASE_URL` (`tarubot_staging`, its password percent-encoded) and `DATABASE_CA_CERT`; `REPORTS_GITHUB_TOKEN` (the reports token, which the bot reads as `GITHUB_REPORTS_TOKEN`: GitHub refuses a secret name that starts with `GITHUB_`) and `HEALTHCHECKS_PING_URL`; `BACKUP_STORAGE_ENDPOINT`, `BACKUP_STORAGE_REGION`, `BACKUP_STORAGE_ACCESS_KEY` and `BACKUP_STORAGE_SECRET_KEY` with a new key pair; and `HEALTHCHECKS_BACKUP_URL` with a new check. Single-line values carry no stray spaces or newlines. Leave `DISCORD_TOKEN` unset until the DevBot move. Then dispatch `target=staging`, `action=preflight`, `version=2.36.0`: it must end `preflight-ok`. It also enables the nightly backup, so the new backup check keeps getting pings from here on.
-12. **The restore drill** on your machine ([Backups on staging](#backups-on-staging)).
-13. **Revoke what the new values replaced:** the old staging bucket key, reports token and checks; retire the old staging `.env` copies as you see fit. Then ask the agent to download and grep the staging runs' logs (read-only) for the host's name, its addresses and any secret shape, and to record the result, before 2.36.1.
+What changes: there is no `infra` environment, one copy of `TOFU_VARS`, and no `TARGET_HOST` or `TARGET_HOST_KEY`. Delete whatever exists of those, and of the `staging` environment's old `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_KNOWN_HOSTS`, with step 0.4.
 
 ### Not yet
 
-| Release | What |
+| Release or step | What |
 | --- | --- |
-| 2.36.1 | CrowdSec, simplified: its switch as a `staging` or `production` variable, the vendor repository the normal way, and the set-only nftables bouncer, after staging shows a clean second Configure. |
-| 2.36.2 | **The DevBot move.** Staging's secrets and a preflight first. Then local DevBot moves to that same release and stops, and the schema heads are checked equal; @deconfined restores its database on the staging host, resets DevBot's token into the `staging` environment only, and dispatches a `bot` run. At least a week of soak follows, then a patch retires local DevBot. |
-| 2.37.0 | **Production on the simple pipeline.** Any pending migration reaches the old host first, and the new host and its secrets are ready. 2.37.0 merges in the working session that also cuts over, and nothing else merges until the cutover is done. Its preflight proves the new host; then, while the approval waits, @deconfined stops the old bot, shuts the old Linode down, resets the token into the `production` environment and approves (#62 answer 1). The old host stays off as a fallback for a week. |
-| 2.38.0 | **The cleanup,** after a settled week, once the fallback is given up and the shared secrets are rotated: `ops/deploy.sh`, the Compose production files, `scripts/host-env-backup.ts`, the production `.env` and its copies, `DEPLOY_ENABLED`, the `notify` job and the old runbooks. |
+| 2.37.1 | CrowdSec, simplified: its switch as a `staging` or `prod` variable, the vendor repository the normal way, and the set-only nftables bouncer, after staging shows a clean second Configure. |
+| Owner steps, on 2.37.0 or later | **The DevBot move** ([DEPLOYMENT.md](DEPLOYMENT.md), step 2.4), with no release of its own. Staging's secrets and a preflight come first. Then local DevBot moves to that same release and stops, and the schema heads are checked equal; @deconfined restores its database on the staging host, resets DevBot's token into the `staging` environment only, and dispatches a `bot` run. At least a week of soak follows, then a patch retires local DevBot. |
+| Owner steps, on 2.37.0 or later | **The prod cutover** ([DEPLOYMENT.md](DEPLOYMENT.md), Phase 6), after the DevBot move's soak. The `prod` host is built and configured while the Compose bot still runs, and any pending migration reaches the Compose host first. Then a prod `bot` request (after an optional preflight request) waits for its approval while @deconfined does the rest: stops the Compose bot, shuts the old Linode down and pauses its backup check, turns `DEPLOY_ENABLED` off, renames the database and role to `tarubot_prod`, sets `DATABASE_URL`, resets the token into `prod`, and approves. The old host stays off as a fallback for a week. |
+| 2.38.0 | **The cleanup,** after a settled week, once the fallback is given up and the shared secrets are rotated: `ops/deploy.sh`, the Compose production files, `scripts/host-env-backup.ts`, the production `.env` and its copies, deploy.yml's Compose `deploy` and `notify` jobs, the `production` target, environment and tool profile, `DEPLOY_ENABLED`, and the old runbooks. `deployments.production` in `src/config/deployment.ts` is renamed then. |
 
 ### The old staging host (2.32.0 to 2.34.0)
 

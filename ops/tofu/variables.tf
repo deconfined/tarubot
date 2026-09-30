@@ -1,7 +1,9 @@
-# The module's inputs (2.36.0, issue #62). The real values are the TOFU_VARS secret, the same in
-# the `infra-plan` and `infra` environments: one JSON tfvars document, whose shape
-# ops/tofu/examples/example.tfvars.json shows with placeholders. The state passphrase comes from
-# TF_VAR_state_passphrase instead.
+# The module's inputs (2.36.0, issue #62; prod names since 2.37.0). The real values are the
+# TOFU_VARS secret, which only the `infra-plan` environment holds: one JSON tfvars document, whose
+# shape ops/tofu/examples/example.tfvars.json shows with placeholders. Deploy's Infrastructure plan
+# job plans with it, and the approving `prod` job reads the same values back from the encrypted
+# saved plan (ops/tofu/ci/tofu-ci.sh adopt), so there is no second copy. The state passphrase
+# comes from TF_VAR_state_passphrase instead.
 #
 # Every variable is sensitive, so OpenTofu never prints a value in a plan, and every validation
 # message is fixed text that never echoes one. Two things do reach the public Actions log on
@@ -11,7 +13,7 @@
 # and dots [.], because \. is not an HCL string escape either.
 
 variable "hosts" {
-  description = "The hosts to build, by a public key: staging or production, optionally followed by -N."
+  description = "The hosts to build, by a public key: staging or prod, optionally followed by -N."
   type = map(object({
     # The Linode's label, which the Cloud Firewall's label is derived from.
     label = string
@@ -20,7 +22,7 @@ variable "hosts" {
     # A Linode region and plan type, such as us-east and g6-standard-1.
     region = string
     type   = string
-    # staging or production: which Configure key goes on the host, and which environment deploys it.
+    # staging or prod: which Configure key goes on the host, and which environment deploys it.
     role = string
   }))
   default   = {}
@@ -31,13 +33,13 @@ variable "hosts" {
   # an optional number, and the role must match the key.
   validation {
     condition = alltrue([
-      for k, h in var.hosts : can(regex("^(staging|production)(-[0-9]{1,2})?$", k)) && split("-", k)[0] == h.role
+      for k, h in var.hosts : can(regex("^(staging|prod)(-[0-9]{1,2})?$", k)) && split("-", k)[0] == h.role
     ])
-    error_message = "Every hosts key must be staging or production, optionally followed by -N (one or two digits), and its role must equal the key's part before -N."
+    error_message = "Every hosts key must be staging or prod, optionally followed by -N (one or two digits), and its role must equal the key's part before -N."
   }
 
   # A label is the Linode's display name inside the account, not a DNS name or an address, and
-  # infra.yml doesn't mask it (don't put the domain in one). Linode's rules, kept to lowercase and
+  # no workflow masks it (don't put the domain in one). Linode's rules, kept to lowercase and
   # '-': 3 to 64 characters, starting and ending with a letter or digit, no doubled '-'. That also
   # keeps the firewall label derived from it (main.tf) within Linode's rules.
   validation {
@@ -94,16 +96,16 @@ variable "root_keys" {
 }
 
 variable "configure_keys" {
-  description = "The public half of each role's ANSIBLE_SSH_KEY, the key host.yml's Configure step logs in with as root."
+  description = "The public half of each role's ANSIBLE_SSH_KEY, the key Deploy's host job (host.yml) logs in with as root."
   type        = map(string)
   nullable    = false
   sensitive   = true
 
   validation {
     condition = alltrue([
-      for role, k in var.configure_keys : contains(["staging", "production"], role) && can(regex("^ssh-ed25519 AAAA[0-9A-Za-z+/]+={0,3}( [ -~]+)?$", k))
+      for role, k in var.configure_keys : contains(["staging", "prod"], role) && can(regex("^ssh-ed25519 AAAA[0-9A-Za-z+/]+={0,3}( [ -~]+)?$", k))
     ])
-    error_message = "configure_keys must map staging or production to one ssh-ed25519 public key line."
+    error_message = "configure_keys must map staging or prod to one ssh-ed25519 public key line."
   }
 }
 
@@ -171,8 +173,9 @@ variable "state_passphrase" {
   nullable    = false
   sensitive   = true
 
-  # At least 32 characters: it is the only key to the saved plan, which infra.yml keeps as a
-  # one-day artifact that anyone signed in to GitHub can download from the public repository.
+  # At least 32 characters: it is the only key to the saved plan, which Deploy's Infrastructure
+  # plan job keeps as a one-day artifact that anyone signed in to GitHub can download from the
+  # public repository.
   validation {
     condition     = length(var.state_passphrase) >= 32
     error_message = "state_passphrase must be at least 32 characters."

@@ -3,8 +3,8 @@
 # cloud-init owns exactly six things: the hostname, root's SSH keys, root's password (the owner's
 # console-only hash, or locked), password SSH off, the Python bindings Ansible needs, and the
 # verify-required seed below. Everything else is ops/ansible/site.yml's. No host key is carried
-# here: the host makes its own Ed25519 key at first boot, and the owner pins it from their own
-# machine (trust on first use).
+# here: the host makes its own Ed25519 key at first boot, and the approving Deploy job pins it on
+# first use (ops/tofu/ci/host.sh pin), before any login.
 hostname: ${jsonencode(hostname)}
 fqdn: ${jsonencode(fqdn)}
 # No default user: root takes the keys below, without cloud-init's "log in as ..." prefix.

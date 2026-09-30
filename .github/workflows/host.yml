@@ -1,8 +1,36 @@
-# The host job (2.36.0, issue #62): Configure, then the bot, on one target, over SSH as root from
-# a GitHub-hosted runner. deploy.yml's staging job calls it after every publish of main and on
-# dispatch; production joins in 2.37.0. The owner's decisions are REQUIREMENTS.md "Approved
-# pipeline amendments (2026-09-29)", and docs/HOSTING.md "The simple pipeline" has the flow.
+# The host job (2.36.0, issue #62; both environments since 2.37.0, REQUIREMENTS.md "Approved
+# unified-pipeline amendments (2026-09-29)"): Deploy's one reusable job for everything that changes
+# the infrastructure or reaches a host. Only .github/workflows/deploy.yml calls it, three ways,
+# each in one environment:
 #
+#   Infrastructure  `prod`, action=infra: adopts the Infrastructure plan job's saved plan, applies
+#                   it when it has changes and pins the host keys it listed. Nothing else.
+#   Staging         `staging`: connects, runs Configure, then the release's own bot.yml. It never
+#                   plans, applies or pins.
+#   Prod            `prod`: the saved plan adopted and applied when it has changes, the listed keys
+#                   pinned, then Configure and the release's own bot.yml, all in one job, so one
+#                   approval covers it.
+#
+#   OpenTofu   With tofu=true (prod only), ops/tofu/ci/tofu-ci.sh's phases: install, backend and
+#              init with prod's read/write state key, then adopt, which accepts the fetched saved
+#              plan only if its SHA-256 and change list are the ones the Infrastructure plan job
+#              showed and takes the values from the plan itself (this job holds no TOFU_VARS), then
+#              apply (only with apply=true: the one step that holds the infrastructure write
+#              tokens) and output. OpenTofu refuses a saved plan whose state moved since. Its files
+#              under $RUNNER_TEMP/tofu (the plan's JSON holds the passphrase and every TOFU_VARS
+#              value) are removed right after the pin step, before anything reaches the host.
+#   Pins       ops/tofu/ci/host.sh pin, with tofu=true: exactly the hosts the approved plan listed.
+#              The pin store is one object per host key beside the state, tarubot/pins/<key>.json,
+#              keyed by the Linode instance and carrying its addresses. A new instance's key is
+#              scanned and stored at once, before any login, so a failed first Configure retries on
+#              the same key; the key pinned for an instance is never replaced. Only a `prod` job
+#              writes pins; every other Object Storage key is limited to its own bucket.
+#   Connect    host.sh connect: the environment's pin (prod reads it with its read/write key,
+#              staging with its read-only one), the Configure key, and a probe as root over IPv6
+#              first, then IPv4 (GitHub's hosted runners have no IPv6). Only the pinned ed25519 key
+#              is accepted, and a key mismatch never falls back to the other family. No pin yet (or
+#              no store in the environment): an automatic run on staging ends green with a notice;
+#              every prod job and every dispatch fails.
 #   Configure  ops/ansible/site.yml at main's head (config_commit), as root: plain host
 #              configuration. No secret reaches it. Actions deploy, configure and preflight.
 #   Bot        The release's own ops/ansible/bot.yml, at the commit its image was built from, with
@@ -11,188 +39,336 @@
 #              writes a result file for the summary (not when the host became unreachable, which
 #              ends Ansible first). Actions deploy, bot and preflight.
 #
-# The job names the target's environment, so that environment's secrets load there and nowhere
-# else; the caller passes `secrets: inherit`. One concurrency group per target keeps two runs off a
-# host at once: a newer run waits in the queue (`queue: max`), and nothing is cancelled or
-# replaced. Re-runs are refused, as in deploy.yml: start a new dispatch. The repository and its logs
-# are public, so the host's name and key are secrets (Actions masks them), every address the name
-# resolves to is masked before anything else prints, ssh runs with LogLevel=FATAL (a key other
-# than the pinned one ends in "Host key verification failed." without ssh printing that key's
-# fingerprint), no script traces, and ansible-playbook never runs with -v, --diff or --check.
+# The job names the caller's environment, so that environment's secrets load there and nowhere
+# else; the caller passes `secrets: inherit`, and each step names only the secrets it needs. Every
+# call shares its environment's concurrency group (host-prod or host-staging): the Infrastructure
+# call and the Prod call never overlap on the unlocked state, and two runs never overlap on a host.
+# A newer run waits in the queue (`queue: max`); nothing is cancelled or replaced. Re-runs are
+# refused, as in deploy.yml: start a new dispatch. The repository and its logs are public: tofu-ci.sh
+# and host.sh mask every address, instance ID, host key and fingerprint before anything else prints,
+# ssh runs with LogLevel=FATAL (a key other than the pinned one ends in "Host key verification
+# failed." without ssh printing that key's fingerprint), no script traces, every ${{ }} reaches a
+# script through env:, and ansible-playbook never runs with -v, --diff or --check.
 name: Host
 
 on:
   workflow_call:
     inputs:
-      target:
-        description: "The environment and host: staging (production joins in 2.37.0)"
+      environment:
+        description: "The environment and host: staging or prod"
         type: string
         required: true
       action:
-        description: "deploy (Configure, then the bot), bot, configure or preflight"
+        description: "infra (OpenTofu alone), deploy (Configure, then the bot), bot, configure or preflight"
         type: string
         required: true
       version:
-        description: "The release X.Y.Z (empty for configure)"
+        description: "The release X.Y.Z (empty for configure and infra)"
         type: string
         default: ""
       commit:
-        description: "The release's commit, 40 hex (empty for configure)"
+        description: "The release's commit, 40 hex (empty for configure and infra)"
         type: string
         default: ""
       digest:
-        description: "The release's image index digest, sha256:<64 hex> (empty for configure)"
+        description: "The release's image index digest, sha256:<64 hex> (empty for configure and infra)"
         type: string
         default: ""
       config_commit:
-        description: "Main's head when the run was created: Configure applies site.yml from it"
+        description: "Main's head when the run was created: Configure and OpenTofu run from it"
         type: string
         required: true
+      tofu:
+        description: "Adopt the Infrastructure plan job's saved plan and pin the listed keys (prod only)"
+        type: boolean
+        default: false
+      apply:
+        description: "The adopted plan has changes, and this job applies them (needs tofu)"
+        type: boolean
+        default: false
+      plan_digest:
+        description: "The saved plan's SHA-256, as the Infrastructure plan job computed it"
+        type: string
+        default: ""
+      plan_changes:
+        description: "The saved plan's change list, as the Infrastructure plan job showed it"
+        type: string
+        default: ""
+      pins:
+        description: "The host keys the approved plan lists as needing a pin, space-separated"
+        type: string
+        default: ""
+    outputs:
+      outcome:
+        description: "deployed, superseded, configured, preflight-ok, refused, unhealthy, failed or no-host; for action=infra applied, pinned, unchanged or failed"
+        value: ${{ jobs.host.outputs.outcome }}
+      action:
+        description: "The action the job ran"
+        value: ${{ jobs.host.outputs.action }}
+      version:
+        description: "The release it deployed, or -"
+        value: ${{ jobs.host.outputs.version }}
+      previous:
+        description: "The release live before, or -"
+        value: ${{ jobs.host.outputs.previous }}
+      restore_point:
+        description: "When the previous instance stopped, or -"
+        value: ${{ jobs.host.outputs.restore_point }}
+      migrations:
+        description: "The release's migrations the live release lacks, space-separated: every one on a first start, whatever the database holds (migrate.js applies only what it lacks)"
+        value: ${{ jobs.host.outputs.migrations }}
+      schema_head:
+        description: "The schema head after the run, or -"
+        value: ${{ jobs.host.outputs.schema_head }}
+      step:
+        description: "Where a failed run stopped, or -"
+        value: ${{ jobs.host.outputs.step }}
+      reason:
+        description: "Why it was refused or failed, or -"
+        value: ${{ jobs.host.outputs.reason }}
+      warnings:
+        description: "Warnings, space-separated: db-maintenance-window, a run in the cluster's Tuesday maintenance window that named migrations (every one on a first start)"
+        value: ${{ jobs.host.outputs.warnings }}
+      pinned:
+        description: "The host keys whose pin this job wrote, space-separated"
+        value: ${{ jobs.host.outputs.pinned }}
+      infrastructure:
+        description: "What the OpenTofu part did: applied, pinned, unchanged or failed; - without it"
+        value: ${{ jobs.host.outputs.infrastructure }}
 
 permissions: {}
 
 jobs:
   host:
     name: Host
-    if: github.run_attempt == '1'
+    if: github.run_attempt == '1' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # Configure's first run on a new host upgrades every package and reboots; bot.yml waits up to
-    # 3 minutes for healthy and runs migrate.js before the start.
-    timeout-minutes: 40
-    environment: ${{ inputs.target }}
+    # An apply that builds a host, its key scan (up to 5 minutes), Configure's first run on a new
+    # host (every package upgraded, and a reboot), and bot.yml, which waits up to 3 minutes for
+    # healthy and runs migrate.js before the start.
+    timeout-minutes: 90
+    environment: ${{ inputs.environment }}
     concurrency:
-      group: host-${{ inputs.target }}
+      group: host-${{ inputs.environment }}
       cancel-in-progress: false
       # GitHub's default keeps one waiting run per group and cancels it when a newer one arrives,
-      # which could drop a dispatched rollback; max keeps every waiting run, in order.
+      # which could drop a dispatched rollback or an approved apply; max keeps every waiting run,
+      # in order.
       queue: max
     permissions:
-      contents: read # the two checkouts of this public repository
+      contents: read # the checkouts of this public repository
     defaults:
       run:
         shell: bash
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    outputs:
+      outcome: ${{ steps.summary.outputs.outcome }}
+      action: ${{ steps.summary.outputs.action }}
+      version: ${{ steps.summary.outputs.version }}
+      previous: ${{ steps.summary.outputs.previous }}
+      restore_point: ${{ steps.summary.outputs.restore_point }}
+      migrations: ${{ steps.summary.outputs.migrations }}
+      schema_head: ${{ steps.summary.outputs.schema_head }}
+      step: ${{ steps.summary.outputs.step }}
+      reason: ${{ steps.summary.outputs.reason }}
+      warnings: ${{ steps.summary.outputs.warnings }}
+      pinned: ${{ steps.summary.outputs.pinned }}
+      infrastructure: ${{ steps.summary.outputs.infrastructure }}
     steps:
       - name: Check the request
+        id: request
         env:
-          TARGET: ${{ inputs.target }}
+          ENVIRONMENT: ${{ inputs.environment }}
           ACTION: ${{ inputs.action }}
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.commit }}
           DIGEST: ${{ inputs.digest }}
           CONFIG_COMMIT: ${{ inputs.config_commit }}
+          TOFU: ${{ inputs.tofu }}
+          APPLY: ${{ inputs.apply }}
+          PLAN_DIGEST: ${{ inputs.plan_digest }}
+          PINS: ${{ inputs.pins }}
         run: |
-          # Every input is public data from deploy.yml's plan, and each must fit its pattern before
-          # a later step builds a ref, a path or an ansible-playbook argument from it.
+          # Every input is public data from deploy.yml's jobs, and each must fit its pattern before
+          # a later step builds a ref, a path or an argument from it. OpenTofu runs only in prod,
+          # the environment @deconfined approves, which alone holds the write credentials.
           set -Eeuo pipefail
           export LC_ALL=C
           bad() { echo "::error::$1"; exit 1; }
-          [[ $TARGET == staging ]] || bad "The target must be staging; production joins host.yml in 2.37.0."
-          [[ $ACTION =~ ^(deploy|bot|configure|preflight)$ ]] || bad "The action must be deploy, bot, configure or preflight."
+          [[ $ENVIRONMENT =~ ^(staging|prod)$ ]] || bad "The environment must be staging or prod."
+          [[ $ACTION =~ ^(infra|deploy|bot|configure|preflight)$ ]] || bad "The action must be infra, deploy, bot, configure or preflight."
+          [[ $TOFU =~ ^(true|false)$ && $APPLY =~ ^(true|false)$ ]] || bad "tofu and apply must each be true or false."
           [[ $CONFIG_COMMIT =~ ^[0-9a-f]{40}$ ]] || bad "config_commit must be a commit: 40 lowercase hex digits."
-          # configure touches no release, so it takes none.
-          if [[ $ACTION != configure ]]; then
+          if [[ $TOFU == true || $APPLY == true || $ACTION == infra ]]; then
+            [[ $ENVIRONMENT == prod ]] || bad "OpenTofu runs only in prod, which @deconfined approves: staging never applies or pins."
+          fi
+          if [[ $APPLY == true || $ACTION == infra ]]; then
+            [[ $TOFU == true ]] || bad "apply and action=infra need tofu=true: there is nothing to apply without the saved plan."
+          fi
+          if [[ $TOFU == true ]]; then
+            [[ $PLAN_DIGEST =~ ^[0-9a-f]{64}$ ]] || bad "plan_digest must be the saved plan's SHA-256: 64 lowercase hex digits."
+            [[ $PINS =~ ^[a-z0-9\ -]*$ ]] || bad "pins must be host keys separated by spaces."
+            read -r -a words <<< "$PINS"
+            for word in "${words[@]}"; do
+              [[ $word =~ ^(staging|prod)(-[0-9]{1,2})?$ ]] || bad "pins may name only host keys: staging or prod, optionally with -N."
+            done
+          else
+            # A plan with nothing to apply or pin still has a digest, which this job then ignores.
+            [[ -z $PINS ]] || bad "pins belong to a job with tofu=true."
+          fi
+          # configure and infra touch no release, so they take none.
+          if [[ $ACTION =~ ^(deploy|bot|preflight)$ ]]; then
             [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]] || bad "The version must be X.Y.Z."
             [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || bad "The commit must be 40 lowercase hex digits."
             [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || bad "The digest must be sha256: and 64 lowercase hex digits."
           fi
 
-      - name: Load the host settings
-        id: host
+      # Main's head holds the scripts (ops/tofu/ci/) and the host configuration. OpenTofu runs from
+      # this path, the one the Infrastructure plan job planned from.
+      - name: Check out main's host configuration
+        id: config
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.config_commit }}
+          path: config
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned OpenTofu
+        id: tofu-install
+        if: inputs.tofu
+        run: bash config/ops/tofu/ci/tofu-ci.sh install
+
+      - name: Write the backend settings
+        id: backend
+        if: inputs.tofu
         env:
-          TARGET_HOST: ${{ secrets.TARGET_HOST }}
-          TARGET_HOST_KEY: ${{ secrets.TARGET_HOST_KEY }}
-          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh backend
+
+      - name: Initialize OpenTofu
+        id: init
+        if: inputs.tofu
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh init
+
+      # The Infrastructure plan job's encrypted saved plan, kept for one day: an expired artifact
+      # fails here, and a new dispatch plans again.
+      - name: Fetch the saved plan
+        id: fetch
+        if: inputs.tofu
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: saved-plan
+          path: ${{ runner.temp }}/tofu
+
+      - name: Adopt the saved plan
+        id: adopt
+        if: inputs.tofu
+        env:
+          DIGEST: ${{ inputs.plan_digest }}
+          APPROVED: ${{ inputs.plan_changes }}
+          HAS_CHANGES: ${{ inputs.apply }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh adopt
+
+      # The one step that holds the infrastructure write tokens, and only when the adopted plan has
+      # changes.
+      - name: Apply the saved plan
+        id: apply
+        if: inputs.apply
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          LINODE_TOKEN: ${{ secrets.LINODE_WRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WRITE_TOKEN }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh apply
+
+      - name: Read the host connections
+        id: output
+        if: inputs.tofu
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh output
+
+      # Exactly the hosts the approved plan listed, each checked against the adopted plan first.
+      - name: Pin the listed host keys
+        id: pin
+        if: inputs.tofu
+        env:
+          PINS: ${{ inputs.pins }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+        run: bash config/ops/tofu/ci/host.sh pin
+
+      # The saved plan's JSON holds every TOFU_VARS value and the state passphrase in the clear,
+      # and nothing after the pin step reads it (connect reads the pin store). So it goes before
+      # connect, the release checkout, pip and the playbooks run; the last step removes it again
+      # after a failure, which skips this one.
+      - name: Remove OpenTofu's files
+        if: inputs.tofu
+        run: rm -rf -- "${RUNNER_TEMP:?}/tofu"
+
+      - name: Connect to the host
+        id: connect
+        if: inputs.action != 'infra'
+        env:
           EVENT: ${{ github.event_name }}
-          TARGET: ${{ inputs.target }}
+          ENVIRONMENT: ${{ inputs.environment }}
           ACTION: ${{ inputs.action }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          # The pin store's key, chosen by the environment itself: prod reads with its read/write
+          # key, staging with its read-only one, so a repository secret of the write key's name
+          # could never reach staging.
+          AWS_ACCESS_KEY_ID: ${{ inputs.environment == 'prod' && secrets.TOFU_STATE_WRITE_ACCESS_KEY || secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ inputs.environment == 'prod' && secrets.TOFU_STATE_WRITE_SECRET_KEY || secrets.TOFU_STATE_READ_SECRET_KEY }}
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
         run: |
-          # The host, its pinned host key and root's Configure key are secrets of the target's
-          # environment, so Actions masks them in the log. The addresses the name resolves to
-          # aren't, so they are masked here before anything else prints; nothing below prints the
-          # name, an address, a key or the key's file. The files are private (umask 077) and the
-          # last step removes them.
+          # host.sh connect masks the pin's addresses, instance ID and key before anything else
+          # prints, writes root's Configure key, known_hosts and the inventory, all private, under
+          # $RUNNER_TEMP/ssh, and probes the host as root, IPv6 first. Exit 3: no pin for this host
+          # yet, or no pin store in this environment.
           set -Eeuo pipefail
           export LC_ALL=C
-          umask 077
-          dir=$RUNNER_TEMP/ssh
           out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
-          bad() { echo "::error::$1"; exit 1; }
-
-          # No host yet (before the owner builds it, or after it is retired): a merge stays green
-          # with a notice, while a dispatch asked for this host and fails.
-          if [[ -z $TARGET_HOST ]]; then
-            [[ $EVENT != workflow_dispatch ]] || bad "no host in the $TARGET environment: set its TARGET_HOST secret."
+          rc=0
+          bash config/ops/tofu/ci/host.sh connect "$ENVIRONMENT" || rc=$?
+          if (( rc == 0 )); then
+            out skip false
+            exit 0
+          fi
+          (( rc == 3 )) || exit 1
+          # No host yet (before the first approved run builds and pins it, or after @deconfined
+          # retired it and deleted its pin, docs/DEPLOYMENT.md step 4.12): a merge stays green on
+          # staging, with a notice. Prod, and every dispatch, asked for this host and fail. A
+          # retired host whose pin is still stored fails as unreachable instead.
+          if [[ $EVENT == workflow_run && $ENVIRONMENT == staging ]]; then
             jq -n --arg action "$ACTION" '{outcome: "no-host", action: $action, version: "-", previous: "-",
               restore_point: "-", migrations: [], schema_head: "-", step: "-", reason: "-", warnings: []}' \
               > "$RUNNER_TEMP/result.json"
             out skip true
-            echo "::notice::no host in the $TARGET environment"
+            echo "::notice::no pinned host in the staging environment yet: the first approved run that builds it pins its key"
             exit 0
           fi
-
-          # A DNS name with A and AAAA records, or an address literal (the lab): nothing that ssh or
-          # Ansible could read as an option.
-          NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-          IPV6='^[0-9a-fA-F]{0,4}(:[0-9a-fA-F]{0,4}){2,7}$'
-          [[ $TARGET_HOST =~ $NAME || $TARGET_HOST =~ $IPV6 ]] ||
-            bad "TARGET_HOST must be a lowercase DNS name with at least two labels, or an IPv4 or IPv6 address."
-          # Every address it resolves to (a literal resolves to itself), masked first.
-          resolved=$(getent ahosts "$TARGET_HOST") || bad "TARGET_HOST doesn't resolve."
-          mapfile -t addresses < <(awk '{ print $1 }' <<< "$resolved" | sort -u)
-          (( ${#addresses[@]} )) || bad "TARGET_HOST resolves to no address."
-          for address in "${addresses[@]}"; do echo "::add-mask::$address"; done
-
-          # The host key the owner pinned from their own machine after the build (trust on first
-          # use): the key alone, no name or comment. A trailing newline is tolerated.
-          key=${TARGET_HOST_KEY%$'\n'}
-          key=${key%$'\r'}
-          # ssh-keygen must read an ed25519 key in it too, not only the shape.
-          if ! [[ $key =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || ! ssh-keygen -E sha256 -lf - <<< "$key" > /dev/null 2>&1; then
-            bad "TARGET_HOST_KEY must be one line: ssh-ed25519 and the host's key, with no name or comment."
-          fi
-
-          # Belt and braces: the pinned key's base64 and its fingerprint are masked too, although
-          # nothing below prints either (ssh runs with LogLevel=FATAL).
-          echo "::add-mask::${key#ssh-ed25519 }"
-          fingerprint=$(ssh-keygen -E sha256 -lf - <<< "$key" | awk '{ print $2 }')
-          echo "::add-mask::${fingerprint#SHA256:}"
-
-          mkdir -p -- "$dir"
-          chmod 700 -- "$dir"
-          # Carriage returns from a key pasted on another system would break it for ssh.
-          printf '%s\n' "${ANSIBLE_SSH_KEY//$'\r'/}" > "$dir/key"
-          unset ANSIBLE_SSH_KEY
-          grep -q 'PRIVATE KEY' "$dir/key" || bad "ANSIBLE_SSH_KEY isn't set in the $TARGET environment."
-          # ssh runs with BatchMode, so a key with a passphrase could never be unlocked and every
-          # connection would end in a bare "Permission denied (publickey)".
-          ssh-keygen -y -P '' -f "$dir/key" > /dev/null 2>&1 ||
-            bad "ANSIBLE_SSH_KEY must be an OpenSSH private key without a passphrase (docs/HOSTING.md, owner step 5)."
-          # The pinned key under the alias `target`, the one host of the inventory, so neither file
-          # holds the host's name.
-          printf 'target %s\n' "$key" > "$dir/known_hosts"
-          # AddressFamily=any follows the owner's IPv6-first rule: on a runner without IPv6 the IPv6
-          # attempt fails at once and ssh tries IPv4. Only the pinned ed25519 key is accepted.
-          # LogLevel=FATAL keeps ssh's error-level messages out of the log, above all the "REMOTE
-          # HOST IDENTIFICATION HAS CHANGED" banner, which prints the offered key's fingerprint
-          # (scanners index host keys by address). A key other than the pinned one then ends as
-          # "Host key verification failed.", on every connection of the run; an authentication
-          # failure still prints. A host that is down or has port 22 closed ends UNREACHABLE with
-          # no reason given.
-          jq -n --arg host "$TARGET_HOST" --arg dir "$dir" '{all: {hosts: {target: {
-              ansible_host: $host,
-              ansible_user: "root",
-              ansible_ssh_private_key_file: ($dir + "/key"),
-              ansible_ssh_common_args: ("-F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes"
-                + " -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + $dir + "/known_hosts"
-                + " -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=target -o HostKeyAlgorithms=ssh-ed25519"
-                + " -o CheckHostIP=no -o UpdateHostKeys=no -o AddressFamily=any -o ConnectTimeout=20"
-                + " -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=FATAL")}}}}' \
-            > "$dir/inventory.json"
-          out skip false
+          out reason no-host
+          echo "::error::no pinned host for $ENVIRONMENT: dispatch Deploy with action=infra to build or pin it (docs/DEPLOYMENT.md)."
+          exit 1
 
       - name: Find the release's commit in its image
         id: release
-        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        if: steps.connect.outputs.skip == 'false' && inputs.action != 'configure'
         env:
           DIGEST: ${{ inputs.digest }}
           COMMIT: ${{ inputs.commit }}
@@ -209,17 +385,9 @@ jobs:
           [[ $rev == "$COMMIT" ]] || { echo "::error::The image's revision label names another commit than the plan's."; exit 1; }
           printf 'ref=%s\n' "$rev" >> "$GITHUB_OUTPUT"
 
-      - name: Check out main's host configuration
-        if: steps.host.outputs.skip != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.config_commit }}
-          path: config
-          persist-credentials: false
-          fetch-depth: 1
-
       - name: Check out the release
-        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        id: release-checkout
+        if: steps.connect.outputs.skip == 'false' && inputs.action != 'configure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.release.outputs.ref }}
@@ -228,7 +396,8 @@ jobs:
           fetch-depth: 1
 
       - name: Install Ansible
-        if: steps.host.outputs.skip != 'true'
+        id: ansible
+        if: steps.connect.outputs.skip == 'false'
         run: |
           # Main's pinned ansible-core (config/ops/ansible/requirements.txt), every package by hash;
           # --no-deps keeps pip from fetching anything the file doesn't list. It runs here, on the
@@ -240,19 +409,20 @@ jobs:
           echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
 
       - name: Configure the host
-        if: steps.host.outputs.skip != 'true' && inputs.action != 'bot'
+        id: configure
+        if: steps.connect.outputs.skip == 'false' && inputs.action != 'bot'
         working-directory: config/ops/ansible
         env:
           ANSIBLE_CONFIG: ${{ github.workspace }}/config/ops/ansible/ansible.cfg
           # ansible-core refuses to start under a non-UTF-8 locale.
           LC_ALL: C.UTF-8
-          TARGET: ${{ inputs.target }}
+          ENVIRONMENT: ${{ inputs.environment }}
           ACTION: ${{ inputs.action }}
         run: |
           # site.yml at main's head, as root: packages, updates, sshd, su and polkit, the tarubot
           # account. It reads no secret, and none is in this step's environment.
           set -Eeuo pipefail
-          ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" site.yml -e "tarubot_role=$TARGET"
+          ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" site.yml -e "tarubot_role=$ENVIRONMENT"
           # A configure dispatch ends here; bot.yml writes the result for every other action.
           if [[ $ACTION == configure ]]; then
             jq -n '{outcome: "configured", action: "configure", version: "-", previous: "-",
@@ -261,21 +431,23 @@ jobs:
           fi
 
       - name: Deploy the bot
-        if: steps.host.outputs.skip != 'true' && inputs.action != 'configure'
+        id: bot
+        if: steps.connect.outputs.skip == 'false' && inputs.action != 'configure'
         working-directory: release/ops/ansible
         env:
           ANSIBLE_CONFIG: ${{ github.workspace }}/config/ops/ansible/ansible.cfg
           LC_ALL: C.UTF-8
-          TARGET: ${{ inputs.target }}
+          ENVIRONMENT: ${{ inputs.environment }}
           ACTION: ${{ inputs.action }}
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.commit }}
           DIGEST: ${{ inputs.digest }}
-          # The release's bot.yml reads exactly these (its vars/bot.yml tb_secret_env), only in
-          # no_log tasks, and feeds each to the host on stdin. An unset one is empty here; bot.yml
-          # decides which the action needs. GitHub refuses a secret name that starts with
-          # GITHUB_ (an env: name here may keep it), so the two GITHUB_ ones come from secrets of
-          # other names, vars/bot.yml tb_secret_source. GITHUB_APP_PRIVATE_KEY is production's.
+          # The release's bot.yml reads exactly these (its vars/bot.yml tb_secret_env and
+          # tb_setting_env), only in no_log tasks, and feeds the secrets to the host on stdin. An
+          # unset one is empty here; bot.yml decides which the action needs. GitHub refuses a
+          # secret name that starts with GITHUB_ (an env: name here may keep it), so the three
+          # GITHUB_ ones come from secrets of other names (vars/bot.yml tb_secret_source and
+          # tb_setting_source). The /suggest app's two are prod's.
           BACKUP_STORAGE_ACCESS_KEY: ${{ secrets.BACKUP_STORAGE_ACCESS_KEY }}
           BACKUP_STORAGE_ENDPOINT: ${{ secrets.BACKUP_STORAGE_ENDPOINT }}
           BACKUP_STORAGE_REGION: ${{ secrets.BACKUP_STORAGE_REGION }}
@@ -283,6 +455,7 @@ jobs:
           DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GITHUB_APP_CLIENT_ID: ${{ secrets.SUGGEST_APP_CLIENT_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.SUGGEST_APP_PRIVATE_KEY }}
           GITHUB_REPORTS_TOKEN: ${{ secrets.REPORTS_GITHUB_TOKEN }}
           HEALTHCHECKS_BACKUP_URL: ${{ secrets.HEALTHCHECKS_BACKUP_URL }}
@@ -296,32 +469,99 @@ jobs:
           # DISCORD_TOKEN means.
           set -Eeuo pipefail
           ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" bot.yml \
-            -e "tarubot_target=$TARGET" -e "tarubot_action=$ACTION" -e "tarubot_version=$VERSION" \
+            -e "tarubot_target=$ENVIRONMENT" -e "tarubot_action=$ACTION" -e "tarubot_version=$VERSION" \
             -e "tarubot_commit=$COMMIT" -e "tarubot_digest=$DIGEST" \
             -e "tarubot_result=$RUNNER_TEMP/result.json"
 
       - name: Summary
+        id: summary
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
-          TARGET: ${{ inputs.target }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTION: ${{ inputs.action }}
+          TOFU: ${{ inputs.tofu }}
+          APPLY: ${{ inputs.apply }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          CONNECT_REASON: ${{ steps.connect.outputs.reason }}
+          # Each step's outcome, in the job's order: the first that failed is where the run stopped.
+          OUTCOMES: >-
+            request=${{ steps.request.outcome }} config=${{ steps.config.outcome }}
+            tofu-install=${{ steps.tofu-install.outcome }} backend=${{ steps.backend.outcome }}
+            init=${{ steps.init.outcome }} fetch=${{ steps.fetch.outcome }}
+            adopt=${{ steps.adopt.outcome }} apply=${{ steps.apply.outcome }}
+            output=${{ steps.output.outcome }} pin=${{ steps.pin.outcome }}
+            connect=${{ steps.connect.outcome }} release=${{ steps.release.outcome }}
+            release-checkout=${{ steps.release-checkout.outcome }} ansible=${{ steps.ansible.outcome }}
+            configure=${{ steps.configure.outcome }} bot=${{ steps.bot.outcome }}
         run: |
-          # The result file, to the log and the run's summary. It decides nothing: the job's colour
-          # comes from the steps above. bot.yml's last play wrote it here on the runner, from public
-          # fields only (or this job did, for no-host and configure); each value still prints only
-          # as plain characters. No file means the run stopped before bot.yml's last play: a step
-          # above failed, or the host became unreachable while bot.yml ran, which ends Ansible
-          # before that play.
+          # The result, to the log, the run's summary and the job's outputs (deploy.yml's Report
+          # reads them). It decides nothing: the job's colour comes from the steps above. bot.yml's
+          # last play wrote the file here on the runner, from public fields only (or this job did,
+          # for no-host and configure); each value still leaves only as plain characters, and each
+          # output only when it fits its pattern. No file means the run stopped before bot.yml's
+          # last play: a step above failed, or the host became unreachable while bot.yml ran.
           set -Eeuo pipefail
           export LC_ALL=C
           file=$RUNNER_TEMP/result.json
-          [[ $TARGET =~ ^(staging|production)$ ]] || TARGET='?'
+          [[ $ENVIRONMENT =~ ^(staging|prod)$ ]] || ENVIRONMENT='?'
+          out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          tok() { if [[ $2 =~ $1 ]]; then printf '%s' "$2"; else printf '?'; fi; }
+          KEYS='^((staging|prod)(-[0-9]{1,2})?( (staging|prod)(-[0-9]{1,2})?)*)?$'
+
+          # Where the run stopped: the first step that failed or was cancelled, by its id.
+          stopped=-
+          read -r -a outcomes <<< "$OUTCOMES"
+          for pair in "${outcomes[@]}"; do
+            if [[ ${pair#*=} == failure || ${pair#*=} == cancelled ]]; then stopped=${pair%%=*}; break; fi
+          done
+          pinned=$(tok "$KEYS" "$PINNED")
+          # What the OpenTofu part did: failed at one of its steps, else applied, pinned or unchanged.
+          infrastructure=-
+          if [[ $TOFU == true ]]; then
+            case $stopped in
+              request | config | tofu-install | backend | init | fetch | adopt | apply | output | pin) infrastructure=failed ;;
+              *)
+                if [[ $APPLY == true ]]; then
+                  infrastructure=applied
+                elif [[ -n $pinned && $pinned != '?' ]]; then
+                  infrastructure=pinned
+                else
+                  infrastructure=unchanged
+                fi
+                ;;
+            esac
+            line="Infrastructure on prod: $infrastructure; host keys pinned: ${pinned:-none}"
+            if [[ $infrastructure == failed ]]; then line+="; stopped at $stopped"; fi
+            echo "$line"
+            printf '## Infrastructure: %s\n\n%s\n\n' "$infrastructure" "$line" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # action=infra: the OpenTofu part is the whole outcome.
+          if [[ $ACTION == infra ]]; then
+            step=-
+            if [[ $infrastructure == failed ]]; then step=$stopped; fi
+            for pair in "outcome=$infrastructure" action=infra version=- previous=- restore_point=- \
+              migrations= schema_head=- "step=$step" reason=- warnings= "pinned=$pinned" \
+              "infrastructure=$infrastructure"; do
+              out "${pair%%=*}" "${pair#*=}"
+            done
+            exit 0
+          fi
+
           if ! jq -e 'type == "object"' "$file" > /dev/null 2>&1; then
             outcome=failed
             if [[ $JOB_STATUS == success ]]; then outcome='?'; fi
-            line="no result file: the run stopped before bot.yml's last play. A step above failed, or the host became unreachable while bot.yml ran."
-            echo "Result on $TARGET: outcome=$outcome, $line"
-            printf '## %s: %s\n\n%s\n' "$TARGET" "$outcome" "$line" >> "$GITHUB_STEP_SUMMARY"
+            reason=-
+            if [[ $stopped == connect ]]; then reason=$(tok '^[a-z0-9-]{1,40}$' "${CONNECT_REASON:--}"); fi
+            text="no result file: the run stopped before bot.yml's last play. A step above failed, or the host became unreachable while bot.yml ran."
+            echo "Result on $ENVIRONMENT: outcome=$outcome step=$stopped reason=$reason; $text"
+            printf '## %s: %s\n\n%s\n' "$ENVIRONMENT" "$outcome" "Stopped at \`$stopped\` (reason \`$reason\`); $text" >> "$GITHUB_STEP_SUMMARY"
+            for pair in "outcome=$outcome" "action=$(tok '^(deploy|bot|configure|preflight)$' "$ACTION")" \
+              version=- previous=- restore_point=- migrations= schema_head=- "step=$stopped" \
+              "reason=$reason" warnings= "pinned=$pinned" "infrastructure=$infrastructure"; do
+              out "${pair%%=*}" "${pair#*=}"
+            done
             exit 0
           fi
           # One `name value` line per field: a string, or a list of strings joined by spaces (none
@@ -334,21 +574,43 @@ jobs:
                 elif type == "array" and all(.[]; type == "string") then (if length == 0 then "none" else map(plain) | join(" ") end)
                 else "?" end) as $v
             | "\($k) \($v)"' "$file")
-          echo "Result on $TARGET: outcome=${value[outcome]} action=${value[action]} version=${value[version]} previous=${value[previous]} restore_point=${value[restore_point]} migrations=${value[migrations]} schema_head=${value[schema_head]} step=${value[step]} reason=${value[reason]} warnings=${value[warnings]}"
+          echo "Result on $ENVIRONMENT: outcome=${value[outcome]} action=${value[action]} version=${value[version]} previous=${value[previous]} restore_point=${value[restore_point]} migrations=${value[migrations]} schema_head=${value[schema_head]} step=${value[step]} reason=${value[reason]} warnings=${value[warnings]}"
           {
-            printf '## %s: %s\n\n| | |\n| --- | --- |\n' "$TARGET" "${value[outcome]}"
+            printf '## %s: %s\n\n| | |\n| --- | --- |\n' "$ENVIRONMENT" "${value[outcome]}"
             for k in action version previous restore_point migrations schema_head step reason warnings; do
               printf '| %s | %s |\n' "$k" "\`${value[$k]}\`"
             done
             printf '\n'
           } >> "$GITHUB_STEP_SUMMARY"
-          # An unhealthy release stays in place (no automatic restore): the way back is a dispatch.
-          if [[ ${value[outcome]} == unhealthy && ${value[previous]} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            hint="To roll back, run Deploy with target=$TARGET, version=${value[previous]} and action=bot."
-            echo "::error::${value[version]} isn't healthy on $TARGET. $hint"
+          # An unhealthy release stays in place, and a failed start leaves the bot down (no
+          # automatic restore): the way back is a dispatch of the release live before. A prod
+          # request waiting for its approval holds host-prod, so on prod that dispatch waits
+          # behind any such request until it is rejected.
+          if [[ ${value[previous]} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+            [[ ${value[outcome]} == unhealthy || ( ${value[outcome]} == failed && ${value[reason]} == restart-failed ) ]]; then
+            hint="To roll back, run Deploy with target=$ENVIRONMENT, version=${value[previous]} and action=bot"
+            if [[ $ENVIRONMENT == prod ]]; then hint+=", after rejecting any prod request still waiting for approval"; fi
+            hint+="."
+            if [[ ${value[outcome]} == unhealthy ]]; then what="isn't healthy"; else what="didn't start"; fi
+            echo "::error::${value[version]} $what on $ENVIRONMENT. $hint"
             printf '%s\n' "$hint" >> "$GITHUB_STEP_SUMMARY"
           fi
+          # The outputs, each only when it fits its pattern (the lists without their "none").
+          list() { if [[ $1 == none ]]; then printf ''; else tok "$2" "$1"; fi; }
+          VER='^([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}|-)$'
+          out outcome "$(tok '^[a-z-]{1,20}$' "${value[outcome]}")"
+          out action "$(tok '^(deploy|bot|configure|preflight|-)$' "${value[action]}")"
+          out version "$(tok "$VER" "${value[version]}")"
+          out previous "$(tok "$VER" "${value[previous]}")"
+          out restore_point "$(tok '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z|-)$' "${value[restore_point]}")"
+          out migrations "$(list "${value[migrations]}" '^[0-9]{3}_[a-z0-9_]+\.sql( [0-9]{3}_[a-z0-9_]+\.sql)*$')"
+          out schema_head "$(tok '^([0-9]{3}_[a-z0-9_]+\.sql|-)$' "${value[schema_head]}")"
+          out step "$(tok '^([a-z-]{1,20}|-)$' "${value[step]}")"
+          out reason "$(tok '^([a-z0-9-]{1,40}|-)$' "${value[reason]}")"
+          out warnings "$(list "${value[warnings]}" '^[a-z0-9-]{1,40}( [a-z0-9-]{1,40})*$')"
+          out pinned "$pinned"
+          out infrastructure "$infrastructure"
 
-      - name: Remove the key
+      - name: Remove the keys and OpenTofu's files
         if: always()
-        run: rm -rf -- "${RUNNER_TEMP:?}/ssh"
+        run: rm -rf -- "${RUNNER_TEMP:?}/ssh" "${RUNNER_TEMP:?}/tofu" "${RUNNER_TEMP:?}/pin"

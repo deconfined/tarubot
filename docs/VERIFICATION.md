@@ -21,6 +21,156 @@ Live registration, gateway connection/restart, complete member enumeration, hier
 
 ## Automated suites
 
+**2.37.0 build and lab rehearsal (2026-09-29 and 30, branch `feat/unified-pipeline-2.37.0` from `b7ab3bc`).**
+
+Built after @deconfined's decisions of 2026-09-29 (REQUIREMENTS.md "Approved unified-pipeline amendments (2026-09-29)"), which followed Claude's read-only review of the Codex branch `feat/environment-pipeline` (`ce3ded7`, never merged). Six components did the work: five built it (the naming and the tool guard; OpenTofu and `.dockerignore`; the host-key pin; the bot playbook's ports; the workflows), and a sixth documented it. The branch was then integrated and rehearsed on four lab VMs.
+
+Nothing touched GitHub, a real host, an environment, a secret, Linode, Cloudflare or Discord, and nothing was dispatched, approved or written to GitHub.
+
+- **Integration fixes:**
+  - **The image build.** Its stage runs `test:unit`, and the image has no `jq`, so `publish-workflow.test.ts`'s three "against a simulated GHCR" tests failed there ("GHCR's token answer holds no token"). That stopped `docker build`, so publish and CI's image build would have failed too. The tests now skip without `jq` (`describe.skipIf`), as the host-pin, host-workflow and infra tests do, and `test:docker` passed again.
+  - **A stale comment.** "The owner pins it from their own machine" now reads "the approving Deploy job pins it on first use (`ops/tofu/ci/host.sh pin`), before any login", in `cloud-init.yaml.tftpl` and both user-data examples, identically. `tofu test` still passes 20 of 20, and `infra.test.ts` 39 of 39.
+- **Local checks** (the integrated branch, before the version bump):
+  - install (`--frozen-lockfile`), typecheck, lint (302 files), format check and build are clean;
+  - `test:unit`: 1,973 pass, 1 skip and 0 fail (80 files, 81,409 expectations);
+  - `test:contract`: 34;
+  - `test:fixture` with the synthetic `test:docker`, and the supplied-fixture `test:docker`: each 2,116 pass, 123 skip and 0 fail (both were red before the image-build fix);
+  - `ci:version` fails only with "Every change set must increment package.json above its base version", as expected before the bump.
+- **Workflows and scripts:**
+  - actionlint 1.7.12 flags only the known `queue` key, in `claude.yml` and `host.yml`. With `queue: max` stripped, actionlint, with ShellCheck on every workflow's scripts, is clean.
+  - ShellCheck 0.11.0 `-S warning` is clean on `ops/*.sh`, `tofu-ci.sh`, `host.sh`, the playbook scripts and every stand-in; `-S style` is clean on `ops/tofu/ci/*.sh`.
+- **OpenTofu 1.12.6:** `fmt -check`, `init -backend=false -lockfile=readonly` and `validate` pass, and `tofu test` passes 20 of 20.
+- **Ansible** (a fresh hashed venv: ansible-core 2.21.4, ansible-lint 26.9.0):
+  - `--syntax-check` passes for `site.yml` (with the example host settings, and with `tarubot_role=prod`) and for `bot.yml`;
+  - ansible-lint's production profile finds nothing;
+  - `tests/fixtures/bot-asserts.py` passes 95 of 95 cases;
+  - Ansible's own `template` module renders the `staging`, `prod` and `prod-no-client` renderings byte for byte as `bot-render.ts` does;
+  - Podman's Quadlet dry run gives `tarubot.service` for all three, and `quadlet.test.ts` passes 12 of 12 with `QUADLET_DRYRUN`. The prod unit mounts `github_app_private_key` only with a client ID.
+- **The site** builds 35 pages. No page changed.
+- **publish.yml's refusal step,** run against the real public GHCR, anonymously and read-only:
+  - version 2.37.0 with an unknown commit: both tags 404, and the step goes on;
+  - version 2.36.0: refused, "already exists … bump the version";
+  - `sha-b7ab3bc…`: refused.
+- **The diff scan:**
+  - no live code or workflow names a retired path; the remaining mentions of `infra.yml`, `TARGET_HOST` or the old timer file are negative assertions in tests, or history in `tofu-ci.sh`'s header;
+  - addresses are documentation ranges and loopback only, and domains are `example.org`/`example.net`, GitHub, GHCR, Pushover and the OpenTofu registry;
+  - secrets are invented test values only;
+  - one Discord ID appears in a new test line: the test guild's #chat channel, which that test file and DEV_GUILD.md already name.
+- **Lab rehearsal.** Four throwaway AlmaLinux 10.2 clones in @deconfined's Proxmox lab, all with SELinux enforcing: a runner stand-in (which had IPv6), staging, prod, and a fourth standing in for a rebuilt instance.
+  - **The harness.** A scratch harness ran the workflow YAML's own `run:` scripts. Each step got exactly its own `env:`, its `if:` was evaluated with GitHub's implicit `success()`, and `GITHUB_ENV`, `GITHUB_PATH` and step outputs carried over. Every job used fresh `RUNNER_TEMP` and workspace paths, as GitHub does.
+  - **Lab-only stand-ins:**
+    - scratch providers in place of `linode/linode` and `cloudflare/cloudflare`, with every real resource type and address, loaded through `dev_overrides`, so the module and scripts ran unchanged; a token starting "ro-" couldn't write;
+    - SeaweedFS behind a TLS terminator with a lab CA, virtual-hosted, for Object Storage: a read-only state key, a read/write key and per-bucket backup keys (MinIO's images are no longer public);
+    - a lab registry for GHCR, which the targets were pointed at;
+    - PostgreSQL 18.4 over TLS on the cluster's port;
+    - after Configure, a non-persistent nftables rule that let both targets reach only the runner (ICMPv6 allowed for neighbour discovery).
+  - **OpenTofu and the pins,** through the real Infrastructure plan job and `host.yml`'s steps:
+    - **The import (Phase 0):** the plan showed `import …db["primary"] +0 -0`. The approving job adopted it with no `TOFU_VARS` in its environment and applied it ("1 imported").
+    - **Staging's build:** four creates, `+2 -0`, and "staging: new host — approving trusts its host key on first use". A pins-only follow-up uploaded a saved plan with no changes; adopt accepted the empty list without applying, and the key was pinned. The stored key equals the host's key after `cloud-init status --wait`. The target's journal shows the scan over IPv6, then IPv4, and no login.
+    - **The pin at boot, and the retry:** a freshly booted prod was built and approved in one job. sshd listened at 01:59:50 and the pin was stored at 01:59:52, while cloud-init was still in `modules:config`. The same job then failed at connect with a wrong Configure key (`key-rejected`), after the pin was stored. The next run's plan said "prod: pinned", ran no OpenTofu, and connected over IPv6 with the stored pin and configured the host.
+    - **Refusals:**
+      - a wrong digest, `has_changes` false with a change list, and a different change list were each refused by adopt;
+      - a second saved plan made before an apply was refused as "Saved plan is stale";
+      - an old pins-only plan after a rebuild was refused, "the host changed since the plan", with the pin untouched;
+      - a pin write with the read-only key failed with the HTTP 403 message;
+      - a backup key writing the state bucket got 403.
+    - **Rebuilds and scope:**
+      - rebuilds of staging and of prod each passed with `+2 -2` ("the rebuilt host's own two old entries");
+      - `db_allow_extra` drift on a rebuild was refused (`refused=true`, no artifact);
+      - a module-wide TTL change planned and applied both from `action=infra` and from a prod request;
+      - `PIN_SCOPE=prod` left staging's missing pin out, with its warning line.
+    - **A rebuilt instance** got a new ID and a fresh scan. With IPv6 dropped by five nftables packets, the scan fell back to IPv4. Connect never scanned.
+    - **A changed address:** the same instance with a new IPv6 address gave "addresses changed — approving updates its pin, not its key". The pin kept its key with no scan, and connect then used the new address.
+    - **Connect:**
+      - normally over IPv6;
+      - with the runner's IPv6 switched off, over IPv4 at once;
+      - with IPv6 dropped but still routed, over IPv4 after about 10 s;
+      - with a changed host key, `host-key` at once, with no IPv4 attempt and no fingerprint in the log.
+    - **No host:** a staging `workflow_run` ended green with the notice; a staging dispatch and a prod job failed with `no-host`.
+    - **Every status line seen:** create, replace, missing, other instance, other addresses and out of scope.
+  - **Configure:**
+    - staging's and prod's first runs changed 24 and 27 items, and their second runs 0;
+    - prod has the 10:00 UTC dnf-automatic drop-in, and staging none;
+    - both hosts have `AllowUsers root`, `verify-required`, the `tarubot` account with linger, and SELinux enforcing.
+  - **`bot.yml`:**
+    - **Staging's preflight:** `preflight-ok`, with the settings check passed, `Schema ready.`, an encrypted 68,043-byte backup uploaded, and the 04:30 timer enabled.
+    - **Prod before the rename:** a `deploy` against `…/tarubot` was refused `database-not-this-target` at the checks, and the host was byte for byte unchanged. With no token and no unit it ended `configured` / `no-token`.
+    - **The rename,** as an admin with `CREATEDB` and `CREATEROLE` but no superuser:
+      - `ALTER DATABASE tarubot RENAME` failed "must be owner of database tarubot": the admin held only the automatic admin option from creating the role (inherit false, set false);
+      - after `GRANT tarubot TO <admin>`, both databases and the role were renamed, and the SCRAM password worked under the new name;
+      - a role with an MD5 password gave "MD5 password cleared because of role rename";
+      - creating a database owned by the application role needed `GRANT <role> TO <admin> WITH SET TRUE`.
+    - **`bot` on the first start:** the settings check passed and no migration was applied. The run ended `unhealthy` (`not-healthy`) with a token-shaped fake of the production application, and failed. The log shows "Modules loaded" and "Database writer lease acquired". `recovery-point` (0600, owned by `tarubot`) equals the result's restore point, 2026-09-30T02:19:28.710281Z.
+    - **Refusals before any write,** with the secrets' and files' times unchanged:
+      - `DATABASE_URL` on port 27521: `settings-invalid` (the migrate check);
+      - an `http://` `HEALTHCHECKS_BACKUP_URL`: `malformed-secret`;
+      - a `/suggest` client ID without its key: `missing-secret`, naming `SUGGEST_APP_PRIVATE_KEY`.
+    - **`/suggest`:** with both set, `GITHUB_APP_CLIENT_ID` and `…_FILE` are in `tarubot.env`, and `/run/secrets/github_app_private_key` is mode 400, owned by 1000:1000. With neither, the setting is empty and nothing is mounted.
+    - **A failed start:** a lab release (2.37.1-lab) carried a migration that fails. The restart failed, the recovery point was written first, and the run ended `restart-failed`.
+    - **Versions:**
+      - a rollback to 2.37.0 across that migration was refused `rollback-across-migration`, with no write, even though the migration never committed;
+      - a `deploy` older than live ended `superseded`, green;
+      - `bot` with 2.37.0 over a newer lab release proceeded (previous: the newer one).
+  - **Report and hygiene:**
+    - deploy.yml's Report step ran on 15 real outcomes with a stand-in `curl`. Each gave the right message and priority, the credentials went only through `curl`'s config on stdin, and no message held an address or ID.
+    - 58 job logs were checked against 64 lab values: addresses, instance IDs, key base64, fingerprints, the bucket and endpoint, the state keys, the passphrase, the database passwords, the fake token and the PEM. None appeared outside an `::add-mask::` line.
+    - Every process's arguments, sampled every 50 ms during a pin write and every 40 ms during a backup, held no credential.
+- **Found, for later patches** (none blocks a deploy; [OPEN_ITEMS.md](OPEN_ITEMS.md#pipeline-follow-ups-62)):
+  - a release whose migration fails at its start couldn't be rolled back with `action=bot`, since the check compared the images' migration files. The review round fixed it in 2.37.0 (below);
+  - Report and the summary suggest rolling back to `previous` even when it equals the version just deployed;
+  - `host.sh` reads a missing `ip` binary as "no route";
+  - a first start's result lists every migration file of the release, which `host.yml` described as applied. 2.37.0 fixes the wording: `host.yml`'s `migrations` description and Report's maintenance-window sentence no longer say a migration ran.
+- **Not exercised:**
+  - GitHub itself: approvals, `secrets: inherit`, the artifact's hand-off, concurrency with `queue: max` (a waiting approval holding `host-prod`), and GitHub's own masking;
+  - the plan's `gh attestation verify` on a new build (it is exercised against published 2.36.0);
+  - the real Linode and Cloudflare providers and APIs, and Linode Object Storage;
+  - Discord, so no healthy deploy and no command registration;
+  - the managed cluster's own rename permissions;
+  - two address families offering different keys (a unit test only);
+  - GitHub's IPv4-only runners (simulated by switching IPv6 off on the lab runner).
+- **Cleanup:** all four VMs destroyed, and `lab list` shows only the template. The lab keys, CA, passwords, image archives and lab images were removed from the scratch directory.
+- **Documentation checks,** after REQUIREMENTS.md, AGENTS.md, CLAUDE.md, DEPLOYMENT.md, HOSTING.md, CI_CD.md, CONFIGURATION.md, OPEN_ITEMS.md, SESSION_HANDOFF.md, DEV_GUILD.md, `ops/tofu/README.md` and these records were written:
+  - `tests/unit/agent-rule.test.ts` (moved from `deploy-workflow.test.ts`, 4 tests) passes: AGENTS.md still quotes the SSH-deploy rule and the widened rule verbatim; every paragraph, list item or table row that names the rule in REQUIREMENTS.md, AGENTS.md, CLAUDE.md, CI_CD.md and HOSTING.md carries @deconfined's confirmation; and 2.37.0's proposed wording appears only as a proposal, once each in REQUIREMENTS.md and AGENTS.md, marked "pending @deconfined's confirmation in the pull request";
+  - broken on purpose, one at a time, in a scratch copy, each failed it: the proposal's marker removed, a clause dropped from AGENTS.md's copy, "pending" added to CLAUDE.md's or CI_CD.md's pointer, the proposal quoted in HOSTING.md as if in force, and the widened rule altered in AGENTS.md;
+  - `docs-site.test.ts` passes (12), and no site page changed, so the site wasn't rebuilt;
+  - every relative link and anchor in the repository's Markdown resolves, apart from three historical links that were already broken on `main` (a 2.x CHANGELOG entry's `docs/OPERATIONS.md` and APP_PLATFORM.md's two removed files); the link in `ops/tofu/README.md` to HOSTING.md, broken on `main`, is fixed;
+  - the lines the docs add name no host, address, zone, account or cluster ID, and no Discord ID the same files didn't already name (the `prod` profile's row repeats production's application and guild);
+  - typecheck, lint and the format check are clean, and `test:unit` passes: 1,977 and 1 skip (81 files, 81,451 expectations).
+
+**2.37.0 review fixes (2026-09-30).** The review's verified findings, applied on the same branch before the version bump:
+- **A rollback after a failed start.** `bot.yml`'s Migrations phase now reads the live unit's `ActiveState` (`systemctl --user show`, read-only) and refuses a rollback across a migration only while the live bot runs; while it doesn't, the older release's own `migrate.js` decides at the restart. Report's and the summary's `restart-failed` messages name the rollback dispatch.
+  - `bot-asserts.py` passes 108 of 108 cases. The rollback check has 15 where it had 4: running, a crash loop (`activating`), `failed`, stopped (`inactive`), `deactivating`, an unreadable read, an empty one, another state, two lines, a failing read, a skipped read, and its message. The restart refusal's message has 2 new ones.
+  - **The older release's side, against PostgreSQL 18.4** in a disposable local container with the release's own `Database`: a newer migration that fails (`SELECT 1/0` after a `CREATE TABLE`) left 10 rows and no table; the older release then applied nothing and reported the schema ready. After a newer migration that committed (11 rows), the older release applied nothing and refused ("Schema version/checksum mismatch"), still 11 rows.
+  - **On a lab VM** (a throwaway AlmaLinux 10.2 clone, SELinux enforcing, systemd 257, Podman 5.8.2), the branch's `bot.yml` ran as the host job runs it, with invented secrets, `target=staging`, `action=bot` and the published 2.28.0 image (which lacks migration 010) over a live unit naming the published 2.36.0 image, with the real unit's restart settings:
+    - a live unit whose `ExecStartPre` fails, as a failing `migrate.js` does, shows `ActiveState=activating` (`auto-restart`, `NRestarts` climbing). The rollback went past the Migrations phase, and stopped at Identity, since 2.28.0 predates the staging profile;
+    - with the live bot running (`active`), it was refused `rollback-across-migration` at `migrations`, naming `010_status_notices.sql`, and the bot kept running;
+    - with the bot stopped by hand (`failed`, since the stand-in container exits on SIGTERM), the rollback went on to Identity;
+    - each time, `tarubot`'s files and Podman secrets were unchanged. The VM was destroyed, and `lab list` shows only the template.
+- **Waiting prod requests.** The runbook, Report's rollback messages and the summary's hint now say to reject a waiting `prod` request before a rollback, since a waiting request holds `host-prod`. The cutover's optional preflight is dispatched before the bot request (step 6.2.1), and the recorded risk names every later prod and Infrastructure job.
+- **OpenTofu's files on the runner.** A new step removes `$RUNNER_TEMP/tofu` right after the pin step. `host-workflow.test.ts` checks its place and effect, and that both playbooks ran with the directory gone.
+- **Runbook gaps:** Phase 2 is staging's; prod's backup bucket, lifecycle rules and check are step 6.1.3; the Compose host's backup check is paused, resumed and deleted in 6.2.2, 6.3F and 6.4; operator tools after the cutover (6.3, and back in 6.3F); the fallback's password; retiring a host (4.12, deleting its pin by hand).
+- **Checks:** typecheck, lint, the format check and build are clean. `test:unit` passes 1,979 with 1 skip (81 files), `test:contract` 34, and the synthetic-fixture `test:docker` 2,122 with 123 skips and 0 failures. Each of seven deliberate breaks of the two changed `bot.yml` expressions fails at least one templar case. The Ansible syntax checks pass, and ansible-lint's production profile finds nothing. actionlint flags only the known `queue` key, and ShellCheck is clean on `tofu-ci.sh`, `host.sh` and the changed stand-in.
+
+**2.37.0 follow-up fixes and final checks (2026-09-30).** The second review round's minor findings, which that round doesn't fix, were applied in a round of their own and verified for accuracy, @deconfined's decisions and hygiene, and the checks. Then came the version bump.
+- **The approval summaries** for `action=bot`, prod's and staging's, state the rollback check `bot.yml` makes: a refusal before anything stops while the live bot runs and the live release has a migration the target lacks; with the bot down, the target's own `migrate.js` decides at the restart. The **Rebuild** note says the old instance's bot stops, and which dispatch brings it back.
+- **The runbook:**
+  - a rebuild replaces the instance, so a host that runs a bot is rebuilt with `action=deploy` and the live version (4.6, HOSTING.md "Rebuilding a host");
+  - prod's `fqdn` and `label` must be new (6.1.2);
+  - the fallback pauses prod's backup check (6.3F);
+  - 6.4 deletes the Compose host's hand-made DNS records;
+  - the rename's rehearsal and window check `pg_stat_activity` for other sessions on `tarubot`, with a way through if the provider's monitoring role holds one. That way through is unverified against the managed cluster.
+- **Cut items:** the optional Lish comparison of a pin, a readback @deconfined cut in 2.36.0, is gone from the runbook, HOSTING.md, OPEN_ITEMS.md and REQUIREMENTS.md's accepted risk.
+- **Agent lists:** CLAUDE.md's and CI_CD.md's combined lists name `infra` again while the widened rule of 2026-09-29 stands.
+- **Migration wording:** `host.yml`'s `migrations` output and Report's maintenance-window sentence no longer say a migration ran. On a first start the list holds every migration of the release, and `migrate.js` applies only what the database lacks.
+- **Final checks, at 2.37.0:**
+  - `bun install --frozen-lockfile` reports no changes. Typecheck, lint (303 files), the format check (302) and build are clean.
+  - `test:unit` passes 1,979 with 1 skip, the Quadlet generator comparison (81 files, 81,540 expectations). `test:contract` passes 34.
+  - The synthetic-fixture `test:docker` passes 2,122 with 123 skips and 0 failures; the image's build stage ran `test:unit` and `test:contract` too.
+  - `ci:version`: "Validated release version 2.37.0 above 2.36.0".
+  - actionlint 1.7.12 with ShellCheck flags only the known `queue` key (`claude.yml`, `host.yml`), and ShellCheck `-S warning` is clean on `ops/*.sh` and `ops/tofu/ci/*.sh`.
+  - The fix round's checks lens also ran OpenTofu 1.12.6 (`fmt`, `init -backend=false -lockfile=readonly`, `validate`, and `test` 20 of 20); the Ansible syntax checks and ansible-lint (nothing found); `bot-asserts.py` (108 of 108); the renderer against Ansible's `template` module (6 of 6 byte for byte); and Podman's Quadlet generator (`quadlet.test.ts` 12 of 12 with `QUADLET_DRYRUN`).
+  - The Compose path's files and SHA-256 pins match `main`.
+
 **2.36.0 build and lab rehearsal (#62, 2026-09-29, branch `feat/pipeline-2.36.0` from `92339f5`).** Built on @deconfined's go-ahead in the session ("Go for it."), from their direction and their [answers on #62](https://github.com/deconfined/tarubot/issues/62#issuecomment-5883718678) (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)"), by five components (OpenTofu, the host playbook, the bot playbook, the workflows, the test timeouts), then integrated, rehearsed twice on lab VMs and documented. Nothing touched the real staging or production hosts, a GitHub environment, secret or variable, or Discord, and nothing was dispatched, approved or written to GitHub.
 - **OpenTofu 1.12.6,** installed in the scratch directory: the release's `SHA256SUMS` signature verified with GPG against OpenTofu's signing key (fingerprint `E3E6 E43D 84CB 852E ADB0 051D 0C0A F313 E5FD 9F80`, the one OpenTofu's own installer pins), then the zip checked against its line (`5dc43da4…c3a8`, now `ops/tofu/opentofu.sha256`). The same check was repeated at integration.
 - **Local checks** (the integrated branch at 2.36.0):

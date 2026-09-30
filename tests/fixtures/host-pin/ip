@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# A stand-in for iproute2's ip in tests/unit/host-pin.test.ts, which runs ops/tofu/ci/host.sh. It
+# answers only `ip -6|-4 route get ADDRESS`: a route when FAKE_ROUTE_6 or FAKE_ROUTE_4 is 1, else
+# "Network is unreachable". By default IPv6 has no route and IPv4 has one, as on GitHub's hosted
+# runners. It records its arguments (after a `== ip` line) in $STUB/argv and `ip 6|4` in
+# $STUB/events.
+set -euo pipefail
+{
+  echo "== ip"
+  printf '%s\n' "$@"
+} >>"$STUB/argv"
+if [[ $# != 4 || ($1 != -6 && $1 != -4) || $2 != route || $3 != get ]]; then
+  echo "ip stand-in: unexpected arguments" >&2
+  exit 2
+fi
+fam=${1#-}
+echo "ip $fam" >>"$STUB/events"
+if [[ $fam == 6 ]]; then routed=${FAKE_ROUTE_6:-0}; else routed=${FAKE_ROUTE_4:-1}; fi
+if [[ $routed == 1 ]]; then
+  echo "$4 dev eth0 src documentation-address"
+  exit 0
+fi
+echo "RTNETLINK answers: Network is unreachable" >&2
+exit 2

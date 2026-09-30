@@ -1,11 +1,11 @@
 ---
-# TaruBot's host configuration (#62): the host layer of the staging and production hosts, which run
+# TaruBot's host configuration (#62): the host layer of the staging and prod hosts, which run
 # AlmaLinux 10 with SELinux enforcing and the bot as a rootless Quadlet unit under the tarubot
 # account. The Configure step of the Deploy workflow's host job (.github/workflows/host.yml) runs it
-# from main's head, on a GitHub runner, as root over SSH, before the release's own bot.yml deploys
-# the bot:
+# from main's head (the commit the Deploy plan names), on a GitHub runner, as root over SSH, before
+# the release's own bot.yml deploys the bot:
 #
-#   ansible-playbook -i INVENTORY site.yml -e tarubot_role=staging|production
+#   ansible-playbook -i INVENTORY site.yml -e tarubot_role=staging|prod
 #
 # Its one input is tarubot_role. It reads no secrets and nothing from the controller's
 # environment: every other value is in this file or vars/layout.yml.
@@ -89,12 +89,12 @@
           # Neither selinux=0 nor enforcing=0 on the kernel's command line.
           - "'0' not in ([ansible_facts.proc_cmdline.selinux | default('1')] | flatten)"
           - "'0' not in ([ansible_facts.proc_cmdline.enforcing | default('1')] | flatten)"
-          - tb_role in ['staging', 'production']
+          - tb_role in ['staging', 'prod']
         fail_msg: >-
           This playbook runs as root on AlmaLinux 10 (x86_64) with SELinux enforcing, in the
           configuration and on the kernel command line, and python3-libselinux installed (cloud-init
           installs it); never lower SELinux to make it pass. tarubot_role must be staging or
-          production.
+          prod.
         quiet: true
 
     - name: Look up the tarubot account
@@ -160,7 +160,7 @@
 
     # ------------------------------------------------------------------------------------------
     # Updates: dnf-automatic applies every update daily and reboots when one needs it (#62,
-    # answer 3). Production runs four hours after staging, through a timer drop-in.
+    # answer 3). Prod runs four hours after staging, through a timer drop-in.
     - name: Configure dnf-automatic, the hosts' only updater
       ansible.builtin.template:
         src: dnf-automatic.conf.j2
@@ -169,30 +169,30 @@
         group: root
         mode: "0644"
 
-    - name: Create the dnf-automatic timer's drop-in directory (production)
+    - name: Create the dnf-automatic timer's drop-in directory (prod)
       ansible.builtin.file:
-        path: "{{ tb_production_timer | dirname }}"
+        path: "{{ tb_prod_timer | dirname }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
-      when: tb_role == 'production'
+      when: tb_role == 'prod'
 
-    - name: Run production's updates at 10:00 UTC, after staging's
+    - name: Run prod's updates at 10:00 UTC, after staging's
       ansible.builtin.copy:
-        src: dnf-automatic-timer-production.conf
-        dest: "{{ tb_production_timer }}"
+        src: dnf-automatic-timer-prod.conf
+        dest: "{{ tb_prod_timer }}"
         owner: root
         group: root
         mode: "0644"
-      when: tb_role == 'production'
+      when: tb_role == 'prod'
       notify:
         - Reload systemd
         - Restart the dnf-automatic timer
 
     - name: Keep staging on the timer's own schedule (06:00 UTC)
       ansible.builtin.file:
-        path: "{{ tb_production_timer }}"
+        path: "{{ tb_prod_timer }}"
         state: absent
       when: tb_role == 'staging'
       notify:

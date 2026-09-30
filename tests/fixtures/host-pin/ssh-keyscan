@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# A stand-in for ssh-keyscan in tests/unit/host-pin.test.ts, which runs ops/tofu/ci/host.sh. It
+# answers exactly `ssh-keyscan -T 5 -t ed25519 ADDRESS` for the address's family (6 when it holds
+# a colon, else 4): FAKE_KEYSCAN_6 or FAKE_KEYSCAN_4 hold the keys it offers, one
+# `ssh-ed25519 <base64>` a line (empty: no answer), from that family's call FAKE_KEYSCAN_FROM on
+# (default 1). Like ssh-keyscan without -q, it prints the server's banner as a `#` comment with the
+# address, and one `ADDRESS KEY` line per key. It records its arguments (after a
+# `== ssh-keyscan` line) in $STUB/argv, `ssh-keyscan 6|4` in $STUB/events, and its name in
+# $STUB/leaked-env when a credential reached its environment.
+set -euo pipefail
+{
+  echo "== ssh-keyscan"
+  printf '%s\n' "$@"
+} >>"$STUB/argv"
+if [[ -n ${AWS_ACCESS_KEY_ID+x}${AWS_SECRET_ACCESS_KEY+x}${ANSIBLE_SSH_KEY+x} ]]; then echo ssh-keyscan >>"$STUB/leaked-env"; fi
+if [[ $# != 5 || $1 != -T || $2 != 5 || $3 != -t || $4 != ed25519 ]]; then
+  echo "ssh-keyscan stand-in: unexpected arguments" >&2
+  exit 2
+fi
+addr=$5
+if [[ $addr == *:* ]]; then fam=6; else fam=4; fi
+echo "ssh-keyscan $fam" >>"$STUB/events"
+n=$(($(cat "$STUB/keyscan-count.$fam" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$STUB/keyscan-count.$fam"
+((n >= ${FAKE_KEYSCAN_FROM:-1})) || exit 0
+keys=FAKE_KEYSCAN_$fam
+[[ -n ${!keys-} ]] || exit 0
+echo "# $addr:22 SSH-2.0-OpenSSH_9.9"
+while IFS= read -r key; do
+  if [[ -n $key ]]; then printf '%s %s\n' "$addr" "$key"; fi
+done <<<"${!keys}"

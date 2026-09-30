@@ -18,7 +18,8 @@ tb_inputs:
   - tarubot_digest
   - tarubot_result
 
-# What bot.yml does. host.yml's fourth action, configure, runs site.yml only and never this play.
+# What bot.yml does. host.yml's other actions never run this play: configure runs site.yml only,
+# and infra (OpenTofu) connects to no host.
 tb_actions:
   - deploy
   - bot
@@ -48,6 +49,18 @@ tb_secret_env:
 tb_secret_source:
   GITHUB_APP_PRIVATE_KEY: SUGGEST_APP_PRIVATE_KEY
   GITHUB_REPORTS_TOKEN: REPORTS_GITHUB_TOKEN
+
+# The plain settings host.yml's Bot step also exports from the job's environment (2.37.0): values
+# that aren't secret but live beside the secrets, so the owner keeps them in one place. Only a
+# target with tarubot_suggest reads GITHUB_APP_CLIENT_ID, /suggest's GitHub App client ID: bot.yml
+# checks its pattern, writes it into tarubot.env, and then requires and mounts the app's private
+# key. Everywhere else it is never read.
+tb_setting_env:
+  - GITHUB_APP_CLIENT_ID
+
+# The GitHub secret behind each tb_setting_env name, as tb_secret_source (a GITHUB_ name again).
+tb_setting_source:
+  GITHUB_APP_CLIENT_ID: SUGGEST_APP_CLIENT_ID
 
 # The PEMs, the only values that may span lines. Every other value must be one run of
 # non-whitespace characters: a stray space or newline (as `gh secret set < file` leaves) is
@@ -90,3 +103,9 @@ tb_identity_script: >-
   const{resolveDeployment:r}=await import("/app/dist/src/config/deployment.js");
   const d=r({TARUBOT_ENVIRONMENT:process.env.TARUBOT_ENVIRONMENT});
   console.log(JSON.stringify({applicationId:d.applicationId,registrationScope:d.registrationScope}))
+
+# The settings check bot.yml's Settings phase runs with `bun` in the release image (2.37.0;
+# scripts/deploy-check.ts, relative to the image's /app): the release's own configuration() and
+# tool guard over the settings and secrets on its stdin, printing only {"ok":true} or the name of
+# the check that refused.
+tb_settings_check: dist/scripts/deploy-check.js

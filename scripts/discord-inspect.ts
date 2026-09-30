@@ -5,9 +5,10 @@
  * - devbot (inferred from DevBot's application ID) and staging (DevBot's application on the
  *   staging host, #50; only TARUBOT_ENVIRONMENT=staging selects it): verify DevBot identity and
  *   report the test guild's capabilities, as before.
- * - production / rehearsal: inspect the production application while the legacy bot still owns the
- *   gateway: intents, guilds, the target guild's permissions (also without Administrator), the
- *   managed-role hierarchy and destination-channel access.
+ * - production / prod / rehearsal: inspect the production application while the legacy bot still
+ *   owns the gateway: intents, guilds, the target guild's permissions (also without Administrator),
+ *   the managed-role hierarchy and destination-channel access. prod (2.37.0) is the production
+ *   application on the new pipeline's host, so it gets the same checks.
  *     bun --env-file="$TARUBOT_PRODUCTION_ENV" dist/scripts/discord-inspect.js \
  *       --guild 1036062273631952955 --dump FINAL.sql      (or repeatable --role ID / --channel ID)
  *   Command scopes are read back separately with dist/scripts/commands.js list.
@@ -161,7 +162,7 @@ async function devbot(): Promise<void> {
   );
 }
 
-/** Production/rehearsal arguments: the target guild plus the IDs to inspect. */
+/** Production/prod/rehearsal arguments: the target guild plus the IDs to inspect. */
 function productionArguments(argv: readonly string[]) {
   let guild: string | null = null;
   let dump: string | null = null;
@@ -184,7 +185,7 @@ function productionArguments(argv: readonly string[]) {
   return { guild, dump, roles, channels };
 }
 
-/** Production/rehearsal mode: a GET-only inspection of the production application. */
+/** Production/prod/rehearsal mode: a GET-only inspection of the production application. */
 async function production(): Promise<void> {
   const args = productionArguments(process.argv.slice(2));
   const deployment = assertToolScope(process.env, {
@@ -309,10 +310,12 @@ async function production(): Promise<void> {
 }
 
 const profile = resolveDeployment(process.env).name;
-// Staging runs DevBot's application in DevBot's test guild, so it gets DevBot's checks.
+// Staging runs DevBot's application in DevBot's test guild, so it gets DevBot's checks; prod runs
+// the production application, so it gets production's.
 if (profile === "devbot" || profile === "staging") await devbot();
-else if (profile === "production" || profile === "rehearsal") await production();
+else if (profile === "production" || profile === "prod" || profile === "rehearsal")
+  await production();
 else
   throw new Error(
-    "discord-inspect needs the devbot, staging, production or rehearsal profile; set TARUBOT_ENVIRONMENT to one of them.",
+    "discord-inspect needs the devbot, staging, production, prod or rehearsal profile; set TARUBOT_ENVIRONMENT to one of them.",
   );

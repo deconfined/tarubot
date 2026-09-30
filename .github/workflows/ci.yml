@@ -86,9 +86,10 @@ jobs:
           command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck --version | sed -n 2p
           shellcheck -S warning ops/*.sh
-          # infra.yml's steps (ops/tofu/ci/), which run with the infra-plan and infra
+          # Deploy's OpenTofu and host-key steps (ops/tofu/ci/), which run in deploy.yml's
+          # Infrastructure plan job and host.yml with the infra-plan, staging and prod
           # environments' secrets.
-          shellcheck -S warning ops/tofu/ci/tofu-ci.sh
+          shellcheck -S warning ops/tofu/ci/tofu-ci.sh ops/tofu/ci/host.sh
       - name: Compile the application
         run: bun run build
       - name: Generate synthetic integration input
@@ -163,10 +164,12 @@ jobs:
 
   playbook:
     name: Host playbook
-    # ops/ansible/ configures the staging host as root (site.yml) and deploys the bot there as the
-    # tarubot user (bot.yml), run from host.yml on a GitHub runner (#62). It runs here without a
-    # host: syntax checks and ansible-lint, with ansible.builtin only and nothing from Galaxy, the
-    # test renderer against Ansible's own template module, and ShellCheck.
+    # ops/ansible/ configures the staging and prod hosts as root (site.yml) and deploys the bot
+    # there as the tarubot user (bot.yml), run from host.yml, Deploy's host job, on a GitHub runner
+    # (#62, 2.37.0). It runs here without a host: syntax checks and ansible-lint, with
+    # ansible.builtin only and nothing from Galaxy, bot.yml's checks evaluated by Ansible's own
+    # templar, the test renderer against Ansible's own template module for every target, and
+    # ShellCheck.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -199,6 +202,15 @@ jobs:
           # ansible-lint runs its own syntax check without an inventory, which ansible.cfg's
           # unparsed_is_failed would refuse; the setting stays on for real runs.
           ANSIBLE_INVENTORY_UNPARSED_FAILED=False ansible-lint --offline --project-dir .
+      - name: Evaluate bot.yml's checks with Ansible's templar
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+        run: |
+          # tests/fixtures/bot-asserts.py loads bot.yml as Ansible does and evaluates the named
+          # asserts, conditions and facts with the pinned ansible-core's templar, against the cases
+          # in bot-asserts.json (invented values only). A failure names only the task and the case.
+          python tests/fixtures/bot-asserts.py
       - name: Install the project Bun version
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -206,8 +218,9 @@ jobs:
       - name: Render the bot's templates with the test renderer
         run: |
           # bot-render.ts needs no dependencies (it imports only from bun and node:), so this job
-          # skips bun install. It writes the unit, the settings file and the vars.json of the
-          # values both templates receive.
+          # skips bun install. It writes, for staging and for prod (with and without the /suggest
+          # app), the unit, the settings file and the vars.json of the values both templates
+          # receive, one directory each.
           bun tests/fixtures/bot-render.ts .cache/bot
       - name: Check the test renderer against Ansible's template module
         working-directory: ops/ansible
@@ -216,14 +229,24 @@ jobs:
           LC_ALL: C.UTF-8
         run: |
           # The unit tests read the renderer's output, so it must be what Ansible writes on a host:
-          # the same templates and values through ansible.builtin.template, byte for byte.
+          # the same templates and values through ansible.builtin.template, byte for byte, for
+          # every rendering (staging, and prod with and without the /suggest app).
           set -Eeuo pipefail
-          mkdir -p "$RUNNER_TEMP/render"
-          for t in tarubot.container tarubot.env; do
-            ansible localhost -i localhost, -c local -m ansible.builtin.template \
-              -a "src=templates/bot/$t.j2 dest=$RUNNER_TEMP/render/$t" \
-              -e "@$GITHUB_WORKSPACE/.cache/bot/staging/vars.json"
-            diff -u "$GITHUB_WORKSPACE/.cache/bot/staging/$t" "$RUNNER_TEMP/render/$t"
+          shopt -s nullglob
+          renders=("$GITHUB_WORKSPACE"/.cache/bot/*/vars.json)
+          prod=("$GITHUB_WORKSPACE"/.cache/bot/prod*/vars.json)
+          [[ -f $GITHUB_WORKSPACE/.cache/bot/staging/vars.json ]] || { echo "::error::The renderer wrote no staging rendering."; exit 1; }
+          (( ${#prod[@]} > 0 )) || { echo "::error::The renderer wrote no prod rendering."; exit 1; }
+          for vars in "${renders[@]}"; do
+            dir=${vars%/vars.json}
+            name=${dir##*/}
+            mkdir -p "$RUNNER_TEMP/render/$name"
+            for t in tarubot.container tarubot.env; do
+              ansible localhost -i localhost, -c local -m ansible.builtin.template \
+                -a "src=templates/bot/$t.j2 dest=$RUNNER_TEMP/render/$name/$t" \
+                -e "@$vars"
+              diff -u "$dir/$t" "$RUNNER_TEMP/render/$name/$t"
+            done
           done
       - name: Check the playbooks' scripts with ShellCheck
         run: |
@@ -253,7 +276,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned OpenTofu
         # The release in ops/tofu/.opentofu-version, checked against ops/tofu/opentofu.sha256, by
-        # the same script infra.yml runs.
+        # the same script Deploy's Infrastructure plan job and host.yml run.
         run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Check the OpenTofu module
         run: |

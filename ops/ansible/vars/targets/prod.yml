@@ -1,0 +1,54 @@
+---
+# Prod's settings (2.37.0), read by bot.yml with -e tarubot_target=prod. Prod runs the production
+# application under the prod tool-guard profile (src/config/deployment.ts), against its own
+# database and role on the managed cluster. The values live in the prod GitHub environment; this
+# file only names them. It holds no Discord ID: the application and its global registration come
+# from the release image itself (vars/bot.yml tb_identity_script).
+
+# The bot's secrets, all required for deploy and bot, by the names the bot reads (the reports
+# token's environment secret is REPORTS_GITHUB_TOKEN: vars/bot.yml tb_secret_source). Each becomes
+# a Podman secret (tarubot-<name in lower case, _ as ->), a Secret= mount in the unit and a
+# NAME_FILE line in tarubot.env. The GitHub App's key for /suggest isn't listed here: it follows
+# tarubot_suggest below.
+tarubot_secrets:
+  - DATABASE_CA_CERT
+  - DATABASE_URL
+  - DISCORD_TOKEN
+  - GITHUB_REPORTS_TOKEN
+  - HEALTHCHECKS_PING_URL
+
+# /suggest posts public suggestions as the TaruBot GitHub App, in production only. bot.yml's
+# tarubot_suggest rule reads GITHUB_APP_CLIENT_ID from the environment secret SUGGEST_APP_CLIENT_ID
+# (vars/bot.yml tb_setting_source). Set, it goes into tarubot.env, and the app's private key
+# (GITHUB_APP_PRIVATE_KEY, from SUGGEST_APP_PRIVATE_KEY) becomes required and is mounted as a
+# secret; empty, neither happens and /suggest stays off.
+tarubot_suggest: true
+
+# The backup's settings, all required by every action: prod's own bucket, key and check, never
+# staging's. The key pair is prod's own, limited to prod's backup bucket. They become Podman
+# secrets that only tarubot-backup reads; the bot's container never mounts them.
+tarubot_backup_settings:
+  - BACKUP_STORAGE_ENDPOINT
+  - BACKUP_STORAGE_REGION
+  - BACKUP_STORAGE_ACCESS_KEY
+  - BACKUP_STORAGE_SECRET_KEY
+  - HEALTHCHECKS_BACKUP_URL
+
+# The only database and role DATABASE_URL may name here; the prod profile's own rule
+# (PROD_DATABASES and PROD_ROLE): the live tarubot_prod, or the same-cluster restore
+# tarubot_prod_restore the bot can be repointed at. Production's database and role are still
+# tarubot until the owner renames them (and tarubot_restore, if it exists) inside the cutover
+# window, so a URL naming tarubot is refused before anything is written. Staging's URL is refused
+# the same way.
+tarubot_database:
+  user: tarubot_prod
+  names:
+    - tarubot_prod
+    - tarubot_prod_restore
+
+# The container's plain settings, after vars/bot.yml tb_base_settings. Replies keep each server's
+# privacy defaults, and there is no test-plan channel. GITHUB_APP_CLIENT_ID isn't here: bot.yml's
+# tarubot_suggest rule writes it.
+tarubot_settings:
+  TARUBOT_ENVIRONMENT: prod
+  PUBLIC_TEST_RESPONSES: "false"

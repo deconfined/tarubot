@@ -3,7 +3,7 @@
  * docker, age, curl, id and date, each first on PATH and recording its arguments and environment:
  * - ops/backup.sh with no argument, the production host's Compose path, in a sandbox shaped like
  *   the host's clone (its static properties are in backup-job.test.ts). The script stays as it is
- *   until production moves (2.37.0); only its Compose path is pinned here.
+ *   until the owner's cutover (2.38.0 removes it); only its Compose path is pinned here.
  * - ops/ansible/files/bot/tarubot-backup (#62), staging's backup on a Quadlet host, which
  *   ops/ansible/bot.yml installs as ~/.local/bin/tarubot-backup with its user service and timer,
  *   in a sandbox home. Its settings come from the Podman secrets bot.yml writes, and these pin

@@ -1,0 +1,1275 @@
+{
+  "comment": "Cases for tests/fixtures/bot-asserts.py: ops/ansible/bot.yml's own expressions, evaluated by ansible-core's templar. Each names a task by its exact name and one of its fields; every value is invented.",
+  "cases": [
+    {
+      "name": "suggest: a target with /suggest reads the client ID on deploy",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "when",
+      "vars": { "tarubot_suggest": true, "tarubot_action": "deploy" },
+      "expect": true
+    },
+    {
+      "name": "suggest: and on bot",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "when",
+      "vars": { "tarubot_suggest": true, "tarubot_action": "bot" },
+      "expect": true
+    },
+    {
+      "name": "suggest: never on a preflight",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "when",
+      "vars": { "tarubot_suggest": true, "tarubot_action": "preflight" },
+      "expect": false
+    },
+    {
+      "name": "suggest: never on a target without /suggest",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "when",
+      "vars": { "tarubot_suggest": false, "tarubot_action": "deploy" },
+      "expect": false
+    },
+    {
+      "name": "suggest: never on a target that doesn't say (staging)",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "when",
+      "vars": { "tarubot_action": "deploy" },
+      "expect": false
+    },
+    {
+      "name": "suggest: an empty client ID is allowed (/suggest off)",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": "" },
+      "expect": true
+    },
+    {
+      "name": "suggest: an unset client ID is allowed (/suggest off)",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": {},
+      "expect": true
+    },
+    {
+      "name": "suggest: a client ID of the pattern is allowed",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23liInvented.id_0-9" },
+      "expect": true
+    },
+    {
+      "name": "suggest: 64 characters are allowed",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": {
+        "GITHUB_APP_CLIENT_ID": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"
+      },
+      "expect": true
+    },
+    {
+      "name": "suggest: 65 characters are refused",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": {
+        "GITHUB_APP_CLIENT_ID": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+      },
+      "expect": false
+    },
+    {
+      "name": "suggest: a trailing newline is refused",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23liInvented\n" },
+      "expect": false
+    },
+    {
+      "name": "suggest: a leading space is refused",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": " Iv23liInvented" },
+      "expect": false
+    },
+    {
+      "name": "suggest: an inner space is refused",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23li Invented" },
+      "expect": false
+    },
+    {
+      "name": "suggest: a slash is refused",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_ok",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23li/Invented" },
+      "expect": false
+    },
+    {
+      "name": "suggest: a well-formed client ID is kept",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_id",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23liInvented.id_0-9" },
+      "expect": "Iv23liInvented.id_0-9"
+    },
+    {
+      "name": "suggest: a malformed client ID is never kept",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_id",
+      "env": { "GITHUB_APP_CLIENT_ID": "Iv23liInvented\n" },
+      "expect": ""
+    },
+    {
+      "name": "suggest: an empty client ID keeps nothing",
+      "task": "Check /suggest's client ID, and keep it only when well formed",
+      "field": "tb_client_id",
+      "env": { "GITHUB_APP_CLIENT_ID": "" },
+      "expect": ""
+    },
+    {
+      "name": "suggest: a client ID makes the container mount the app's key",
+      "task": "Work out which secrets the container mounts",
+      "field": "tb_container_secrets",
+      "vars": {
+        "tarubot_action": "deploy",
+        "tarubot_secrets": ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN"],
+        "tb_client_id": "Iv23liInvented"
+      },
+      "expect": ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN", "GITHUB_APP_PRIVATE_KEY"]
+    },
+    {
+      "name": "suggest: no client ID, no key",
+      "task": "Work out which secrets the container mounts",
+      "field": "tb_container_secrets",
+      "vars": {
+        "tarubot_action": "bot",
+        "tarubot_secrets": ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN"],
+        "tb_client_id": ""
+      },
+      "expect": ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN"]
+    },
+    {
+      "name": "suggest: a preflight mounts the database's two only",
+      "task": "Work out which secrets the container mounts",
+      "field": "tb_container_secrets",
+      "vars": {
+        "tarubot_action": "preflight",
+        "tarubot_secrets": ["DATABASE_CA_CERT", "DATABASE_URL", "DISCORD_TOKEN"],
+        "tb_client_id": "Iv23liInvented"
+      },
+      "expect": ["DATABASE_CA_CERT", "DATABASE_URL"]
+    },
+    {
+      "name": "suggest: the app's key is then required, with the backup's settings",
+      "task": "Work out which secrets this action needs",
+      "field": "tb_required",
+      "vars": {
+        "tb_container_secrets": ["DATABASE_URL", "GITHUB_APP_PRIVATE_KEY"],
+        "tarubot_backup_settings": ["BACKUP_STORAGE_ENDPOINT", "HEALTHCHECKS_BACKUP_URL"]
+      },
+      "expect": [
+        "DATABASE_URL",
+        "GITHUB_APP_PRIVATE_KEY",
+        "BACKUP_STORAGE_ENDPOINT",
+        "HEALTHCHECKS_BACKUP_URL"
+      ]
+    },
+    {
+      "name": "suggest: the refusals name the environment's secrets",
+      "task": "Start the lists of missing and malformed settings",
+      "field": "tb_secret_names",
+      "expect": {
+        "BACKUP_STORAGE_ACCESS_KEY": "BACKUP_STORAGE_ACCESS_KEY",
+        "BACKUP_STORAGE_ENDPOINT": "BACKUP_STORAGE_ENDPOINT",
+        "BACKUP_STORAGE_REGION": "BACKUP_STORAGE_REGION",
+        "BACKUP_STORAGE_SECRET_KEY": "BACKUP_STORAGE_SECRET_KEY",
+        "DATABASE_CA_CERT": "DATABASE_CA_CERT",
+        "DATABASE_URL": "DATABASE_URL",
+        "DISCORD_TOKEN": "DISCORD_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY": "SUGGEST_APP_PRIVATE_KEY",
+        "GITHUB_REPORTS_TOKEN": "REPORTS_GITHUB_TOKEN",
+        "HEALTHCHECKS_BACKUP_URL": "HEALTHCHECKS_BACKUP_URL",
+        "HEALTHCHECKS_PING_URL": "HEALTHCHECKS_PING_URL",
+        "GITHUB_APP_CLIENT_ID": "SUGGEST_APP_CLIENT_ID"
+      }
+    },
+    {
+      "name": "suggest: a target with /suggest and its switch alone passes",
+      "task": "Check the target's /suggest switch",
+      "field": "that",
+      "vars": {
+        "tarubot_suggest": true,
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod", "PUBLIC_TEST_RESPONSES": "false" }
+      },
+      "expect": true
+    },
+    {
+      "name": "suggest: a target without the switch passes (staging)",
+      "task": "Check the target's /suggest switch",
+      "field": "that",
+      "vars": {
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "staging", "GITHUB_APP_CLIENT_ID": "" }
+      },
+      "expect": true
+    },
+    {
+      "name": "suggest: a client ID in a /suggest target's plain settings is refused",
+      "task": "Check the target's /suggest switch",
+      "field": "that",
+      "vars": {
+        "tarubot_suggest": true,
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod", "GITHUB_APP_CLIENT_ID": "" }
+      },
+      "expect": false
+    },
+    {
+      "name": "suggest: a switch that isn't a boolean is refused",
+      "task": "Check the target's /suggest switch",
+      "field": "that",
+      "vars": { "tarubot_suggest": "yes", "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod" } },
+      "expect": false
+    },
+    {
+      "name": "suggest: a malformed client ID is refused",
+      "task": "Refuse a /suggest client ID that isn't one",
+      "field": "that",
+      "vars": { "tb_client_ok": false },
+      "expect": false
+    },
+    {
+      "name": "suggest: a well-formed or empty client ID passes",
+      "task": "Refuse a /suggest client ID that isn't one",
+      "field": "that",
+      "vars": { "tb_client_ok": true },
+      "expect": true
+    },
+    {
+      "name": "suggest: the refusal names SUGGEST_APP_CLIENT_ID",
+      "task": "Refuse a /suggest client ID that isn't one",
+      "field": "fail_msg",
+      "vars": {
+        "tb_client_ok": false,
+        "tarubot_target": "prod",
+        "tb_secret_names": { "GITHUB_APP_CLIENT_ID": "SUGGEST_APP_CLIENT_ID" }
+      },
+      "contains": ["SUGGEST_APP_CLIENT_ID in the prod environment"],
+      "excludes": ["\n"]
+    },
+    {
+      "name": "suggest: prod's settings carry the client ID before the identity",
+      "task": "Assemble the container's settings and mounts",
+      "field": "tb_env",
+      "vars": {
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod", "PUBLIC_TEST_RESPONSES": "false" },
+        "tarubot_suggest": true,
+        "tb_client_id": "Iv23liInvented",
+        "tb_identity": { "applicationId": "APPLICATION_ID", "registrationScope": "global" }
+      },
+      "expect": [
+        { "name": "HEALTH_PORT", "value": "3000" },
+        { "name": "ENABLE_EFFECTS", "value": "true" },
+        { "name": "TARUBOT_ENVIRONMENT", "value": "prod" },
+        { "name": "PUBLIC_TEST_RESPONSES", "value": "false" },
+        { "name": "GITHUB_APP_CLIENT_ID", "value": "Iv23liInvented" },
+        { "name": "DISCORD_APPLICATION_ID", "value": "APPLICATION_ID" },
+        { "name": "TEST_GUILD_ID", "value": "" }
+      ]
+    },
+    {
+      "name": "suggest: prod without a client ID still writes the setting, empty",
+      "task": "Assemble the container's settings and mounts",
+      "field": "tb_env",
+      "vars": {
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod", "PUBLIC_TEST_RESPONSES": "false" },
+        "tarubot_suggest": true,
+        "tb_client_id": "",
+        "tb_identity": { "applicationId": "APPLICATION_ID", "registrationScope": "global" }
+      },
+      "expect": [
+        { "name": "HEALTH_PORT", "value": "3000" },
+        { "name": "ENABLE_EFFECTS", "value": "true" },
+        { "name": "TARUBOT_ENVIRONMENT", "value": "prod" },
+        { "name": "PUBLIC_TEST_RESPONSES", "value": "false" },
+        { "name": "GITHUB_APP_CLIENT_ID", "value": "" },
+        { "name": "DISCORD_APPLICATION_ID", "value": "APPLICATION_ID" },
+        { "name": "TEST_GUILD_ID", "value": "" }
+      ]
+    },
+    {
+      "name": "suggest: staging's settings stay its own, with its test guild",
+      "task": "Assemble the container's settings and mounts",
+      "field": "tb_env",
+      "vars": {
+        "tarubot_settings": {
+          "TARUBOT_ENVIRONMENT": "staging",
+          "PUBLIC_TEST_RESPONSES": "true",
+          "GITHUB_APP_CLIENT_ID": ""
+        },
+        "tb_client_id": "",
+        "tb_identity": { "applicationId": "APPLICATION_ID", "registrationScope": "TEST_GUILD" }
+      },
+      "expect": [
+        { "name": "HEALTH_PORT", "value": "3000" },
+        { "name": "ENABLE_EFFECTS", "value": "true" },
+        { "name": "TARUBOT_ENVIRONMENT", "value": "staging" },
+        { "name": "PUBLIC_TEST_RESPONSES", "value": "true" },
+        { "name": "GITHUB_APP_CLIENT_ID", "value": "" },
+        { "name": "DISCORD_APPLICATION_ID", "value": "APPLICATION_ID" },
+        { "name": "TEST_GUILD_ID", "value": "TEST_GUILD" }
+      ]
+    },
+    {
+      "name": "suggest: the app's key is mounted like every other secret",
+      "task": "Assemble the container's settings and mounts",
+      "field": "tb_mounts",
+      "vars": {
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod" },
+        "tb_container_secrets": ["DATABASE_URL", "GITHUB_APP_PRIVATE_KEY"],
+        "tb_identity": { "applicationId": "APPLICATION_ID", "registrationScope": "global" }
+      },
+      "expect": [
+        { "secret": "tarubot-database-url", "target": "database_url" },
+        { "secret": "tarubot-github-app-private-key", "target": "github_app_private_key" }
+      ]
+    },
+    {
+      "name": "suggest: and gets its NAME_FILE line",
+      "task": "Assemble the container's settings and mounts",
+      "field": "tb_files",
+      "vars": {
+        "tarubot_settings": { "TARUBOT_ENVIRONMENT": "prod" },
+        "tb_container_secrets": ["DATABASE_URL", "GITHUB_APP_PRIVATE_KEY"],
+        "tb_identity": { "applicationId": "APPLICATION_ID", "registrationScope": "global" }
+      },
+      "expect": [
+        { "name": "DATABASE_URL", "path": "database_url" },
+        { "name": "GITHUB_APP_PRIVATE_KEY", "path": "github_app_private_key" }
+      ]
+    },
+
+    {
+      "name": "backup: an https:// check URL passes",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_url_ok",
+      "env": { "HEALTHCHECKS_BACKUP_URL": "https://hc-ping.example.org/invented" },
+      "expect": true
+    },
+    {
+      "name": "backup: an http:// check URL is refused",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_url_ok",
+      "env": { "HEALTHCHECKS_BACKUP_URL": "http://hc-ping.example.org/invented" },
+      "expect": false
+    },
+    {
+      "name": "backup: a check URL without a scheme is refused",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_url_ok",
+      "env": { "HEALTHCHECKS_BACKUP_URL": "hc-ping.example.org/invented" },
+      "expect": false
+    },
+    {
+      "name": "backup: https:// with no host is refused",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_url_ok",
+      "env": { "HEALTHCHECKS_BACKUP_URL": "https:///invented" },
+      "expect": false
+    },
+    {
+      "name": "backup: an https:// endpoint passes",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_endpoint_ok",
+      "env": { "BACKUP_STORAGE_ENDPOINT": "https://objects.example.org" },
+      "expect": true
+    },
+    {
+      "name": "backup: a bare endpoint host passes (tarubot-backup adds https://)",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_endpoint_ok",
+      "env": { "BACKUP_STORAGE_ENDPOINT": "objects.example.org" },
+      "expect": true
+    },
+    {
+      "name": "backup: an http:// endpoint is refused",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_endpoint_ok",
+      "env": { "BACKUP_STORAGE_ENDPOINT": "http://objects.example.org" },
+      "expect": false
+    },
+    {
+      "name": "backup: any other scheme is refused",
+      "task": "Check that the backup's URLs use HTTPS (booleans only)",
+      "field": "tb_backup_endpoint_ok",
+      "env": { "BACKUP_STORAGE_ENDPOINT": "s3://objects.example.org" },
+      "expect": false
+    },
+    {
+      "name": "backup: both on HTTPS pass the refusal",
+      "task": "Refuse backup URLs that don't use HTTPS",
+      "field": "that",
+      "vars": { "tb_backup_url_ok": true, "tb_backup_endpoint_ok": true },
+      "expect": true
+    },
+    {
+      "name": "backup: a check URL off HTTPS is refused",
+      "task": "Refuse backup URLs that don't use HTTPS",
+      "field": "that",
+      "vars": { "tb_backup_url_ok": false, "tb_backup_endpoint_ok": true },
+      "expect": false
+    },
+    {
+      "name": "backup: an endpoint off HTTPS is refused",
+      "task": "Refuse backup URLs that don't use HTTPS",
+      "field": "that",
+      "vars": { "tb_backup_url_ok": true, "tb_backup_endpoint_ok": false },
+      "expect": false
+    },
+    {
+      "name": "backup: the refusal names only the failing setting",
+      "task": "Refuse backup URLs that don't use HTTPS",
+      "field": "fail_msg",
+      "vars": {
+        "tb_backup_url_ok": false,
+        "tb_backup_endpoint_ok": true,
+        "tarubot_target": "prod",
+        "tb_secret_names": {
+          "HEALTHCHECKS_BACKUP_URL": "HEALTHCHECKS_BACKUP_URL",
+          "BACKUP_STORAGE_ENDPOINT": "BACKUP_STORAGE_ENDPOINT"
+        }
+      },
+      "contains": [
+        "These values in the prod environment must use https://",
+        "bare host name): HEALTHCHECKS_BACKUP_URL."
+      ],
+      "excludes": ["BACKUP_STORAGE_ENDPOINT", "\n"]
+    },
+
+    {
+      "name": "database: prod's live database as prod's role passes",
+      "task": "Check that DATABASE_URL names this target's database and user (a boolean only)",
+      "field": "tb_db_ok",
+      "vars": {
+        "tarubot_database": {
+          "user": "tarubot_prod",
+          "names": ["tarubot_prod", "tarubot_prod_restore"]
+        }
+      },
+      "env": {
+        "DATABASE_URL": "postgresql://tarubot_prod:invented@db.example.org:27520/tarubot_prod?sslmode=require"
+      },
+      "expect": true
+    },
+    {
+      "name": "database: prod's same-cluster restore passes",
+      "task": "Check that DATABASE_URL names this target's database and user (a boolean only)",
+      "field": "tb_db_ok",
+      "vars": {
+        "tarubot_database": {
+          "user": "tarubot_prod",
+          "names": ["tarubot_prod", "tarubot_prod_restore"]
+        }
+      },
+      "env": {
+        "DATABASE_URL": "postgresql://tarubot_prod:invented@db.example.org:27520/tarubot_prod_restore"
+      },
+      "expect": true
+    },
+    {
+      "name": "database: the Compose host's tarubot is refused under prod",
+      "task": "Check that DATABASE_URL names this target's database and user (a boolean only)",
+      "field": "tb_db_ok",
+      "vars": {
+        "tarubot_database": {
+          "user": "tarubot_prod",
+          "names": ["tarubot_prod", "tarubot_prod_restore"]
+        }
+      },
+      "env": { "DATABASE_URL": "postgresql://tarubot:invented@db.example.org:27520/tarubot" },
+      "expect": false
+    },
+    {
+      "name": "database: prod's role on another database is refused",
+      "task": "Check that DATABASE_URL names this target's database and user (a boolean only)",
+      "field": "tb_db_ok",
+      "vars": {
+        "tarubot_database": {
+          "user": "tarubot_prod",
+          "names": ["tarubot_prod", "tarubot_prod_restore"]
+        }
+      },
+      "env": {
+        "DATABASE_URL": "postgresql://tarubot_prod:invented@db.example.org:27520/tarubot_staging"
+      },
+      "expect": false
+    },
+
+    {
+      "name": "check: {\"ok\":true} with status 0 passes",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 0, "stdout": "{\"ok\":true}" } },
+      "expect": true
+    },
+    {
+      "name": "check: a refusing check is refused",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 1, "stdout": "{\"ok\":false,\"check\":\"migrate\"}" } },
+      "expect": false
+    },
+    {
+      "name": "check: a false check with status 0 is still refused",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 0, "stdout": "{\"ok\":false,\"check\":\"configuration\"}" } },
+      "expect": false
+    },
+    {
+      "name": "check: garbage on stdout is refused",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 0, "stdout": "error: Cannot find module" } },
+      "expect": false
+    },
+    {
+      "name": "check: ok followed by more output is refused",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 0, "stdout": "{\"ok\":true}\nmore" } },
+      "expect": false
+    },
+    {
+      "name": "check: ok with a failing status is refused",
+      "task": "Refuse settings the release itself refuses",
+      "field": "that",
+      "vars": { "tb_check": { "rc": 125, "stdout": "{\"ok\":true}" } },
+      "expect": false
+    },
+    {
+      "name": "check: the refusal names the check",
+      "task": "Refuse settings the release itself refuses",
+      "field": "fail_msg",
+      "vars": {
+        "tarubot_version": "2.37.0",
+        "tarubot_target": "prod",
+        "tb_check": { "rc": 1, "stdout": "{\"ok\":false,\"check\":\"migrate\"}" }
+      },
+      "contains": [
+        "2.37.0's own checks refuse the prod settings (migrate): the bot or its tools would refuse them at start. Nothing was written"
+      ],
+      "excludes": ["\n"]
+    },
+    {
+      "name": "check: other output never reaches the message",
+      "task": "Refuse settings the release itself refuses",
+      "field": "fail_msg",
+      "vars": {
+        "tarubot_version": "2.37.0",
+        "tarubot_target": "prod",
+        "tb_check": { "rc": 1, "stdout": "{\"ok\":false,\"check\":\"inventedsecretvalue\"}" }
+      },
+      "contains": ["(settings)"],
+      "excludes": ["inventedsecretvalue"]
+    },
+    {
+      "name": "check: a failed run with no stdout still has a message",
+      "task": "Refuse settings the release itself refuses",
+      "field": "fail_msg",
+      "vars": { "tarubot_version": "2.37.0", "tarubot_target": "staging", "tb_check": { "rc": 2 } },
+      "contains": ["(settings)"]
+    },
+    {
+      "name": "check: the check gets tarubot.env's settings and the container's secrets, nothing else",
+      "task": "Check the settings with the release's own configuration and tool guard",
+      "field": "stdin",
+      "json": true,
+      "vars": {
+        "tarubot_action": "deploy",
+        "tb_env": [
+          { "name": "HEALTH_PORT", "value": "3000" },
+          { "name": "TARUBOT_ENVIRONMENT", "value": "prod" },
+          { "name": "GITHUB_APP_CLIENT_ID", "value": "Iv23liInvented" },
+          { "name": "DISCORD_APPLICATION_ID", "value": "APPLICATION_ID" },
+          { "name": "TEST_GUILD_ID", "value": "" }
+        ],
+        "tb_container_secrets": ["DATABASE_CA_CERT", "DATABASE_URL", "GITHUB_APP_PRIVATE_KEY"]
+      },
+      "env": {
+        "DATABASE_CA_CERT": "-----BEGIN CERTIFICATE-----\ninvented\n-----END CERTIFICATE-----",
+        "DATABASE_URL": "postgresql://tarubot_prod:in\"vented@db.example.org:27520/tarubot_prod",
+        "GITHUB_APP_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\ninvented\n-----END PRIVATE KEY-----",
+        "HEALTHCHECKS_BACKUP_URL": "https://hc-ping.example.org/backup-invented"
+      },
+      "expect": {
+        "action": "deploy",
+        "env": {
+          "HEALTH_PORT": "3000",
+          "TARUBOT_ENVIRONMENT": "prod",
+          "GITHUB_APP_CLIENT_ID": "Iv23liInvented",
+          "DISCORD_APPLICATION_ID": "APPLICATION_ID",
+          "TEST_GUILD_ID": "",
+          "DATABASE_CA_CERT": "-----BEGIN CERTIFICATE-----\ninvented\n-----END CERTIFICATE-----",
+          "DATABASE_URL": "postgresql://tarubot_prod:in\"vented@db.example.org:27520/tarubot_prod",
+          "GITHUB_APP_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\ninvented\n-----END PRIVATE KEY-----"
+        }
+      }
+    },
+    {
+      "name": "check: a preflight's check gets the database's two secrets",
+      "task": "Check the settings with the release's own configuration and tool guard",
+      "field": "stdin",
+      "json": true,
+      "vars": {
+        "tarubot_action": "preflight",
+        "tb_env": [{ "name": "TARUBOT_ENVIRONMENT", "value": "staging" }],
+        "tb_container_secrets": ["DATABASE_CA_CERT", "DATABASE_URL"]
+      },
+      "env": {
+        "DATABASE_CA_CERT": "invented-ca",
+        "DATABASE_URL": "postgresql://tarubot_staging:invented@db.example.org:27520/tarubot_staging",
+        "DISCORD_TOKEN": "invented.token.value"
+      },
+      "expect": {
+        "action": "preflight",
+        "env": {
+          "TARUBOT_ENVIRONMENT": "staging",
+          "DATABASE_CA_CERT": "invented-ca",
+          "DATABASE_URL": "postgresql://tarubot_staging:invented@db.example.org:27520/tarubot_staging"
+        }
+      }
+    },
+
+    {
+      "name": "restart: the time before it must be read",
+      "task": "Read the time before the restart",
+      "field": "failed_when",
+      "vars": { "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" } },
+      "expect": false
+    },
+    {
+      "name": "restart: an unreadable time fails before anything stops",
+      "task": "Read the time before the restart",
+      "field": "failed_when",
+      "vars": { "tb_before": { "rc": 0, "stdout": "Wed Sep 30 00:26:23 UTC 2026" } },
+      "expect": true
+    },
+    {
+      "name": "restart: a failed date fails",
+      "task": "Read the time before the restart",
+      "field": "failed_when",
+      "vars": { "tb_before": { "rc": 1, "stdout": "" } },
+      "expect": true
+    },
+    {
+      "name": "restart: the stop systemd shows becomes ISO time",
+      "task": "Take the InactiveEnterTimestamp it shows",
+      "field": "tb_stopped",
+      "vars": {
+        "tb_after": {
+          "rc": 0,
+          "stdout": "NRestarts=0\nActiveState=active\nInactiveEnterTimestamp=Wed 2026-09-30 00:26:23.131772 UTC"
+        }
+      },
+      "expect": "2026-09-30T00:26:23.131772Z"
+    },
+    {
+      "name": "restart: a unit that never stopped shows none",
+      "task": "Take the InactiveEnterTimestamp it shows",
+      "field": "tb_stopped",
+      "vars": {
+        "tb_after": {
+          "rc": 0,
+          "stdout": "NRestarts=0\nActiveState=active\nInactiveEnterTimestamp="
+        }
+      },
+      "expect": "-"
+    },
+    {
+      "name": "restart: an unreadable state shows none",
+      "task": "Take the InactiveEnterTimestamp it shows",
+      "field": "tb_stopped",
+      "vars": { "tb_after": { "rc": 1, "msg": "invented" } },
+      "expect": "-"
+    },
+    {
+      "name": "restart: a clean restart keeps the old instance's stop",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=0",
+            "ActiveState=active",
+            "InactiveEnterTimestamp=Wed 2026-09-30 00:26:23.131772 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-30T00:26:23.131772Z"
+      },
+      "expect": "2026-09-30T00:26:23.131772Z"
+    },
+    {
+      "name": "restart: a failed start keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "failed": true, "msg": "Unable to restart service tarubot.service" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=0",
+            "ActiveState=activating",
+            "InactiveEnterTimestamp=Wed 2026-09-30 00:26:23.166327 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-30T00:26:23.166327Z"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a failed restart keeps the time before it even when the unit looks up",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "failed": true, "msg": "Unable to restart service tarubot.service" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=0",
+            "ActiveState=active",
+            "InactiveEnterTimestamp=Wed 2026-09-30 00:26:24.500000 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-30T00:26:24.500000Z"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a bot that already exited keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=0",
+            "ActiveState=failed",
+            "InactiveEnterTimestamp=Wed 2026-09-30 00:26:25.000001 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-30T00:26:25.000001Z"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a bot systemd restarted on its own keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=1",
+            "ActiveState=active",
+            "InactiveEnterTimestamp=Wed 2026-09-30 00:26:26.367037 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-30T00:26:26.367037Z"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a first start keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": ["NRestarts=0", "ActiveState=active", "InactiveEnterTimestamp="]
+        },
+        "tb_stopped": "-"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a stop older than this run keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": {
+          "rc": 0,
+          "stdout_lines": [
+            "NRestarts=0",
+            "ActiveState=active",
+            "InactiveEnterTimestamp=Tue 2026-09-29 10:00:00.000000 UTC"
+          ]
+        },
+        "tb_stopped": "2026-09-29T10:00:00.000000Z"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: an unreadable state keeps the time before it",
+      "task": "Keep the restore point",
+      "field": "tb_restore_point",
+      "vars": {
+        "tb_restart": { "changed": true, "state": "started" },
+        "tb_before": { "rc": 0, "stdout": "2026-09-30T00:26:23.127464Z" },
+        "tb_after": { "rc": 1, "msg": "invented" },
+        "tb_stopped": "-"
+      },
+      "expect": "2026-09-30T00:26:23.127464Z"
+    },
+    {
+      "name": "restart: a clean restart passes",
+      "task": "Require the restart to have succeeded",
+      "field": "that",
+      "vars": { "tb_restart": { "changed": true, "state": "started" } },
+      "expect": true
+    },
+    {
+      "name": "restart: a failed restart is refused after the restore point",
+      "task": "Require the restart to have succeeded",
+      "field": "that",
+      "vars": {
+        "tb_restart": { "failed": true, "msg": "Unable to restart service tarubot.service" }
+      },
+      "expect": false
+    },
+    {
+      "name": "restart: a failed start names the rollback to the release live before",
+      "task": "Require the restart to have succeeded",
+      "field": "fail_msg",
+      "vars": {
+        "tarubot_version": "2.37.1",
+        "tb_previous": "2.37.0"
+      },
+      "contains": [
+        "systemd couldn't restart the bot on 2.37.1",
+        "recovery-point and this run's result. To go back, dispatch 2.37.0 with action=bot."
+      ]
+    },
+    {
+      "name": "restart: a failed first start names no rollback",
+      "task": "Require the restart to have succeeded",
+      "field": "fail_msg",
+      "vars": {
+        "tarubot_version": "2.37.1",
+        "tb_previous": "-"
+      },
+      "contains": ["this run's result."],
+      "excludes": ["To go back", "dispatch"]
+    },
+
+    {
+      "name": "rollback: a release with every live migration passes",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=active"],
+          "stdout": "ActiveState=active",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: the same migrations pass",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=active"],
+          "stdout": "ActiveState=active",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: a first start passes (no live unit, the state read skipped)",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": [],
+        "tb_target_migrations": ["001_initial.sql"],
+        "tb_live_state": {
+          "changed": false,
+          "skipped": true,
+          "false_condition": "tb_live_ref != ''"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: across a migration while the live bot runs is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=active"],
+          "stdout": "ActiveState=active",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration while the live bot's start fails (a crash loop) passes",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=activating"],
+          "stdout": "ActiveState=activating",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: across a migration while the live bot has failed passes",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=failed"],
+          "stdout": "ActiveState=failed",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: across a migration while the live bot is stopped (for a restore) passes",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=inactive"],
+          "stdout": "ActiveState=inactive",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: across a migration while the live bot stops passes",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=deactivating"],
+          "stdout": "ActiveState=deactivating",
+          "changed": false
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "rollback: across a migration with an unreadable state is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 1,
+          "stdout_lines": [],
+          "stdout": "",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration with a state read that printed nothing is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": [],
+          "stdout": "",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration with another state (reloading) is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=reloading"],
+          "stdout": "ActiveState=reloading",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration with a state read of two lines is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 0,
+          "stdout_lines": ["ActiveState=inactive", "ActiveState=active"],
+          "stdout": "ActiveState=inactive\nActiveState=active",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration with a state read that errs is refused, whatever it printed",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "rc": 1,
+          "stdout_lines": ["ActiveState=inactive"],
+          "stdout": "ActiveState=inactive",
+          "changed": false
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: across a migration with no state read at all is refused",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "that",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_live_state": {
+          "changed": false,
+          "skipped": true
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "rollback: the refusal names the running release and the files the target lacks",
+      "task": "Refuse a rollback across a migration while the live bot runs",
+      "field": "fail_msg",
+      "vars": {
+        "tb_live_migrations": ["001_initial.sql", "002_next.sql", "003_new.sql"],
+        "tb_target_migrations": ["001_initial.sql", "002_next.sql"],
+        "tb_previous": "2.37.1",
+        "tarubot_version": "2.37.0"
+      },
+      "contains": [
+        "The live release (2.37.1) is running",
+        "2.37.0 lacks: 003_new.sql.",
+        "stop the bot and restore"
+      ]
+    },
+
+    {
+      "name": "health: the wait stops at healthy",
+      "task": "Wait for the bot to turn healthy",
+      "field": "until",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"Image\":\"i1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "health: the wait stops early when the bot exited",
+      "task": "Wait for the bot to turn healthy",
+      "field": "until",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"exited\"}}]"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "health: the wait goes on while starting",
+      "task": "Wait for the bot to turn healthy",
+      "field": "until",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"starting\"}}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: the wait itself never fails the run",
+      "task": "Wait for the bot to turn healthy",
+      "field": "failed_when",
+      "vars": { "tb_health_first": { "rc": 125, "stdout": "" } },
+      "expect": false
+    },
+    {
+      "name": "health: healthy passes the assert after the wait",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"Image\":\"i1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "health: still starting when the wait ran out is refused",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"starting\"}}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: unhealthy is refused",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"unhealthy\"}}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: an exited bot is refused",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"exited\"}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: a running bot without a health check is refused",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\"}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: a missing container is refused",
+      "task": "Require healthy",
+      "field": "that",
+      "vars": { "tb_health_first": { "rc": 125, "stdout": "" } },
+      "expect": false
+    },
+    {
+      "name": "health: the same container a minute later passes",
+      "task": "Require the same container, still healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        },
+        "tb_health_again": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        }
+      },
+      "expect": true
+    },
+    {
+      "name": "health: a restarted container is refused",
+      "task": "Require the same container, still healthy",
+      "field": "that",
+      "vars": {
+        "tb_health_first": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c1\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        },
+        "tb_health_again": {
+          "rc": 0,
+          "stdout": "[{\"Id\":\"c2\",\"State\":{\"Status\":\"running\",\"Health\":{\"Status\":\"healthy\"}}}]"
+        }
+      },
+      "expect": false
+    },
+    {
+      "name": "health: the release's own image passes",
+      "task": "Require the release's own image",
+      "field": "that",
+      "vars": {
+        "tb_image_id": "i1",
+        "tb_health_again": { "rc": 0, "stdout": "[{\"Id\":\"c1\",\"Image\":\"i1\"}]" }
+      },
+      "expect": true
+    },
+    {
+      "name": "health: another image is refused",
+      "task": "Require the release's own image",
+      "field": "that",
+      "vars": {
+        "tb_image_id": "i1",
+        "tb_health_again": { "rc": 0, "stdout": "[{\"Id\":\"c1\",\"Image\":\"i0\"}]" }
+      },
+      "expect": false
+    }
+  ]
+}

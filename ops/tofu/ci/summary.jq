@@ -1,9 +1,10 @@
-# The public change list (tofu-ci.sh summarize): one sorted line per change, `ACTION ADDRESS`,
-# plus ` +N -M` (entries added and removed) on a database access list, and `?` for anything this
-# can't name, which the guards then refuse. Input: `tofu show -json` of the saved plan; $vars[0]:
-# the values. A set with a new host's addresses in it is wholly unknown in a plan, so its counts are
-# rebuilt the way ../main.tf builds the list: db_allow_extra, each known host's IPv6 /128 and IPv4
-# /32, and two entries per host still being built.
+# The public change list (tofu-ci.sh summarize, and adopt again from the fetched file): one sorted
+# line per change, `ACTION ADDRESS`, plus ` +N -M` (entries added and removed) on a database
+# access list, and `?` for anything this can't name, which the guards then refuse. Input:
+# `tofu show -json` of the saved plan; $vars[0]: the values. A set with a new host's addresses in
+# it is wholly unknown in a plan, so its counts are rebuilt the way ../main.tf builds the list:
+# db_allow_extra, each known host's IPv6 /128 and IPv4 /32, and two entries per host still being
+# built. tofu-ci.sh's rebuild allowance finds the removed entries the same way.
 def addr: if test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end;
 def act:
   if . == ["create"] then "create"

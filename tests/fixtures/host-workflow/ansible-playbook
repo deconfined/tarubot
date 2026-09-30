@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A simulated ansible-playbook for tests/unit/host-workflow.test.ts. Each call records its
 # arguments (one a line) in $STUB/ansible/<n>.argv, its working directory in <n>.cwd and its
-# environment (NUL-separated, as env -0 prints it) in <n>.env. When $STUB/bot-result exists and
+# environment (NUL-separated, as env -0 prints it) in <n>.env, and whether OpenTofu's files were
+# still under $RUNNER_TEMP/tofu (present or absent) in <n>.tofu. When $STUB/bot-result exists and
 # the call names -e tarubot_result=PATH, it copies that file to PATH, as bot.yml's last play
 # writes the result. It exits with $STUB/exit.<playbook> (exit.site.yml, exit.bot.yml), 0 when
 # there is none.
@@ -11,6 +12,7 @@ n=$(($(find "$STUB/ansible" -name '*.argv' | wc -l) + 1))
 printf '%s\n' "$@" >"$STUB/ansible/$n.argv"
 pwd >"$STUB/ansible/$n.cwd"
 env -0 >"$STUB/ansible/$n.env"
+if [[ -e ${RUNNER_TEMP:-/nonexistent}/tofu ]]; then echo present; else echo absent; fi >"$STUB/ansible/$n.tofu"
 playbook=
 for arg in "$@"; do
   if [[ $arg == *.yml && -z $playbook ]]; then playbook=$arg; fi

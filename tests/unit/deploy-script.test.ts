@@ -21,11 +21,12 @@
  *   cap, pruning, following a busy run, a dead worker, a conflicting request, the committed v1 run
  *   directory, the detached launch, and one request through main into the real worker.
  *
- * Only the Compose mode is tested: it is production's live path until 2.37.0, and the script is
- * byte-identical to 2.35.0's (deploy-workflow.test.ts pins its SHA-256). Its Quadlet modes served
- * the staging host that 2.36.0 retires (#62); nothing runs them any more, so their tests and
- * stubs went with it, and the script goes in 2.38.0. A recording stand-in for podman, systemctl,
- * journalctl and systemd-run still shows that no Compose path calls one.
+ * Only the Compose mode is tested: it is production's live path until the owner's cutover, and
+ * the script is byte-identical to 2.35.0's (deploy-workflow.test.ts pins its SHA-256). Its Quadlet
+ * modes served the staging host that 2.36.0 retires (#62); nothing runs them any more, so their
+ * tests and stubs went with it, and the script goes in 2.38.0, after the cutover. A recording
+ * stand-in for podman, systemctl, journalctl and systemd-run still shows that no Compose path
+ * calls one.
  *
  * Scenarios need git and jq; the image build (oven/bun, which has neither) skips them, and CI's
  * checks job and the dev VM run them.

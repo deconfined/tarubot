@@ -10,7 +10,8 @@
  * - sshd allows keys only, root only, a verified FIDO key and one host key, and sshd -T checks each;
  * - root's console password stays on the console: su needs wheel, and the polkit rule, run here
  *   against stub subjects, refuses everyone but root;
- * - dnf-automatic applies every update and reboots when needed, production after staging;
+ * - dnf-automatic applies every update and reboots when needed, prod after staging (the role is
+ *   staging or prod since 2.37.0, and prod's timer drop-in has the prod name);
  * - the tarubot account, and root's keys and password left to cloud-init;
  * - ansible.cfg, the hash-pinned requirements, the examples, and ShellCheck over ops/.
  * Static only: nothing here runs Ansible, since unit tests also run in the image build.
@@ -181,6 +182,25 @@ describe("site.yml", () => {
     expect([...new Set([...settings].map((m) => m[0]))]).toEqual(["tarubot_role"]);
     expect(layout.tb_role).toBe("{{ tarubot_role | default('') }}");
   });
+
+  test("the role is staging or prod (2.37.0), checked before anything changes", async () => {
+    const list = await tasks();
+    const check = named(
+      list,
+      "Refuse anything but root on AlmaLinux 10 with SELinux enforcing, or an unknown role",
+    );
+    expect(check.module).toBe("ansible.builtin.assert");
+    const that = check.args.that as unknown[];
+    expect(that.filter((item) => String(item).includes("tb_role"))).toEqual([
+      "tb_role in ['staging', 'prod']",
+    ]);
+    expect(String(check.args.fail_msg)).toContain("tarubot_role must be staging or prod.");
+    // It runs before the account lookup, and so before every task that changes the host.
+    expect(list.indexOf(check)).toBeLessThan(list.indexOf(byModule(list, "getent")[0] as Task));
+    // The hand-run example names a role site.yml accepts.
+    const example = await mappingAt(`${ANSIBLE}/host.example.yml`);
+    expect(["staging", "prod"]).toContain(String(example.tarubot_role));
+  });
 });
 
 describe("sshd", () => {
@@ -294,30 +314,41 @@ describe("updates", () => {
     for (const word of ["excludepkgs", "{%"]) expect(conf).not.toContain(word);
   });
 
-  test("production's timer runs after staging's whole window, and staging has no drop-in", async () => {
-    const dropIn = await read(`${ANSIBLE}/files/dnf-automatic-timer-production.conf`);
+  test("prod's timer runs after staging's whole window, and staging has no drop-in", async () => {
+    // Renamed for prod in 2.37.0: the production-named file is gone.
+    expect(existsSync(root(`${ANSIBLE}/files/dnf-automatic-timer-production.conf`))).toBe(false);
+    const dropIn = await read(`${ANSIBLE}/files/dnf-automatic-timer-prod.conf`);
     const calendars = [...dropIn.matchAll(/^OnCalendar=(.*)$/gmu)].map((m) => m[1]);
     // The first, empty, clears the unit's own 06:00; staging keeps that, plus up to an hour
-    // (RandomizedDelaySec=60m), so production starts at 07:00 or later.
+    // (RandomizedDelaySec=60m), so prod starts at 07:00 or later.
     expect(calendars).toHaveLength(2);
     expect(calendars[0]).toBe("");
     const time = /^\*-\*-\* (\d{2}):(\d{2}):\d{2} UTC$/u.exec(calendars[1] ?? "");
     expect(Number(time?.[1]) * 60 + Number(time?.[2])).toBeGreaterThanOrEqual(7 * 60);
-    expect((await mappingAt(`${ANSIBLE}/vars/layout.yml`)).tb_production_timer).toBe(
-      "/etc/systemd/system/dnf-automatic.timer.d/50-tarubot.conf",
-    );
+    const layout = await mappingAt(`${ANSIBLE}/vars/layout.yml`);
+    expect(layout.tb_prod_timer).toBe("/etc/systemd/system/dnf-automatic.timer.d/50-tarubot.conf");
+    expect(layout).not.toHaveProperty("tb_production_timer");
     const list = await tasks();
-    const install = named(list, "Run production's updates at 10:00 UTC, after staging's");
+    const directory = named(list, "Create the dnf-automatic timer's drop-in directory (prod)");
+    const install = named(list, "Run prod's updates at 10:00 UTC, after staging's");
     const remove = named(list, "Keep staging on the timer's own schedule (06:00 UTC)");
-    expect([install.args.dest, install.task.when]).toEqual([
-      "{{ tb_production_timer }}",
-      "tb_role == 'production'",
+    expect([directory.args.path, directory.task.when]).toEqual([
+      "{{ tb_prod_timer | dirname }}",
+      "tb_role == 'prod'",
+    ]);
+    expect([install.args.src, install.args.dest, install.task.when]).toEqual([
+      "dnf-automatic-timer-prod.conf",
+      "{{ tb_prod_timer }}",
+      "tb_role == 'prod'",
     ]);
     expect([remove.args.path, remove.args.state, remove.task.when]).toEqual([
-      "{{ tb_production_timer }}",
+      "{{ tb_prod_timer }}",
       "absent",
       "tb_role == 'staging'",
     ]);
+    // Only the two roles, and nothing in site.yml or its layout still says production.
+    for (const file of ["site.yml", "vars/layout.yml"])
+      expect(await read(`${ANSIBLE}/${file}`), file).not.toMatch(/production/u);
     for (const t of [install, remove])
       expect(t.task.notify).toEqual(["Reload systemd", "Restart the dnf-automatic timer"]);
     // Handlers run in the order they are defined: systemd reads the drop-in before the restart.

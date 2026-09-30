@@ -6,7 +6,7 @@
  * - the rules: the file's text less one newline, both forms refused, an empty NAME_FILE unset,
  *   failures that name settings only, and process.env never written;
  * - configuration(): the same Configuration from plain variables as before and from files, and a
- *   CA required under the production and staging markers;
+ *   CA required under the production, prod (2.37.0) and staging markers;
  * - Database's default CA, issue-report redaction of file-sourced values, commands.js's `run`;
  * - statically, that nothing under src/ or scripts/ reads one of the six from process.env itself.
  */
@@ -336,8 +336,8 @@ describe("configuration()", () => {
     }
   });
 
-  test("production and staging refuse a start without the cluster's CA, in either form", () => {
-    for (const marker of ["production", "staging"]) {
+  test("production, prod and staging refuse a start without the cluster's CA, in either form", () => {
+    for (const marker of ["production", "prod", "staging"]) {
       const env = { ...PLAIN, TARUBOT_ENVIRONMENT: marker };
       for (const without of [env, { ...env, DATABASE_CA_CERT: "" }])
         expect(() => configuration(without)).toThrow(

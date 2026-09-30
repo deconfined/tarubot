@@ -3,6 +3,18 @@
 .git
 **/.git
 **/.terraform
+# OpenTofu's local state, saved plans, values and backend settings (a hand run's, or a lab's) hold
+# addresses, IDs and keys, so none may reach COPY . or a build cache (2.37.0, from Codex's
+# ce3ded7).
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/plan.bin
+**/*.tfvars
+**/*.tfvars.json
+**/backend.hcl
+# The build stage's unit tests read the committed placeholder values, which name nothing real.
+!ops/tofu/examples/*.tfvars.json
 .serena
 .cache
 node_modules
@@ -21,5 +33,9 @@ artifacts
 # The non-secret templates are unit-tested inside the build stage; the runtime stages never copy them.
 !.env.example
 tarubot_backup.sql
+# Database dumps under any other name, such as an operator's pg_dump before an update (2.37.0, from
+# Codex's ce3ded7).
+**/*.dump
+**/*.backup
 *.log
 .DS_Store
