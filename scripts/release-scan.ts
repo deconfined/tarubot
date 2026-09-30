@@ -11,18 +11,16 @@ import {
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { platformImages } from "./release-policy.js";
+import { ReleaseScanGate, releaseScanJson, releaseScanner } from "./release-scan-exceptions.js";
 
 const image = "ghcr.io/deconfined/tarubot";
-export const scanner = {
-  version: "0.74.0",
-  sha256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
-};
+export const scanner = releaseScanner;
 
 /** Raw Buildx output has no added newline, so bind the parsed index to its exact OCI digest. */
 export function boundIndex(bytes: Uint8Array, digest: string): unknown {
   if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== digest)
     throw new Error("invalid-release-index");
-  return JSON.parse(Buffer.from(bytes).toString());
+  return releaseScanJson(bytes);
 }
 
 /** Fixed command construction: no shell, arbitrary tool arguments, tags or credential inheritance. */
@@ -36,13 +34,21 @@ export function scanCommands(index: unknown): string[][] {
     "/dev/null",
     "--ignorefile",
     "/dev/null",
+    // v0.74.0 tries only selected sources: remote forbids ambient daemon fallback.
+    "--image-src",
+    "remote",
+    "--format",
+    "json",
+    // pflag boolean flags need an attached false; a separate token is a positional image.
+    "--list-all-pkgs=false",
     "--scanners",
     "vuln",
     "--severity",
     "HIGH,CRITICAL",
     "--ignore-unfixed",
     "--exit-code",
-    "1",
+    // Scanner execution errors still fail; the strict source-policy gate judges findings.
+    "0",
     "--timeout",
     "10m",
     "--platform",
@@ -52,10 +58,13 @@ export function scanCommands(index: unknown): string[][] {
 }
 if (import.meta.main) {
   let directory: string | undefined;
+  let completed: ReleaseScanGate | undefined;
   try {
     const digest = process.env.DIGEST ?? "";
     const temp = process.env.RUNNER_TEMP;
     if (!/^sha256:[a-f0-9]{64}$/u.test(digest) || !temp) throw new Error("invalid-scan-input");
+    // Validate the fixed source policy before any registry/scanner I/O; no runtime override.
+    const gate = new ReleaseScanGate();
     const privateDirectory = join(temp, "release-scan");
     // Refuse stale output or symlinks rather than reuse an earlier runner directory.
     mkdirSync(privateDirectory, { mode: 0o700 });
@@ -86,6 +95,7 @@ if (import.meta.main) {
           HOME: privateDirectory,
           DOCKER_CONFIG: dockerConfig,
           TRIVY_CACHE_DIR: join(privateDirectory, "cache"),
+          TMPDIR: privateDirectory,
         },
         // Bound registry/scanner failures as well as Trivy's own vulnerability timeout.
         timeout: command[0] === "trivy" ? 11 * 60_000 : 60_000,
@@ -96,13 +106,17 @@ if (import.meta.main) {
       writeFileSync(join(privateDirectory, `${name}.stderr`), result.stderr, { mode: 0o600 });
       if (!result.success || result.exitedDueToTimeout || result.exitedDueToMaxBuffer)
         throw new Error("scan-failed");
+      return result.stdout;
     };
     run(["docker", "buildx", "imagetools", "inspect", "--raw", `${image}@${digest}`], "index");
     const index = boundIndex(readFileSync(join(privateDirectory, "index.stdout")), digest);
-    for (const [i, command] of scanCommands(index).entries()) run(command, `platform-${i}`);
-    console.log(
-      "Both runtime platform digests passed the pinned high/critical fixable-vulnerability gate.",
-    );
+    const images = platformImages(index);
+    for (const [i, command] of scanCommands(index).entries()) {
+      const binding = images[i];
+      if (!binding) throw new Error("invalid-scan-input");
+      gate.checkReport(run(command, `platform-${i}`), binding);
+    }
+    completed = gate;
   } catch {
     console.log(
       "::error::Release platform evidence, scanner execution or vulnerability gate failed; signing/promotion is blocked.",
@@ -114,6 +128,20 @@ if (import.meta.main) {
       if (directory) rmSync(directory, { recursive: true, force: true });
     } catch {
       console.log("::error::Private scanner output cleanup failed; signing/promotion is blocked.");
+      process.exitCode = 1;
+    }
+  }
+  if (completed && !process.exitCode) {
+    try {
+      // Cleanup and both scan durations count against expiry, including a frozen wall clock.
+      completed.finish();
+      console.log(
+        "Both runtime platform digests passed the pinned high/critical fixable-vulnerability gate.",
+      );
+    } catch {
+      console.log(
+        "::error::Release platform evidence, scanner execution or vulnerability gate failed; signing/promotion is blocked.",
+      );
       process.exitCode = 1;
     }
   }

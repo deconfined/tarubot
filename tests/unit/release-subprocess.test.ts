@@ -71,6 +71,31 @@ type Call = {
   pluginMode?: number;
 };
 
+/** Complete pinned JSON reports bind each successful stand-in scan to its immutable child. */
+function scannedReplies(): Reply[] {
+  return imageIndex.manifests.map((manifest) => {
+    const reference = `ghcr.io/deconfined/tarubot@${manifest.digest}`;
+    return {
+      stdout: JSON.stringify({
+        SchemaVersion: 2,
+        Trivy: { Version: "0.74.0" },
+        ArtifactName: reference,
+        ArtifactType: "container_image",
+        Metadata: {
+          Reference: reference,
+          RepoDigests: [reference],
+          ImageConfig: {
+            os: "linux",
+            architecture: manifest.platform.architecture,
+            config: { Env: [hostile] },
+          },
+        },
+        Results: [],
+      }),
+    };
+  });
+}
+
 /** Embed fixture paths in direct Bun executables so Bash startup hooks can never reach real tools. */
 function fixture(replies: Record<string, Reply[]>) {
   const directory = mkdtempSync(join(scratch, "case-"));
@@ -224,7 +249,7 @@ describe("scanner subprocess boundary", () => {
   test("scans both immutable platform digests with isolated configuration and removes private logs", () => {
     const f = fixture({
       docker: [{ stdout: indexBytes, stderr: hostile }],
-      trivy: [{ stdout: hostile, stderr: hostile }, { stdout: hostile }],
+      trivy: scannedReplies().map((reply) => ({ ...reply, stderr: hostile })),
     });
     const result = f.run("scan");
     expect(result.exitCode).toBe(0);
@@ -259,7 +284,7 @@ describe("scanner subprocess boundary", () => {
   });
 
   test("copies only the action-installed Buildx executable into private Docker configuration", () => {
-    const f = fixture({ docker: [{ stdout: indexBytes }], trivy: [{}, {}] });
+    const f = fixture({ docker: [{ stdout: indexBytes }], trivy: scannedReplies() });
     const config = join(f.callerHome, ".docker");
     mkdirSync(join(config, "cli-plugins"), { recursive: true });
     const plugin = `#!${process.execPath}\nconsole.log("invented-buildx-plugin");\n`;
@@ -345,7 +370,7 @@ describe("scanner subprocess boundary", () => {
   test("the second architecture must pass too", () => {
     const f = fixture({
       docker: [{ stdout: indexBytes }],
-      trivy: [{}, { stderr: hostile, exitCode: 1 }],
+      trivy: [scannedReplies()[0] ?? {}, { stderr: hostile, exitCode: 1 }],
     });
     const result = f.run("scan");
     expect(result.exitCode).toBe(1);

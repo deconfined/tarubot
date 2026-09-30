@@ -107,7 +107,7 @@ jobs:
     # request or branch workflow can mint. The BuildKit provenance and SBOM the build attaches stay
     # unsigned. Nothing verifies the signature yet: the deploy plan's `gh attestation verify`
     # arrives in 2.33.0.
-    # A separate job keeps the OIDC token out of the build, which runs the repository's code, and
+    # A separate job keeps the OIDC token out of the build and dependency installation, and
     # keeps registry write access out of the job that can sign. The attestation isn't pushed to
     # GHCR (push-to-registry stays off), so this job needs neither packages: write nor a login,
     # and artifact-metadata storage records apply only to organization-owned repositories.
@@ -116,6 +116,13 @@ jobs:
       id-token: write # request the Sigstore signing certificate
       attestations: write # store the attestation with the repository
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - name: Check the digest the build returned
         # An empty subject-digest would make the action look for subjects elsewhere (the runner's
         # artifacts list), so anything but one sha256 digest stops the job before it signs.
@@ -127,6 +134,10 @@ jobs:
             exit 1
           fi
           echo "Signing ghcr.io/deconfined/tarubot@${DIGEST}"
+      - name: Recheck reviewed scanner exceptions before signing
+        # Only the reviewed source policy runs here; no packages or build scripts are installed.
+        # More than ten minutes of remaining life covers this job's hard signing deadline.
+        run: bun --no-env-file scripts/release-scan-exceptions.ts sign
       - name: Attest build provenance
         # With no sbom-path and no predicate input, actions/attest v4 runs in its "Provenance" mode
         # and generates the SLSA build provenance itself (src/detect.ts, detectAttestationType, at
@@ -176,6 +187,13 @@ jobs:
       contents: read
       packages: write # retag the image as latest in GHCR
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -201,4 +219,7 @@ jobs:
             exit 0
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # Recheck after any release/approval/concurrency wait and immediately before the write.
+          # The source policy requires more remaining life than this ten-minute job can use.
+          bun --no-env-file scripts/release-scan-exceptions.ts promote
           docker buildx imagetools create --tag "$image:latest" "$image@${DIGEST}"

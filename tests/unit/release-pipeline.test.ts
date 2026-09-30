@@ -115,6 +115,11 @@ describe("platform scan evidence", () => {
       expect(command).toContain("HIGH,CRITICAL");
       expect(command).toContain("--ignore-unfixed");
       expect(command).toContain("--exit-code");
+      expect(command[command.indexOf("--exit-code") + 1]).toBe("0");
+      expect(command[command.indexOf("--format") + 1]).toBe("json");
+      expect(command[command.indexOf("--image-src") + 1]).toBe("remote");
+      expect(command).toContain("--list-all-pkgs=false");
+      expect(command).not.toContain("false");
       expect(command).toContain("--config");
       expect(command).toContain("--ignorefile");
       expect(command.at(-1)).toMatch(/^ghcr\.io\/deconfined\/tarubot@sha256:[a-f0-9]{64}$/u);

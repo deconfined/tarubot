@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.16 fresh streaming SSH",
-  "objective": "Preserve private streaming input, output and remote status while obtaining fresh durable trust and local DNSSEC for each SSH exchange. Keep Ansible and workflow integration plus activation pending; the disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.17 reviewed scanner exceptions",
+  "objective": "Authenticate both pinned platform reports and permit only exact reviewed source exceptions with bounded expiry, including signing and latest-promotion checkpoints. Keep release activation fenced; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise actual invented subprocesses, binary streams, backpressure, known remote failures, uncertain transport, bounded proof preparation, expired physical authority and late channel completion without contacting a host.",
+    "Exercise invented pinned scanner reports and subprocesses, exact OS and package identity, malformed JSON, execution failures, source-only policy, future reviews and expiry across scan/sign/promotion waits; perform no registry scan or host operation.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

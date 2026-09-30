@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.16**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.17**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.17 — Reviewed scanner exceptions
+
+- Authenticate each pinned Trivy JSON report to its exact runtime child digest and platform before evaluating fixed high/critical findings. Remote-only scanning, bounded strict parsing and every execution error remain mandatory gates.
+- Add an empty source policy for reviewed exceptions with exact finding identity, reason, issue and at most 30 days of validity. OS identity authenticates the full digest-bearing target before projecting exact family/base version and extended-support status; package paths remain literal.
+- Recheck expiry after both scans and immediately before signing or latest promotion, requiring more remaining life than each bounded write job can consume. Keep ignore/config overrides disabled and scanner output private.
 
 ## 2.36.16 — Fresh streaming SSH transport
 

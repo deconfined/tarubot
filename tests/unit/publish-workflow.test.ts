@@ -168,21 +168,25 @@ describe("the attest job", () => {
     expect(read("ops/deploy.sh")).toContain(`readonly IMAGE=${image}\n`);
   });
 
-  test("reads no tag: its only expression is the build's digest", () => {
+  test("reads no tag: expressions bind only the release checkout and build's digest", () => {
     const expressions = [...JSON.stringify(attest).matchAll(/\$\{\{\s*([^}]*?)\s*\}\}/gu)].map(
       (m) => m[1],
     );
-    expect(new Set(expressions)).toEqual(new Set(["needs.publish.outputs.digest"]));
+    expect(new Set(expressions)).toEqual(new Set(["github.sha", "needs.publish.outputs.digest"]));
     // No step pulls, inspects or retags an image, and none uses a registry action.
     for (const s of attest.steps) {
       expect(s.run ?? "").not.toMatch(/docker|imagetools|crane|oras|skopeo|gh api/u);
-      if (s.uses) expect(s.uses).toMatch(/^actions\/attest@/u);
+      if (s.uses) expect(s.uses).toMatch(/^(?:actions\/(?:attest|checkout)|oven-sh\/setup-bun)@/u);
     }
   });
 
   test("checks the digest before signing, since an empty one would sign discovered subjects", () => {
     const names = attest.steps.map((s) => s.name);
-    expect(names).toEqual(["Check the digest the build returned", "Attest build provenance"]);
+    expect(names.filter(Boolean)).toEqual([
+      "Check the digest the build returned",
+      "Recheck reviewed scanner exceptions before signing",
+      "Attest build provenance",
+    ]);
     const check = stepOf(attest, "Check the digest the build returned");
     expect(check.env).toEqual({ DIGEST: DIGEST_OUTPUT });
     const run = check.run ?? "";
@@ -201,6 +205,33 @@ describe("the attest job", () => {
       `sha256:${"a1".repeat(32)}\nsha256:${"b2".repeat(32)}`,
     ])
       expect({ digest, exit: outcome(digest) }).toEqual({ digest, exit: 1 });
+  });
+});
+
+describe("reviewed exception expiry before registry/signature writes", () => {
+  test("both bounded jobs use their own release source and cannot install runtime policy overrides", () => {
+    // A successful earlier scan cannot authorize an expired exception after another job waits.
+    for (const j of [attest, latest]) {
+      expect(j["timeout-minutes"]).toBe(10);
+      const checkout = j.steps.find((s) => s.uses?.startsWith("actions/checkout@"));
+      expect(checkout?.with).toEqual({ ref: expr("github.sha"), "persist-credentials": false });
+      const setup = j.steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
+      expect(setup?.with).toEqual({ "bun-version-file": "package.json" });
+      expect(j.steps.map((s) => s.run ?? "").join("\n")).not.toMatch(/bun install|--policy/u);
+    }
+    const signIndex = attest.steps.indexOf(stepOf(attest, "Attest build provenance"));
+    expect(attest.steps[signIndex - 1]?.run).toBe(
+      "bun --no-env-file scripts/release-scan-exceptions.ts sign",
+    );
+    const promote = stepOf(latest, "Advance the latest tag after successful publication").run ?? "";
+    const check = "bun --no-env-file scripts/release-scan-exceptions.ts promote";
+    expect(promote.indexOf(check)).toBeGreaterThan(
+      promote.indexOf('if [ "$current" != "$GITHUB_SHA" ]'),
+    );
+    expect(promote.slice(promote.indexOf(check)).trim().split("\n")).toEqual([
+      check,
+      `docker buildx imagetools create --tag "$image:latest" "$image@\${DIGEST}"`,
+    ]);
   });
 });
 
