@@ -349,6 +349,69 @@ describe("pinned local DNSSEC SSHFP evidence", () => {
 });
 
 describe("explicit durable enrollment and connection boundaries", () => {
+  test("journal diagnostics hide bindings and external shadows cannot replace durable enrollment guards", async () => {
+    const f = fixture();
+    const shadowStore = new MemoryStore();
+    expect(Object.keys(f.journal)).toEqual([]);
+    expect(JSON.stringify(f.journal)).toBe("{}");
+    for (const diagnostic of [Bun.inspect(f.journal), JSON.stringify(f.journal)]) {
+      expect(diagnostic).not.toContain(passphrase);
+      expect(diagnostic).not.toContain(backend);
+      expect(diagnostic).not.toContain(pin.binary_sha256);
+    }
+    for (const name of ["codec", "store", "target", "pin", "now", "path", "authorizedNow"])
+      expect(Reflect.get(f.journal, name)).toBeUndefined();
+    Object.assign(f.journal, {
+      store: shadowStore,
+      codec: new RecordCodec(`${passphrase}-shadow`, "f".repeat(64)),
+      target: "production",
+      pin: { ...pin, binary_sha256: "e".repeat(64) },
+      now: () => 0,
+      path: (name: string) => `trust/production/${name}`,
+      authorizedNow: () => instant,
+      current: async () => null,
+      completed: async () => null,
+    });
+    await f.journal.recordAuthorization(f.a);
+    const ticket = await f.journal.begin(f.a, f.d, enrollmentRun, f.observe);
+    await f.journal.publish(ticket, f.writer, f.validate);
+    await f.journal.finish(ticket);
+    expect((await f.journal.inspect(f.d)).key).toBe(rfcKey);
+    expect(f.store.events.filter((event) => event.startsWith("write:"))).not.toHaveLength(0);
+    expect(
+      f.store.events.every((event) => event === "observe" || event.includes("trust/staging/")),
+    ).toBe(true);
+    expect(shadowStore.writeCount).toBe(0);
+    f.store.data.delete(`${prefix}completed/${ticket.generation}`);
+    await refusal(f.journal.inspect(f.d));
+  });
+  test("plain constructor authority is captured once and accessor failures stay redacted", async () => {
+    const store = new MemoryStore();
+    let accesses = 0;
+    const journal = new TrustJournal(store, {
+      get target(): "staging" | "production" {
+        return ++accesses === 1 ? "staging" : "production";
+      },
+      backend,
+      passphrase,
+      validator: pin,
+      now: () => instant,
+    });
+    await journal.recordAuthorization(authorization());
+    expect(accesses).toBe(1);
+    expect(store.data.has(`${prefix}registration`)).toBe(true);
+    expect(
+      () =>
+        new TrustJournal(store, {
+          target: "staging",
+          backend,
+          get passphrase(): string {
+            throw new Error("invented-private-accessor-diagnostic");
+          },
+          validator: pin,
+        }),
+    ).toThrow("invalid-ssh-trust");
+  });
   test("a missing current never learns a key, and authorization must already be durable", async () => {
     const f = fixture();
     await refusal(f.journal.inspect(f.d));

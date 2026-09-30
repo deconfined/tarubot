@@ -11,7 +11,12 @@ import {
   verifyAppliedPlan,
   type ControlStore,
 } from "../../scripts/infra-control.js";
-import { controlPhase, S3ControlStore } from "../../scripts/infra-control-cli.js";
+import {
+  controlPhase,
+  infrastructureJournal,
+  S3ControlStore,
+} from "../../scripts/infra-control-cli.js";
+import { createControlStorage, type ControlStorageConfig } from "../../scripts/control-storage.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
 
 const passphrase = "invented control-record passphrase with sufficient entropy";
@@ -70,6 +75,28 @@ async function established() {
 }
 
 describe("control-record encryption and evidence", () => {
+  test("runtime privacy hides derived keys and preserves pre-hardening ciphertext and backend/path bindings", () => {
+    const privateCodec = new RecordCodec(passphrase, "a".repeat(64));
+    const path = "intents/11111111-1111-4111-8111-111111111111";
+    // Produced by the pre-hardening RecordCodec with only the invented fixture passphrase.
+    const legacy = Buffer.from(
+      "54494331896985342b3fb359ec579ba9160f2c796b5359dd7ac97b8457ea4b055013bf2d09893204cacd0bc2a79e731c4bc244cdf9ffaf6e08423ec22fad5e12e7cef056",
+      "hex",
+    );
+    expect(Object.keys(privateCodec)).toEqual([]);
+    expect(JSON.stringify(privateCodec)).toBe("{}");
+    expect(Bun.inspect(privateCodec)).not.toContain("Buffer");
+    expect(Reflect.get(privateCodec, "key")).toBeUndefined();
+    expect(Reflect.get(privateCodec, "backend")).toBeUndefined();
+    Object.assign(privateCodec, { key: Buffer.alloc(32), backend: "b".repeat(64) });
+    expect(privateCodec.open(path, legacy)).toEqual({ fixture: "invented-legacy-record" });
+    expect(() => privateCodec.open("current", legacy)).toThrow("invalid-control-record");
+    const bytes = privateCodec.seal(path, inputs);
+    expect(new RecordCodec(passphrase, "a".repeat(64)).open(path, bytes)).toEqual(inputs);
+    expect(() => new RecordCodec(passphrase, "b".repeat(64)).open(path, bytes)).toThrow(
+      "invalid-control-record",
+    );
+  });
   test("randomized authenticated encryption exposes neither values nor private digests", () => {
     const a = codec.seal("current", inputs);
     const b = codec.seal("current", inputs);
@@ -112,6 +139,32 @@ describe("control-record encryption and evidence", () => {
 });
 
 describe("single-writer journal transitions", () => {
+  test("diagnostics and instance shadows cannot expose or replace the journal's history capabilities", async () => {
+    const f = await established();
+    const shadow = new MemoryStore();
+    expect(Object.keys(f.journal)).toEqual([]);
+    expect(JSON.stringify(f.journal)).toBe("{}");
+    expect(Bun.inspect(f.journal)).not.toContain("example-staging");
+    for (const name of ["store", "codec", "read", "persist", "head", "baseline", "validateIntent"])
+      expect(Reflect.get(f.journal, name)).toBeUndefined();
+    Object.assign(f.journal, {
+      store: shadow,
+      codec: new RecordCodec(`${passphrase}-shadow`, "c".repeat(64)),
+      read: async () => null,
+      persist: async () => {},
+      head: async () => ({ baseline: null, pending: null }),
+      baseline: async () => ({ intent: {}, state: before }),
+      validateIntent: () => {},
+    });
+    const ticket = await f.journal.begin(f.snapshot, inputs, run, binding, "apply");
+    await expect(f.journal.inspect(before)).rejects.toThrow("invalid-control-record");
+    await f.journal.finish(ticket, after);
+    expect((await f.journal.inspect(after)).generation).toBe(ticket.generation);
+    expect(f.store.get("current")).toEqual({ baseline: ticket.generation, pending: null });
+    expect(shadow.writes).toEqual([]);
+    f.store.data.delete(`completed/${ticket.generation}`);
+    await expect(f.journal.inspect(after)).rejects.toThrow("invalid-control-record");
+  });
   test("baseline establishment is explicit; ordinary Apply cannot learn a missing baseline", async () => {
     const store = new MemoryStore();
     const journal = new InfrastructureJournal(store, codec);
@@ -447,6 +500,160 @@ describe("private phase adapter", () => {
     expect(output.stdout.toString()).toBe(
       "::error::Infrastructure control evidence or persistence failed; stop and reconcile any pending operation before another write.\n",
     );
+  });
+});
+
+describe("scoped infrastructure journal factory", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "infra-journal-factory-test-"));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const backend =
+    'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://us-east-1.example.org" }\nuse_path_style = false\n';
+  const environment = () => ({
+    AWS_ACCESS_KEY_ID: "invented-access",
+    AWS_SECRET_ACCESS_KEY: "invented-secret",
+    // Neither supplied ambient session field authorizes a temporary credential in this factory.
+    AWS_SESSION_TOKEN: "invented-unapproved-session",
+    S3_SESSION_TOKEN: "invented-other-unapproved-session",
+    TF_VAR_state_passphrase: passphrase,
+  });
+  test("reopens historical raw-backend ciphertext and writes the same namespace through the scoped store", async () => {
+    const directory = mkdtempSync(join(scratch, "compatible-"));
+    writeFileSync(join(directory, "backend.hcl"), backend, { mode: 0o600 });
+    const physicalPrefix = "tarubot/control/v1/infra/";
+    const previous = "33333333-3333-4333-8333-333333333333";
+    const originalCodec = new RecordCodec(
+      passphrase,
+      privateDigest({ backend, key: "tarubot/infra.tfstate" }),
+    );
+    const intent = {
+      generation: previous,
+      previous: null,
+      kind: "baseline",
+      run,
+      binding,
+      inputs,
+      before,
+    };
+    const baseline = { intent, state: before };
+    const objects = new Map<string, Uint8Array>();
+    for (const [path, value] of [
+      ["current", { baseline: previous, pending: null }],
+      [`intents/${previous}`, intent],
+      [`baselines/${previous}`, baseline],
+      [`completed/${previous}`, { generation: previous, baseline: privateDigest(baseline) }],
+    ] as const)
+      objects.set(physicalPrefix + path, originalCodec.seal(path, value));
+    const captures: ControlStorageConfig[] = [];
+    const options: Bun.S3Options[] = [];
+    const calls: string[] = [];
+    const journal = infrastructureJournal(directory, environment(), {
+      createStore(config) {
+        captures.push(structuredClone(config));
+        // The actual scoped factory is exercised with an invented native transport, not HTTP.
+        const store = createControlStorage(config, {
+          createClient(native) {
+            options.push(structuredClone(native));
+            return {
+              presign(key: string) {
+                const url = new URL(`${native.endpoint}/${key}`);
+                url.searchParams.set("X-Amz-Date", "20260930T000000Z");
+                url.searchParams.set(
+                  "X-Amz-Credential",
+                  `${native.accessKeyId}/20260930/${native.region}/s3/aws4_request`,
+                );
+                return url.toString();
+              },
+              file(key: string) {
+                calls.push(key);
+                return {
+                  stream: () =>
+                    new ReadableStream<Uint8Array>({
+                      start(controller) {
+                        const bytes = objects.get(key);
+                        if (bytes) {
+                          controller.enqueue(Uint8Array.from(bytes));
+                          controller.close();
+                        } else
+                          controller.error(
+                            Object.assign(new Error("invented-absence"), { code: "NoSuchKey" }),
+                          );
+                      },
+                    }),
+                };
+              },
+              async write(key: string, bytes: Uint8Array) {
+                calls.push(key);
+                objects.set(key, Uint8Array.from(bytes));
+                return bytes.length;
+              },
+            } as unknown as Bun.S3Client;
+          },
+        });
+        expect(store.namespace).toBe(physicalPrefix);
+        return store;
+      },
+    });
+    expect(captures).toEqual([
+      {
+        scope: "infra",
+        bucket: "state-bucket-example",
+        endpoint: "https://us-east-1.example.org",
+        region: "us-east-1",
+        credentials: {
+          accessKeyId: "invented-access",
+          secretAccessKey: "invented-secret",
+          sessionToken: null,
+        },
+      },
+    ]);
+    expect(options[0]).toMatchObject({
+      endpoint: "https://state-bucket-example.us-east-1.example.org",
+      virtualHostedStyle: true,
+      sessionToken: "",
+      retry: 0,
+    });
+    const snapshot = await journal.inspect(before);
+    expect(snapshot).toEqual({ generation: previous, inputs, state: before });
+    const ticket = await journal.begin(snapshot, inputs, run, binding, "apply");
+    await journal.finish(ticket, after);
+    expect(await journal.inspect(after)).toEqual({
+      generation: ticket.generation,
+      inputs,
+      state: after,
+    });
+    const latest = objects.get(`${physicalPrefix}current`);
+    expect(latest).toBeDefined();
+    if (!latest) throw new Error("missing-invented-current-record");
+    expect(originalCodec.open("current", latest)).toEqual({
+      baseline: ticket.generation,
+      pending: null,
+    });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((path) => path.startsWith(physicalPrefix))).toBe(true);
+    expect(objects.has("tarubot/infra.tfstate")).toBe(false);
+  });
+  test("missing credentials or short passphrase stop before creating any native store", () => {
+    const directory = mkdtempSync(join(scratch, "invalid-"));
+    writeFileSync(join(directory, "backend.hcl"), backend, { mode: 0o600 });
+    let created = false;
+    for (const changed of [
+      { AWS_ACCESS_KEY_ID: "" },
+      { AWS_SECRET_ACCESS_KEY: "" },
+      { TF_VAR_state_passphrase: "short" },
+    ])
+      expect(() =>
+        infrastructureJournal(
+          directory,
+          { ...environment(), ...changed },
+          {
+            createStore() {
+              created = true;
+              throw new Error("unexpected-invented-storage-construction");
+            },
+          },
+        ),
+      ).toThrow("invalid-control-evidence");
+    expect(created).toBe(false);
   });
 });
 

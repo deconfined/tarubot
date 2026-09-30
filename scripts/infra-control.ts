@@ -115,15 +115,15 @@ export interface ControlStore {
 
 /** Authenticated encryption binds ciphertext to both backend and object path (no cross-key replay). */
 export class RecordCodec {
-  private readonly key: Buffer;
-  constructor(
-    passphrase: string,
-    private readonly backend: string,
-  ) {
+  // Derived key material and backend bindings must not become ordinary diagnostic properties.
+  readonly #key: Buffer;
+  readonly #backend: string;
+  constructor(passphrase: string, backend: string) {
     requireRecord(passphrase.length >= 32);
     digest(backend);
+    this.#backend = backend;
     // Separate the control-record key from native state encryption and handoff HMAC domains.
-    this.key = scryptSync(passphrase, `${domain}:${backend}`, 32, {
+    this.#key = scryptSync(passphrase, `${domain}:${backend}`, 32, {
       N: 32768,
       r: 8,
       p: 1,
@@ -134,8 +134,8 @@ export class RecordCodec {
     const plaintext = Buffer.from(canonical(value));
     requireRecord(plaintext.length <= limit);
     const nonce = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", this.key, nonce);
-    cipher.setAAD(Buffer.from(`${domain}:${this.backend}:${path}`));
+    const cipher = createCipheriv("aes-256-gcm", this.#key, nonce);
+    cipher.setAAD(Buffer.from(`${domain}:${this.#backend}:${path}`));
     return Buffer.concat([
       Buffer.from("TIC1"),
       nonce,
@@ -150,8 +150,8 @@ export class RecordCodec {
       requireRecord(
         data.length >= 32 && data.length <= limit + 32 && data.subarray(0, 4).toString() === "TIC1",
       );
-      const decipher = createDecipheriv("aes-256-gcm", this.key, data.subarray(4, 16));
-      decipher.setAAD(Buffer.from(`${domain}:${this.backend}:${path}`));
+      const decipher = createDecipheriv("aes-256-gcm", this.#key, data.subarray(4, 16));
+      decipher.setAAD(Buffer.from(`${domain}:${this.#backend}:${path}`));
       decipher.setAuthTag(data.subarray(-16));
       return JSON.parse(
         Buffer.concat([decipher.update(data.subarray(16, -16)), decipher.final()]).toString(),
@@ -164,24 +164,27 @@ export class RecordCodec {
 
 /** One shared workflow group must enclose read→begin→provider Apply→finish, including recovery. */
 export class InfrastructureJournal {
-  constructor(
-    private readonly store: ControlStore,
-    private readonly codec: RecordCodec,
-  ) {}
-  private async read(path: string): Promise<unknown | null> {
-    const bytes = await this.store.read(path);
-    return bytes === null ? null : this.codec.open(path, bytes);
+  // Trusted dependency capabilities remain caller-owned; instance shadows cannot replace them.
+  readonly #store: ControlStore;
+  readonly #codec: RecordCodec;
+  constructor(store: ControlStore, codec: RecordCodec) {
+    this.#store = store;
+    this.#codec = codec;
   }
-  private async persist(path: string, value: unknown, historical = false): Promise<void> {
+  async #read(path: string): Promise<unknown | null> {
+    const bytes = await this.#store.read(path);
+    return bytes === null ? null : this.#codec.open(path, bytes);
+  }
+  async #persist(path: string, value: unknown, historical = false): Promise<void> {
     // Refusing an existing history key is a safety check, NOT atomic conditional creation.
-    if (historical) requireRecord((await this.store.read(path)) === null);
-    const bytes = this.codec.seal(path, value);
-    await this.store.write(path, bytes);
-    const readback = await this.store.read(path);
+    if (historical) requireRecord((await this.#store.read(path)) === null);
+    const bytes = this.#codec.seal(path, value);
+    await this.#store.write(path, bytes);
+    const readback = await this.#store.read(path);
     requireRecord(readback !== null && Buffer.from(bytes).equals(Buffer.from(readback)));
   }
-  private async head(): Promise<Head | null> {
-    const value = await this.read("current");
+  async #head(): Promise<Head | null> {
+    const value = await this.#read("current");
     if (value === null) return null;
     const h = exact(value, ["baseline", "pending"]);
     if (h.baseline !== null) generation(h.baseline);
@@ -189,7 +192,7 @@ export class InfrastructureJournal {
     requireRecord(h.baseline !== null || h.pending !== null);
     return h as unknown as Head;
   }
-  private validateIntent(value: unknown): asserts value is Intent {
+  #validateIntent(value: unknown): asserts value is Intent {
     const i = exact(value, [
       "generation",
       "previous",
@@ -208,14 +211,14 @@ export class InfrastructureJournal {
     object(i.inputs);
     validateState(i.before);
   }
-  private async baseline(id: string): Promise<Baseline> {
-    const b = exact(await this.read(`baselines/${id}`), ["intent", "state"]);
-    this.validateIntent(b.intent);
+  async #baseline(id: string): Promise<Baseline> {
+    const b = exact(await this.#read(`baselines/${id}`), ["intent", "state"]);
+    this.#validateIntent(b.intent);
     validateState(b.state);
     requireRecord(b.intent.generation === id);
-    requireRecord(isDeepStrictEqual(await this.read(`intents/${id}`), b.intent));
+    requireRecord(isDeepStrictEqual(await this.#read(`intents/${id}`), b.intent));
     requireRecord(
-      isDeepStrictEqual(await this.read(`completed/${id}`), {
+      isDeepStrictEqual(await this.#read(`completed/${id}`), {
         generation: id,
         baseline: privateDigest(b),
       }),
@@ -225,10 +228,10 @@ export class InfrastructureJournal {
   /** Missing baseline is review-required; missing referenced history or any pending intent stops. */
   async inspect(state: StateEvidence): Promise<Snapshot> {
     validateState(state);
-    const head = await this.head();
+    const head = await this.#head();
     if (head === null) return { generation: null, state, inputs: null };
     requireRecord(head.pending === null && head.baseline !== null);
-    const baseline = await this.baseline(head.baseline);
+    const baseline = await this.#baseline(head.baseline);
     requireRecord(isDeepStrictEqual(baseline.state, state));
     return { generation: head.baseline, state, inputs: baseline.intent.inputs };
   }
@@ -255,21 +258,21 @@ export class InfrastructureJournal {
       inputs,
       before: snapshot.state,
     };
-    this.validateIntent(intent);
-    await this.persist(`intents/${intent.generation}`, intent, true);
+    this.#validateIntent(intent);
+    await this.#persist(`intents/${intent.generation}`, intent, true);
     // A crash after this reference is persisted requires owner reconciliation, even before Apply.
-    await this.persist("current", { baseline: snapshot.generation, pending: intent.generation });
+    await this.#persist("current", { baseline: snapshot.generation, pending: intent.generation });
     return { generation: intent.generation, binding };
   }
   async finish(ticket: Ticket, state: StateEvidence): Promise<void> {
     generation(ticket.generation);
     digest(ticket.binding);
     validateState(state);
-    const intent = await this.read(`intents/${ticket.generation}`);
-    this.validateIntent(intent);
+    const intent = await this.#read(`intents/${ticket.generation}`);
+    this.#validateIntent(intent);
     requireRecord(intent.binding === ticket.binding);
     requireRecord(
-      isDeepStrictEqual(await this.head(), {
+      isDeepStrictEqual(await this.#head(), {
         baseline: intent.previous,
         pending: intent.generation,
       }),
@@ -282,14 +285,14 @@ export class InfrastructureJournal {
         : state.serial > intent.before.serial,
     );
     const baseline: Baseline = { intent, state };
-    await this.persist(`baselines/${intent.generation}`, baseline, true);
-    await this.persist("current", { baseline: intent.generation, pending: intent.generation });
-    await this.persist(
+    await this.#persist(`baselines/${intent.generation}`, baseline, true);
+    await this.#persist("current", { baseline: intent.generation, pending: intent.generation });
+    await this.#persist(
       `completed/${intent.generation}`,
       { generation: intent.generation, baseline: privateDigest(baseline) },
       true,
     );
-    await this.persist("current", { baseline: intent.generation, pending: null });
+    await this.#persist("current", { baseline: intent.generation, pending: null });
     // Reopen all links, not merely the last write, before downstream use is permitted.
     await this.inspect(state);
   }

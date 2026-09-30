@@ -282,6 +282,23 @@ describe("locally verified wire evidence", () => {
 });
 
 describe("measured private native execution", () => {
+  test("diagnostics and external shadows cannot expose or replace the measured runtime and executor", async () => {
+    const f = fixture();
+    const validator = f.validator();
+    expect(Object.keys(validator)).toEqual([]);
+    expect(JSON.stringify(validator)).toBe("{}");
+    expect(Bun.inspect(validator)).not.toContain(f.directory);
+    expect(Reflect.get(validator, "options")).toBeUndefined();
+    expect(Reflect.get(validator, "run")).toBeUndefined();
+    Object.assign(validator, {
+      options: { helper: "other-helper", runtime: { directory: "other-runtime" } },
+      run: () => {
+        throw new Error("external-shadow-executor-used");
+      },
+    });
+    expect((await validator.validate(target, sshfp)).records).toEqual([sshfp]);
+    expect(f.calls).toHaveLength(1);
+  });
   test("the durable pin binds the runtime manifest before native execution", async () => {
     const f = fixture();
     await refusal(

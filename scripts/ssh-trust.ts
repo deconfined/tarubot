@@ -443,12 +443,14 @@ interface CompletedTrust {
  * Purpose/role/backend separation below additionally prevents cross-target ciphertext replay.
  */
 export class TrustJournal {
-  private readonly codec: RecordCodec;
-  private readonly target: TargetRole;
-  private readonly pin: ValidatorPin;
-  private readonly now: () => number;
+  // Runtime privacy keeps journal keys, target bindings and validators out of diagnostics.
+  readonly #codec: RecordCodec;
+  readonly #target: TargetRole;
+  readonly #pin: ValidatorPin;
+  readonly #now: () => number;
+  readonly #store: ControlStore;
   constructor(
-    private readonly store: ControlStore,
+    store: ControlStore,
     options: {
       target: TargetRole;
       backend: string;
@@ -457,24 +459,31 @@ export class TrustJournal {
       now?: () => number;
     },
   ) {
-    role(options.target);
-    fingerprint(options.backend);
-    requireTrust(typeof options.passphrase === "string" && options.passphrase.length >= 32);
-    this.target = options.target;
-    this.pin = validatorPin(options.validator);
-    this.now = options.now ?? Date.now;
-    this.codec = new RecordCodec(
-      options.passphrase,
-      privateDigest({
-        purpose: "tarubot-ssh-trust-v1",
-        target: options.target,
-        backend: options.backend,
-      }),
-    );
-  }
-  private time(): number {
     try {
-      const now = this.now();
+      this.#store = store;
+      const { now, ...configuration } = options;
+      const config = structuredClone(configuration);
+      role(config.target);
+      fingerprint(config.backend);
+      requireTrust(typeof config.passphrase === "string" && config.passphrase.length >= 32);
+      this.#target = config.target;
+      this.#pin = validatorPin(config.validator);
+      this.#now = now ?? Date.now;
+      this.#codec = new RecordCodec(
+        config.passphrase,
+        privateDigest({
+          purpose: "tarubot-ssh-trust-v1",
+          target: config.target,
+          backend: config.backend,
+        }),
+      );
+    } catch {
+      throw new Error("invalid-ssh-trust");
+    }
+  }
+  #time(): number {
+    try {
+      const now = this.#now();
       timestamp(now);
       return now;
     } catch {
@@ -482,91 +491,91 @@ export class TrustJournal {
     }
   }
   /** Approval stays live at mutation/return boundaries after asynchronous evidence reads. */
-  private authorizedNow(a: EnrollmentAuthorization): number {
-    const now = this.time();
-    requireTrust(a.target === this.target && a.approved_at <= now && now < a.expires_at);
+  #authorizedNow(a: EnrollmentAuthorization): number {
+    const now = this.#time();
+    requireTrust(a.target === this.#target && a.approved_at <= now && now < a.expires_at);
     return now;
   }
-  private path(path: string): string {
-    return `trust/${this.target}/${path}`;
+  #path(path: string): string {
+    return `trust/${this.#target}/${path}`;
   }
-  private async read(path: string): Promise<unknown | null> {
+  async #read(path: string): Promise<unknown | null> {
     try {
-      const bytes = await this.store.read(this.path(path));
-      return bytes === null ? null : this.codec.open(this.path(path), bytes);
+      const bytes = await this.#store.read(this.#path(path));
+      return bytes === null ? null : this.#codec.open(this.#path(path), bytes);
     } catch {
       throw new Error("invalid-ssh-trust");
     }
   }
-  private async persist(
+  async #persist(
     path: string,
     value: unknown,
     historical = false,
     requireFresh?: () => void,
   ): Promise<void> {
     try {
-      const key = this.path(path);
+      const key = this.#path(path);
       // This check is a convention under the repository writer group, not conditional storage.
-      if (historical) requireTrust((await this.store.read(key)) === null);
-      const bytes = this.codec.seal(key, value);
+      if (historical) requireTrust((await this.#store.read(key)) === null);
+      const bytes = this.#codec.seal(key, value);
       // A historical existence read and write acknowledgement may cross a freshness deadline.
       requireFresh?.();
-      await this.store.write(key, bytes);
-      const readback = await this.store.read(key);
+      await this.#store.write(key, bytes);
+      const readback = await this.#store.read(key);
       requireTrust(readback !== null && Buffer.from(bytes).equals(Buffer.from(readback)));
       requireFresh?.();
     } catch {
       throw new Error("invalid-ssh-trust");
     }
   }
-  private async head(): Promise<Head | null> {
-    const value = await this.read("current");
+  async #head(): Promise<Head | null> {
+    const value = await this.#read("current");
     if (value === null) return null;
     const h = exact(value, ["schema", "target", "generation", "pending"]);
-    requireTrust(h.schema === 1 && h.target === this.target);
+    requireTrust(h.schema === 1 && h.target === this.#target);
     if (h.generation !== null) generation(h.generation);
     if (h.pending !== null) generation(h.pending);
     requireTrust(h.generation !== null || h.pending !== null);
     return h as unknown as Head;
   }
-  private async authorization(id: string): Promise<EnrollmentAuthorization> {
+  async #authorization(id: string): Promise<EnrollmentAuthorization> {
     generation(id);
-    const a = enrollmentAuthorization(await this.read(`authorizations/${id}`));
-    requireTrust(a.target === this.target && a.generation === id);
+    const a = enrollmentAuthorization(await this.#read(`authorizations/${id}`));
+    requireTrust(a.target === this.#target && a.generation === id);
     return a;
   }
-  private async latestAuthorization(): Promise<EnrollmentAuthorization> {
-    const pointer = exact(await this.read("authorization-current"), [
+  async #latestAuthorization(): Promise<EnrollmentAuthorization> {
+    const pointer = exact(await this.#read("authorization-current"), [
       "schema",
       "target",
       "generation",
       "previous",
       "authorization_digest",
     ]);
-    requireTrust(pointer.schema === 1 && pointer.target === this.target);
+    requireTrust(pointer.schema === 1 && pointer.target === this.#target);
     generation(pointer.generation);
-    const a = await this.authorization(pointer.generation);
+    const a = await this.#authorization(pointer.generation);
     requireTrust(
       pointer.previous === a.previous && pointer.authorization_digest === privateDigest(a),
     );
     return a;
   }
-  private async registration(): Promise<Registration> {
-    const r = exact(await this.read("registration"), [
+  async #registration(): Promise<Registration> {
+    const r = exact(await this.#read("registration"), [
       "schema",
       "target",
       "generation",
       "authorization_digest",
     ]);
-    requireTrust(r.schema === 1 && r.target === this.target);
+    requireTrust(r.schema === 1 && r.target === this.#target);
     generation(r.generation);
-    const a = await this.authorization(r.generation);
+    const a = await this.#authorization(r.generation);
     requireTrust(
       a.kind === "initial" && a.previous === null && r.authorization_digest === privateDigest(a),
     );
     return r as unknown as Registration;
   }
-  private intent(value: unknown): Intent {
+  #intent(value: unknown): Intent {
     const i = exact(value, [
       "schema",
       "target",
@@ -577,14 +586,14 @@ export class TrustJournal {
       "previous",
       "started_at",
     ]);
-    requireTrust(i.schema === 1 && i.target === this.target);
+    requireTrust(i.schema === 1 && i.target === this.#target);
     generation(i.operation);
     const a = enrollmentAuthorization(i.authorization);
     const d = targetDescriptor(i.descriptor);
     runIdentity(i.enrollment_run);
     requireTrust(
-      a.target === this.target &&
-        d.target === this.target &&
+      a.target === this.#target &&
+        d.target === this.#target &&
         a.descriptor_digest === privateDigest(d),
     );
     timestamp(i.started_at);
@@ -597,24 +606,24 @@ export class TrustJournal {
     } else requireTrust(a.previous === null);
     return i as unknown as Intent;
   }
-  private async requireIntent(i: Intent): Promise<string> {
+  async #requireIntent(i: Intent): Promise<string> {
     requireTrust(
-      isDeepStrictEqual(await this.authorization(i.authorization.generation), i.authorization),
+      isDeepStrictEqual(await this.#authorization(i.authorization.generation), i.authorization),
     );
     const binding = privateDigest(i);
     requireTrust(
-      isDeepStrictEqual(await this.read(`attempts/${i.authorization.generation}`), {
+      isDeepStrictEqual(await this.#read(`attempts/${i.authorization.generation}`), {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: i.authorization.generation,
         operation: i.operation,
         binding,
       }),
     );
     requireTrust(
-      isDeepStrictEqual(await this.read(`consumed/${i.authorization.generation}`), {
+      isDeepStrictEqual(await this.#read(`consumed/${i.authorization.generation}`), {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: i.authorization.generation,
         operation: i.operation,
         binding,
@@ -622,7 +631,7 @@ export class TrustJournal {
     );
     return binding;
   }
-  private trustRecord(value: unknown, i: Intent, binding: string): TrustRecord {
+  #trustRecord(value: unknown, i: Intent, binding: string): TrustRecord {
     const t = exact(value, [
       "schema",
       "target",
@@ -637,7 +646,7 @@ export class TrustJournal {
     ]);
     requireTrust(
       t.schema === 1 &&
-        t.target === this.target &&
+        t.target === this.#target &&
         t.generation === i.authorization.generation &&
         t.operation === i.operation &&
         t.binding === binding,
@@ -654,27 +663,27 @@ export class TrustJournal {
     );
     return t as unknown as TrustRecord;
   }
-  private async storedTrust(id: string): Promise<{ record: TrustRecord; intent: Intent }> {
+  async #storedTrust(id: string): Promise<{ record: TrustRecord; intent: Intent }> {
     generation(id);
-    const ref = exact(await this.read(`references/${id}`), [
+    const ref = exact(await this.#read(`references/${id}`), [
       "schema",
       "target",
       "generation",
       "operation",
       "trust_digest",
     ]);
-    requireTrust(ref.schema === 1 && ref.target === this.target && ref.generation === id);
+    requireTrust(ref.schema === 1 && ref.target === this.#target && ref.generation === id);
     generation(ref.operation);
-    const i = this.intent(await this.read(`intents/${ref.operation}`));
+    const i = this.#intent(await this.#read(`intents/${ref.operation}`));
     requireTrust(i.operation === ref.operation && i.authorization.generation === id);
-    const binding = await this.requireIntent(i);
-    const record = this.trustRecord(await this.read(`records/${id}`), i, binding);
+    const binding = await this.#requireIntent(i);
+    const record = this.#trustRecord(await this.#read(`records/${id}`), i, binding);
     requireTrust(ref.trust_digest === privateDigest(record));
     return { record, intent: i };
   }
-  private request(record: TrustRecord, previous: SshfpRecord | null): PublicationRequest {
+  #request(record: TrustRecord, previous: SshfpRecord | null): PublicationRequest {
     return {
-      target: this.target,
+      target: this.#target,
       generation: record.generation,
       zone_id: record.descriptor.dns_zone_id,
       name: record.descriptor.fqdn,
@@ -684,11 +693,7 @@ export class TrustJournal {
       sshfp: record.sshfp,
     };
   }
-  private publication(
-    value: unknown,
-    record: TrustRecord,
-    previous: SshfpRecord | null,
-  ): Publication {
+  #publication(value: unknown, record: TrustRecord, previous: SshfpRecord | null): Publication {
     const p = exact(value, [
       "schema",
       "target",
@@ -698,8 +703,8 @@ export class TrustJournal {
       "dns",
       "verified_at",
     ]);
-    requireTrust(p.schema === 1 && p.target === this.target && p.operation === record.operation);
-    requireTrust(isDeepStrictEqual(p.request, this.request(record, previous)));
+    requireTrust(p.schema === 1 && p.target === this.#target && p.operation === record.operation);
+    requireTrust(isDeepStrictEqual(p.request, this.#request(record, previous)));
     const rr = sshfpRecord(p.record);
     requireTrust(
       rr.zone_id === record.descriptor.dns_zone_id &&
@@ -709,34 +714,34 @@ export class TrustJournal {
     if (previous) requireTrust(rr.id === previous.id);
     timestamp(p.verified_at);
     requireTrust(p.verified_at >= record.observations.observed_at);
-    dnssecEvidence(p.dns, rr.name, rr.sshfp, this.pin, p.verified_at);
+    dnssecEvidence(p.dns, rr.name, rr.sshfp, this.#pin, p.verified_at);
     return p as unknown as Publication;
   }
-  private async completed(id: string, depth = 0): Promise<CompletedTrust> {
+  async #completed(id: string, depth = 0): Promise<CompletedTrust> {
     // Bound corrupt/cyclic ancestry instead of recursively trusting a newest-generation pointer.
     requireTrust(depth < 64);
-    const { record, intent } = await this.storedTrust(id);
+    const { record, intent } = await this.#storedTrust(id);
     let previous: CompletedTrust | null = null;
     if (intent.previous !== null) {
-      previous = await this.completed(intent.previous.generation, depth + 1);
+      previous = await this.#completed(intent.previous.generation, depth + 1);
       requireTrust(intent.previous.trust_digest === privateDigest(previous.record));
       requireTrust(
         previous.record.descriptor.fqdn === record.descriptor.fqdn &&
           previous.record.descriptor.dns_zone_id === record.descriptor.dns_zone_id,
       );
-    } else requireTrust((await this.registration()).generation === id);
-    const publication = this.publication(
-      await this.read(`publications/${record.operation}`),
+    } else requireTrust((await this.#registration()).generation === id);
+    const publication = this.#publication(
+      await this.#read(`publications/${record.operation}`),
       record,
       previous?.publication.record ?? null,
     );
     requireTrust(
       isDeepStrictEqual(
-        await this.read(`publication-intents/${record.operation}`),
+        await this.#read(`publication-intents/${record.operation}`),
         publication.request,
       ),
     );
-    const done = exact(await this.read(`completed/${id}`), [
+    const done = exact(await this.#read(`completed/${id}`), [
       "schema",
       "target",
       "generation",
@@ -748,7 +753,7 @@ export class TrustJournal {
     ]);
     requireTrust(
       done.schema === 1 &&
-        done.target === this.target &&
+        done.target === this.#target &&
         done.generation === id &&
         done.operation === record.operation &&
         done.binding === record.binding &&
@@ -761,71 +766,71 @@ export class TrustJournal {
       publication.dns,
       record.descriptor.fqdn,
       record.sshfp,
-      this.pin,
+      this.#pin,
       done.finished_at,
     );
     return { record, publication, intent };
   }
-  private async current(): Promise<CompletedTrust> {
-    const registration = await this.registration();
-    const head = await this.head();
+  async #current(): Promise<CompletedTrust> {
+    const registration = await this.#registration();
+    const head = await this.#head();
     requireTrust(head !== null && head.pending === null && head.generation !== null);
-    const a = await this.latestAuthorization();
-    const consumed = await this.read(`consumed/${a.generation}`);
-    const attempt = await this.read(`attempts/${a.generation}`);
+    const a = await this.#latestAuthorization();
+    const consumed = await this.#read(`consumed/${a.generation}`);
+    const attempt = await this.#read(`attempts/${a.generation}`);
     // Consumption before pending publication is also an interrupted operation, never an empty role.
     requireTrust(
       consumed === null
         ? attempt === null && a.previous === head.generation
         : a.generation === head.generation,
     );
-    const current = await this.completed(head.generation);
+    const current = await this.#completed(head.generation);
     requireTrust(registration.target === current.record.target);
     return current;
   }
   /** Owner-fenced setup only. This API cannot establish approval from a flag, a missing record or a caller claim. */
   async recordAuthorization(value: unknown): Promise<void> {
     const a = enrollmentAuthorization(value);
-    const now = this.time();
-    requireTrust(a.target === this.target && a.approved_at <= now && now < a.expires_at);
+    const now = this.#time();
+    requireTrust(a.target === this.#target && a.approved_at <= now && now < a.expires_at);
     if (a.kind === "initial") {
       requireTrust(
-        (await this.head()) === null &&
-          (await this.read("registration")) === null &&
-          (await this.read("authorization-current")) === null,
+        (await this.#head()) === null &&
+          (await this.#read("registration")) === null &&
+          (await this.#read("authorization-current")) === null,
       );
-      requireTrust((await this.read(`consumed/${a.generation}`)) === null);
+      requireTrust((await this.#read(`consumed/${a.generation}`)) === null);
     } else {
-      const current = await this.current();
+      const current = await this.#current();
       requireTrust(current.record.generation === a.previous);
     }
-    await this.persist(`authorizations/${a.generation}`, a, true);
+    await this.#persist(`authorizations/${a.generation}`, a, true);
     if (a.kind === "initial")
-      await this.persist(
+      await this.#persist(
         "registration",
         {
           schema: 1,
-          target: this.target,
+          target: this.#target,
           generation: a.generation,
           authorization_digest: privateDigest(a),
         },
         true,
       );
-    await this.persist("authorization-current", {
+    await this.#persist("authorization-current", {
       schema: 1,
-      target: this.target,
+      target: this.#target,
       generation: a.generation,
       previous: a.previous,
       authorization_digest: privateDigest(a),
     });
-    requireTrust(isDeepStrictEqual(await this.latestAuthorization(), a));
-    await this.registration();
+    requireTrust(isDeepStrictEqual(await this.#latestAuthorization(), a));
+    await this.#registration();
   }
   /** An absent current record is always a refusal here, including before authorized initial enrollment. */
   async inspect(value: unknown): Promise<TrustSnapshot> {
     const d = targetDescriptor(value);
-    requireTrust(d.target === this.target);
-    const { record, publication } = await this.current();
+    requireTrust(d.target === this.#target);
+    const { record, publication } = await this.#current();
     requireTrust(instanceBinding(record.descriptor) === instanceBinding(d));
     return structuredClone({
       generation: record.generation,
@@ -846,23 +851,23 @@ export class TrustJournal {
     const a = enrollmentAuthorization(authorization);
     const d = targetDescriptor(descriptor);
     const enrollment_run = structuredClone(runIdentity(enrollmentRun));
-    const now = this.time();
+    const now = this.#time();
     requireTrust(
-      a.target === this.target &&
-        d.target === this.target &&
+      a.target === this.#target &&
+        d.target === this.#target &&
         a.descriptor_digest === privateDigest(d) &&
         a.approved_at <= now &&
         now < a.expires_at,
     );
-    requireTrust(isDeepStrictEqual(await this.latestAuthorization(), a));
-    const registration = await this.registration();
-    requireTrust((await this.read(`attempts/${a.generation}`)) === null);
-    requireTrust((await this.read(`consumed/${a.generation}`)) === null);
+    requireTrust(isDeepStrictEqual(await this.#latestAuthorization(), a));
+    const registration = await this.#registration();
+    requireTrust((await this.#read(`attempts/${a.generation}`)) === null);
+    requireTrust((await this.#read(`consumed/${a.generation}`)) === null);
     let previous: Intent["previous"] = null;
     if (a.kind === "initial")
-      requireTrust(registration.generation === a.generation && (await this.head()) === null);
+      requireTrust(registration.generation === a.generation && (await this.#head()) === null);
     else {
-      const current = await this.current();
+      const current = await this.#current();
       requireTrust(
         current.record.generation === a.previous &&
           current.record.descriptor.fqdn === d.fqdn &&
@@ -875,7 +880,7 @@ export class TrustJournal {
     }
     const intent: Intent = {
       schema: 1,
-      target: this.target,
+      target: this.#target,
       operation: randomUUID(),
       authorization: a,
       descriptor: d,
@@ -886,57 +891,57 @@ export class TrustJournal {
     const binding = privateDigest(intent);
     // Reserve the permanent link first: even a failed intent acknowledgement leaves indexed work.
     // It also prevents recreating an observed attempt if its consumed/head link is later lost.
-    await this.persist(
+    await this.#persist(
       `attempts/${a.generation}`,
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: a.generation,
         operation: intent.operation,
         binding,
       },
       true,
     );
-    await this.persist(`intents/${intent.operation}`, intent, true);
-    await this.persist(
+    await this.#persist(`intents/${intent.operation}`, intent, true);
+    await this.#persist(
       `consumed/${a.generation}`,
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: a.generation,
         operation: intent.operation,
         binding,
       },
       true,
     );
-    await this.persist("current", {
+    await this.#persist("current", {
       schema: 1,
-      target: this.target,
+      target: this.#target,
       generation: a.previous,
       pending: intent.operation,
     });
     let observations: ScanEvidence;
     try {
       // Durable consumption may outlast the grant; it cannot authorize a late first scan.
-      this.authorizedNow(a);
+      this.#authorizedNow(a);
       observations = structuredClone(await observe());
-      this.authorizedNow(a);
+      this.#authorizedNow(a);
     } catch {
       throw new Error("invalid-ssh-trust");
     }
-    const key = canonicalEd25519(observedKey(observations, d, this.time()));
-    await this.requireIntent(intent);
+    const key = canonicalEd25519(observedKey(observations, d, this.#time()));
+    await this.#requireIntent(intent);
     requireTrust(
-      isDeepStrictEqual(await this.head(), {
+      isDeepStrictEqual(await this.#head(), {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: a.previous,
         pending: intent.operation,
       }),
     );
     const record: TrustRecord = {
       schema: 1,
-      target: this.target,
+      target: this.#target,
       generation: a.generation,
       operation: intent.operation,
       binding,
@@ -946,55 +951,55 @@ export class TrustJournal {
       sshfp: key.sshfp,
       observations,
     };
-    this.trustRecord(record, intent, binding);
-    await this.persist(`records/${a.generation}`, record, true);
-    await this.persist(
+    this.#trustRecord(record, intent, binding);
+    await this.#persist(`records/${a.generation}`, record, true);
+    await this.#persist(
       `references/${a.generation}`,
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: a.generation,
         operation: intent.operation,
         trust_digest: privateDigest(record),
       },
       true,
     );
-    await this.persist("current", {
+    await this.#persist("current", {
       schema: 1,
-      target: this.target,
+      target: this.#target,
       generation: a.generation,
       pending: intent.operation,
     });
     const ticket = { operation: intent.operation, generation: a.generation, binding };
-    await this.active(ticket);
+    await this.#active(ticket);
     return ticket;
   }
-  private async active(
+  async #active(
     value: unknown,
   ): Promise<{ record: TrustRecord; intent: Intent; previous: SshfpRecord | null }> {
     const ticket = exact(value, ["operation", "generation", "binding"]);
     generation(ticket.operation);
     generation(ticket.generation);
     fingerprint(ticket.binding);
-    const registration = await this.registration();
-    const a = await this.latestAuthorization();
+    const registration = await this.#registration();
+    const a = await this.#latestAuthorization();
     requireTrust(a.generation === ticket.generation);
-    this.authorizedNow(a);
+    this.#authorizedNow(a);
     requireTrust(
-      isDeepStrictEqual(await this.head(), {
+      isDeepStrictEqual(await this.#head(), {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: ticket.generation,
         pending: ticket.operation,
       }),
     );
-    const { record, intent } = await this.storedTrust(ticket.generation);
+    const { record, intent } = await this.#storedTrust(ticket.generation);
     if (intent.previous === null) requireTrust(registration.generation === record.generation);
     requireTrust(record.operation === ticket.operation && record.binding === ticket.binding);
     const previous =
-      intent.previous === null ? null : await this.completed(intent.previous.generation);
+      intent.previous === null ? null : await this.#completed(intent.previous.generation);
     if (previous) requireTrust(intent.previous?.trust_digest === privateDigest(previous.record));
-    this.authorizedNow(a);
+    this.#authorizedNow(a);
     return { record, intent, previous: previous?.publication.record ?? null };
   }
   /** Persist exact DNS intent before the sole owned-record writer; interrupted publication never retries. */
@@ -1003,9 +1008,9 @@ export class TrustJournal {
     writer: DnsWriter,
     validate: (request: PublicationRequest) => Promise<DnssecEvidence>,
   ): Promise<void> {
-    const { record, intent, previous } = await this.active(ticket);
-    const request = this.request(record, previous);
-    requireTrust((await this.read(`publication-intents/${ticket.operation}`)) === null);
+    const { record, intent, previous } = await this.#active(ticket);
+    const request = this.#request(record, previous);
+    requireTrust((await this.#read(`publication-intents/${ticket.operation}`)) === null);
     let before: SshfpRecord[];
     try {
       before = structuredClone(await writer.read(structuredClone(request)));
@@ -1014,15 +1019,15 @@ export class TrustJournal {
     }
     requireTrust(Array.isArray(before));
     requireTrust(isDeepStrictEqual(before.map(sshfpRecord), previous === null ? [] : [previous]));
-    await this.persist(`publication-intents/${ticket.operation}`, request, true, () => {
-      this.authorizedNow(intent.authorization);
+    await this.#persist(`publication-intents/${ticket.operation}`, request, true, () => {
+      this.#authorizedNow(intent.authorization);
     });
-    await this.active(ticket);
+    await this.#active(ticket);
     let returned: SshfpRecord;
     let readback: SshfpRecord[];
     let dns: DnssecEvidence;
     try {
-      this.authorizedNow(intent.authorization);
+      this.#authorizedNow(intent.authorization);
       returned = sshfpRecord(await writer.write(structuredClone(request)));
       readback = structuredClone(await writer.read(structuredClone(request)));
       dns = structuredClone(await validate(structuredClone(request)));
@@ -1032,23 +1037,23 @@ export class TrustJournal {
     requireTrust(
       Array.isArray(readback) && isDeepStrictEqual(readback.map(sshfpRecord), [returned]),
     );
-    const publication = this.publication(
+    const publication = this.#publication(
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         operation: ticket.operation,
         request,
         record: returned,
         dns,
-        verified_at: this.time(),
+        verified_at: this.#time(),
       },
       record,
       previous,
     );
-    await this.active(ticket);
-    await this.persist(`publications/${ticket.operation}`, publication, true, () => {
-      const now = this.authorizedNow(intent.authorization);
-      dnssecEvidence(publication.dns, record.descriptor.fqdn, record.sshfp, this.pin, now);
+    await this.#active(ticket);
+    await this.#persist(`publications/${ticket.operation}`, publication, true, () => {
+      const now = this.#authorizedNow(intent.authorization);
+      dnssecEvidence(publication.dns, record.descriptor.fqdn, record.sshfp, this.#pin, now);
     });
   }
   /**
@@ -1057,29 +1062,29 @@ export class TrustJournal {
    * Connections therefore also require independent successful evidence for enrollment_run.
    */
   async finish(ticket: TrustTicket): Promise<void> {
-    const { record, intent, previous } = await this.active(ticket);
-    const publication = this.publication(
-      await this.read(`publications/${ticket.operation}`),
+    const { record, intent, previous } = await this.#active(ticket);
+    const publication = this.#publication(
+      await this.#read(`publications/${ticket.operation}`),
       record,
       previous,
     );
     requireTrust(
       isDeepStrictEqual(
-        await this.read(`publication-intents/${ticket.operation}`),
+        await this.#read(`publication-intents/${ticket.operation}`),
         publication.request,
       ),
     );
     const requireFresh = (): number => {
-      const now = this.authorizedNow(intent.authorization);
-      dnssecEvidence(publication.dns, record.descriptor.fqdn, record.sshfp, this.pin, now);
+      const now = this.#authorizedNow(intent.authorization);
+      dnssecEvidence(publication.dns, record.descriptor.fqdn, record.sshfp, this.#pin, now);
       return now;
     };
     const now = requireFresh();
-    await this.persist(
+    await this.#persist(
       `completed/${record.generation}`,
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: record.generation,
         operation: record.operation,
         binding: record.binding,
@@ -1090,11 +1095,11 @@ export class TrustJournal {
       true,
       requireFresh,
     );
-    await this.persist(
+    await this.#persist(
       "current",
       {
         schema: 1,
-        target: this.target,
+        target: this.#target,
         generation: record.generation,
         pending: null,
       },
@@ -1130,12 +1135,12 @@ export class TrustJournal {
       value,
       snapshot.descriptor.fqdn,
       snapshot.sshfp,
-      this.pin,
-      this.time(),
+      this.#pin,
+      this.#time(),
     );
     requireTrust(isDeepStrictEqual(await this.inspect(descriptor), snapshot));
     // Reopening the durable chain can outlast a short DNS TTL; return only still-live evidence.
-    dnssecEvidence(dns, snapshot.descriptor.fqdn, snapshot.sshfp, this.pin, this.time());
+    dnssecEvidence(dns, snapshot.descriptor.fqdn, snapshot.sshfp, this.#pin, this.#time());
     return { ...snapshot, expires_at: dns.expires_at };
   }
 }

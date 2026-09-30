@@ -398,6 +398,88 @@ async function refusal(action: Promise<unknown>) {
 }
 
 describe("owner-fenced completed-history restoration", () => {
+  test("diagnostics hide passphrases and external shadows cannot replace history or owner fences", async () => {
+    const f = await infraFixture();
+    const shadowStore = new Versions();
+    expect(Object.keys(f.recovery)).toEqual([]);
+    expect(JSON.stringify(f.recovery)).toBe("{}");
+    for (const diagnostic of [JSON.stringify(f.recovery), Bun.inspect(f.recovery)]) {
+      expect(diagnostic).not.toContain(passphrase);
+      expect(diagnostic).not.toContain(backend);
+      expect(diagnostic).not.toContain(namespace("infra"));
+    }
+    for (const name of [
+      "codec",
+      "repairCodec",
+      "clock",
+      "options",
+      "store",
+      "owner",
+      "fence",
+      "bound",
+    ])
+      expect(Reflect.get(f.recovery, name)).toBeUndefined();
+    Object.assign(f.recovery, {
+      store: shadowStore,
+      codec: new RecordCodec(`${passphrase}-shadow`, "f".repeat(64)),
+      repairCodec: new RecordCodec(`${passphrase}-shadow`, "e".repeat(64)),
+      options: {
+        target: "production",
+        backend: "e".repeat(64),
+        namespace: "other/",
+        passphrase: "short",
+      },
+      clock: () => 0,
+      owner: {
+        confirmRecoveryRun: async () => ({ conclusion: "success" }),
+      },
+      fence: async () => ({}),
+      bound: () => {},
+      fresh: () => {},
+    });
+    await f.recovery.restore(f.a, f.manifest, f.outcome);
+    expect((await f.journal.inspect(f.evidence)).generation).toBe(f.a.desired_generation);
+    await refusal(f.recovery.guardConsumer(f.a.generation));
+    f.flags.succeeded = true;
+    await f.recovery.guardConsumer(f.a.generation);
+    expect(shadowStore.writes).toEqual([]);
+  });
+  test("plain constructor authority is captured once and accessor failures stay redacted", async () => {
+    const f = await infraFixture();
+    let accesses = 0;
+    const recovery = new ControlRecovery(
+      f.store,
+      {
+        get target(): "infra" {
+          accesses++;
+          return accesses === 1 ? "infra" : ("production" as "infra");
+        },
+        backend,
+        namespace: namespace("infra"),
+        passphrase,
+        now: () => instant,
+      },
+      f.owner,
+    );
+    await recovery.restore(f.a, f.manifest, f.outcome);
+    expect(accesses).toBe(1);
+    expect((await f.journal.inspect(f.evidence)).generation).toBe(f.a.desired_generation);
+    expect(
+      () =>
+        new ControlRecovery(
+          f.store,
+          {
+            target: "infra",
+            backend,
+            namespace: namespace("infra"),
+            get passphrase(): string {
+              throw new Error("invented-private-accessor-diagnostic");
+            },
+          },
+          f.owner,
+        ),
+    ).toThrow("invalid-control-recovery");
+  });
   test("same-key encrypted versions restore a verified baseline; the mandatory reader guard waits for run success", async () => {
     const f = await infraFixture();
     await refusal(f.recovery.guardConsumer(f.a.generation));

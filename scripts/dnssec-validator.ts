@@ -230,13 +230,15 @@ export function rejectAmbientLoaderPreload(inspect: (path: string) => unknown = 
 }
 
 export class LocalDnssecValidator {
-  private readonly options: {
+  // Paths, durable pins and the trusted executor remain runtime-private authority inputs.
+  readonly #options: {
     helper: string;
     anchors: string;
     pin: ValidatorPin;
     runtime: { directory: string; manifest_sha256: string };
     now: () => number;
   };
+  readonly #run: ValidatorExecutor;
   constructor(
     options: {
       helper: string;
@@ -245,19 +247,22 @@ export class LocalDnssecValidator {
       runtime: { directory: string; manifest_sha256: string };
       now?: () => number;
     },
-    private readonly run: ValidatorExecutor = execute,
+    run: ValidatorExecutor = execute,
   ) {
-    this.options = {
-      ...structuredClone({ ...options, now: undefined }),
-      now: options.now ?? Date.now,
-    };
+    try {
+      const { now, ...configuration } = options;
+      this.#options = { ...structuredClone(configuration), now: now ?? Date.now };
+      this.#run = run;
+    } catch {
+      throw new Error("invalid-local-dnssec");
+    }
   }
   /** Every invocation copies and rehashes the entire reviewed closure into a private fresh cwd. */
   async validate(descriptor: TargetDescriptor, expected: Sshfp): Promise<DnssecEvidence> {
     let working: string | undefined;
     try {
       const d = targetDescriptor(descriptor);
-      const o = this.options;
+      const o = this.#options;
       const p = exact(o.pin, [
         "name",
         "version",
@@ -374,7 +379,7 @@ export class LocalDnssecValidator {
       const started = o.now();
       time(started);
       rejectAmbientLoaderPreload();
-      const result = this.run({
+      const result = this.#run({
         argv: [
           join(working, "lib", raw.loader as string),
           "--inhibit-cache",

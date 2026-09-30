@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.9**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.10**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.10 — Scoped provider and control-record adapters
+
+- Add bounded read-only instance verification and a target-scoped SSHFP writer that requires a fresh authorization callback immediately before mutation. Preserve unrelated algorithms and refuse conflicting records, uncertain responses and automatic retries.
+- Add explicit scoped native S3 stores for infrastructure and each target's trust/recovery records. Verify bucket-qualified routing and authorized credentials locally before each operation, refuse ambient session-token fallback and cap streamed objects. Preserve the existing infrastructure encryption identity and record namespace; keep credentials, derived keys and journal authority in runtime-private fields and snapshot caller inputs before validation.
+- Derive minimized applied-host descriptors only from complete linked infrastructure evidence, stable state readbacks and authenticated previous applied inputs. Bind the current release producer separately from a historical completed baseline; encrypted transport, protected enrollment and activation remain pending.
 
 ## 2.36.9 — Trust transport and completed-history recovery
 

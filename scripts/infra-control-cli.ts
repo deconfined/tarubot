@@ -1,6 +1,7 @@
 /** Private infrastructure phase adapter. Never expose S3 exceptions, records, paths or hashes. */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createControlStorage, type ControlStorageConfig } from "./control-storage.js";
 import { handoffBinding, classifyPlan } from "./infra-policy.js";
 import {
   guardDatabaseClusters,
@@ -24,7 +25,7 @@ function fail(): never {
   throw new Error("invalid-control-evidence");
 }
 
-/** Native Bun S3 keeps Actions dependency-free. There are no conditional writes or lock objects. */
+/** Legacy injected lab transport; the runner factory below uses the scoped, guarded native store. */
 export class S3ControlStore implements ControlStore {
   constructor(private readonly client: Pick<Bun.S3Client, "file" | "write">) {}
   async read(key: string): Promise<Uint8Array | null> {
@@ -52,6 +53,10 @@ export class S3ControlStore implements ControlStore {
 export function infrastructureJournal(
   directory: string,
   environment: NodeJS.ProcessEnv,
+  dependencies: {
+    /** Internal invented-test seam, never a CLI/environment-selected transport override. */
+    createStore?: (configuration: ControlStorageConfig) => ControlStore;
+  } = {},
 ): InfrastructureJournal {
   const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
   const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
@@ -67,20 +72,20 @@ export function infrastructureJournal(
     passphrase.length < 32
   )
     fail();
+  // Preserve the exact historical encryption identity; qualified S3 routing does not rekey records.
   const identity = privateDigest({ backend, key: backendKey });
-  const client = new Bun.S3Client({
+  const store = (dependencies.createStore ?? createControlStorage)({
+    scope: "infra",
     bucket,
     endpoint,
     region: "us-east-1",
-    virtualHostedStyle: true,
-    retry: 0,
-    accessKeyId: environment.AWS_ACCESS_KEY_ID,
-    secretAccessKey: environment.AWS_SECRET_ACCESS_KEY,
+    credentials: {
+      accessKeyId: environment.AWS_ACCESS_KEY_ID,
+      secretAccessKey: environment.AWS_SECRET_ACCESS_KEY,
+      sessionToken: null,
+    },
   });
-  return new InfrastructureJournal(
-    new S3ControlStore(client),
-    new RecordCodec(passphrase, identity),
-  );
+  return new InfrastructureJournal(store, new RecordCodec(passphrase, identity));
 }
 
 /** All evidence lives under RUNNER_TEMP/tofu with umask 077, never in an Actions output/artifact. */
