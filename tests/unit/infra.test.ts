@@ -13,8 +13,8 @@
  *   (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)", confirmed item 4), first attempts
  *   only, least permissions, one concurrency group that queues every waiting run, pinned actions,
  *   every ${{ }} through env:, each secret in the steps that need it, and the phases each job runs.
- *   No job checks the environments' own rules: they are the owner's settings, read back once when
- *   made (REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)").
+ *   Execution gates stay owner settings. Enabled journal access separately reopens independently
+ *   owner-administered control configuration with a dedicated read-only credential.
  * - The hand-off: Plan plans without a state lock and keeps its encrypted saved plan as a one-day
  *   artifact only for an apply that passed the guards; Apply never plans, refuses a file whose
  *   SHA-256 or change list differs from the Plan job's, or that was planned with other values than
@@ -146,12 +146,23 @@ const SHARED: [string, string | null][] = [
 ];
 /** The saved plan's artifact, which only the Plan job uploads and only the Apply job downloads. */
 const ARTIFACT = "saved-plan";
-/** The four secrets both environments hold under the same name; every other one is READ or WRITE. */
+/** Independent owner evidence is private even when its IDs are otherwise public metadata. */
+const OWNER_SECRETS = [
+  "CONTROL_OWNER_ID",
+  "CONTROL_REPOSITORY_ID",
+  "CONTROL_OWNER_ENVIRONMENT_ID",
+  "CONTROL_OWNER_READ_TOKEN",
+];
+const ownerInputs = Object.fromEntries(
+  OWNER_SECRETS.map((name) => [name, expr(`secrets.${name}`)]),
+);
+/** Shared backend inputs and independent owner reader; provider/storage secrets stay READ/WRITE. */
 const SHARED_SECRETS = [
   "TOFU_STATE_BUCKET",
   "TOFU_STATE_ENDPOINT",
   "TOFU_STATE_PASSPHRASE",
   "TOFU_VARS",
+  ...OWNER_SECRETS,
 ];
 /** Every secrets.NAME a job's steps read, sorted and unique. */
 const secretsOfJob = (j: Job) =>
@@ -292,12 +303,13 @@ describe("infra.yml's shape", () => {
         "TOFU_STATE_WRITE_SECRET_KEY",
       ].sort(),
     );
-    // Every name but the four shared ones says which kind it is, and no job reads the other kind.
+    // Provider/storage names identify their role; the independent owner reader is shared.
     for (const name of [...planSecrets, ...applySecrets].filter((n) => !SHARED_SECRETS.includes(n)))
       expect({ name, kind: /_(READ|WRITE)_/u.test(name) }).toEqual({ name, kind: true });
     expect(planSecrets.filter((n) => n.includes("_WRITE_"))).toEqual([]);
     expect(applySecrets.filter((n) => n.includes("_READ_"))).toEqual([
       "CLOUDFLARE_READ_TOKEN",
+      "CONTROL_OWNER_READ_TOKEN",
       "LINODE_READ_TOKEN",
     ]);
     // Each job maps them onto the variables OpenTofu reads, the same names in both.
@@ -309,9 +321,10 @@ describe("infra.yml's shape", () => {
       CLOUDFLARE_API_TOKEN: expr(`secrets.CLOUDFLARE_${kind}_TOKEN`),
     });
     expect(stepOf(plan, "Plan").env).toEqual(tools("READ"));
-    expect(stepOf(apply, "Apply").env).toEqual(tools("WRITE"));
+    expect(stepOf(apply, "Apply").env).toEqual({ ...tools("WRITE"), ...ownerInputs });
     expect(stepOf(apply, "Verify adoption with read-only provider credentials").env).toEqual({
       ...tools("WRITE"),
+      ...ownerInputs,
       LINODE_TOKEN: expr("secrets.LINODE_READ_TOKEN"),
       CLOUDFLARE_API_TOKEN: expr("secrets.CLOUDFLARE_READ_TOKEN"),
     });
@@ -400,7 +413,7 @@ describe("infra.yml's shape", () => {
         {
           "Prepare the values and the masks": prepare,
           "Initialize OpenTofu": init("READ"),
-          "Read durable control records": init("READ"),
+          "Read durable control records": [...init("READ"), ...OWNER_SECRETS].sort(),
           Plan: tokens("READ"),
           "Summarize the plan": ["TOFU_STATE_PASSPHRASE"],
         },
@@ -410,15 +423,19 @@ describe("infra.yml's shape", () => {
         {
           "Prepare the values and the masks": prepare,
           "Initialize OpenTofu": init("WRITE"),
-          "Read durable control records": init("WRITE"),
+          "Read durable control records": [...init("WRITE"), ...OWNER_SECRETS].sort(),
           "Compare with the reviewed plan": ["TOFU_STATE_PASSPHRASE"],
-          Apply: tokens("WRITE"),
+          Apply: [...tokens("WRITE"), ...OWNER_SECRETS].sort(),
           "Verify adoption with read-only provider credentials": [
             "CLOUDFLARE_READ_TOKEN",
             "LINODE_READ_TOKEN",
             ...init("WRITE"),
+            ...OWNER_SECRETS,
           ].sort(),
-          "Establish initial baseline without provider changes": init("WRITE"),
+          "Establish initial baseline without provider changes": [
+            ...init("WRITE"),
+            ...OWNER_SECRETS,
+          ].sort(),
         },
       ],
     ];
@@ -458,6 +475,71 @@ describe("infra.yml's shape", () => {
     // GitHub prints a step's env: values in the clear before it runs, so the replace input, which
     // a mistyped host name could fill, never goes there: prepare reads it from the event payload.
     expect(infraText).not.toContain(expr("inputs.replace"));
+  });
+
+  test("all seven journal entry points receive only masked independent owner configuration", () => {
+    // Numeric owner IDs must never move to unmasked vars or public job outputs. Each execution
+    // scope pins the same independent control-infra environment, not its own approval-gate ID.
+    const shape = z
+      .object({
+        env: z.record(z.string(), z.string()).optional(),
+        jobs: z.record(
+          z.string(),
+          z
+            .object({
+              env: z.record(z.string(), z.string()).optional(),
+              steps: z
+                .array(
+                  z
+                    .object({
+                      name: z.string().optional(),
+                      env: z.record(z.string(), z.string()).optional(),
+                    })
+                    .passthrough(),
+                )
+                .optional(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough();
+    const scopes: [string, Record<string, string[]>][] = [
+      [
+        "infra",
+        {
+          plan: ["Read durable control records"],
+          apply: [
+            "Read durable control records",
+            "Apply",
+            "Verify adoption with read-only provider credentials",
+            "Establish initial baseline without provider changes",
+          ],
+        },
+      ],
+      [
+        "release-infra",
+        {
+          plan: ["Plan and require automatic policy"],
+          apply: ["Recheck policy and apply exact saved plan"],
+        },
+      ],
+    ];
+    for (const [file, allowed] of scopes) {
+      const data = shape.parse(YAML.parse(read(`.github/workflows/${file}.yml`)));
+      const privateFields = (env: Record<string, string> = {}) =>
+        Object.fromEntries(Object.entries(env).filter(([name]) => OWNER_SECRETS.includes(name)));
+      expect(privateFields(data.env)).toEqual({});
+      for (const [name, j] of Object.entries(data.jobs)) {
+        expect(privateFields(j.env)).toEqual({});
+        const supplied: string[] = [];
+        for (const s of j.steps ?? []) {
+          const expected = allowed[name]?.includes(s.name ?? "") ?? false;
+          expect(privateFields(s.env)).toEqual(expected ? ownerInputs : {});
+          if (expected) supplied.push(s.name ?? "");
+        }
+        expect(supplied).toEqual(allowed[name] ?? []);
+      }
+    }
   });
 
   test("only the encrypted saved plan leaves the Plan job, for an apply that passed the guards, for one day", () => {

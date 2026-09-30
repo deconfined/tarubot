@@ -16,8 +16,8 @@ import {
   infrastructureJournal,
   S3ControlStore,
 } from "../../scripts/infra-control-cli.js";
-import { createControlStorage, type ControlStorageConfig } from "../../scripts/control-storage.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
+import type { GitHubReadRequest } from "../../scripts/trust-run.js";
 
 const passphrase = "invented control-record passphrase with sufficient entropy";
 const codec = new RecordCodec(passphrase, "a".repeat(64));
@@ -515,6 +515,10 @@ describe("scoped infrastructure journal factory", () => {
     AWS_SESSION_TOKEN: "invented-unapproved-session",
     S3_SESSION_TOKEN: "invented-other-unapproved-session",
     TF_VAR_state_passphrase: passphrase,
+    CONTROL_OWNER_ID: "123456",
+    CONTROL_REPOSITORY_ID: "234567",
+    CONTROL_OWNER_ENVIRONMENT_ID: "1010",
+    CONTROL_OWNER_READ_TOKEN: "invented_owner_read_token_1234567890",
   });
   test("reopens historical raw-backend ciphertext and writes the same namespace through the scoped store", async () => {
     const directory = mkdtempSync(join(scratch, "compatible-"));
@@ -543,69 +547,92 @@ describe("scoped infrastructure journal factory", () => {
       [`completed/${previous}`, { generation: previous, baseline: privateDigest(baseline) }],
     ] as const)
       objects.set(physicalPrefix + path, originalCodec.seal(path, value));
-    const captures: ControlStorageConfig[] = [];
     const options: Bun.S3Options[] = [];
     const calls: string[] = [];
+    const requests: GitHubReadRequest[] = [];
+    const api = "https://api.github.com/repos/deconfined/tarubot";
+    const ownerRecord: Record<string, unknown> = {
+      schema: 1,
+      target: "infra",
+      backend: privateDigest({ backend, key: "tarubot/infra.tfstate" }),
+      namespace: physicalPrefix,
+      revision: "44444444-4444-4444-8444-444444444444",
+      repair: { mode: "never-repaired" },
+    };
+    const observed = 1_800_000_000_000;
     const journal = infrastructureJournal(directory, environment(), {
-      createStore(config) {
-        captures.push(structuredClone(config));
-        // The actual scoped factory is exercised with an invented native transport, not HTTP.
-        const store = createControlStorage(config, {
-          createClient(native) {
-            options.push(structuredClone(native));
-            return {
-              presign(key: string) {
-                const url = new URL(`${native.endpoint}/${key}`);
-                url.searchParams.set("X-Amz-Date", "20260930T000000Z");
-                url.searchParams.set(
-                  "X-Amz-Credential",
-                  `${native.accessKeyId}/20260930/${native.region}/s3/aws4_request`,
-                );
-                return url.toString();
-              },
-              file(key: string) {
-                calls.push(key);
-                return {
-                  stream: () =>
-                    new ReadableStream<Uint8Array>({
-                      start(controller) {
-                        const bytes = objects.get(key);
-                        if (bytes) {
-                          controller.enqueue(Uint8Array.from(bytes));
-                          controller.close();
-                        } else
-                          controller.error(
-                            Object.assign(new Error("invented-absence"), { code: "NoSuchKey" }),
-                          );
-                      },
-                    }),
-                };
-              },
-              async write(key: string, bytes: Uint8Array) {
-                calls.push(key);
-                objects.set(key, Uint8Array.from(bytes));
-                return bytes.length;
-              },
-            } as unknown as Bun.S3Client;
+      now: () => observed,
+      async get(request) {
+        requests.push(structuredClone(request));
+        const data: Record<string, unknown> = {
+          [api]: {
+            id: 234567,
+            full_name: "deconfined/tarubot",
+            fork: false,
+            owner: { id: 123456, login: "deconfined" },
           },
-        });
-        expect(store.namespace).toBe(physicalPrefix);
-        return store;
+          [`${api}/environments/control-infra`]: {
+            id: 1010,
+            name: "control-infra",
+            url: `${api}/environments/control-infra`,
+          },
+          [`${api}/environments/control-infra/variables/CONTROL_OWNER_ANCHOR`]: {
+            name: "CONTROL_OWNER_ANCHOR",
+            value: JSON.stringify(ownerRecord),
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        };
+        if (!Object.hasOwn(data, request.url)) throw new Error("unexpected-invented-owner-api");
+        return {
+          status: 200,
+          url: request.url,
+          headers: { "content-type": "application/json" },
+          body: Buffer.from(JSON.stringify(data[request.url])),
+        };
+      },
+      // Native-shaped streams/presigns exercise the actual scoped factory and owner guard.
+      createClient(native) {
+        options.push(structuredClone(native));
+        return {
+          presign(key: string) {
+            const url = new URL(`${native.endpoint}/${key}`);
+            url.searchParams.set("X-Amz-Date", "20260930T000000Z");
+            url.searchParams.set(
+              "X-Amz-Credential",
+              `${native.accessKeyId}/20260930/${native.region}/s3/aws4_request`,
+            );
+            return url.toString();
+          },
+          file(key: string) {
+            calls.push(key);
+            return {
+              stream: () =>
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    const bytes = objects.get(key);
+                    if (bytes) {
+                      controller.enqueue(Uint8Array.from(bytes));
+                      controller.close();
+                    } else
+                      controller.error(
+                        Object.assign(new Error("invented-absence"), { code: "NoSuchKey" }),
+                      );
+                  },
+                }),
+            };
+          },
+          async write(key: string, bytes: Uint8Array) {
+            calls.push(key);
+            objects.set(key, Uint8Array.from(bytes));
+            return bytes.length;
+          },
+        } as unknown as Bun.S3Client;
       },
     });
-    expect(captures).toEqual([
-      {
-        scope: "infra",
-        bucket: "state-bucket-example",
-        endpoint: "https://us-east-1.example.org",
-        region: "us-east-1",
-        credentials: {
-          accessKeyId: "invented-access",
-          secretAccessKey: "invented-secret",
-          sessionToken: null,
-        },
-      },
-    ]);
+    expect(Object.isFrozen(journal)).toBe(true);
+    expect(Object.keys(journal)).toEqual([]);
+    expect(requests).toHaveLength(0);
     expect(options[0]).toMatchObject({
       endpoint: "https://state-bucket-example.us-east-1.example.org",
       virtualHostedStyle: true,
@@ -631,29 +658,88 @@ describe("scoped infrastructure journal factory", () => {
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.every((path) => path.startsWith(physicalPrefix))).toBe(true);
     expect(objects.has("tarubot/infra.tfstate")).toBe(false);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(
+      requests.every(
+        (request) =>
+          request.headers.Authorization === `Bearer ${environment().CONTROL_OWNER_READ_TOKEN}`,
+      ),
+    ).toBe(true);
+    expect(
+      requests.some((request) => request.url.endsWith("/variables/CONTROL_OWNER_ANCHOR")),
+    ).toBe(true);
+    // A completed ordinary pointer does not bypass an independently fenced owner scope.
+    ownerRecord.revision = "66666666-6666-4666-8666-666666666666";
+    ownerRecord.repair = { mode: "repairing", generation: "55555555-5555-4555-8555-555555555555" };
+    const count = calls.length;
+    await expect(journal.inspect(after)).rejects.toThrow("control-consumer-read-failed");
+    expect(calls).toHaveLength(count);
   });
-  test("missing credentials or short passphrase stop before creating any native store", () => {
+  test("missing credentials, owner configuration or noncanonical unsafe IDs stop before native/GitHub effects", () => {
     const directory = mkdtempSync(join(scratch, "invalid-"));
     writeFileSync(join(directory, "backend.hcl"), backend, { mode: 0o600 });
     let created = false;
-    for (const changed of [
+    let fetched = false;
+    const changes: NodeJS.ProcessEnv[] = [
       { AWS_ACCESS_KEY_ID: "" },
       { AWS_SECRET_ACCESS_KEY: "" },
       { TF_VAR_state_passphrase: "short" },
+      { CONTROL_OWNER_READ_TOKEN: "" },
+      { CONTROL_OWNER_READ_TOKEN: undefined },
+      { CONTROL_OWNER_READ_TOKEN: "short" },
+      { CONTROL_OWNER_READ_TOKEN: "invented\nprivate-token" },
+    ];
+    for (const name of [
+      "CONTROL_OWNER_ID",
+      "CONTROL_REPOSITORY_ID",
+      "CONTROL_OWNER_ENVIRONMENT_ID",
     ])
+      for (const value of [
+        undefined,
+        "",
+        "0",
+        "01",
+        "+1",
+        "-1",
+        "1.0",
+        " 1",
+        "1 ",
+        "1e3",
+        "0x10",
+        "9007199254740992",
+        "999999999999999999999",
+      ])
+        changes.push({ [name]: value });
+    for (const changed of changes)
       expect(() =>
         infrastructureJournal(
           directory,
           { ...environment(), ...changed },
           {
-            createStore() {
+            createClient() {
               created = true;
               throw new Error("unexpected-invented-storage-construction");
+            },
+            async get() {
+              fetched = true;
+              throw new Error("unexpected-invented-owner-api");
             },
           },
         ),
       ).toThrow("invalid-control-evidence");
     expect(created).toBe(false);
+    expect(fetched).toBe(false);
+  });
+  test("default disabled-control read needs neither owner configuration, backend nor native transport", async () => {
+    const directory = mkdtempSync(join(scratch, "disabled-"));
+    await controlPhase("read", directory, { CONTROL_RECORDS_ENABLED: "false" });
+    expect(JSON.parse(readFileSync(join(directory, "control-context.json"), "utf8"))).toEqual({
+      enabled: false,
+    });
+    expect(JSON.parse(readFileSync(join(directory, "baseline-inputs.json"), "utf8"))).toBeNull();
+    await expect(
+      controlPhase("read", directory, { CONTROL_RECORDS_ENABLED: "true" }),
+    ).rejects.toThrow("invalid-control-evidence");
   });
 });
 

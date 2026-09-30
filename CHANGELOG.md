@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.17**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.18**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.18 — Mandatory owner-guarded journal factories
+
+- Construct ordinary infrastructure and per-target trust journals only through private scoped storage and the independent current owner boundary. Expose a frozen journal, with no raw storage, key, approval override or repair capability.
+- Integrate the default infrastructure CLI factory and all seven workflow entry points with explicit masked owner configuration and a separate read-only GitHub credential. Preserve historical encryption identity and the disabled-control early return.
+- Keep owner provisioning, remaining trust/host integration and activation pending. Completed-repair checks still have substantial request volume and need a separately reviewed bounded integration; these declarations create no credentials or environment settings.
 
 ## 2.36.17 — Reviewed scanner exceptions
 
