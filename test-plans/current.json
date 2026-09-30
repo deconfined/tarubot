@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.12 workflow authority and consumer guards",
-  "objective": "Implement live owner-job and successful producer-job verification plus independently owner-anchored normal control consumers. Keep operational integration and release activation fenced; the exact disposable guest is stopped with evidence retained.",
+  "title": "Session: 2.36.13 scoped descriptor transport",
+  "objective": "Implement target-isolated descriptor storage and separate sealing/consumption factories. Keep private authority and fresh-connection integration pending and release activation fenced; the exact disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise current protected-job authority, exact producer success and private receipt bindings, owner repair-anchor transitions, missing/pending metadata and asynchronous expiry/input boundaries using invented evidence.",
+    "Exercise exact descriptor paths, target/routing/passphrase isolation, consumer write refusal, native credential scope and bounded persistence/readback failure handling using invented evidence.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [
