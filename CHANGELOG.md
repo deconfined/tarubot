@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.11**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.12**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.12 — Live authority and guarded control consumers
+
+- Add bounded read-only verification of an active owner-approved target job before mutation, and of the exact successful infrastructure producer job before consuming an encrypted target descriptor. Keep private grant/event and sealing-receipt authentication separate from public GitHub metadata.
+- Add explicit owner-anchored control-consumer guards that distinguish a never-repaired scope from an expected completed repair. Refuse missing, pending, changed or uncertain recovery evidence before and after normal record operations.
+- Keep operational workflow/credential integration and release activation fenced; no owner gate, environment, real backend or running bot is changed.
 
 ## 2.36.11 — Private target handoff and exact-version reads
 
