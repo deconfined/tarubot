@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.15**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.16**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.16 — Fresh streaming SSH transport
+
+- Add bounded private streaming SSH with backpressure, independent input/output channels and known remote exit status for future Ansible integration. Every exchange obtains fresh durable enrollment and local DNSSEC authority; uncertain transport permanently fences its instance and grants no retry.
+- Bound proof preparation with wall and physical deadlines, then recheck private paths, durable-key pin and original proof expiry immediately before one isolated SSH start.
+- Keep the Ansible plugin, launcher and operational workflow integration pending. Offline subprocess fixtures authenticate to no host; frozen production delivery and release activation remain unchanged.
 
 ## 2.36.15 — Independent owner configuration for control consumers
 

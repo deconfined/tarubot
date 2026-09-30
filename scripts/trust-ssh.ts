@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import {
   canonicalEd25519,
@@ -260,10 +261,28 @@ const shellArgument = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 export async function trustedSsh(
   request: SshCommand,
   connectionTrust: (descriptor: TargetDescriptor) => Promise<ConnectionProof>,
-  dependencies: { run?: TrustProcessRunner; now?: () => number } = {},
+  dependencies: {
+    run?: TrustProcessRunner;
+    now?: () => number;
+    /** A stricter preparation budget is allowed; this cannot extend the sixty-second bound. */
+    preparation_timeout_ms?: number;
+  } = {},
 ): Promise<Uint8Array> {
   let directory: string | undefined;
+  let preparationTimer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // Capture trusted capabilities before any await; replacing a dependency must not reroute SSH.
+    const run = dependencies.run ?? execute;
+    const now = dependencies.now ?? Date.now;
+    const preparationBudget = dependencies.preparation_timeout_ms ?? 60_000;
+    requireTransport(
+      typeof run === "function" &&
+        typeof now === "function" &&
+        typeof connectionTrust === "function" &&
+        Number.isInteger(preparationBudget) &&
+        preparationBudget > 0 &&
+        preparationBudget <= 60_000,
+    );
     // Callback awaits may run arbitrary asynchronous work; never reread mutable caller inputs.
     request = structuredClone(request);
     const descriptor = targetDescriptor(request.descriptor);
@@ -298,9 +317,21 @@ export async function trustedSsh(
     const identity = privatePath(request.identity_file, false);
     privatePath(resolve(identity, ".."), true);
     directory = mkdtempSync(join(request.work_root, "ssh-connect-"));
-    const now = dependencies.now ?? Date.now;
     const started = instant(now);
-    const proof = structuredClone(await connectionTrust(structuredClone(descriptor)));
+    const physicalStarted = performance.now();
+    const physicalDeadline = physicalStarted + preparationBudget;
+    const proof = structuredClone(
+      await Promise.race([
+        Promise.resolve().then(() => connectionTrust(structuredClone(descriptor))),
+        new Promise<never>((_, reject) => {
+          preparationTimer = setTimeout(
+            () => reject(new Error("trusted-ssh-failed")),
+            preparationBudget,
+          );
+        }),
+      ]),
+    );
+    clearTimeout(preparationTimer);
     const enrolled = targetDescriptor(proof.descriptor);
     const {
       applied_generation: _currentGeneration,
@@ -376,14 +407,25 @@ export async function trustedSsh(
       `${request.user}@${descriptor.addresses[request.address_family]}`,
       request.command.map(shellArgument).join(" "),
     ];
+    // A proof callback cannot replace the originally validated private paths while it is awaited.
+    privatePath(request.work_root, true);
+    privatePath(identity, false);
+    privatePath(resolve(identity, ".."), true);
+    privatePath(directory, true);
+    privatePath(hosts, false);
+    requireTransport(readFileSync(hosts, "utf8") === pin);
     const preparedAt = instant(now);
     requireTransport(
-      preparedAt >= started && preparedAt - started <= 60_000 && preparedAt < proof.expires_at,
+      preparedAt >= started &&
+        preparedAt - started < preparationBudget &&
+        performance.now() < physicalDeadline &&
+        performance.now() < physicalStarted + proof.expires_at - started &&
+        preparedAt < proof.expires_at,
     );
     // This is the last synchronous check before spawning SSH. DNS's AD bit is deliberately never
     // delegated to OpenSSH: it must compare the one durable known_hosts key even for secure SSHFP.
     const result = processResult(
-      await (dependencies.run ?? execute)({
+      await run({
         executable: "/usr/bin/ssh",
         args,
         directory,
@@ -399,6 +441,7 @@ export async function trustedSsh(
     // No host names, addresses, key material, remote text, private paths or process diagnostics.
     throw new Error("trusted-ssh-failed");
   } finally {
+    clearTimeout(preparationTimer);
     removePrivate(directory, "trusted-ssh-failed");
   }
 }
