@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.36.6**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.7**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.7 — Existing database adoption guards
+
+- Add optional existing-cluster configuration and declarative imports using owner-supplied settings, independent import-only plan guards and preserved access-list ownership. Cluster creation, replacement, deletion and remote mutation cannot pass the adoption path.
+- Require durable intent, exact saved-plan import and a subsequent read-only no-change verification before completing the applied-input baseline. Keep replacement activation fenced; no real cluster import or provider change is performed by implementation or synthetic checks.
 
 ## 2.36.6 — Replacement release components and staging evidence
 

@@ -1,10 +1,13 @@
-# The shape of TOFU_VARS (tofu-ci.sh prepare): exactly the seven keys of
+# The shape of TOFU_VARS (tofu-ci.sh prepare): the original seven keys and optional adoption map of
 # ../examples/example.tfvars.json, and the values the masks (masks.jq) rely on. ../variables.tf
 # validates every value again, precisely. The caller discards jq's output and errors, which could
 # quote the value, and prints a fixed message instead.
 def str($re): type == "string" and test($re);
 type == "object"
-and (keys == ["cloudflare_zone_id", "configure_keys", "database_ids", "db_allow_extra", "hosts", "root_keys", "root_password_hash"])
+and ((keys - ["existing_databases"]) == ["cloudflare_zone_id", "configure_keys", "database_ids", "db_allow_extra", "hosts", "root_keys", "root_password_hash"])
+and (if has("existing_databases") then .existing_databases | type == "object" else true end)
+and (.database_ids as $ids | all((.existing_databases // {}) | to_entries[];
+    .key as $key | ($ids | has($key)) and (.value | type == "object")))
 and (.hosts | type == "object")
 and all(.hosts | to_entries[];
     (.key | test("^(staging|production)(-[0-9]{1,2})?$"))

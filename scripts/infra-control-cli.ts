@@ -3,6 +3,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { handoffBinding, classifyPlan } from "./infra-policy.js";
 import {
+  guardDatabaseClusters,
+  requireDatabaseAdoption,
+  verifyDatabaseAdoption,
+} from "./database-adoption.js";
+import {
   InfrastructureJournal,
   RecordCodec,
   privateDigest,
@@ -113,7 +118,11 @@ export async function controlPhase(
     const inputs = read("values.tfvars.json") as Record<string, unknown>;
     const run = { commit: environment.GITHUB_SHA ?? "", run: environment.GITHUB_RUN_ID ?? "" };
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
-    if (event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply")) fail();
+    const adopting = command === "begin" && event.inputs?.operation === "adopt";
+    if (!adopting && event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply"))
+      fail();
+    if (adopting) requireDatabaseAdoption(read("plan.json"), inputs, context.snapshot.inputs);
+    else guardDatabaseClusters(read("plan.json"), inputs);
     if (command === "baseline") {
       // Initial establishment is an explicit reviewed dispatch, with a complete no-change plan.
       if (classifyPlan(read("plan.json"), inputs, inputs).decision !== "no-changes") fail();
@@ -128,6 +137,16 @@ export async function controlPhase(
     write("control-ticket.json", ticket);
     if (command === "baseline") await journal.finish(ticket, state);
   } else if (command === "finish") {
+    const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
+    if (event.inputs?.operation === "adopt")
+      verifyDatabaseAdoption(
+        read("plan.json"),
+        read("adoption-no-change.json"),
+        read("applied-state.json"),
+        read("values.tfvars.json"),
+        context.snapshot.inputs,
+      );
+    else if (event.inputs?.operation !== "apply") fail();
     verifyAppliedPlan(read("plan.json"), read("applied-state.json"));
     await journal.finish(read("control-ticket.json") as Ticket, state);
   } else fail();

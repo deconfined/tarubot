@@ -147,6 +147,12 @@ run "the_example_host" {
     error_message = "With no cluster configured, the module must plan no access list."
   }
 
+  # An empty adoption map cannot turn access-list-only configurations into cluster creation.
+  assert {
+    condition     = length(linode_database_postgresql_v2.cluster) == 0
+    error_message = "The default empty existing_databases map must manage no cluster."
+  }
+
   assert {
     condition     = output.hosts == { staging = "staging" }
     error_message = "The hosts output must map each host key to its role."

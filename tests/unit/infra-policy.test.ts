@@ -85,10 +85,29 @@ const acl = change("linode_database_access_controls", "db", "primary", {
   database_type: "postgresql",
   allow_list: v.db_allow_extra,
 });
+// Import intent is explicit; cluster presence can no longer be inferred from a database ID alone.
+const clusterConfig = {
+  label: "example-database",
+  engine_id: "postgresql/17",
+  region: "us-east",
+  type: "g6-standard-1",
+  cluster_size: 1,
+  suspended: false,
+  updates: { day_of_week: 2, duration: 4, frequency: "weekly", hour_of_day: 22 },
+  private_network: { vpc_id: 1, subnet_id: 2, public_access: false },
+  expected_encrypted: true,
+  expected_ssl_connection: true,
+  engine_config: {},
+};
 const cluster = change("linode_database_postgresql_v2", "cluster", "primary", {
   id: "100",
-  engine_id: "postgresql/17",
-  type: "g6-standard-1",
+  ...Object.fromEntries(
+    Object.entries(clusterConfig).filter(
+      ([key]) => !key.startsWith("expected_") && key !== "engine_config",
+    ),
+  ),
+  encrypted: true,
+  ssl_connection: true,
 });
 const outputs = {
   hosts: {
@@ -142,7 +161,11 @@ function edit(which: typeof host, values: Value) {
   return r;
 }
 function decision(resources: (typeof host)[], expected = v) {
-  return classifyPlan(plan(resources, expected), expected, v);
+  const clusters = resources.some((r) => r.type === "linode_database_postgresql_v2")
+    ? { existing_databases: { primary: clusterConfig } }
+    : {};
+  const current = { ...expected, ...clusters };
+  return classifyPlan(plan(resources, current), current, { ...v, ...clusters });
 }
 
 describe("safe full-plan policy", () => {

@@ -57,9 +57,16 @@ const inputKeys = [
   "database_ids",
   "db_allow_extra",
 ];
-function inputs(value: unknown): ObjectValue {
-  const v = object(value);
-  requireEvidence(isDeepStrictEqual(Object.keys(v).sort(), [...inputKeys].sort()));
+/** Normalize the optional adoption map without changing the older private tfvars contract. */
+export function inputs(value: unknown): ObjectValue {
+  const raw = object(value);
+  const v: ObjectValue = {
+    ...raw,
+    existing_databases: Object.hasOwn(raw, "existing_databases") ? raw.existing_databases : {},
+  };
+  requireEvidence(
+    isDeepStrictEqual(Object.keys(v).sort(), [...inputKeys, "existing_databases"].sort()),
+  );
   const hosts = object(v.hosts);
   for (const [key, entry] of Object.entries(hosts)) {
     requireEvidence(/^(staging|production)(-[0-9]{1,2})?$/u.test(key));
@@ -73,6 +80,16 @@ function inputs(value: unknown): ObjectValue {
   for (const [key, id] of Object.entries(object(v.database_ids))) {
     requireEvidence(/^[a-z]{1,16}$/u.test(key) && /^[0-9]{1,20}$/u.test(text(id)));
   }
+  v.existing_databases = Object.fromEntries(
+    Object.entries(object(v.existing_databases)).map(([key, config]) => {
+      requireEvidence(Object.hasOwn(object(v.database_ids), key));
+      return [key, databaseConfig(config)];
+    }),
+  );
+  const adoptedIds = Object.keys(object(v.existing_databases)).map(
+    (key) => object(v.database_ids)[key],
+  );
+  requireEvidence(new Set(adoptedIds).size === adoptedIds.length);
   list(v.root_keys).forEach(text);
   Object.values(object(v.configure_keys)).forEach(text);
   text(v.root_password_hash);
@@ -124,6 +141,93 @@ const fields: Record<string, string[]> = {
     engine_config_pg_stat_monitor_enable engine_config_pglookout_max_failover_replication_time_lag
     engine_config_shared_buffers_percentage engine_config_work_mem`.split(/\s+/u),
 };
+/** Match the pinned module's typed optional nulls; never default an actual cluster setting. */
+function databaseConfig(value: unknown): ObjectValue {
+  const config = object(value);
+  requireEvidence(
+    isDeepStrictEqual(Object.keys(config).sort(), [
+      "cluster_size",
+      "engine_config",
+      "engine_id",
+      "expected_encrypted",
+      "expected_ssl_connection",
+      "label",
+      "private_network",
+      "region",
+      "suspended",
+      "type",
+      "updates",
+    ]),
+  );
+  for (const key of ["label", "engine_id", "region", "type"])
+    requireEvidence(text(config[key]).trim().length > 0);
+  requireEvidence(/^postgresql\/[0-9][0-9A-Za-z._-]*$/u.test(text(config.engine_id)));
+  for (const key of ["suspended", "expected_encrypted", "expected_ssl_connection"])
+    requireEvidence(typeof config[key] === "boolean");
+  requireEvidence(Number.isSafeInteger(config.cluster_size) && Number(config.cluster_size) > 0);
+  const updates = object(config.updates);
+  requireEvidence(
+    isDeepStrictEqual(Object.keys(updates).sort(), [
+      "day_of_week",
+      "duration",
+      "frequency",
+      "hour_of_day",
+    ]),
+  );
+  for (const key of ["day_of_week", "duration", "hour_of_day"])
+    requireEvidence(Number.isSafeInteger(updates[key]));
+  requireEvidence(
+    Number(updates.day_of_week) >= 1 &&
+      Number(updates.day_of_week) <= 7 &&
+      Number(updates.hour_of_day) >= 0 &&
+      Number(updates.hour_of_day) <= 23 &&
+      Number(updates.duration) > 0 &&
+      updates.frequency === "weekly",
+  );
+  if (config.private_network !== null) {
+    const network = object(config.private_network);
+    requireEvidence(
+      isDeepStrictEqual(Object.keys(network).sort(), ["public_access", "subnet_id", "vpc_id"]),
+    );
+    requireEvidence(typeof network.public_access === "boolean");
+    for (const key of ["vpc_id", "subnet_id"])
+      requireEvidence(Number.isSafeInteger(network[key]) && Number(network[key]) > 0);
+  }
+  const engine = object(config.engine_config);
+  const keys =
+    fields.linode_database_postgresql_v2?.filter((key) => key.startsWith("engine_config_")) ?? [];
+  requireEvidence(Object.keys(engine).every((key) => keys.includes(key)));
+  const booleans = new Set([
+    "engine_config_pg_jit",
+    "engine_config_pg_pg_stat_monitor_pgsm_enable_query_plan",
+    "engine_config_pg_stat_monitor_enable",
+  ]);
+  const strings = new Set([
+    "engine_config_pg_default_toast_compression",
+    "engine_config_pg_password_encryption",
+    "engine_config_pg_pg_partman_bgw_role",
+    "engine_config_pg_pg_stat_statements_track",
+    "engine_config_pg_timezone",
+    "engine_config_pg_track_commit_timestamp",
+    "engine_config_pg_track_functions",
+    "engine_config_pg_track_io_timing",
+  ]);
+  const normalized = Object.fromEntries(
+    keys.map((key) => {
+      const entry = Object.hasOwn(engine, key) ? engine[key] : null;
+      requireEvidence(
+        entry === null ||
+          (booleans.has(key)
+            ? typeof entry === "boolean"
+            : strings.has(key)
+              ? typeof entry === "string"
+              : typeof entry === "number" && Number.isFinite(entry)),
+      );
+      return [key, entry];
+    }),
+  );
+  return { ...config, engine_config: normalized };
+}
 /** Nested controls have named fields too; unchanged unknown fields cannot ride a safe update. */
 function knownNestedFields(type: string, values: ObjectValue): void {
   const record = (value: unknown, keys: string[]) =>
@@ -177,6 +281,7 @@ const actions = new Set([
 ]);
 
 interface Resource {
+  raw: ObjectValue;
   address: string;
   type: string;
   index: string;
@@ -209,7 +314,7 @@ function resource(value: unknown, v: ObjectValue): Resource {
   for (const field of ["before_sensitive", "after_sensitive"])
     if (Object.hasOwn(change, field)) unknownMask(change[field]);
   if (Object.hasOwn(change, "replace_paths")) list(change.replace_paths);
-  return { address: text(r.address), type, index, change, action };
+  return { raw: r, address: text(r.address), type, index, change, action };
 }
 
 /** A safe ACL addition must be an exact single address of an unchanged known module host. */
@@ -269,6 +374,7 @@ function unchangedIntent(current: ObjectValue, baseline: unknown): boolean {
     "root_password_hash",
     "database_ids",
     "cloudflare_zone_id",
+    "existing_databases",
   ])
     if (!isDeepStrictEqual(current[key], previous[key])) return false;
   const strippedHosts = (v: ObjectValue) =>
@@ -279,6 +385,37 @@ function unchangedIntent(current: ObjectValue, baseline: unknown): boolean {
       }),
     );
   return isDeepStrictEqual(strippedHosts(current), strippedHosts(previous));
+}
+
+/** Independent adoption guard reuses pinned schema validation but never permits cluster mutation. */
+export function requireClusterNoop(value: unknown, expected: unknown): void {
+  const v = inputs(expected);
+  const r = resource(value, v);
+  requireEvidence(r.type === "linode_database_postgresql_v2" && r.action === '["no-op"]');
+  requireEvidence(differences(r).length === 0);
+  const after = object(r.change.after);
+  const config = object(object(v.existing_databases)[r.index]);
+  requireEvidence(String(after.id) === object(v.database_ids)[r.index]);
+  for (const key of [
+    "label",
+    "engine_id",
+    "region",
+    "type",
+    "cluster_size",
+    "suspended",
+    "updates",
+    "private_network",
+  ])
+    requireEvidence(Object.hasOwn(config, key) && isDeepStrictEqual(after[key], config[key]));
+  requireEvidence(
+    typeof config.expected_encrypted === "boolean" && after.encrypted === config.expected_encrypted,
+  );
+  requireEvidence(
+    typeof config.expected_ssl_connection === "boolean" &&
+      after.ssl_connection === config.expected_ssl_connection,
+  );
+  for (const [key, value] of Object.entries(object(config.engine_config)))
+    if (value !== null) requireEvidence(isDeepStrictEqual(after[key], value));
 }
 
 /** Conservative pure classifier; it has no provider, state, credential or network access. */
@@ -305,10 +442,12 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
       for (const instance of list(c.instances ?? []))
         requireEvidence(object(instance).status === "pass");
     }
-    const plannedInputs = Object.fromEntries(
-      Object.entries(object(p.variables))
-        .filter(([key]) => key !== "state_passphrase")
-        .map(([key, entry]) => [key, object(entry).value]),
+    const plannedInputs = inputs(
+      Object.fromEntries(
+        Object.entries(object(p.variables))
+          .filter(([key]) => key !== "state_passphrase")
+          .map(([key, entry]) => [key, object(entry).value]),
+      ),
     );
     requireEvidence(isDeepStrictEqual(plannedInputs, v));
     const resources = list(p.resource_changes).map((r) => resource(r, v));
@@ -325,15 +464,14 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
           (key) => `linode_database_access_controls.db[${JSON.stringify(key)}]`,
         ),
       );
-    // Cluster adoption is a later module milestone; recognize it without granting mutation rights.
-    requireEvidence(
-      isDeepStrictEqual(
-        resources
-          .filter((r) => r.type !== "linode_database_postgresql_v2")
-          .map((r) => r.address)
-          .sort(),
-        expectedAddresses.sort(),
+    expectedAddresses.push(
+      ...Object.keys(object(v.existing_databases)).map(
+        (key) => `linode_database_postgresql_v2.cluster[${JSON.stringify(key)}]`,
       ),
+    );
+    // Configured adoption resources must be present even on no-op; omission is not completion.
+    requireEvidence(
+      isDeepStrictEqual(resources.map((r) => r.address).sort(), expectedAddresses.sort()),
     );
     // Omitting a managed host must not turn its ACL address into evidence.
     const planned = object(object(p.planned_values).root_module);
@@ -368,8 +506,7 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
           reasons.add(r.type === "linode_firewall" ? "firewall-change" : "cluster-change");
         else {
           requireEvidence(differences(r).length === 0);
-          if (r.type === "linode_database_postgresql_v2")
-            requireEvidence(String(object(r.change.after).id) === object(v.database_ids)[r.index]);
+          if (r.type === "linode_database_postgresql_v2") requireClusterNoop(r.raw, v);
         }
         continue;
       }
@@ -518,6 +655,7 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
       "infra-control-cli.ts",
       "release-infra.ts",
       "release-policy.ts",
+      "database-adoption.ts",
     ].map((name) =>
       createHash("sha256")
         .update(readFileSync(new URL(name, import.meta.url)))
@@ -534,6 +672,9 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
       : null,
     release: existsSync(join(directory, "release-context.json"))
       ? JSON.parse(readFileSync(join(directory, "release-context.json"), "utf8"))
+      : null,
+    operation: environment.GITHUB_EVENT_PATH
+      ? (JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH, "utf8")).inputs?.operation ?? null)
       : null,
     commit: environment.GITHUB_SHA,
     run: environment.GITHUB_RUN_ID,

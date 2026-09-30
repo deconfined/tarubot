@@ -69,16 +69,20 @@ prepare() {
   # The shape check prints nothing of the value: jq's own messages could quote it. Values reach jq
   # through printf (a shell builtin) and a pipe, never an argument or a temporary file.
   if ! printf '%s' "${TOFU_VARS-}" | jq -e -f "$here/shape.jq" >/dev/null 2>&1; then
-    fail "TOFU_VARS must be one JSON object with exactly the keys hosts, root_keys, configure_keys, root_password_hash, cloudflare_zone_id, database_ids and db_allow_extra, in the shape of ops/tofu/examples/example.tfvars.json."
+    fail "TOFU_VARS must match the required keys and optional existing_databases map in ops/tofu/examples/example.tfvars.json."
   fi
   printf '%s' "${TOFU_VARS-}" | jq -c -f "$here/masks.jq" >"$d/masks.json"
   local m
   while IFS= read -r m; do
     echo "::add-mask::$m"
-  done < <(jq -r '.[]' "$d/masks.json")
+  # Workflow command payload escaping preserves a private multiline value as one command. Raw
+  # jq strings would split it into fragments and expose the later lines before they are masked.
+  done < <(jq -r '.[] | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' "$d/masks.json")
   # From here on every identifying value prints as ***.
 
   printf '%s' "${TOFU_VARS-}" | jq -c . >"$d/values.tfvars.json"
+  bun "$module/../../scripts/database-adoption.ts" validate "$d" >"$d/input-validation.log" 2>"$d/input-validation.stderr" ||
+    fail "Private infrastructure inputs or existing-cluster settings are invalid; nothing was planned."
 
   # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
   [[ ${STATE_BUCKET-} =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "TOFU_STATE_BUCKET must be an Object Storage bucket name."
@@ -185,9 +189,16 @@ changes() {
     fail "The change list couldn't be built from the saved plan; nothing was applied."
 }
 
+# This fence is independent of destroy/access overrides and the advisory automatic policy.
+database_guard() {
+  bun "$module/../../scripts/database-adoption.ts" guard "$d" >"$d/adoption-guard.log" 2>"$d/adoption-guard.stderr" ||
+    fail "The cluster guard refused this plan; mutations are never permitted and imports require reviewed adoption."
+}
+
 summarize() {
   local has_changes delimiter digest refuse=0 action address counts
   changes
+  database_guard
   if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
 
   {
@@ -223,6 +234,8 @@ summarize() {
     fail "The infrastructure policy couldn't read its evidence; nothing was applied."
   decision=$(jq -er '.decision | select(. == "invalid" or . == "review-required" or . == "safe" or . == "no-changes")' "$d/policy.json" 2>/dev/null) ||
     fail "The infrastructure policy returned no recognized decision."
+  # Markdown backticks are literal formatting; command substitution is intentionally disabled.
+  # shellcheck disable=SC2016
   printf '\nAdvisory safe-plan policy: `%s`. The owner-approved Apply gate remains required.\n' "$decision" >>"$GITHUB_STEP_SUMMARY"
   {
     echo "changes<<$delimiter"
@@ -268,8 +281,9 @@ compare() {
   # Reconstruct full JSON from the encrypted saved plan before checking its bound evidence.
   changes
   # All private inputs, including ignored creation-only credentials, must agree before handoff.
-  jq -e --slurpfile v "$d/values.tfvars.json" '(.variables | map_values(.value) | del(.state_passphrase)) == $v[0]' "$d/plan.json" >/dev/null 2>&1 ||
+  bun "$module/../../scripts/database-adoption.ts" inputs "$d" >"$d/input-comparison.log" 2>"$d/input-comparison.stderr" ||
     fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
+  database_guard
   [[ ${BINDING-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's handoff binding didn't arrive; nothing was applied."
   local binding
   binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
@@ -291,6 +305,12 @@ apply() {
   binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
     fail "The plan handoff couldn't be rechecked; nothing was applied."
   [[ $binding == "$verified" ]] || fail "The plan handoff changed after comparison; nothing was applied."
+  database_guard
+  local operation
+  operation=$(jq -er '.inputs.operation | select(. == "apply" or . == "adopt")' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "Apply requires a reviewed apply or adopt dispatch."
+  if [[ $operation == adopt ]]; then
+    control_enabled || fail "Cluster adoption requires a completed durable baseline."
+  fi
   if control_enabled; then
     # Reload persisted state immediately before intent creation; changes since Plan are refused.
     control_state
@@ -308,6 +328,12 @@ apply() {
     echo "::error::apply failed (exit $rc); reconcile any pending control operation before a new run. Its diagnostics, with names, numbers and addresses left out:"
     jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/apply.jsonl" 2>/dev/null || true
     exit 1
+  fi
+  if [[ $operation == adopt ]]; then
+    # Import advanced only state. Keep the journal pending until a distinct step, with read-only
+    # provider credentials, refreshes a no-change plan and verifies the original saved result.
+    echo "Import applied; durable completion awaits read-only no-change verification."
+    return
   fi
   if control_enabled; then
     control_state
@@ -330,6 +356,30 @@ apply() {
   done <"$d/changes.txt"
 }
 
+# Never overwrite the exact imported plan or re-plan with provider-write credentials. The workflow
+# supplies read-only provider tokens here, while retaining storage writes for journal completion.
+verify_adoption() {
+  state_settings
+  provider_tokens "Read-only provider tokens are required for adoption verification."
+  control_enabled || fail "Adoption verification requires enabled control records."
+  [[ -f $d/control-ticket.json ]] || fail "Adoption verification has no pending ticket."
+  control_state
+  cp -- "$d/state.json" "$d/applied-evidence-state.json"
+  tofu -chdir="$module" plan -input=false -lock=false -json -var-file="$d/values.tfvars.json" -out="$d/adoption-verify.bin" >"$d/adoption-verify.jsonl" 2>"$d/adoption-verify.stderr" ||
+    fail "Read-only adoption refresh failed; durable intent remains pending."
+  tofu -chdir="$module" show -json "$d/adoption-verify.bin" >"$d/adoption-no-change.json" 2>"$d/adoption-show.stderr" ||
+    fail "Adoption refresh evidence couldn't be read; durable intent remains pending."
+  tofu -chdir="$module" show -json >"$d/applied-state.json" 2>"$d/applied-state.stderr" ||
+    fail "Imported state verification failed; durable intent remains pending."
+  control_state
+  cmp -s -- "$d/state.json" "$d/applied-evidence-state.json" ||
+    fail "State changed during adoption verification; durable intent remains pending."
+  bun "$module/../../scripts/database-adoption.ts" verify "$d" >"$d/adoption-verify.log" 2>"$d/adoption-verify-policy.stderr" ||
+    fail "Adoption is not verified unchanged; durable intent remains pending."
+  control_call finish
+  echo "Expected imports and read-only no-change refresh verified; durable baseline completed."
+}
+
 baseline() {
   state_settings
   control_enabled || fail "Baseline establishment requires owner-enabled control records."
@@ -341,9 +391,9 @@ baseline() {
 }
 
 case ${1-} in
-  install | prepare | init | control_read | plan | summarize | compare | apply | baseline)
-    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|baseline"
+  install | prepare | init | control_read | plan | summarize | compare | apply | verify_adoption | baseline)
+    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline"
     "$1"
     ;;
-  *) fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|baseline" ;;
+  *) fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline" ;;
 esac

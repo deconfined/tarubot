@@ -46,9 +46,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "plan previews; apply makes reviewed changes; baseline records existing unchanged state"
+        description: "plan previews; apply reviews changes; baseline records unchanged state; adopt imports existing clusters"
         type: choice
-        options: [plan, apply, baseline]
+        options: [plan, apply, baseline, adopt]
         default: plan
       replace:
         description: 'Rebuild one host: linode_instance.host["<key>"] (needs allow_destroy)'
@@ -142,7 +142,7 @@ jobs:
         run: bash ops/tofu/ci/tofu-ci.sh summarize
       # Only a plan that passed the guards, for an apply, leaves the job: the encrypted file alone.
       - name: Keep the saved plan for Apply
-        if: inputs.operation == 'baseline' || (inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true')
+        if: inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && steps.summary.outputs.has_changes == 'true')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: saved-plan
@@ -159,7 +159,7 @@ jobs:
     needs: plan
     if: >-
       github.run_attempt == '1' && github.ref == 'refs/heads/main'
-      && (inputs.operation == 'baseline' || (inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'))
+      && (inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && needs.plan.outputs.has_changes == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: infra
@@ -209,7 +209,7 @@ jobs:
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh compare
       - name: Apply
-        if: inputs.operation == 'apply'
+        if: inputs.operation == 'apply' || inputs.operation == 'adopt'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
@@ -217,6 +217,16 @@ jobs:
           LINODE_TOKEN: ${{ secrets.LINODE_WRITE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WRITE_TOKEN }}
         run: bash ops/tofu/ci/tofu-ci.sh apply
+      # Import completion is withheld until refresh uses read-only provider tokens in a new step.
+      - name: Verify adoption with read-only provider credentials
+        if: inputs.operation == 'adopt'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+        run: bash ops/tofu/ci/tofu-ci.sh verify_adoption
       - name: Establish initial baseline without provider changes
         if: inputs.operation == 'baseline'
         env:

@@ -46,7 +46,7 @@ PR checks + security + code-owner review
 | Durable enrollment and SSHFP publication | dedicated enrollment job; no competing OpenTofu SSHFP writer |
 | Secrets, protection rules, provider/account changes, destructive recovery | owner |
 
-The current module imports access controls, not the cluster. Extend it with `linode_database_postgresql_v2` at the pinned provider version and a declarative import of the privately supplied existing identifier. Never infer current settings from examples or retrieve admin credentials into an agent session.
+The module optionally imports `linode_database_postgresql_v2` through the private `existing_databases` map, using existing `database_ids`. Empty or omitted configuration preserves the access-controls-only path. The owner supplies exact current settings; examples cannot establish those settings. Never retrieve admin credentials into an agent session. See [the adoption runbook](../ops/tofu/README.md) before changing private inputs.
 
 1. The owner records current region, engine/version, plan, node count, SSL/encryption, maintenance and supported settings privately. Match them exactly; check the pinned provider schema for computed credentials/defaults affecting import.
 2. Add `prevent_destroy`; independently forbid cluster creation, deletion, replacement and automatic mutation in policy. Removing the block can remove lifecycle protection, so it is insufficient alone.
@@ -153,13 +153,15 @@ Each milestone is a coherent signed commit/version change with tests. Code avail
 | 1. Specification | This document and contributor/deployment links | Documented; no runtime change |
 | 2. Safety foundation | Full-plan classifier, adversarial fixtures, plan/backend/input binding; reviewed lane intact | Implemented locally; classification advisory, activation not performed |
 | 3. Durable control records | Serialized operation journals, applied-input baselines, verified pointers and interrupted-write fencing | Implemented locally, owner-enabled reviewed path; real backend/plan-shape rehearsal and recovery tooling pending |
-| 4. Database adoption | Import-only v2 cluster configuration and independent guards | Pending; no agent-run live import |
+| 4. Database adoption | Import-only v2 cluster configuration and independent guards | Implemented locally; private settings, reviewed import and live no-change/readiness evidence remain owner steps |
 | 5. Enrollment | Serialized durable TOFU, DNS-only SSHFP writer, local DNSSEC validation | Pending prerequisites/tests |
 | 6. Staging delivery | Reusable infrastructure flow, owner-enabled safe lane, recovery fixes, exact-release acceptance | Components implemented locally; code-fenced pending adoption/trust and live acceptance |
 | 7. Production cutover | Separate reviewed replacement of frozen Compose path and staging-gated promotion | Pending separate review/owner window |
 | 8. Activation | Owner sets credentials/gates, imports cluster, enrolls hosts, rehearses recovery, enables flow | Owner only; not performed |
 
 Offline checks: contributor quality/build/unit/contract checks; synthetic Docker/PostgreSQL suite; shell/workflow checks; OpenTofu fmt/validate/mock plans; Ansible syntax/lint/template checks; site build if user-facing pages change. No root Bun site scripts.
+
+The reviewed Infrastructure workflow adds `operation=adopt`. Establish its durable baseline against unchanged existing configuration first, then add only the exact cluster configuration. The independent guard requires all expected new cluster imports, optional matching access-control imports and no host, ACL, output, drift or other input changes. It rejects cluster creation, update, deletion and replacement even when override switches are set. Apply persists intent and imports the exact encrypted saved plan, then keeps the intent pending. A separate step uses read-only provider tokens to refresh a distinct no-change plan and verifies stable state, original planned values and cluster identity/settings before completing the baseline. Any failure requires reconciliation; it cannot become automatic import authority. This code path has not imported a live cluster or changed an environment.
 
 Policy fixtures cover allowed fields and one-field deviations; import-plus-update; deletes/replaces/deposed; wrong providers/modules/indexes; duplicates; ignored-input/credential changes; database settings/removal/widening/unrelated additions; unknown addresses; exposure/drift/output-only changes; incomplete/error/check-failed plans; stale/wrong plan/backend/release; hostile-value redaction. Run phase tests with stand-ins, never live credentials.
 

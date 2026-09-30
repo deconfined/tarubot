@@ -18,6 +18,8 @@ Use [CONTRIBUTING.md](../CONTRIBUTING.md) for the local change checklist. This r
 
 Actions use full-SHA pins; checkouts never persist credentials. PR jobs are read-only and use invented migration input. CI needs no live Discord/database/provider credentials. The version gate runs last so earlier checks still report on dependency PRs awaiting a version commit.
 
+Infrastructure's reviewed `adopt` operation imports only explicitly configured existing clusters. Cluster mutation is independently refused regardless of destroy/access switches. Import completion remains pending until a separate step, using read-only provider tokens, verifies a fresh no-change plan and exact saved-plan/state evidence. Private settings and any real import remain owner steps; release activation stays fenced.
+
 CI also refuses changes to existing migrations, checks ShellCheck coverage, renders the bot unit through the pinned Podman Quadlet generator, syntax/lint-checks the builtin-only Ansible playbooks, and compares the test renderer with Ansible. PR infrastructure checks run pinned OpenTofu fmt/validate/mock tests and cloud-init schema validation without secrets; publication can skip that external-registry-dependent job.
 
 Merge with a merge commit only, after up-to-date CI, security checks and the owner's code-owner review. Further pushes dismiss that review. A runtime merge can configure staging as root; review is a security boundary, not paperwork.

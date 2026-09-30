@@ -215,7 +215,7 @@ describe("infra.yml's shape", () => {
     ]);
     expect(inputs.operation).toMatchObject({
       type: "choice",
-      options: ["plan", "apply", "baseline"],
+      options: ["plan", "apply", "baseline", "adopt"],
       default: "plan",
     });
     expect(inputs.replace).toMatchObject({ type: "string", default: "" });
@@ -242,7 +242,7 @@ describe("infra.yml's shape", () => {
     const guard = "github.run_attempt == '1' && github.ref == 'refs/heads/main'";
     expect(plan.if).toBe(guard);
     expect(apply.if).toBe(
-      `${guard} && (inputs.operation == 'baseline' || (inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'))`,
+      `${guard} && (inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && needs.plan.outputs.has_changes == 'true'))`,
     );
     // Plan is the first job; nothing reads the environments' own rules through the API, which
     // the owner sets and reads back once (REQUIREMENTS.md, "Approved pipeline amendments").
@@ -269,7 +269,7 @@ describe("infra.yml's shape", () => {
     expect(apply.outputs).toBeUndefined();
   });
 
-  test("Plan reads only infra-plan's read-only secrets, and Apply only infra's write ones", () => {
+  test("Plan reads only read credentials; Apply uses writes and a distinct read-only verification step", () => {
     const planSecrets = secretsOfJob(plan);
     const applySecrets = secretsOfJob(apply);
     expect(planSecrets).toEqual(
@@ -285,6 +285,8 @@ describe("infra.yml's shape", () => {
       [
         "CLOUDFLARE_WRITE_TOKEN",
         "LINODE_WRITE_TOKEN",
+        "LINODE_READ_TOKEN",
+        "CLOUDFLARE_READ_TOKEN",
         ...SHARED_SECRETS,
         "TOFU_STATE_WRITE_ACCESS_KEY",
         "TOFU_STATE_WRITE_SECRET_KEY",
@@ -294,7 +296,10 @@ describe("infra.yml's shape", () => {
     for (const name of [...planSecrets, ...applySecrets].filter((n) => !SHARED_SECRETS.includes(n)))
       expect({ name, kind: /_(READ|WRITE)_/u.test(name) }).toEqual({ name, kind: true });
     expect(planSecrets.filter((n) => n.includes("_WRITE_"))).toEqual([]);
-    expect(applySecrets.filter((n) => n.includes("_READ_"))).toEqual([]);
+    expect(applySecrets.filter((n) => n.includes("_READ_"))).toEqual([
+      "CLOUDFLARE_READ_TOKEN",
+      "LINODE_READ_TOKEN",
+    ]);
     // Each job maps them onto the variables OpenTofu reads, the same names in both.
     const tools = (kind: string) => ({
       AWS_ACCESS_KEY_ID: expr(`secrets.TOFU_STATE_${kind}_ACCESS_KEY`),
@@ -305,6 +310,11 @@ describe("infra.yml's shape", () => {
     });
     expect(stepOf(plan, "Plan").env).toEqual(tools("READ"));
     expect(stepOf(apply, "Apply").env).toEqual(tools("WRITE"));
+    expect(stepOf(apply, "Verify adoption with read-only provider credentials").env).toEqual({
+      ...tools("WRITE"),
+      LINODE_TOKEN: expr("secrets.LINODE_READ_TOKEN"),
+      CLOUDFLARE_API_TOKEN: expr("secrets.CLOUDFLARE_READ_TOKEN"),
+    });
     // The script names each environment's own secrets when one is missing.
     expect(phaseOf("plan")).toContain(
       'provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."',
@@ -356,12 +366,13 @@ describe("infra.yml's shape", () => {
       ["Fetch the saved plan", null],
       ["Compare with the reviewed plan", "compare"],
       ["Apply", "apply"],
+      ["Verify adoption with read-only provider credentials", "verify_adoption"],
       ["Establish initial baseline without provider changes", "baseline"],
       cleanup,
     ]);
     // The script holds exactly those phases, and runs nothing else.
     expect(scriptText).toContain(
-      "  install | prepare | init | control_read | plan | summarize | compare | apply | baseline)\n",
+      "  install | prepare | init | control_read | plan | summarize | compare | apply | verify_adoption | baseline)\n",
     );
     for (const j of [plan, apply]) {
       const clean = stepOf(j, "Clean up");
@@ -402,6 +413,11 @@ describe("infra.yml's shape", () => {
           "Read durable control records": init("WRITE"),
           "Compare with the reviewed plan": ["TOFU_STATE_PASSPHRASE"],
           Apply: tokens("WRITE"),
+          "Verify adoption with read-only provider credentials": [
+            "CLOUDFLARE_READ_TOKEN",
+            "LINODE_READ_TOKEN",
+            ...init("WRITE"),
+          ].sort(),
           "Establish initial baseline without provider changes": init("WRITE"),
         },
       ],
@@ -448,7 +464,7 @@ describe("infra.yml's shape", () => {
     const keep = stepOf(plan, "Keep the saved plan for Apply");
     // After the summary step, whose guards exit non-zero, so a refused plan never leaves the job.
     expect(keep.if).toBe(
-      "inputs.operation == 'baseline' || (inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true')",
+      `inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && steps.summary.outputs.has_changes == 'true')`,
     );
     expect(keep.with).toEqual({
       name: ARTIFACT,
@@ -506,8 +522,8 @@ describe("public-log hygiene", () => {
   test("every tofu command writes its output and errors to a private file", () => {
     // Decrypted state/show evidence also stays private and is never uploaded.
     const calls = commandLines(scriptText).filter((l) => /^tofu\s/u.test(l));
-    expect(calls.length).toBe(6);
-    expect(scriptText.match(/\btofu -chdir=/gu)).toHaveLength(5);
+    expect(calls.length).toBe(9);
+    expect(scriptText.match(/\btofu -chdir=/gu)).toHaveLength(8);
     for (const line of calls) {
       // stdout to a file under $d, and stderr to a file or along with stdout.
       const ok =
@@ -520,7 +536,7 @@ describe("public-log hygiene", () => {
     const jqOnOutput = commandLines(scriptText).filter(
       (l) => /\bjq\b/u.test(l) && /"\$d\/(?:plan\.jsonl?|apply\.jsonl)"/u.test(l),
     );
-    expect(jqOnOutput.length).toBe(5);
+    expect(jqOnOutput.length).toBe(4);
     for (const line of jqOnOutput)
       expect({
         line,
@@ -594,8 +610,12 @@ describe("public-log hygiene", () => {
         tofu: true,
       });
     // Exactly the seven keys of examples/example.tfvars.json.
-    const keys = Object.keys(JSON.parse(read("ops/tofu/examples/example.tfvars.json"))).sort();
-    expect(shape).toContain(`keys == ${JSON.stringify(keys).replaceAll(",", ", ")}`);
+    const keys = Object.keys(JSON.parse(read("ops/tofu/examples/example.tfvars.json")))
+      .filter((k) => k !== "existing_databases")
+      .sort();
+    expect(shape).toContain(
+      `(keys - ["existing_databases"]) == ${JSON.stringify(keys).replaceAll(",", ", ")}`,
+    );
     // A label is only a string here (it isn't masked); variables.tf keeps Linode's own rules.
     expect(shape).toContain('(.value.label | type == "string")');
     expect(variables).toContain('can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label))');
@@ -784,6 +804,8 @@ describe("ops/tofu", () => {
       "ops/tofu/main.tf",
       "ops/tofu/opentofu.sha256",
       "ops/tofu/outputs.tf",
+      "ops/tofu/tests/database-adoption.tftest.hcl",
+      "ops/tofu/tests/fixtures/database-adoption-validation/outputs.tf",
       "ops/tofu/tests/main.tftest.hcl",
       "ops/tofu/variables.tf",
       "ops/tofu/versions.tf",
@@ -799,6 +821,7 @@ describe("ops/tofu", () => {
       "root_password_hash",
       "cloudflare_zone_id",
       "database_ids",
+      "existing_databases",
       "db_allow_extra",
       "state_passphrase",
     ]);
@@ -924,12 +947,18 @@ describe("ops/tofu", () => {
     expect(main).toMatch(
       /host_access = concat\(\n\s+\[for k in sort\(tolist\(local\.host_keys\)\) : "\$\{local\.host_ipv6\[k\]\}\/128"\],\n\s+\[for k in sort\(tolist\(local\.host_keys\)\) : "\$\{local\.host_ipv4\[k\]\}\/32"\],\n/u,
     );
-    // The import block tofu test can't exercise: one per cluster, with the provider's ID form.
+    // The unchanged access-list import keeps its state address and provider ID form. The separate
+    // existing-cluster import is covered by database-adoption-module.test.ts and import-only guards.
     const imports = [...main.matchAll(/^import \{\n([\s\S]*?)^\}$/gmu)].map((m) => m[1] ?? "");
-    expect(imports).toHaveLength(1);
-    expect(imports[0]).toContain("for_each = local.database_keys");
-    expect(imports[0]).toContain("to = linode_database_access_controls.db[each.key]");
-    expect(imports[0]).toContain(`id = nonsensitive("\${var.database_ids[each.key]}:postgresql")`);
+    expect(imports).toHaveLength(2);
+    const accessImport = imports.find((value) =>
+      value.includes("to = linode_database_access_controls.db[each.key]"),
+    );
+    expect(accessImport).toContain("for_each = local.database_keys");
+    expect(accessImport).toContain("to = linode_database_access_controls.db[each.key]");
+    expect(accessImport).toContain(
+      `id = nonsensitive("\${var.database_ids[each.key]}:postgresql")`,
+    );
     // Both for_each keys come unwrapped from their sensitive maps, as public-safe words.
     expect(main).toContain("host_keys     = nonsensitive(toset(keys(var.hosts)))");
     expect(main).toContain("database_keys = nonsensitive(toset(keys(var.database_ids)))");
@@ -1053,6 +1082,7 @@ describe("ops/tofu", () => {
       "configure_keys",
       "database_ids",
       "db_allow_extra",
+      "existing_databases",
       "hosts",
       "root_keys",
       "root_password_hash",
@@ -1060,6 +1090,7 @@ describe("ops/tofu", () => {
     expect(Object.keys(vars.hosts)).toEqual(["staging"]);
     expect(vars.cloudflare_zone_id).toBe("0".repeat(32));
     expect(vars.database_ids).toEqual({ primary: "0" });
+    expect(vars.existing_databases).toEqual({});
     expect(vars.root_password_hash).toBe("");
     for (const key of [...vars.root_keys, ...Object.values(vars.configure_keys)])
       expect(key).toMatch(/EXAMPLE/u);
@@ -1396,6 +1427,8 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
             GITHUB_SHA: "1".repeat(40),
             GITHUB_RUN_ID: "1234",
             GITHUB_RUN_ATTEMPT: "1",
+            // Prepare also invokes the real Bun validator before the injected controller phase.
+            TEST_REAL_BUN: process.execPath,
             ...env,
           },
           stdin: "ignore",
@@ -1580,6 +1613,31 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(r.phase("baseline", STATE).code).toBe(1);
   });
 
+  test("prepare escapes private multiline mask commands before any value can split into public lines", () => {
+    const values = example();
+    values.existing_databases = {
+      primary: {
+        label: "invented-first%\r\ninvented-second",
+        engine_id: "postgresql/17",
+        region: "us-east",
+        type: "g6-standard-1",
+        cluster_size: 1,
+        suspended: false,
+        expected_encrypted: true,
+        expected_ssl_connection: true,
+        updates: { day_of_week: 2, duration: 4, frequency: "weekly", hour_of_day: 22 },
+        private_network: null,
+        engine_config: { engine_config_pg_timezone: "xy" },
+      },
+    };
+    const result = runner().phase("prepare", { ...PREPARED, TOFU_VARS: JSON.stringify(values) });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("::add-mask::invented-first%25%0D%0Ainvented-second\n");
+    expect(result.out).toContain("::add-mask::xy\n");
+    expect(result.out.split("\n")).not.toContain("invented-second");
+    expect(result.err).toBe("");
+  });
+
   test("prepare masks every identifying value first, and writes only private files", () => {
     const r = runner();
     const done = r.phase("prepare", PREPARED);
@@ -1599,7 +1657,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       TOFU_VARS: '{"hosts": "staging.example.org"}',
     });
     expect(bad.code).toBe(1);
-    expect(bad.out).toStartWith("::error::TOFU_VARS must be one JSON object");
+    expect(bad.out).toStartWith("::error::TOFU_VARS must match the required keys");
     expect(bad.out + bad.err).not.toContain("example.org");
     // A replace, read from the event payload, names one configured host's instance, and is never
     // echoed back, not even a host name typed in its place.
@@ -1790,6 +1848,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
         GITHUB_SHA: "1".repeat(40),
         GITHUB_RUN_ID: "1234",
         GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_EVENT_PATH: join(r.dir, "event.json"),
       }),
     };
     expect(r.phase("compare", reviewed)).toEqual({
