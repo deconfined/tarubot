@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.10 scoped trust and storage adapters",
-  "objective": "Implement explicit scoped provider/DNS/control-record transports and pure applied-host projection. Preserve infrastructure ciphertext compatibility, isolate private credentials and keep release activation fenced while rehearsing native S3 only in the new marked disposable guest.",
+  "title": "Session: 2.36.11 private handoff and version reads",
+  "objective": "Implement private encrypted applied-target transport and exact scoped historical object reads. Require independent successful producer-job evidence and preserve release activation fences; rehearse only invented data and temporary TLS fixtures in the exact marked disposable guest.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise target scope, exact provider identity, SSHFP predecessor/conflict and late authorization checks, bounded storage, native routing/ambient-credential refusal and complete applied-host evidence using invented data.",
+    "Exercise target/purpose/backend isolation, exact release/producer-job proofs, immutable byte readback, expiry/mutation boundaries and exact-version response/query/refusal rules using invented evidence.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

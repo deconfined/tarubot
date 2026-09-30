@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.10**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.11**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.11 — Private target handoff and exact-version reads
+
+- Add purpose/target/backend-bound encryption and exact persistence readback for minimized applied-target descriptors. Consumption requires a fresh independent successful infrastructure sealing job, exact release/current producer and unchanged ciphertext; overall publication success is not required inside its own staging dependency.
+- Add scoped owner-selected historical object reads with a measured isolated curl transfer that signs the exact version query. Require full response bytes and matching version metadata; refuse redirects, partial/deleted/compressed objects, ambiguous absence, inherited credentials and retries. Credentials stay in a private input pipe.
+- Keep workflow integration, independent repair anchors and guarded normal consumers pending. These transport components authorize no enrollment, restore, deployment or activation.
 
 ## 2.36.10 — Scoped provider and control-record adapters
 
