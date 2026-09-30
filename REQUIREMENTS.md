@@ -2,7 +2,7 @@
 
 - **Status:** Draft for owner review
 - **Prepared:** 2026-09-21
-- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments"); 2026-09-29 (owner pipeline decisions on issue #62; see "Approved pipeline amendments"); 2026-09-29 (owner decisions for one deployment path, after the review of a Codex branch; see "Approved unified-pipeline amendments")
+- **Amended:** 2026-09-23 (owner launch decisions; see "Approved launch amendments"); 2026-09-24 (owner reply-session decisions; see "Approved reply-session amendments"); 2026-09-24 (owner hosting decision; see "Approved hosting amendment"); 2026-09-24 (owner Lodestone decisions; see "Approved Lodestone amendments"); 2026-09-24 (owner issue-reporting decisions; see "Approved issue-reporting amendments"); 2026-09-25 (hosting follow-up; see "Approved hosting amendment"); 2026-09-25 (owner officer-notice decisions on issue #29; see "Approved officer-notice amendments"); 2026-09-25 (owner changelog decisions; see "Approved changelog amendments"); 2026-09-25 (owner documentation-site decisions; see "Approved documentation-site amendments"); 2026-09-25 (owner public-suggestion decisions; see "Approved public-suggestion amendments"); 2026-09-25 (owner status-notice decisions on issue #31; see "Approved status-notice amendments"); 2026-09-26 (owner SSH-deploy decisions on issue #41; see "Approved SSH-deploy amendments"); 2026-09-26 (owner channel-obfuscation decision on issue #47; see ACCESS-01); 2026-09-26 (owner staging decisions on issue #50; see "Approved staging amendments"); 2026-09-28 (owner visibility decisions on issue #46; see "Approved visibility amendments"); 2026-09-29 (owner pipeline decisions on issue #62; see "Approved pipeline amendments"); 2026-09-29 (owner decisions for one deployment path, after the review of a Codex branch; see "Approved unified-pipeline amendments"); 2026-09-30 (owner answers to 2.37.0's four questions, the rule for agents on the one path among them; see "Approved unified-pipeline amendments")
 - **Deliverable:** A TypeScript Discord bot for Final Fantasy XIV Free Companies
 
 ### Approved implementation amendments (2026-09-21)
@@ -555,7 +555,7 @@ So each host generates its own Ed25519 host key at first boot. @deconfined trust
 - **Decision 9's maintenance-window warning** for a deploy that applies migrations.
 - **The platform:** AlmaLinux 10 with SELinux enforcing, rootless Podman and Quadlet, secrets as read-only files, the backup never a Quadlet unit (question 11), staging's own database, bucket, key and checks (question 3), migrations tried on staging when they merge (question 6), the writer lease, the heartbeat and the nightly encrypted dump.
 
-**The widened rule for agents.** AGENTS.md carries it verbatim. @deconfined approved its `infra-plan` entry on 2026-09-29, with confirmed item 4:
+**The widened rule for agents.** AGENTS.md carried it verbatim until 2.37.0: since @deconfined's confirmation on 2026-09-30, the rule for agents on the one path in "Approved unified-pipeline amendments (2026-09-29)" replaces it. @deconfined approved its `infra-plan` entry on 2026-09-29, with confirmed item 4:
 
 > Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
 
@@ -739,7 +739,8 @@ These amendments supersede conflicting text in "Approved pipeline amendments (20
   - decision 7's per-target groups. The groups are per environment (`host-staging`, `host-prod`), and the Infrastructure call shares `host-prod`. Reject stale requests rather than approving them, as before;
   - "decision 5's quiet message goes with the `notify` job at 2.37.0". `notify` stays for the Compose host until 2.38.0, and Report sends the new path's messages;
   - "the `infra` concurrency group serializes runs" and "the saved plan's values are infra's", from the implementation notes;
-  - the release list (below).
+  - the release list (below);
+  - the widened rule for agents, which the rule for agents on the one path (below) replaces.
 - **In "Approved SSH-deploy amendments (2026-09-26)":** "until 2.37.0 moves production" now reads "until the cutover". The host-side mechanics there serve the Compose host until then.
 - **In the Codex branch's unmerged text:**
   - its choice 3, one approval given before any plan exists, is superseded by decision 1;
@@ -747,7 +748,7 @@ These amendments supersede conflicting text in "Approved pipeline amendments (20
   - its choice 1, Linode only, stands, as @deconfined's provider decision already said;
   - none of its own mechanics land: the build per dispatch, `pipeline.yml`, `ops/pipeline/`, `ops/ansible/deploy.yml`, `vars/targets/production.yml`, the public `deploy/pipeline` site page, the cross-environment guard, and `production` as a new environment's name.
 
-**The release list** (proposed, question 4 below). 2.36.1 and 2.36.2 can't follow 2.37.0:
+**The release list** (question 4 below, confirmed by @deconfined on 2026-09-30). 2.36.1 and 2.36.2 can't follow 2.37.0:
 1. 2.37.0: this release, one path;
 2. 2.37.1: CrowdSec, simplified, once staging shows a clean second Configure;
 3. the DevBot move: owner steps on 2.37.0 or later, with no release of its own;
@@ -765,13 +766,14 @@ These amendments supersede conflicting text in "Approved pipeline amendments (20
 - **The fallback week shares the database password and the heartbeat URL** between the old and the new host, until @deconfined rotates both.
 - The risks accepted earlier the same day stand: `infra-plan`'s read-only Linode token can read the cluster's admin credentials, and no run checks the environments' settings, `prod`'s and `staging`'s included.
 
-**For @deconfined to confirm in the pull request.** The build made four choices that need @deconfined's answer. Each is built as recommended, and each is proposed until @deconfined confirms it.
-1. **The wording of the rule for agents** (below).
-2. **`DEPLOY_ENABLED` picks production's path in automatic runs until 2.38.0.** Exactly `true` asks for the Compose job, as today, and anything else asks for `prod`. @deconfined turns it off inside the cutover window, and the fallback turns it back on. Before the cutover, turning it off to pause the Compose host sends automatic runs to `prod`, whose requests @deconfined then rejects. The alternative: automatic runs never ask for `prod` in 2.37.0, and 2.38.0 makes prod automatic.
-3. **Staging-side applies wait for `prod`'s approval,** with the write tokens only in `prod` and no `infra` environment. The alternative keeps an approval-gated `infra` environment for staging's applies, which needs a second copy of the write tokens, the state key and the passphrase, and a second concurrency group joined to prod's.
-4. **The release list** above. The alternative keeps the DevBot move as a patch release of its own, 2.37.2.
+**Confirmed by @deconfined in the pull request.** The build made four choices that needed @deconfined's answer, each built as recommended. @deconfined kept all four on 2026-09-30, in the session's questions tool ([recorded on PR #64](https://github.com/deconfined/tarubot/pull/64#issuecomment-5911268081)).
+1. **The wording of the rule for agents** (below): "Confirm as proposed (Recommended)".
+2. **`DEPLOY_ENABLED` picks production's path in automatic runs until 2.38.0.** Exactly `true` asks for the Compose job, as today, and anything else asks for `prod`. @deconfined turns it off inside the cutover window, and the fallback turns it back on. Before the cutover, turning it off to pause the Compose host sends automatic runs to `prod`, whose requests @deconfined then rejects. Answer: "As built (Recommended)". The declined alternative: automatic runs never ask for `prod` in 2.37.0, and 2.38.0 makes prod automatic.
+3. **Staging-side applies wait for `prod`'s approval,** with the write tokens only in `prod` and no `infra` environment. Answer: "Wait for prod's approval (Recommended)". The declined alternative would have kept an approval-gated `infra` environment for staging's applies, which would need a second copy of the write tokens, the state key and the passphrase, and a second concurrency group joined to prod's.
+4. **The release list** above: "As proposed (Recommended)". The declined alternative would have made the DevBot move a patch release of its own, 2.37.2.
 
-**Proposed, for @deconfined to confirm** (question 1: the agent rule's wording for the one path, pending @deconfined's confirmation in the pull request). It would replace the widened rule of 2026-09-29, which names the Infrastructure workflow and `infra`; the SSH-deploy rule of 2026-09-26 stays verbatim while the Compose path lives. Until @deconfined confirms it, both confirmed rules apply as written, and Claude sessions also follow this wording, which only adds limits:
+**The rule for agents on the one path** (question 1), confirmed by @deconfined on 2026-09-30 ([PR #64](https://github.com/deconfined/tarubot/pull/64#issuecomment-5911268081)). It replaces the widened rule of 2026-09-29, which names the Infrastructure workflow and `infra`, both retired here; the SSH-deploy rule of 2026-09-26 stays verbatim while the Compose path lives. AGENTS.md carries it verbatim:
+
 > Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never enable or disable the Deploy or Publish containers workflow; never approve, reject, bypass, cancel or re-run a Deploy or Publish containers run or any of its jobs; never change the `staging`, `prod`, `production`, `notify` or `infra-plan` environments, their secrets or their variables, or `DEPLOY_ENABLED`; and dispatch Deploy only when the owner asks in that session.
 
 ## 1. Purpose and interpretation

@@ -231,12 +231,12 @@ The agent rule is REQUIREMENTS.md's "Agent rule" in "Approved SSH-deploy amendme
 
 **Staging, prod and the widened rule (REQUIREMENTS.md "Approved staging amendments (2026-09-26)", question 5, "Approved pipeline amendments (2026-09-29)" and "Approved unified-pipeline amendments (2026-09-29)").** The same limits hold for every target and for the infrastructure:
 - agents never approve, reject, re-run or cancel a Deploy or Publish containers run or any of its jobs, and never enable or disable either workflow;
-- they never change the `staging`, `prod`, `production`, `notify` or `infra-plan` environments (and `infra`, while the widened rule of 2026-09-29 stands), their secrets or their variables, or `DEPLOY_ENABLED`;
+- they never change the `staging`, `prod`, `production`, `notify` or `infra-plan` environments, their secrets or their variables, or `DEPLOY_ENABLED`;
 - they never hold a deploy key, `ANSIBLE_SSH_KEY`, a key to the pin store or any other environment secret;
 - they never push a workflow that does any of these;
 - they dispatch Deploy, for any target and action, only when @deconfined asks in that session.
 
-The widened rule of 2026-09-29, which @deconfined confirmed, names the Infrastructure workflow and `infra`, both gone in 2.37.0. The wording that names Deploy, Publish containers and `prod` instead is 2.37.0's proposal, quoted in AGENTS.md for @deconfined to confirm in the pull request. Agents follow it meanwhile, since it only adds limits. Since 2.36.0 a staging dispatch no longer has to come from @deconfined's own account: the staging dispatcher check went with the old staging job.
+The widened rule of 2026-09-29 named the Infrastructure workflow and `infra`, both gone in 2.37.0. Since 2026-09-30 the rule for agents on the one path, which names Deploy, Publish containers and `prod` instead, replaces it: @deconfined confirmed it in [PR #64](https://github.com/deconfined/tarubot/pull/64#issuecomment-5911268081), and AGENTS.md quotes it verbatim. Since 2.36.0 a staging dispatch no longer has to come from @deconfined's own account: the staging dispatcher check went with the old staging job.
 
 By the rules and AGENTS.md, merging, approving, dispatching and every environment, secret and variable change are the owner's alone. Technically one path remains. The SSH key pushes as the owner, so it can push any branch but `main`, including one whose workflow asks for write permissions on its own `GITHUB_TOKEN`: the repository's default is read, and a same-repository workflow may raise it. Such a workflow can:
 - dispatch, cancel and re-run runs, including Deploy on `main` (production, prod and every infrastructure apply still wait for @deconfined's approval, and the Infrastructure plan runs with read-only tokens only; a staging dispatch runs at once, but only a release `main`'s `publish.yml` signed, 2.36.0 or later, with the environment's own settings);

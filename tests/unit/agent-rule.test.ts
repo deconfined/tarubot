@@ -5,12 +5,12 @@
  * - The SSH-deploy rule (REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)"): the owner's
  *   answer to question 1 and the clauses @deconfined confirmed on 2026-09-26, quoted verbatim in
  *   AGENTS.md, and every paragraph that names it says it was confirmed.
- * - The widened rule (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)"), verbatim in
- *   AGENTS.md too.
- * - 2.37.0's proposed wording for the one path (REQUIREMENTS.md "Approved unified-pipeline
- *   amendments (2026-09-29)", question 1). It is the one text allowed to call itself pending, and
- *   only in the unit that quotes it whole. When @deconfined confirms it, the pull request that
- *   records the confirmation removes that allowance (PROPOSAL below) and the "pending" words.
+ * - The rule for agents on the one path (REQUIREMENTS.md "Approved unified-pipeline amendments
+ *   (2026-09-29)", question 1), which @deconfined confirmed on 2026-09-30 in PR #64: verbatim in
+ *   REQUIREMENTS.md and AGENTS.md, introduced as confirmed, and never called proposed or pending.
+ * - The widened rule of 2026-09-29 (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)"),
+ *   which the one-path rule replaces: it stays in REQUIREMENTS.md as history, and AGENTS.md no
+ *   longer quotes it.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -29,11 +29,10 @@ const POINTERS = [
 ] as const;
 
 /**
- * 2.37.0's proposed wording, exactly as @deconfined was asked to confirm it (question 1). Until
- * confirmed, it may appear only as a proposal: in a unit that quotes it whole and says it is
- * proposed and pending.
+ * The rule for agents on the one path, exactly as @deconfined confirmed it on 2026-09-30
+ * ("Confirm as proposed (Recommended)", recorded on PR #64).
  */
-const PROPOSAL =
+const ONE_PATH =
   "Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never enable or disable the Deploy or Publish containers workflow; never approve, reject, bypass, cancel or re-run a Deploy or Publish containers run or any of its jobs; never change the `staging`, `prod`, `production`, `notify` or `infra-plan` environments, their secrets or their variables, or `DEPLOY_ENABLED`; and dispatch Deploy only when the owner asks in that session.";
 
 describe("the agent rule", () => {
@@ -73,13 +72,13 @@ describe("the agent rule", () => {
     expect(agents).toContain(`- ${clauses}\n`);
     // Nothing still calls any confirmed part of it pending: not the rule itself, and not the text
     // in the files that point to it, each of which says it was confirmed. The one exception is the
-    // unit that quotes 2.37.0's proposal whole (the next test holds it to that).
+    // unit that quotes the one-path rule whole (its own test below holds it to its confirmation).
     expect({ confirmed: PENDING.test(confirmed), clauses: PENDING.test(clauses) }).toEqual({
       confirmed: false,
       clauses: false,
     });
     for (const file of POINTERS) {
-      const units = agentRuleUnits(read(file)).filter((unit) => !unit.includes(PROPOSAL));
+      const units = agentRuleUnits(read(file)).filter((unit) => !unit.includes(ONE_PATH));
       expect({ file, points: units.length > 0 }).toEqual({ file, points: true });
       for (const unit of units) {
         // The unit's first words name it in a failure.
@@ -94,8 +93,9 @@ describe("the agent rule", () => {
     }
   });
 
-  test("the widened rule of 2026-09-29 is in AGENTS.md verbatim", () => {
-    // The blockquote in "Approved pipeline amendments (2026-09-29)", "The widened rule for agents".
+  test("the widened rule of 2026-09-29 stays in REQUIREMENTS.md as history, not in AGENTS.md", () => {
+    // The blockquote in "Approved pipeline amendments (2026-09-29)", "The widened rule for agents",
+    // which the one-path rule replaced on 2026-09-30.
     const widened =
       /\n> (Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` [^\n]*an Infrastructure run[^\n]+)\n/u.exec(
         read("REQUIREMENTS.md"),
@@ -103,35 +103,36 @@ describe("the agent rule", () => {
     expect(widened).toContain(
       "never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments",
     );
-    expect(read("AGENTS.md")).toContain(`  - ${widened}\n`);
+    expect(read("AGENTS.md")).not.toContain(widened);
   });
 
-  test("2.37.0's wording is only a proposal: quoted whole, marked, and pending", () => {
-    // REQUIREMENTS.md and AGENTS.md each quote it exactly once, in a unit that names the rule, says
-    // it is proposed and pending @deconfined's confirmation, and holds the whole text; no other
-    // file may quote it as if it were in force.
-    const count = (text: string) => text.split(PROPOSAL).length - 1;
-    const requirements = read("REQUIREMENTS.md");
-    expect(requirements).toContain(`\n> ${PROPOSAL}\n`);
-    const agents = read("AGENTS.md");
-    expect(agents).toContain(`\n  - ${PROPOSAL}\n`);
+  test("the one-path rule is confirmed, and quoted whole in REQUIREMENTS.md and AGENTS.md", () => {
+    // REQUIREMENTS.md quotes it as a blockquote after the paragraph that records the confirmation,
+    // and AGENTS.md as a nested item under the one that does; no file holds more than one copy, and
+    // no copy sits in or after text that still calls it proposed or pending.
+    const count = (text: string) => text.split(ONE_PATH).length - 1;
+    expect(read("REQUIREMENTS.md")).toContain(`\n> ${ONE_PATH}\n`);
+    expect(read("AGENTS.md")).toContain(`\n  - ${ONE_PATH}\n`);
     for (const file of POINTERS) {
       const text = read(file);
-      const proposals = agentRuleUnits(text).filter((unit) => unit.includes(PROPOSAL));
-      // Every copy of the text sits in a unit that names the rule, so none escapes the checks, and
-      // no file holds more than one: REQUIREMENTS.md and AGENTS.md exactly one each.
+      const units = markdownUnits(text);
+      const holding = units.flatMap((unit, at) => (unit.includes(ONE_PATH) ? [at] : []));
       const required = file === "REQUIREMENTS.md" || file === "AGENTS.md";
-      expect({ file, copies: count(text) }).toEqual({ file, copies: proposals.length });
-      expect({ file, units: proposals.length }).toEqual({
+      expect({ file, copies: count(text) }).toEqual({ file, copies: holding.length });
+      expect({ file, units: holding.length }).toEqual({
         file,
-        units: required ? 1 : Math.min(proposals.length, 1),
+        units: required ? 1 : Math.min(holding.length, 1),
       });
-      for (const unit of proposals)
+      for (const at of holding) {
+        // The quote and the unit before it: REQUIREMENTS.md's lead-in is its own paragraph.
+        const context = `${units[at - 1] ?? ""}\n${units[at]}`;
         expect({
           file,
-          proposed: /\bproposed\b/iu.test(unit),
-          pending: /\bpending @deconfined's confirmation in the pull request\b/u.test(unit),
-        }).toEqual({ file, proposed: true, pending: true });
+          confirmed: /confirmed by @deconfined on 2026-09-30/u.test(context),
+          proposed: /\bproposed\b/iu.test(context),
+          pending: PENDING.test(context),
+        }).toEqual({ file, confirmed: true, proposed: false, pending: false });
+      }
     }
   });
 
@@ -180,6 +181,11 @@ const CONFIRMATION = /issuecomment-5846407419|confirmed[^.]*2026-09-26/iu;
  * is never tested with it.
  */
 function agentRuleUnits(text: string): string[] {
+  return markdownUnits(text).filter((unit) => /agent rule/iu.test(unit));
+}
+
+/** Every Markdown unit of a file, in order, split as agentRuleUnits describes. */
+function markdownUnits(text: string): string[] {
   const units: string[][] = [];
   let current: string[] | null = null;
   for (const line of text.split("\n")) {
@@ -198,5 +204,5 @@ function agentRuleUnits(text: string): string[] {
     // A table row or a heading is a unit of its own line.
     if (single) current = null;
   }
-  return units.map((unit) => unit.join("\n")).filter((unit) => /agent rule/iu.test(unit));
+  return units.map((unit) => unit.join("\n"));
 }
