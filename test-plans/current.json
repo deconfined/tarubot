@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.3 infrastructure safety foundation",
-  "objective": "Implement the first pipeline safety milestone: advisory full-plan policy and enforced private plan/backend/input/run binding. No automatic apply, cluster adoption, SSH enrollment or bot change; production Compose and current owner approval gates stay intact.",
+  "title": "Session: 2.36.4 Linode single-writer pipeline specification",
+  "objective": "Record Linode as the initial pipeline target without mandatory conditional object writes. Specify serialized journals/baselines/trust, verified persistence and owner-fenced recovery; no automatic lane, database adoption, SSH enrollment or live operation is activated.",
   "user": [
-    "Review the narrow classifier and handoff binding; current Apply still requires owner approval and no automatic lane is enabled.",
-    "Review docs/PIPELINE.md for remaining milestones, owner prerequisites and accepted first-use SSH risk; this change does not complete live acceptance."
+    "Review docs/PIPELINE.md for the single-writer boundary, incomplete-operation fencing and remaining implementation milestones.",
+    "Keep current owner approval gates intact; any hand recovery must exclude running/queued automation. No host, database or credential move is requested."
   ],
   "assistant": [
-    "Test hostile/missing/unknown plans, baseline intent, allowlisted deltas, keyed backend/run binding and refusal of post-Compare changes with invented data.",
-    "Run applicable source-quality, unit/contract, build, version and synthetic Docker checks; hold no environment secrets or operate live infrastructure."
+    "Check internal navigation, formatting, version/startup-plan consistency and existing infrastructure safety contracts with invented data.",
+    "Leave workflows, the documentation site and frozen production Compose untouched; hold no environment secrets or operate live infrastructure."
   ],
   "bot": [
     "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
-    "Continue existing behavior; the safety foundation triggers no migration, deployment or new Discord action."
+    "Continue existing behavior; this specification update triggers no migration, deployment or new Discord action."
   ]
 }

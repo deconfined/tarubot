@@ -6,6 +6,8 @@ This is the implementation specification for the next pipeline, not a claim that
 
 The agreed direction is **safe auto-apply**, using the existing Linode PostgreSQL cluster, AlmaLinux 10 with SELinux enforcing, Ansible and rootless Podman/Quadlet. The documentation site stays in place. Production deployment still requires the owner's GitHub environment approval. Credentials stay in GitHub Actions secrets, never in the checkout, user data or an agent session.
 
+**Initial provider: Linode**, for compute, the existing PostgreSQL cluster and private Object Storage. Object storage conditional writes are not required. Use workflow-serialized writes and verified persistence, not a distributed-lock claim; retain native passphrase-based state/plan encryption and GitHub environment secrets. No external lock service, Secret Manager or KMS is a prerequisite. OVH remains an optional later owner-selected migration, requiring separate review and recovery/cutover acceptance; do not add a second provider or replace the current database for this implementation.
+
 The owner selected **durable automatic trust on first use (TOFU)** for initial SSH enrollment. This accepts possible interception of the first observation. DNSSEC/SSHFP protects subsequent connections; it cannot authenticate that first observation retroactively. Hosts generate their own SSH keys; normal enrollment needs no manual pinning.
 
 Authorization remains unchanged: this document authorizes no live operation, environment change, workflow dispatch, shared-bot restart or Discord write. Do not repurpose approval-gated `infra` to bypass its reviewer. Production's byte-pinned Compose files and `deploy`/`notify` jobs remain unchanged until a separately reviewed cutover; prepare that separately from staging/safety work.
@@ -92,27 +94,41 @@ Retain enforced native state/plan encryption and one-day encrypted-plan artifact
 
 The owner creates/readbacks the safe lane and accepts reviewed workflow code gating its write credentials. Do not remove `infra`'s reviewer. Enrollment tokens need only intended-zone DNS edit and private trust-store access.
 
-Use one shared infrastructure concurrency group across dispatch/release callers, without cancelling queued/running work. Serialize Configure/deploy/enrollment per target. Avoid nested reusable workflows holding the same concurrency group while waiting on each other. Verify backend conditional locks in a disposable lab before enabling them; until then serialization and no overlapping hand runs is the supported boundary, not a distributed-lock claim. Saved-plan staleness does not make concurrent provider writes safe. Recheck obsolete releases before credential gates and after waiting for approval.
+Use the shared `infra` concurrency group across every dispatch/release infrastructure writer, including applied-input baseline updates; retain `cancel-in-progress: false` and `queue: max`. Serialize Configure/deploy/enrollment and each target's trust/SSHFP writes in its shared target group. Avoid nested reusable workflows holding the same group while waiting on each other. Recheck obsolete releases before credential gates and after waiting for approval. Superseded/skipped work never counts as acceptance.
+
+This is repository-local single-writer coordination, not a storage lock or distributed lease. Keep native S3 locking disabled; a read-then-PUT lock object or expected-revision check is not compare-and-swap. Saved-plan staleness does not make concurrent provider writes safe. All writers must use these groups and scoped credentials. Before a hand run, the owner fences automation and verifies that no running or queued job can overlap; agents never change workflow/environment controls to create that window. A future backend lock is optional and needs separate review and disposable-lab compatibility tests, not a provider move now.
+
+### Durable control records and interrupted writes
+
+Keep applied-input baselines, operation journals and SSH trust in private encrypted versioned Linode Object Storage, with restricted writers, owner-controlled recovery and tested write/readback visibility. Plan reads records without writing. Each mutable current-generation pointer has one designated serialized writer; per-target enrollment cannot update the shared infrastructure baseline.
+
+1. Write each record under a unique operation/generation key and never intentionally overwrite historical records. This is an append-only convention, not storage-enforced immutability. Bind the record to its role/backend, instance or state identity, previous generation, workflow commit/run and relevant plan/input/policy digests. Preserve state lineage/serial evidence with an applied-input baseline.
+2. Under the writer's concurrency group, validate the expected previous generation and absence of an incomplete operation. Initial baseline/enrollment establishment is an explicit owner-reviewed operation; missing records do not mean an empty safe baseline or permission to relearn trust.
+3. Before provider, trust or DNS mutation, persist an operation intent and its pending-operation reference, and verify both by exact readback. An intent permits only that operation's bound inputs, not arbitrary recovery writes.
+4. After successful Apply and infrastructure verification, persist/read back the completed applied-input baseline, advance/read back its current-generation pointer and then mark/read back the operation as complete. Enrollment similarly persists and verifies trust before authentication and records verified SSHFP publication before completion. Downstream promotion waits for complete evidence.
+5. Failed or ambiguous writes, stale/conflicting generations, partial Apply and interrupted pointer/completion updates block subsequent mutation and promotion. Never clear an intent in unconditional cleanup, infer that an absent success record means no remote change, or blindly rerun Apply. Owner-authorized reconciliation establishes actual state/trust/DNS outcomes and repairs the journal before work resumes.
+
+Readback verifies persistence, not mutual exclusion. Version history supports recovery, not atomic updates or protection against an unrestricted storage writer. The supported safety boundary is one authorized writer, including during recovery; loss of that boundary stops automation. Restore tests must cover mismatched state/baseline/trust generations rather than accepting whichever object is newest.
 
 ## Durable SSH TOFU and DNSSEC SSHFP
 
 ### Enrollment
 
 1. Privately obtain provider instance identity/addresses from successfully applied state. Require target A/AAAA resolution to agree, and wait boundedly for DNS/SSH. A hostname is not an instance identity.
-2. Look up a durable record by target role and provider instance identity. Runner caches, fresh `known_hosts` and public artifacts are not trust stores. Use private encrypted object storage with version history, restricted writers and tested conditional create/update.
-3. With no record, consistently observe exactly one valid Ed25519 key on reachable expected addresses. Atomically persist it **before** authentication/configuration, with instance/address binding, enrollment generation/time and SHA-256 SSHFP. Conflicting concurrent enrollment or failed persistence blocks deployment. Consistency checks do not eliminate the accepted first-use interception risk.
+2. Under the target writer's concurrency group, resolve the expected trust generation by target role and provider instance identity. Runner caches, fresh `known_hosts` and public artifacts are not trust stores. Use the encrypted, versioned control records and operation journal above; require matching reference/record bindings.
+3. Only an explicitly approved, not-yet-enrolled generation may make a first observation. Consistently observe exactly one valid Ed25519 key on reachable expected addresses. Persist/read back the trust record and its generation reference **before** authentication/configuration, with instance/address binding, enrollment generation/time and SHA-256 SSHFP. Missing prior trust, conflicting evidence or failed persistence blocks deployment. Consistency checks do not eliminate the accepted first-use interception risk.
 4. With a record, require an exact match. Never use `accept-new`, relearn, fall back to an empty file or overlook a missing record for a previously enrolled instance. Mismatch, lost trust or ambiguous identity stops delivery and alerts the owner.
 5. Rebuild/rotation needs a separately approved enrollment generation after fencing the old host. Changed instance/hostname alone cannot authorize forgetting trust. Seeding existing manual pins is owner-authorized migration, not silent pin removal.
 
 ### Publication and connection
 
-Publish **`SSHFP 4 2`** (Ed25519/SHA-256) from the persisted key. The enrollment job is the sole SSHFP writer. Update only the expected record/name/type and retain a private trust-revision journal; never remove unrelated records or publish private keys. Initial enrollment/rotation is outside general safe auto-apply.
+Publish **`SSHFP 4 2`** (Ed25519/SHA-256) from the persisted key, within the same serialized enrollment operation. The enrollment job is the sole SSHFP writer. Update only the expected record/name/type and retain a private trust-revision journal; never remove unrelated records or publish private keys. Initial enrollment/rotation is outside general safe auto-apply.
 
 Cloudflare DNSSEC enablement alone is insufficient. Verify the parent DS/DNSKEY chain using a pinned local validating resolver, not an untrusted remote AD bit. Test bogus/insecure/missing/stale answers; wait boundedly for authoritative publication and validated resolution.
 
 Connections require strict Ed25519 checking against the durable record, a private explicit `known_hosts`, `UpdateHostKeys=no`, batch mode and no global/agent fallback, **plus** matching DNSSEC-validated SSHFP. Never warn-and-continue on absent/bogus/mismatched DNSSEC. SSHFP cannot authorize replacing durable trust. If inventory uses `HostKeyAlias=target`, validate the real DNS name explicitly rather than querying that alias. Mask names/addresses/keys/fingerprints first; keep diagnostics private or fixed-code only.
 
-Trust recovery is an owner-authorized restore from protected version history or newly authenticated observation. An old record must not accept unintended rotation. Provider identity lookup, conditional storage APIs and the local validating resolver are prerequisites, not yet proven capabilities.
+Trust recovery is an owner-authorized restore from protected version history or newly authenticated observation, with competing automation fenced. An old record must not accept unintended rotation. Provider identity lookup, serialized encrypted persistence/readback/recovery and the local validating resolver need implementation and rehearsal; conditional storage APIs are not prerequisites.
 
 ## Deployment, staging acceptance and recovery
 
@@ -136,17 +152,18 @@ Each milestone is a coherent signed commit/version change with tests. Code avail
 | --- | --- | --- |
 | 1. Specification | This document and contributor/deployment links | Documented; no runtime change |
 | 2. Safety foundation | Full-plan classifier, adversarial fixtures, plan/backend/input binding; reviewed lane intact | Implemented locally; classification advisory, activation not performed |
-| 3. Database adoption | Import-only v2 cluster configuration and independent guards | Pending; no agent-run live import |
-| 4. Enrollment | Durable TOFU, conditional storage, DNS-only SSHFP writer, local DNSSEC validation | Pending prerequisites/tests |
-| 5. Staging delivery | Reusable infrastructure flow, owner-enabled safe lane, recovery fixes, exact-release acceptance | Pending |
-| 6. Production cutover | Separate reviewed replacement of frozen Compose path and staging-gated promotion | Pending separate review/owner window |
-| 7. Activation | Owner sets credentials/gates, imports cluster, enrolls hosts, rehearses recovery, enables flow | Owner only; not performed |
+| 3. Durable control records | Serialized operation journals, applied-input baselines, verified pointers and interrupted-write fencing | Pending; no native S3 lock requirement |
+| 4. Database adoption | Import-only v2 cluster configuration and independent guards | Pending; no agent-run live import |
+| 5. Enrollment | Serialized durable TOFU, DNS-only SSHFP writer, local DNSSEC validation | Pending prerequisites/tests |
+| 6. Staging delivery | Reusable infrastructure flow, owner-enabled safe lane, recovery fixes, exact-release acceptance | Pending |
+| 7. Production cutover | Separate reviewed replacement of frozen Compose path and staging-gated promotion | Pending separate review/owner window |
+| 8. Activation | Owner sets credentials/gates, imports cluster, enrolls hosts, rehearses recovery, enables flow | Owner only; not performed |
 
 Offline checks: contributor quality/build/unit/contract checks; synthetic Docker/PostgreSQL suite; shell/workflow checks; OpenTofu fmt/validate/mock plans; Ansible syntax/lint/template checks; site build if user-facing pages change. No root Bun site scripts.
 
 Policy fixtures cover allowed fields and one-field deviations; import-plus-update; deletes/replaces/deposed; wrong providers/modules/indexes; duplicates; ignored-input/credential changes; database settings/removal/widening/unrelated additions; unknown addresses; exposure/drift/output-only changes; incomplete/error/check-failed plans; stale/wrong plan/backend/release; hostile-value redaction. Run phase tests with stand-ins, never live credentials.
 
-Enrollment fixtures cover first/repeat trust, changed key/instance/address, lost record, concurrency/storage failure, invalid keys, SSHFP publication races, DNSSEC failures and leakage. Delivery tests prove failed/skipped/non-deployed staging blocks production, schema-aware recovery, migration/restart-failure evidence and single-writer fencing.
+Control-record fixtures cover serialized writer ownership, wrong/stale previous generations, rejected readback, interruption before/after Apply and pointer/completion writes, pending-intent refusal and mismatched version-history recovery. Enrollment fixtures cover first/repeat trust, changed key/instance/address, lost record, concurrency/storage failure, invalid keys, SSHFP publication races, DNSSEC failures and leakage. Delivery tests prove failed/skipped/non-deployed staging blocks production, schema-aware recovery, migration/restart-failure evidence and single-writer fencing.
 
 Owner-authorized disposable-lab rehearsal precedes activation: TLS database/S3, DNSSEC, TOFU persistence/conflict/rebuild, two idempotent Configures, isolated healthy deploy/stability/readback, reboot, backup/restore, migration and partial-failure recovery. Only separate live acceptance proves real staging runs.
 
@@ -156,7 +173,7 @@ The classifier (`scripts/infra-policy.ts`) has no provider/network access or pac
 
 - Owner's private cluster baseline, supported v2 schema/import behavior and state mapping; no agent credential/state retrieval.
 - Owner creation/readback of the safe-apply gate and scoped credentials; no environment setup as a code side effect.
-- Private trust backend with verified atomic conditional writes/version retention, provider identity lookup and pinned validating resolver; no ephemeral-cache substitute.
+- Private versioned Linode control-record storage, scoped readers/writers, tested serialization/readback and owner-fenced recovery; provider identity lookup and pinned validating resolver; no ephemeral-cache substitute or mandatory conditional writes.
 - Reviewed production cutover, single-writer/restore window, DevBot token move and scanner exception policy. A docs merge implies none of these operations.
 
 Record acceptance in CI and concise PR/issue evidence, not duplicate handoff diaries. Update [DEPLOYMENT](DEPLOYMENT.md) when a path ships, and public self-hosting pages when behavior changes, using placeholders only.

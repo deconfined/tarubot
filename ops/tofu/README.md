@@ -109,6 +109,8 @@ The plan refuses to go on:
 
 There is no state lock. Runs serialize through the workflow's `infra` concurrency group, and a [hand run](#a-hand-run-when-actions-is-down) must never overlap one. The Plan job plans with `-lock=false` as well, because its state key is read-only and could never write a lock: the backend configures none today (no `use_lockfile`), and the flag keeps a later one from making Plan write.
 
+The [next pipeline specification](../../docs/PIPELINE.md#plan-transfer-credentials-and-concurrency) retains this Linode single-writer boundary rather than requiring conditional object writes or a new locking service. Its durable journals/baselines and automatic SSH enrollment are not implemented yet; the current workflow remains dispatch-only with owner-approved Apply and manual host-key pinning.
+
 ## The first apply
 
 It is two applies, so that adopting the existing access list can't change it.
@@ -153,7 +155,7 @@ A new owner key, Configure key or root hash reaches a host only through a rebuil
 
 ## A hand run when Actions is down
 
-From the owner's machine, never from an agent's, and never while an Infrastructure run is active. Run it from the repository's root. Every file it writes (the backend settings, the values, OpenTofu's working directory and the saved plan) goes to a private directory outside the checkout, so none of them can be committed, and the directory goes afterwards:
+From the owner's machine, never from an agent's. First fence automation and verify that no running or queued Infrastructure job can overlap the hand run; an Actions outage alone is not proof that every runner has stopped. Run it from the repository's root. Every file it writes (the backend settings, the values, OpenTofu's working directory and the saved plan) goes to a private directory outside the checkout, so none of them can be committed, and the directory goes afterwards:
 
 ```sh
 umask 077

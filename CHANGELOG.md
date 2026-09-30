@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.3**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.4**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.4 — Linode single-writer pipeline specification
+
+- Keep Linode compute, the existing PostgreSQL cluster and private Object Storage as the initial target; retain GitHub environment secrets and native passphrase encryption. OVH is an optional later reviewed migration, not a prerequisite.
+- Replace mandatory conditional storage writes with workflow-serialized control records, verified persistence and owner-fenced recovery. Specify operation journals, applied-input baselines, trust generations and refusal of interrupted/ambiguous writes; version history and readback are not distributed locks.
+- Clarify that a hand run must exclude queued/running automation. Durable control records and enrollment remain pending; no workflow, live infrastructure, deployment or member-facing behavior changes.
 
 ## 2.36.3 — Infrastructure safety foundation
 
