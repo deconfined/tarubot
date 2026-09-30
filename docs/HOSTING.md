@@ -42,6 +42,8 @@ Read the **target job's** result, not just the run's conclusion. Production and 
 
 Quadlet deployment leaves an unhealthy release in place: **no automatic rollback**. A same-schema rollback is a fresh staging `action=bot` dispatch of the previous version. Across a committed migration it is refused; fix forward or restore under an owner-approved window. A missing/`-` restore point is not evidence that migrations did not commit. Confirm the database's schema head and writer activity independently.
 
+Before installing/reloading a candidate, the Quadlet play stops the existing writer, requires its stop timestamp and writes private `~/.config/tarubot/recovery-boundary.json` with that boundary and previous/candidate image/schema context. A failed start can therefore leave a boundary even when no workflow result returns. The previous image's schema head does not prove the live database's schema, and the timestamp does not prove a usable provider PITR point. Preserve the record while inspecting/fencing the writer and checking recovery sources; it never authorizes an image rollback or restore by itself.
+
 Production Compose has its own stage-aware automatic recovery. A schema-preserving restart can roll back; a committed migration cannot be undone by an old image. Never manually start a second worker or delete a run directory to “unstick” a deployment. See the [frozen Compose recovery reference](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#outcomes) for its result codes and [manual recovery](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#updating-to-a-release) when Actions is unavailable.
 
 ## Backups

@@ -94,7 +94,68 @@ const fields: Record<string, string[]> = {
     private_routing proxied ttl tags settings comment_modified_on created_on modified_on proxiable
     tags_modified_on meta`.split(/\s+/u),
   linode_database_access_controls: ["id", "database_id", "database_type", "allow_list", "timeouts"],
+  // Linode v4.5.0 at c77ffd4d69cde96fb01b9bf83f6506e5cab957a4:
+  // linode/firewall/framework_schema_resource.go and framework_schema_datasource.go.
+  linode_firewall: `id label tags disabled inbound outbound inbound_policy outbound_policy version
+    fingerprint linodes nodebalancers interfaces devices status created updated`.split(/\s+/u),
+  // The same pinned source's linode/databasepostgresqlv2/framework_resource_schema.go;
+  // framework_resource.go adds create/update/delete timeouts through BaseResource.
+  linode_database_postgresql_v2: `id engine_id label region type allow_list ca_cert cluster_size
+    fork_restore_time fork_source suspended updates created encrypted engine host_primary
+    host_secondary host_standby members oldest_restore_time pending_updates platform port
+    private_network root_password root_username ssl_connection status updated version timeouts
+    engine_config_pg_autovacuum_analyze_scale_factor engine_config_pg_autovacuum_analyze_threshold
+    engine_config_pg_autovacuum_max_workers engine_config_pg_autovacuum_naptime
+    engine_config_pg_autovacuum_vacuum_cost_delay engine_config_pg_autovacuum_vacuum_cost_limit
+    engine_config_pg_autovacuum_vacuum_scale_factor engine_config_pg_autovacuum_vacuum_threshold
+    engine_config_pg_bgwriter_delay engine_config_pg_bgwriter_flush_after engine_config_pg_bgwriter_lru_maxpages
+    engine_config_pg_bgwriter_lru_multiplier engine_config_pg_deadlock_timeout engine_config_pg_default_toast_compression
+    engine_config_pg_idle_in_transaction_session_timeout engine_config_pg_jit engine_config_pg_max_files_per_process
+    engine_config_pg_max_locks_per_transaction engine_config_pg_max_logical_replication_workers
+    engine_config_pg_max_parallel_workers engine_config_pg_max_parallel_workers_per_gather
+    engine_config_pg_max_pred_locks_per_transaction engine_config_pg_max_replication_slots
+    engine_config_pg_max_slot_wal_keep_size engine_config_pg_max_stack_depth engine_config_pg_max_standby_archive_delay
+    engine_config_pg_max_standby_streaming_delay engine_config_pg_max_wal_senders engine_config_pg_max_worker_processes
+    engine_config_pg_password_encryption engine_config_pg_pg_partman_bgw_interval engine_config_pg_pg_partman_bgw_role
+    engine_config_pg_pg_stat_monitor_pgsm_enable_query_plan engine_config_pg_pg_stat_monitor_pgsm_max_buckets
+    engine_config_pg_pg_stat_statements_track engine_config_pg_temp_file_limit engine_config_pg_timezone
+    engine_config_pg_track_activity_query_size engine_config_pg_track_commit_timestamp engine_config_pg_track_functions
+    engine_config_pg_track_io_timing engine_config_pg_wal_sender_timeout engine_config_pg_wal_writer_delay
+    engine_config_pg_stat_monitor_enable engine_config_pglookout_max_failover_replication_time_lag
+    engine_config_shared_buffers_percentage engine_config_work_mem`.split(/\s+/u),
 };
+/** Nested controls have named fields too; unchanged unknown fields cannot ride a safe update. */
+function knownNestedFields(type: string, values: ObjectValue): void {
+  const record = (value: unknown, keys: string[]) =>
+    requireEvidence(Object.keys(object(value)).every((key) => keys.includes(key)));
+  const records = (value: unknown, keys: string[]) =>
+    list(value).forEach((v) => {
+      record(v, keys);
+    });
+  if (type === "linode_firewall") {
+    for (const key of ["inbound", "outbound"])
+      if (values[key] !== undefined && values[key] !== null)
+        records(values[key], [
+          "label",
+          "action",
+          "protocol",
+          "description",
+          "ports",
+          "ipv4",
+          "ipv6",
+        ]);
+    if (values.devices !== undefined && values.devices !== null)
+      records(values.devices, ["id", "entity_id", "type", "label", "url"]);
+  } else if (type === "linode_database_postgresql_v2") {
+    // Pinned linode/helper/databaseshared/{updates,private_network,pending_updates}.go.
+    if (values.updates !== undefined && values.updates !== null)
+      record(values.updates, ["day_of_week", "duration", "frequency", "hour_of_day"]);
+    if (values.private_network !== undefined && values.private_network !== null)
+      record(values.private_network, ["vpc_id", "subnet_id", "public_access"]);
+    if (values.pending_updates !== undefined && values.pending_updates !== null)
+      records(values.pending_updates, ["deadline", "description", "planned_for"]);
+  }
+}
 const providers: Record<string, string> = {
   linode_instance: "registry.opentofu.org/linode/linode",
   linode_firewall: "registry.opentofu.org/linode/linode",
@@ -181,6 +242,8 @@ function differences(r: Resource): string[] {
   );
   const keys = new Set([...Object.keys(before), ...Object.keys(after), ...Object.keys(unknown)]);
   requireEvidence([...keys].every((key) => fields[r.type]?.includes(key)));
+  knownNestedFields(r.type, before);
+  knownNestedFields(r.type, after);
   const differing: string[] = [];
   for (const key of keys) {
     if (r.type === "cloudflare_dns_record" && key === "modified_on" && unknown[key] === true)
@@ -233,8 +296,8 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
     requireEvidence(
       p.format_version === "1.2" && p.terraform_version === "1.12.6" && p.errored === false,
     );
-    for (const flag of ["complete", "applyable"])
-      if (Object.hasOwn(p, flag)) requireEvidence(p[flag] === true);
+    if (Object.hasOwn(p, "complete")) requireEvidence(p.complete === true);
+    if (Object.hasOwn(p, "applyable")) requireEvidence(typeof p.applyable === "boolean");
     if (p.deferred_changes !== undefined) requireEvidence(list(p.deferred_changes).length === 0);
     for (const check of list(p.checks ?? [])) {
       const c = object(check);
@@ -303,11 +366,11 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
       if (r.type === "linode_database_postgresql_v2" || r.type === "linode_firewall") {
         if (r.action !== '["no-op"]')
           reasons.add(r.type === "linode_firewall" ? "firewall-change" : "cluster-change");
-        else
-          requireEvidence(
-            isDeepStrictEqual(r.change.before, r.change.after) &&
-              !unknownMask(r.change.after_unknown),
-          );
+        else {
+          requireEvidence(differences(r).length === 0);
+          if (r.type === "linode_database_postgresql_v2")
+            requireEvidence(String(object(r.change.after).id) === object(v.database_ids)[r.index]);
+        }
         continue;
       }
       if (r.action !== '["no-op"]' && r.action !== '["update"]') {
@@ -317,6 +380,49 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
       const delta = differences(r);
       if (r.action === '["no-op"]') {
         requireEvidence(delta.length === 0);
+        const after = object(r.change.after);
+        // A provider no-op must still describe the configured object, rather than merely
+        // matching its own duplicated views. Ignored creation-only inputs stay baseline-bound.
+        if (r.type === "linode_instance") {
+          const host = object(object(v.hosts)[r.index]);
+          const firewall = resources.find(
+            (entry) => entry.type === "linode_firewall" && entry.index === r.index,
+          );
+          requireEvidence(
+            ["label", "region", "type"].every((key) => after[key] === host[key]) &&
+              after.image === "linode/almalinux10" &&
+              after.booted === true &&
+              after.disk_encryption === "enabled" &&
+              after.interface_generation === "legacy_config" &&
+              list(after.interface).length === 1 &&
+              object(list(after.interface)[0]).purpose === "public" &&
+              firewall &&
+              String(after.firewall_id) === String(object(firewall.change.after).id),
+          );
+        } else if (r.type === "cloudflare_dns_record") {
+          const host = resources.find(
+            (entry) => entry.type === "linode_instance" && entry.index === r.index,
+          );
+          requireEvidence(host);
+          const addresses = object(host.change.after);
+          const ipv4 = list(addresses.ipv4);
+          const ipv6 = text(addresses.ipv6);
+          requireEvidence(ipv4.length === 1 && isIP(text(ipv4[0])) === 4);
+          requireEvidence(ipv6.endsWith("/128") && isIP(ipv6.slice(0, -4)) === 6);
+          const isIPv6 = r.address.includes(".aaaa[");
+          requireEvidence(
+            after.zone_id === v.cloudflare_zone_id &&
+              after.name === object(object(v.hosts)[r.index]).fqdn &&
+              after.type === (isIPv6 ? "AAAA" : "A") &&
+              after.proxied === false &&
+              after.content === (isIPv6 ? ipv6.slice(0, -4) : ipv4[0]),
+          );
+        } else
+          requireEvidence(
+            String(after.database_id) === object(v.database_ids)[r.index] &&
+              after.database_type === "postgresql" &&
+              after.id === `${object(v.database_ids)[r.index]}:postgresql`,
+          );
         continue;
       }
       if (r.type === "linode_instance") {
@@ -377,7 +483,10 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
         reasons.add("output-change");
     }
     if (reasons.size) return result("review-required");
-    return result(resources.some((r) => r.action !== '["no-op"]') ? "safe" : "no-changes");
+    const changed = resources.some((r) => r.action !== '["no-op"]');
+    // Some show formats report an empty plan as not applyable: it can continue, never mutate.
+    requireEvidence(!changed || p.applyable !== false);
+    return result(changed ? "safe" : "no-changes");
   } catch {
     // No exception text, path, key, value or diagnostics are ever included in public output.
     return { revision: "1", decision: "invalid", reasons: ["invalid-evidence"] };
@@ -404,7 +513,12 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
     policy: createHash("sha256")
       .update(readFileSync(import.meta.path))
       .digest("hex"),
-    controlCode: ["infra-control.ts", "infra-control-cli.ts"].map((name) =>
+    controlCode: [
+      "infra-control.ts",
+      "infra-control-cli.ts",
+      "release-infra.ts",
+      "release-policy.ts",
+    ].map((name) =>
       createHash("sha256")
         .update(readFileSync(new URL(name, import.meta.url)))
         .digest("hex"),
@@ -417,6 +531,9 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
       : null,
     baseline: existsSync(join(directory, "baseline-inputs.json"))
       ? JSON.parse(readFileSync(join(directory, "baseline-inputs.json"), "utf8"))
+      : null,
+    release: existsSync(join(directory, "release-context.json"))
+      ? JSON.parse(readFileSync(join(directory, "release-context.json"), "utf8"))
       : null,
     commit: environment.GITHUB_SHA,
     run: environment.GITHUB_RUN_ID,

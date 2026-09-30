@@ -86,9 +86,18 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
+  scan:
+    name: Scan built platforms
+    needs: publish
+    uses: ./.github/workflows/scan.yml
+    with:
+      digest: ${{ needs.publish.outputs.digest }}
+    permissions:
+      contents: read
+
   attest:
     name: Sign build provenance
-    needs: publish
+    needs: [publish, scan]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -131,11 +140,32 @@ jobs:
           subject-digest: ${{ needs.publish.outputs.digest }}
           push-to-registry: false
 
+  release:
+    name: Replacement release orchestration
+    needs: [verify, publish, attest]
+    # Owner activation remains separate. This flag is never set/changed by repository code.
+    if: github.ref == 'refs/heads/main' && vars.RELEASE_PIPELINE_ENABLED == 'true'
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    secrets: inherit
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      commit: ${{ github.sha }}
+      digest: ${{ needs.publish.outputs.digest }}
+      publication_run: ${{ github.run_id }}
+
   latest:
     name: Promote latest
     # latest never names an image whose provenance isn't signed.
-    needs: [publish, attest]
-    if: github.ref == 'refs/heads/main'
+    needs: [publish, attest, release]
+    if: >-
+      always() && github.ref == 'refs/heads/main'
+      && needs.publish.result == 'success' && needs.attest.result == 'success'
+      && (vars.RELEASE_PIPELINE_ENABLED != 'true'
+          || (needs.release.result == 'success' && needs.release.outputs.accepted == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Only mutable latest promotion is serialized; version/SHA publication has already completed.

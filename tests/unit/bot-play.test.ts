@@ -330,6 +330,8 @@ describe("bot.yml's shape", () => {
       ["Preflight", "Require Schema ready.", "failed", "schema-not-ready"],
       ["Preflight", "Run one backup", "failed", "backup-failed"],
       ["Unit", "Refuse a unit Quadlet can't turn into tarubot.service", "failed", "unit-invalid"],
+      ["Unit", "Stop the old writer before installing the candidate", "failed", "stop-failed"],
+      ["Unit", "Require an existing writer's captured stop boundary", "failed", "boundary-missing"],
       ["Restart", "Restart the bot", "failed", "restart-failed"],
       ["Health", "Require healthy", "unhealthy", "not-healthy"],
       ["Health", "Require the same container, still healthy", "unhealthy", "not-healthy"],

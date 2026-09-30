@@ -43,24 +43,11 @@ export class S3ControlStore implements ControlStore {
   }
 }
 
-/** All evidence lives under RUNNER_TEMP/tofu with umask 077, never in an Actions output/artifact. */
-export async function controlPhase(
-  command: string,
+/** Shared transport/key factory; reviewed and automatic adapters have distinct authority gates. */
+export function infrastructureJournal(
   directory: string,
   environment: NodeJS.ProcessEnv,
-  suppliedJournal?: InfrastructureJournal,
-): Promise<void> {
-  const read = (name: string): unknown => JSON.parse(readFileSync(join(directory, name), "utf8"));
-  const write = (name: string, value: unknown) =>
-    writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
-  if (command === "read" && environment.CONTROL_RECORDS_ENABLED !== "true") {
-    if (environment.CONTROL_RECORDS_ENABLED && environment.CONTROL_RECORDS_ENABLED !== "false")
-      fail();
-    write("control-context.json", { enabled: false });
-    // Do not let a prior local baseline survive an explicitly disabled phase.
-    write("baseline-inputs.json", null);
-    return;
-  }
+): InfrastructureJournal {
   const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
   const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
   const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
@@ -85,10 +72,31 @@ export async function controlPhase(
     accessKeyId: environment.AWS_ACCESS_KEY_ID,
     secretAccessKey: environment.AWS_SECRET_ACCESS_KEY,
   });
+  return new InfrastructureJournal(
+    new S3ControlStore(client),
+    new RecordCodec(passphrase, identity),
+  );
+}
+
+/** All evidence lives under RUNNER_TEMP/tofu with umask 077, never in an Actions output/artifact. */
+export async function controlPhase(
+  command: string,
+  directory: string,
+  environment: NodeJS.ProcessEnv,
+  suppliedJournal?: InfrastructureJournal,
+): Promise<void> {
+  const read = (name: string): unknown => JSON.parse(readFileSync(join(directory, name), "utf8"));
+  const write = (name: string, value: unknown) =>
+    writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
+  if (command === "read" && environment.CONTROL_RECORDS_ENABLED !== "true") {
+    if (environment.CONTROL_RECORDS_ENABLED && environment.CONTROL_RECORDS_ENABLED !== "false")
+      fail();
+    write("control-context.json", { enabled: false });
+    write("baseline-inputs.json", null);
+    return;
+  }
   // Dependency injection is internal-only for invented tests, never a CLI/environment override.
-  const journal =
-    suppliedJournal ??
-    new InfrastructureJournal(new S3ControlStore(client), new RecordCodec(passphrase, identity));
+  const journal = suppliedJournal ?? infrastructureJournal(directory, environment);
   const state = stateEvidence(read("state.json"));
   if (command === "read") {
     const snapshot = await journal.inspect(state);

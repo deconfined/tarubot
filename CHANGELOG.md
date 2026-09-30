@@ -1,6 +1,15 @@
 # Version history
 
-The current application version is **2.36.5**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.6**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.6 — Replacement release components and staging evidence
+
+- Scan both exact runtime child digests with a checksum-pinned Trivy gate before signing. Reject malformed/duplicate platform evidence, index digest mismatches, scan errors and fixable high/critical vulnerabilities; isolate scanner/admission subprocesses and remove private diagnostics on every exit.
+- Add inactive replacement release/infrastructure workflows, exact publication/provenance identity, journaled safe Apply and stable no-change verification. Require main-only pre-existing environments, no dispatch/re-run automatic authority and explicit successful target acceptance; retain production's byte-identical Compose delivery jobs.
+- Add staging checks for the candidate image/schema, repeated readiness/Discord/writer lease, exact candidate command inventory, backup timer, a new completed encrypted off-site backup and process-start/restart stability. Skipped/configured/superseded outcomes cannot count as acceptance; test the actual Ansible assertions with invented evidence.
+- Refuse unknown unchanged firewall/database fields and inconsistent host, DNS and database identities before automatic infrastructure continuation. Use portable temporary directories so control-record tests run in clean Docker builds.
+- Stop the previous Quadlet writer and persist its recovery boundary before installing/starting a candidate; refuse a missing stop boundary. Replace blind rollback advice with schema-aware fix-forward/owner recovery.
+- Keep a code-level activation fence before all replacement credential jobs until database adoption and durable SSH enrollment ship. No live activation, deployment, credential change or production cutover; synthetic acceptance is not live acceptance.
 
 ## 2.36.5 — Durable infrastructure control records
 

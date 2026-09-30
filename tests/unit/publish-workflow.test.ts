@@ -69,7 +69,16 @@ const workflow = z
     on: z.unknown(),
     permissions: z.record(z.string(), z.string()),
     concurrency: z.unknown(),
-    jobs: z.object({ verify: z.unknown(), publish: job, attest: job, latest: job }).strict(),
+    jobs: z
+      .object({
+        verify: z.unknown(),
+        publish: job,
+        scan: z.unknown(),
+        attest: job,
+        release: z.unknown(),
+        latest: job,
+      })
+      .strict(),
   })
   .strict();
 
@@ -134,7 +143,7 @@ describe("the build's digest", () => {
 
 describe("the attest job", () => {
   test("runs after publish, from main, with only the permissions signing needs", () => {
-    expect(needsOf(attest)).toEqual(["publish"]);
+    expect(needsOf(attest)).toEqual(["publish", "scan"]);
     expect(attest.if).toBe("github.ref == 'refs/heads/main'");
     expect(attest["runs-on"]).toBe("ubuntu-24.04");
     // No packages: write and no registry login: the attestation stays with the repository.
@@ -221,8 +230,9 @@ describe("who may sign or write", () => {
 
 describe("the latest tag", () => {
   test("waits for attest and promotes the signed digest, never the sha- tag", () => {
-    expect(needsOf(latest).sort()).toEqual(["attest", "publish"]);
-    expect(latest.if).toBe("github.ref == 'refs/heads/main'");
+    expect(needsOf(latest).sort()).toEqual(["attest", "publish", "release"]);
+    expect(latest.if).toContain("needs.release.outputs.accepted == 'true'");
+    expect(latest.if).toContain("needs.attest.result == 'success'");
     const promote = stepOf(latest, "Advance the latest tag after successful publication");
     expect(promote.env?.DIGEST).toBe(DIGEST_OUTPUT);
     const run = promote.run ?? "";

@@ -11,6 +11,8 @@ These procedures assume the stock `docker-compose.yml` with its bundled PostgreS
 
 Read the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) entries between your release and the new one first. Each says whether it adds a **migration** and whether its **commands changed**.
 
+Signed published releases pass vulnerability scans for both AMD64 and ARM64 before signing and promotion. A failed scan can leave candidate version tags in the registry without a signed release; do not treat an available tag as verification. Use the signed digest and provenance checks in [installation](/tarubot/deploy/install/), not just `latest` or a successful pull.
+
 1. Fetch the new release's Compose file and settings template. A release can add, rename or remove settings and services in `docker-compose.yml`, and Compose passes the bot only the settings that file lists, so take both from the commit that built the new image. Nothing restarts yet.
 
    ```sh

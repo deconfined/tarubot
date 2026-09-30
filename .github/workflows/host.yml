@@ -48,6 +48,22 @@ on:
         description: "Main's head when the run was created: Configure applies site.yml from it"
         type: string
         required: true
+      accept_release:
+        description: "Require real acceptance for the replacement orchestrator (never configure-only)"
+        type: boolean
+        default: false
+      schema_head:
+        description: "Expected migration head for acceptance"
+        type: string
+        default: ""
+      publication_run:
+        description: "Publication run bound into acceptance"
+        type: string
+        default: ""
+    outputs:
+      accepted:
+        description: "True only after exact-release target acceptance"
+        value: ${{ jobs.host.outputs.accepted }}
 
 permissions: {}
 
@@ -68,6 +84,8 @@ jobs:
       queue: max
     permissions:
       contents: read # the two checkouts of this public repository
+    outputs:
+      accepted: ${{ steps.accept.outputs.accepted }}
     defaults:
       run:
         shell: bash
@@ -95,6 +113,20 @@ jobs:
             [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || bad "The commit must be 40 lowercase hex digits."
             [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || bad "The digest must be sha256: and 64 lowercase hex digits."
           fi
+
+      - name: Recheck automatic release freshness
+        if: inputs.accept_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ inputs.commit }}
+          CONFIG_COMMIT: ${{ inputs.config_commit }}
+        run: |
+          # This runs after waiting for the target group, before settings/keys or root Configure.
+          set -Eeuo pipefail
+          [[ $GITHUB_REF == refs/heads/main && $GITHUB_RUN_ATTEMPT == 1 ]]
+          [[ $COMMIT == "$CONFIG_COMMIT" && $COMMIT == "$GITHUB_SHA" ]]
+          current=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          [[ $current == "$COMMIT" ]]
 
       - name: Load the host settings
         id: host
@@ -300,6 +332,36 @@ jobs:
             -e "tarubot_commit=$COMMIT" -e "tarubot_digest=$DIGEST" \
             -e "tarubot_result=$RUNNER_TEMP/result.json"
 
+      - name: Install Bun for acceptance validation
+        if: inputs.accept_release && steps.host.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: config/package.json
+
+      - name: Require exact-release staging acceptance
+        id: accept
+        if: inputs.accept_release && steps.host.outputs.skip != 'true'
+        working-directory: config/ops/ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/config/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DIGEST: ${{ inputs.digest }}
+          PUBLICATION_RUN: ${{ inputs.publication_run }}
+          SCHEMA_HEAD: ${{ inputs.schema_head }}
+        run: |
+          # Missing/failed/configured/superseded results are not a healthy deployment.
+          set -Eeuo pipefail
+          jq -e --arg version "$VERSION" --arg schema "$SCHEMA_HEAD" \
+            '.outcome == "deployed" and .action == "deploy" and .version == $version and .schema_head == $schema' \
+            "$RUNNER_TEMP/result.json" >/dev/null 2>&1
+          ansible-playbook -i "$RUNNER_TEMP/ssh/inventory.json" accept.yml \
+            -e tarubot_target=staging -e "tarubot_version=$VERSION" -e "tarubot_commit=$COMMIT" \
+            -e "tarubot_digest=$DIGEST" -e "tarubot_schema_head=$SCHEMA_HEAD" \
+            -e "tarubot_publication_run=$PUBLICATION_RUN" -e "tarubot_acceptance=$RUNNER_TEMP/acceptance.json"
+          bun ../../scripts/release-acceptance.ts
+
       - name: Summary
         if: always()
         env:
@@ -342,9 +404,9 @@ jobs:
             done
             printf '\n'
           } >> "$GITHUB_STEP_SUMMARY"
-          # An unhealthy release stays in place (no automatic restore): the way back is a dispatch.
+          # Missing schema evidence is not unchanged-schema evidence; never recommend blind rollback.
           if [[ ${value[outcome]} == unhealthy && ${value[previous]} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            hint="To roll back, run Deploy with target=$TARGET, version=${value[previous]} and action=bot."
+            hint="Inspect and fence the live writer and verify the database schema first. Fix forward or use owner-controlled recovery; image rollback needs explicit unchanged-schema evidence."
             echo "::error::${value[version]} isn't healthy on $TARGET. $hint"
             printf '%s\n' "$hint" >> "$GITHUB_STEP_SUMMARY"
           fi

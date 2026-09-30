@@ -136,6 +136,7 @@ jobs:
           # Main's head when this run was created: staging's Configure applies site.yml from it.
           CONFIG_COMMIT: ${{ github.sha }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          RELEASE_PIPELINE_ENABLED: ${{ vars.RELEASE_PIPELINE_ENABLED }}
         run: |
           set -Eeuo pipefail
           export LC_ALL=C
@@ -199,6 +200,7 @@ jobs:
           PRODUCTION=false STAGING=false PRODUCTION_REASON=- target_notes=()
           # What staging does: an automatic run deploys, a staging dispatch names its action.
           STAGING_ACTION=deploy
+          RELEASE_PIPELINE_ENABLED=${RELEASE_PIPELINE_ENABLED-false}
           if [[ $EVENT == workflow_run ]]; then
             requested=(production staging)
           else
@@ -217,7 +219,9 @@ jobs:
           fi
           for target in "${requested[@]}"; do
             if [[ $target == staging ]]; then
-              STAGING=true
+              # The replacement orchestrator already deployed and accepted this automatic release
+              # inside publication. Do not deliver it twice. Explicit staging dispatch stays recovery.
+              if [[ $EVENT != workflow_run || $RELEASE_PIPELINE_ENABLED != true ]]; then STAGING=true; fi
             elif [[ $DEPLOY_ENABLED == true ]]; then
               PRODUCTION=true
             else

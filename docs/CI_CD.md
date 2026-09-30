@@ -8,7 +8,8 @@ Use [CONTRIBUTING.md](../CONTRIBUTING.md) for the local change checklist. This r
 | --- | --- |
 | `ci.yml` | Version/changelog, types, lint/format, build, unit/contract/PostgreSQL tests and AMD64/ARM64 image builds; required `CI result` |
 | `codeql.yml` | JavaScript/TypeScript and Actions analysis; required security gate |
-| `publish.yml` | Revalidate merged `main`, publish GHCR images, sign provenance, then promote `latest` |
+| `publish.yml`, `scan.yml` | Revalidate merged `main`, publish candidate images, scan both exact platform digests, sign provenance, then promote `latest` |
+| `release.yml`, `release-infra.yml` | Inactive replacement components; code-fenced before credentials until adoption/trust ship; see [PIPELINE](PIPELINE.md#replacement-components-implemented-but-activation-fenced) |
 | `deploy.yml`, `host.yml` | Verify the published release and run target-specific deployment; see [DEPLOYMENT](DEPLOYMENT.md) |
 | `infra.yml` | Dispatch-only infrastructure plan/approved apply; see [OpenTofu](../ops/tofu/README.md) |
 | `pages.yml` | pnpm/Node site build and Pages publication; site changes must have a green Build |
@@ -23,7 +24,7 @@ Merge with a merge commit only, after up-to-date CI, security checks and the own
 
 ## Signed build provenance
 
-Publication signs the **build-returned index digest**, not a tag read back from GHCR. Only its attestation job receives OIDC/attestation write permissions; that job has no registry write. `latest` advances only after signing. Unsigned BuildKit provenance/SBOM metadata is not the deployment trust boundary.
+Publication scans both runtime child digests with checksum-pinned Trivy, failing on fixable high/critical vulnerabilities and scan errors before signing the **build-returned index digest**, not a tag read back from GHCR. The scanner validates index bytes/platforms and does not honor repository ignore/config files; exceptions are not implemented. Only the attestation job receives OIDC/attestation write permissions; that job has no registry write. `latest` advances only after signing (and replacement staging acceptance when that future lane is enabled). Unsigned BuildKit provenance/SBOM metadata is not the deployment trust boundary.
 
 Deployment verifies the exact certificate identity, source ref and commit before any digest is used, even before a “nothing to deploy” exit. To verify a release manually, substitute its digest and commit:
 

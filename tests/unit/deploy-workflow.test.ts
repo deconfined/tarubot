@@ -652,7 +652,7 @@ describe("the workflow's shape", () => {
     const { plan, notify } = deploy.jobs;
     expect(plan.environment).toBeUndefined();
     expect(refs(plan, "secrets")).toEqual([]);
-    expect(refs(plan, "vars")).toEqual(["DEPLOY_ENABLED"]);
+    expect(refs(plan, "vars")).toEqual(["DEPLOY_ENABLED", "RELEASE_PIPELINE_ENABLED"]);
     const production = deploy.jobs.deploy;
     expect(production.environment).toBe("production");
     expect(refs(production, "secrets")).toEqual(["DEPLOY_SSH_KEY"]);
@@ -817,9 +817,11 @@ describe("the staging job and host.yml", () => {
           from: `\${{ steps.plan.outputs.${output} }}`,
         });
     }
-    // host.yml takes exactly these inputs.
+    // Legacy staging omits the replacement's optional acceptance inputs.
     expect(Object.keys(staging.with).sort()).toEqual(
-      Object.keys(host.on.workflow_call.inputs).sort(),
+      Object.keys(host.on.workflow_call.inputs)
+        .filter((key) => !["accept_release", "schema_head", "publication_run"].includes(key))
+        .sort(),
     );
     // The plan writes the three new outputs.
     const plan = runOf("plan", "plan");
@@ -931,6 +933,7 @@ describe("no host in the repository", () => {
     "api.pushover.net",
     "slsa.dev",
     "steps.host",
+    "jobs.host",
   ]);
 
   test("the workflows and ops/deploy.sh name no host beyond GitHub, GHCR and Pushover", () => {
@@ -1023,7 +1026,7 @@ describe("the other workflows", () => {
         expect({ file, owner, named: names.test(source) }).toEqual({
           file,
           owner,
-          named: file === owner,
+          named: file === owner || (owner === "infra.yml" && file === "release-infra.yml"),
         });
       // No workflow runs untrusted pull-request code with the repository's secrets.
       expect({ file, target: source.includes("pull_request_target") }).toEqual({

@@ -63,16 +63,26 @@ const step = z
 const input = z
   .object({
     description: z.string(),
-    type: z.literal("string"),
+    type: z.enum(["string", "boolean"]),
     required: z.boolean().optional(),
-    default: z.string().optional(),
+    default: z.union([z.string(), z.boolean()]).optional(),
   })
   .strict();
 const workflow = z
   .object({
     name: z.literal("Host"),
     on: z
-      .object({ workflow_call: z.object({ inputs: z.record(z.string(), input) }).strict() })
+      .object({
+        workflow_call: z
+          .object({
+            inputs: z.record(z.string(), input),
+            outputs: z.record(
+              z.string(),
+              z.object({ description: z.string(), value: z.string() }).strict(),
+            ),
+          })
+          .strict(),
+      })
       .strict(),
     permissions: z.record(z.string(), z.string()),
     jobs: z
@@ -92,6 +102,7 @@ const workflow = z
               })
               .strict(),
             permissions: z.record(z.string(), z.string()),
+            outputs: z.record(z.string(), z.string()),
             defaults: z.object({ run: z.object({ shell: z.literal("bash") }).strict() }).strict(),
             steps: z.array(step),
           })
@@ -153,6 +164,7 @@ const BOT_SECRET_NAMES = BOT_SECRETS.map(secretOf).sort();
 /** The step order interfaces §3 gives, by name. */
 const ORDER = [
   "Check the request",
+  "Recheck automatic release freshness",
   "Load the host settings",
   "Find the release's commit in its image",
   "Check out main's host configuration",
@@ -160,6 +172,8 @@ const ORDER = [
   "Install Ansible",
   "Configure the host",
   "Deploy the bot",
+  "Install Bun for acceptance validation",
+  "Require exact-release staging acceptance",
   "Summary",
   "Remove the key",
 ];
@@ -179,11 +193,15 @@ describe("the workflow's shape", () => {
       "commit",
       "digest",
       "config_commit",
+      "accept_release",
+      "schema_head",
+      "publication_run",
     ]);
     for (const name of ["target", "action", "config_commit"])
       expect({ name, required: inputs[name]?.required }).toEqual({ name, required: true });
     for (const name of ["version", "commit", "digest"])
       expect({ name, default: inputs[name]?.default }).toEqual({ name, default: "" });
+    expect(inputs.accept_release?.default).toBe(false);
     // Nothing untrusted can start it: no pull request trigger of any kind.
     expect(text).not.toMatch(/pull_request/u);
   });
@@ -234,6 +252,7 @@ describe("the workflow's shape", () => {
     const unlessSkipped = "steps.host.outputs.skip != 'true'";
     expect(steps.map((s) => [s.name, s.if ?? ""])).toEqual([
       ["Check the request", ""],
+      ["Recheck automatic release freshness", "inputs.accept_release"],
       ["Load the host settings", ""],
       [
         "Find the release's commit in its image",
@@ -244,6 +263,8 @@ describe("the workflow's shape", () => {
       ["Install Ansible", unlessSkipped],
       ["Configure the host", `${unlessSkipped} && inputs.action != 'bot'`],
       ["Deploy the bot", `${unlessSkipped} && inputs.action != 'configure'`],
+      ["Install Bun for acceptance validation", `inputs.accept_release && ${unlessSkipped}`],
+      ["Require exact-release staging acceptance", `inputs.accept_release && ${unlessSkipped}`],
       ["Summary", "always()"],
       ["Remove the key", "always()"],
     ]);
@@ -271,7 +292,11 @@ describe("the workflow's shape", () => {
       "fetch-depth": 1,
     });
     // Every action is pinned to a full SHA, and there are exactly these two.
-    expect(steps.filter((s) => s.uses).map((s) => s.uses)).toEqual([pinned, pinned]);
+    expect(steps.filter((s) => s.uses).map((s) => s.uses)).toEqual([
+      pinned,
+      pinned,
+      "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+    ]);
     // Ansible comes from main's hash-pinned requirements, into a private virtual environment.
     expect(runOf("Install Ansible")).toContain(
       "--no-deps --require-hashes -r config/ops/ansible/requirements.txt",
@@ -329,7 +354,9 @@ describe("the workflow's shape", () => {
       ),
     ].map((m) => (m[1] ?? "").toLowerCase());
     // steps.host is the settings step's id in the conditions, not a name.
-    expect([...new Set(hosts)].filter((name) => name !== "steps.host")).toEqual(["ghcr.io"]);
+    expect(
+      [...new Set(hosts)].filter((name) => !["steps.host", "jobs.host"].includes(name)),
+    ).toEqual(["ghcr.io"]);
     expect(text).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/u);
     expect(text).not.toMatch(/\b[0-9a-f]{1,4}:[0-9a-f]{1,4}:[0-9a-f:]*\b/iu);
   });
@@ -558,6 +585,15 @@ function job(where: Box, c: Context, bot?: { result?: unknown; exit?: number }) 
   const results: Record<string, ReturnType<typeof runStep>> = {};
   for (const name of ORDER) {
     if (name.startsWith("Check out") || name === "Install Ansible") continue;
+    if (
+      [
+        "Recheck automatic release freshness",
+        "Install Bun for acceptance validation",
+        "Require exact-release staging acceptance",
+      ].includes(name) &&
+      c.inputs.accept_release !== "true"
+    )
+      continue;
     const always = name === "Summary" || name === "Remove the key";
     if (failed && !always) continue;
     if (!always && name !== "Check the request" && name !== "Load the host settings") {
@@ -1064,9 +1100,10 @@ describe.skipIf(!hasJq)("the summary", () => {
     });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(
-      "::error::2.36.0 isn't healthy on staging. To roll back, run Deploy with target=staging, version=2.35.0 and action=bot.",
+      "::error::2.36.0 isn't healthy on staging. Inspect and fence the live writer and verify the database schema first. Fix forward or use owner-controlled recovery; image rollback needs explicit unchanged-schema evidence.",
     );
-    expect(r.summary).toContain("version=2.35.0 and action=bot");
+    expect(r.summary).toContain("explicit unchanged-schema evidence");
+    expect(r.summary).not.toContain("version=2.35.0 and action=bot");
     // With no release before it, there is nothing to name.
     const first = summarize({ ...deployed, outcome: "unhealthy", previous: "-" });
     expect(first.stdout).not.toContain("To roll back");

@@ -5,7 +5,7 @@ This is the **implemented** pipeline. Production still uses Docker Compose; stag
 ## Release flow
 
 1. **PR:** CI, security checks and the owner's code-owner review. Merge with a merge commit.
-2. **Publish:** revalidate, build AMD64/ARM64 images, publish to GHCR, sign the returned digest, then promote `latest`.
+2. **Publish:** revalidate, build AMD64/ARM64 images, publish candidates to GHCR, scan both exact runtime digests, sign the returned index digest, then promote `latest`. A failed scan blocks signing/promotion even though candidate tags already exist.
 3. **Deploy plan:** bind version, commit and digest; verify provenance; inspect runtime paths and schema changes. Documentation/test/CI-only changes do not request deployment.
 4. **Staging:** `host.yml` runs `site.yml` from the planned `main` head as root, then the release's `bot.yml` as `tarubot`. It deploys without a reviewer when configured. No target host means an automatic `no-host`; no Discord token on an empty host means configure-only. Neither counts as a healthy bot deployment.
 5. **Production:** the owner approves the `production` environment. The frozen Compose job sends its constrained deploy command over SSH; the host checks and deploys the release, and notify reports the outcome.
@@ -21,7 +21,7 @@ Dispatch Deploy from `main` with an explicit release version:
 | `production` | `action=deploy` only; a rollback also needs `rollback=true` and `from=<live version>` |
 | `staging` | `deploy`: Configure then bot; `configure`: host only; `bot`: release only; `preflight`: Configure plus database/backup checks without Discord |
 
-Staging goes back using `action=bot` and the previous version, not production's rollback inputs. Normal Deploy requires signed publication; staging also requires a release containing its bot playbook. Re-runs are refused: start a fresh, owner-authorized dispatch.
+Staging image rollback uses `action=bot`, not production's rollback inputs, **only after the owner verifies unchanged live schema and fences the writer**. On missing/changed schema evidence, fix forward or follow owner-controlled recovery. The playbook stops the old writer and persists a private recovery boundary before installing/starting the candidate; it does not automatically put anything back. Normal Deploy requires signed publication; staging also requires a release containing its bot playbook. Re-runs are refused: inspect uncertain outcomes before a fresh, owner-authorized dispatch.
 
 Production's repository variable `DEPLOY_ENABLED` must be exactly `true`. Staging has no switch; the owner pauses it by adding an environment reviewer. Per-target host jobs queue rather than cancel waiting runs. See [CI/CD](CI_CD.md) for provenance and [HOSTING](HOSTING.md) for failures.
 
@@ -44,6 +44,6 @@ Production's Quadlet cutover is not implemented here. It needs a separately revi
 
 ## Boundaries
 
-The infrastructure workflow binds the encrypted saved plan to its private backend/inputs and workflow run before writes, and emits an advisory full-plan policy decision. It is still dispatch-only with owner-approved Apply; database-cluster adoption, automatic SSH enrollment and release-integrated safe apply are not shipped. See [implementation milestones](PIPELINE.md#implementation-milestones-and-acceptance).
+The infrastructure workflow binds the encrypted saved plan to its private backend/inputs and workflow run before writes, and emits an advisory full-plan policy decision. It is still dispatch-only with owner-approved Apply. Replacement release/safe-apply/acceptance components exist but their publisher hook defaults off and a **code-level admission fence blocks activation before credentials** until database adoption and durable SSH enrollment ship. Do not set `RELEASE_PIPELINE_ENABLED` now. See [implementation milestones](PIPELINE.md#implementation-milestones-and-acceptance) and the component details; no live acceptance or production cutover is claimed.
 
 The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened to Infrastructure/every deployment environment. [AGENTS.md](../AGENTS.md) carries it verbatim. Agents hold no host-access key/environment secret, never approve or bypass a gate, and dispatch only when asked in that session. Environment, provider, token and key changes remain owner actions.

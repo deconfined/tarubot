@@ -1,13 +1,13 @@
 {
-  "title": "Session: 2.36.5 durable infrastructure control records",
-  "objective": "Implement encrypted single-writer operation journals and applied-input baselines with verified persistence and interrupted-write refusal. Integrate an owner-enabled path into reviewed infrastructure jobs; do not enable automatic Apply, adopt a database, enroll hosts or operate live systems.",
+  "title": "Session: 2.36.6 replacement release orchestration",
+  "objective": "Build a new release entry point using pinned image scanning, exact release identity, journaled infrastructure policy gates and explicit staging evidence. Preserve production Compose and approval jobs; do not activate credentials, operate hosts or claim live acceptance.",
   "user": [
-    "Review journal/baseline setup and recovery prerequisites; activation requires private versioned storage and owner-reviewed initial baseline establishment.",
+    "Review the replacement workflow and its activation prerequisites; missing infrastructure, trust or staging acceptance must block promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Test encrypted storage, wrong bindings, stale/missing records, exact readback and interruptions around Apply and baseline/pointer completion using invented data.",
-    "Run quality/build/unit/contract and infrastructure phase checks. Preserve frozen production Compose and hold no live environment secrets."
+    "Test image-platform selection, provenance/release binding, safe/no-change infrastructure routing and rejection of incomplete/superseded staging evidence with invented fixtures.",
+    "Resume the safety review of scanner/admission failures, target acceptance and recovery boundaries; run quality/build/unit/contract, workflow, site and synthetic Docker checks. Keep activation off, preserve frozen production files and hold no environment secrets."
   ],
   "bot": [
     "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",

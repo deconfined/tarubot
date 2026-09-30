@@ -1,6 +1,7 @@
 /** Invented encrypted storage/state only; fault injection never contacts a backend or provider. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   InfrastructureJournal,
@@ -309,7 +310,8 @@ describe("post-Apply verification", () => {
 });
 
 describe("private phase adapter", () => {
-  const scratch = mkdtempSync("/tmp/opencode/infra-control-test-");
+  // The Docker build has no agent-specific scratch directory; use the platform temp root.
+  const scratch = mkdtempSync(join(tmpdir(), "infra-control-test-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
   const values = {
     hosts: {},

@@ -29,9 +29,9 @@
 #        files       tarubot-tool, the backup script and units, the age recipients;
 #        preflight   (preflight only) migrate.js must print Schema ready., then one backup, and
 #                    the nightly backup timer;
-#        unit        render the candidate unit, check it with Quadlet's dry run, then write the
-#                    settings, the unit and the image file back to back;
-#        restart     systemd stops the old bot, runs migrate.js in the new image, starts it;
+#        unit        render/check the candidate, stop the old writer, persist its stop boundary,
+#                    then write the settings, unit and image file and reload the user manager;
+#        restart     systemd runs migrate.js in the new image and starts it;
 #        health      healthy within three minutes, and still the same healthy container a minute
 #                    later, running the release's image;
 #        timer       the nightly backup timer;
@@ -40,7 +40,8 @@
 #      Before the secrets phase nothing is written to the host but image pulls. A failure anywhere
 #      lands in the rescue, which records the phase, and the outcome and reason a task that can
 #      fail declares in its own vars (tb_outcome, tb_reason). Nothing is ever put back: an
-#      unhealthy release fails the run, and the owner rolls back by dispatching the previous one.
+#      unhealthy release fails the run. Recovery requires live schema/writer evidence; dispatch
+#      an older image only with unchanged-schema evidence, otherwise fix forward or restore.
 #   3. On the runner, write the result JSON (public fields only) to tarubot_result, then fail the
 #      run unless the outcome is deployed, superseded, configured or preflight-ok. Ansible runs
 #      this play after the rescue and after play 1's unreachable check, but not when the host
@@ -805,7 +806,61 @@
               vars:
                 tb_reason: unit-invalid
 
-            # Back to back: the settings, the unit, the image file, then the reload.
+            # Fence the old writer BEFORE installing/reloading a candidate that can run migrations.
+            # A restart failure must not lose the stop-time boundary after committed migrations.
+            - name: Stop the old writer before installing the candidate
+              ansible.builtin.systemd_service:
+                name: tarubot.service
+                state: stopped
+                scope: user
+              when: tb_unit.stat.exists
+              vars:
+                tb_reason: stop-failed
+
+            - name: Read when the previous instance stopped
+              ansible.builtin.command:
+                argv:
+                  - systemctl
+                  - --user
+                  - show
+                  - tarubot.service
+                  - --property=InactiveEnterTimestamp
+                  - --value
+                  - --timestamp=us+utc
+              register: tb_inactive
+              changed_when: false
+              when: tb_unit.stat.exists
+
+            - name: Keep it as the restore point
+              ansible.builtin.set_fact:
+                tb_restore_point: >-
+                  {{ (tb_inactive.stdout.split()[1] ~ 'T' ~ tb_inactive.stdout.split()[2] ~ 'Z')
+                     if tb_inactive.stdout is match('^[A-Za-z]+ [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6} UTC$')
+                     else '-' }}
+              when: tb_unit.stat.exists
+
+            - name: Require an existing writer's captured stop boundary
+              ansible.builtin.assert:
+                that:
+                  - tb_restore_point | default('-') != '-'
+                quiet: true
+              when: tb_unit.stat.exists
+              vars:
+                tb_reason: boundary-missing
+
+            - name: Persist the boundary before a candidate migration can run
+              ansible.builtin.copy:
+                # This is recovery context, not evidence that provider PITR can restore this point.
+                content: >-
+                  {{ {'previous': tb_previous | default('-'), 'version': tarubot_version,
+                      'commit': tarubot_commit, 'digest': tarubot_digest,
+                      'restore_point': tb_restore_point | default('-'),
+                      'previous_image_schema_head': (tb_live_migrations | last) if tb_live_migrations | length > 0 else '-',
+                      'schema_head': tb_schema_head | default('-')} | to_json }}
+                dest: "{{ tb_home }}/.config/tarubot/recovery-boundary.json"
+                mode: "0600"
+
+            # Back to back after fencing: the settings, unit, image file, then reload.
             - name: Write the container's settings
               ansible.builtin.template:
                 src: templates/bot/tarubot.env.j2
@@ -831,9 +886,8 @@
                 scope: user
 
         # ------------------------------------------------------------------------------------
-        # systemd stops the old container (freeing the writer lease), runs migrate.js in the new
-        # image (ExecStartPre), then starts the bot. If the runner disappears, systemd still
-        # finishes the restart.
+        # The old writer was stopped and its boundary persisted before installing the new unit.
+        # Starting runs the candidate's migrate.js (ExecStartPre); systemd finishes if the runner dies.
         - name: Restart
           when:
             - tb_result is not defined
@@ -846,32 +900,10 @@
             - name: Restart the bot
               ansible.builtin.systemd_service:
                 name: tarubot.service
-                state: restarted
+                state: started
                 scope: user
               vars:
                 tb_reason: restart-failed
-
-            # The old instance's stop, before migrate.js could commit: the point a restore goes
-            # back to. Empty on a first start.
-            - name: Read when the previous instance stopped
-              ansible.builtin.command:
-                argv:
-                  - systemctl
-                  - --user
-                  - show
-                  - tarubot.service
-                  - --property=InactiveEnterTimestamp
-                  - --value
-                  - --timestamp=us+utc
-              register: tb_inactive
-              changed_when: false
-
-            - name: Keep it as the restore point
-              ansible.builtin.set_fact:
-                tb_restore_point: >-
-                  {{ (tb_inactive.stdout.split()[1] ~ 'T' ~ tb_inactive.stdout.split()[2] ~ 'Z')
-                     if tb_inactive.stdout is match('^[A-Za-z]+ [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6} UTC$')
-                     else '-' }}
 
         # ------------------------------------------------------------------------------------
         # Every automatic restart makes a new container (Quadlet runs it with --rm), so the same
@@ -910,7 +942,7 @@
                     and ((tb_health_first.stdout | from_json)[0].State.Health | default({}, true)).Status | default('') == 'healthy'
                 fail_msg: >-
                   {{ tarubot_version }} didn't turn healthy within the wait, or exited. Nothing was
-                  put back; to roll back, dispatch the previous release with action bot.
+                  put back; inspect the live schema and writer before fix-forward or owner recovery.
                 quiet: true
               vars:
                 tb_outcome: unhealthy

@@ -275,6 +275,120 @@ describe("safe full-plan policy", () => {
     };
     expect(decision([host, firewall, a, aaaa, updated]).decision).toBe("review-required");
   });
+  test("unknown firewall and cluster fields cannot ride no-ops or another resource's safe change", () => {
+    const renamed = { ...v, hosts: { staging: { ...v.hosts.staging, label: "example-renamed" } } };
+    // These values agree in both duplicated plan views; only the pinned schema can reject them.
+    for (const [original, values] of [
+      [firewall, { unexpected_security_control: "opaque" }],
+      [
+        firewall,
+        { inbound: [{ protocol: "TCP", ports: "22", action: "ACCEPT", unexpected_control: true }] },
+      ],
+      [
+        firewall,
+        { devices: [{ id: 1, entity_id: 200, type: "linode", unexpected_control: true }] },
+      ],
+      [cluster, { unexpected_cluster_control: "opaque" }],
+      [cluster, { updates: { day_of_week: 2, unexpected_control: true } }],
+      [cluster, { private_network: { vpc_id: 1, subnet_id: 2, unexpected_control: true } }],
+      [cluster, { pending_updates: [{ deadline: "example", unexpected_control: true }] }],
+    ] as const) {
+      const unrecognized = structuredClone(original);
+      Object.assign(unrecognized.change.before, values);
+      Object.assign(unrecognized.change.after, values);
+      const otherResources = [host, firewall, a, aaaa, acl].filter(
+        (r) => r.address !== original.address,
+      );
+      expect(decision([...otherResources, unrecognized]).decision).toBe("invalid");
+      expect(
+        decision(
+          [
+            ...otherResources.filter((r) => r.address !== host.address),
+            edit(host, { label: renamed.hosts.staging.label }),
+            unrecognized,
+          ],
+          renamed,
+        ).decision,
+      ).toBe("invalid");
+    }
+    const knownFirewall = structuredClone(firewall);
+    const knownCluster = structuredClone(cluster);
+    Object.assign(knownFirewall.change.before, {
+      disabled: false,
+      inbound: [
+        { label: "allow-ssh", action: "ACCEPT", protocol: "TCP", ports: "22", ipv4: ["0.0.0.0/0"] },
+      ],
+      devices: [{ id: 1, entity_id: 200, type: "linode", label: "example", url: "example" }],
+    });
+    Object.assign(knownCluster.change.before, {
+      root_password: "invented-unchanged-password",
+      updates: { day_of_week: 2, duration: 4, frequency: "weekly", hour_of_day: 22 },
+      private_network: { vpc_id: 1, subnet_id: 2, public_access: false },
+      pending_updates: [{ deadline: "example", description: "example", planned_for: "example" }],
+    });
+    knownFirewall.change.after = structuredClone(knownFirewall.change.before);
+    knownCluster.change.after = structuredClone(knownCluster.change.before);
+    expect(decision([host, knownFirewall, a, aaaa, acl, knownCluster]).decision).toBe("no-changes");
+    expect(
+      decision(
+        [
+          edit(host, { label: renamed.hosts.staging.label }),
+          knownFirewall,
+          a,
+          aaaa,
+          acl,
+          knownCluster,
+        ],
+        renamed,
+      ).decision,
+    ).toBe("safe");
+  });
+  test("no-op identity and configured host/DNS intent must agree independently of duplicated views", () => {
+    for (const [original, values] of [
+      [acl, { database_id: 999 }],
+      [acl, { id: "999:postgresql" }],
+      [acl, { database_type: "mysql" }],
+      [cluster, { id: "999" }],
+      [host, { label: "example-unconfigured" }],
+      [host, { region: "other-region" }],
+      [host, { type: "g6-standard-2" }],
+      [host, { image: "linode/other" }],
+      [host, { booted: false }],
+      [host, { disk_encryption: "disabled" }],
+      [host, { interface_generation: "linode" }],
+      [host, { interface: [{ purpose: "vpc" }] }],
+      [host, { firewall_id: 999 }],
+      [a, { zone_id: "f".repeat(32) }],
+      [a, { name: "other.example.org" }],
+      [a, { type: "AAAA" }],
+      [a, { content: "192.0.2.99" }],
+      [aaaa, { type: "A" }],
+      [aaaa, { content: "2001:db8::99" }],
+      [aaaa, { proxied: true }],
+    ] as const) {
+      const inconsistent = structuredClone(original);
+      Object.assign(inconsistent.change.before, values);
+      Object.assign(inconsistent.change.after, values);
+      const remaining = [host, firewall, a, aaaa, acl].filter(
+        (r) => r.address !== original.address,
+      );
+      expect(decision([...remaining, inconsistent]).decision).toBe("invalid");
+    }
+    for (const original of [firewall, cluster]) {
+      const inconsistent = structuredClone(original);
+      Object.assign(inconsistent.change, {
+        before_identity: { id: "one" },
+        after_identity: { id: "two" },
+      });
+      expect(
+        decision(
+          [host, firewall, a, aaaa, acl]
+            .filter((r) => r.address !== original.address)
+            .concat(inconsistent),
+        ).decision,
+      ).toBe("invalid");
+    }
+  });
   test("ignored creation-only intent and private expected inputs cannot hide behind no-op resources", () => {
     for (const next of [
       { ...v, root_keys: ["changed"] },
@@ -282,10 +396,12 @@ describe("safe full-plan policy", () => {
       { ...v, root_password_hash: "changed" },
       { ...v, cloudflare_zone_id: "f".repeat(32) },
     ]) {
-      expect(classifyPlan(plan(undefined, next), next, v)).toMatchObject({
-        decision: "review-required",
-        reasons: ["changed-intent"],
-      });
+      if (next.cloudflare_zone_id === v.cloudflare_zone_id)
+        expect(classifyPlan(plan(undefined, next), next, v)).toMatchObject({
+          decision: "review-required",
+          reasons: ["changed-intent"],
+        });
+      else expect(classifyPlan(plan(undefined, next), next, v).decision).toBe("invalid");
       expect(classifyPlan(plan(), next, v).decision).toBe("invalid");
     }
   });
@@ -296,7 +412,7 @@ describe("safe full-plan policy", () => {
       { errored: true },
       { errored: undefined },
       { complete: false },
-      { applyable: false },
+      { applyable: "false" },
       { deferred_changes: [{}] },
       { resource_changes: undefined },
       { resource_changes: null },
