@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.14**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.15**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.15 — Independent owner configuration for control consumers
+
+- Read fresh owner configuration independently of object storage, pin repository/environment identity and bind completed repair metadata to the exact private intent and approved final recovery run. Reject missing, contradictory, changed or expired boundaries; expose no repair capability.
+- Count freshness from before the first request, including physical elapsed time with a frozen wall clock. Exercise real encrypted completed histories in all three control scopes.
+- Keep normal factory/workflow integration and activation pending. Owner-only configuration administration and request-volume acceptance remain required; no environment or live journal is changed.
 
 ## 2.36.14 — GitHub-signed private descriptor receipts
 
