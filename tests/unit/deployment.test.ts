@@ -1,8 +1,9 @@
 /**
  * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
- * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
- * and the tracked production env template, the file-delivered secrets (2.33.0), and DevBot's
- * throwaway-server rehearsal allowance (2.35.0, #46). Staging's container settings are pinned from
+ * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50),
+ * the prod profile (2.37.0) beside the Compose host's production profile, the tracked production
+ * env template, the file-delivered secrets (2.33.0), and DevBot's throwaway-server rehearsal
+ * allowance (2.35.0, #46). Staging's container settings are pinned from
  * the playbook's side in bot-play.test.ts (2.36.0).
  * Every refusal is checked to be a configuration Failure that never echoes a secret.
  */
@@ -20,6 +21,8 @@ import {
   type Environment,
   type Launch,
   localDatabaseHost,
+  PROD_DATABASES,
+  PROD_ROLE,
   PRODUCTION_DATABASES,
   resolveDeployment,
   restoreCertificate,
@@ -104,6 +107,30 @@ const stagingEnv = (overrides: Environment = {}): Environment => ({
   ...overrides,
 });
 
+/**
+ * A URL on the managed cluster as the prod profile uses it (2.37.0): the direct port, as the
+ * tarubot_prod role, by default on the primary's host.
+ */
+const prodUrl = (name: string, host = MANAGED, user = PROD_ROLE, port = 27520) =>
+  managedUrl(name, host, user, port);
+/**
+ * The prod container's settings (2.37.0; written by ops/ansible/bot.yml): the fixed values in
+ * ops/ansible/vars/targets/prod.yml (the prod marker, no public test replies), the identity the
+ * release image reports (the production application, global registration, so TEST_GUILD_ID is
+ * empty), and prod's own database and role on the managed cluster from the prod environment's
+ * secrets.
+ */
+const prodEnv = (overrides: Environment = {}): Environment => ({
+  TARUBOT_ENVIRONMENT: "prod",
+  DISCORD_TOKEN: TOKEN,
+  DISCORD_APPLICATION_ID: PRODUCTION_APP,
+  TEST_GUILD_ID: "",
+  PUBLIC_TEST_RESPONSES: "false",
+  DATABASE_URL: prodUrl("tarubot_prod"),
+  DATABASE_CA_CERT: CA,
+  ...overrides,
+});
+
 /** Launched as the runbook says: bun --env-file=PATH dist/scripts/<tool>.js, from a checkout. */
 const direct: Launch = {
   execArgv: ["--env-file=/home/operator/production.env"],
@@ -179,13 +206,14 @@ describe("profiles", () => {
 
   test("(c) production credentials need an explicit marker", () => {
     const env = productionEnv({ TARUBOT_ENVIRONMENT: "" });
-    refused(() => resolveDeployment(env), "TARUBOT_ENVIRONMENT=production or rehearsal");
+    refused(() => resolveDeployment(env), "TARUBOT_ENVIRONMENT=production, prod or rehearsal");
     refused(() => assertToolScope(env, scope.migrate, direct), "TARUBOT_ENVIRONMENT");
-    // The marker closes on unknown values; `staging` is a profile of its own (below).
-    refused(
-      () => resolveDeployment({ ...env, TARUBOT_ENVIRONMENT: "prod" }),
-      "TARUBOT_ENVIRONMENT",
-    );
+    // The marker closes on unknown values; `staging` and `prod` are profiles of their own (below).
+    for (const marker of ["live", "Prod", "PROD", "prod ", "production-2"])
+      refused(
+        () => resolveDeployment({ ...env, TARUBOT_ENVIRONMENT: marker }),
+        "Invalid deployment settings: TARUBOT_ENVIRONMENT.",
+      );
   });
 
   test("(d) production refuses leaked development scoping", () => {
@@ -798,7 +826,7 @@ describe("staging (#50)", () => {
     );
     refused(
       () => assertToolScope(stagingEnv(), scope.register(), container),
-      "global command registration belongs to the production profile",
+      "global command registration belongs to the production and prod profiles",
     );
     refused(
       () => assertToolScope(stagingEnv(), scope.register(PRODUCTION_GUILD), container),
@@ -957,6 +985,318 @@ describe("staging (#50)", () => {
   });
 });
 
+describe("prod (2.37.0)", () => {
+  const directPort =
+    "must use the managed cluster's direct port 27520 (never its 27521 pool or any other port).";
+  const notProd = "is not a prod database (tarubot_prod or tarubot_prod_restore)";
+  const prodRole = `must connect as the ${PROD_ROLE} user`;
+  const restoreRule =
+    "must be tarubot_prod on a PITR fork (another host) or tarubot_prod_restore on the primary's host";
+
+  test("the prod marker selects the production application's identity; nothing else does", () => {
+    expect(PROD_DATABASES).toEqual(["tarubot_prod", "tarubot_prod_restore"]);
+    expect(PROD_ROLE).toBe("tarubot_prod");
+    expect(resolveDeployment(prodEnv())).toEqual({
+      name: "prod",
+      applicationId: PRODUCTION_APP,
+      guilds: [PRODUCTION_GUILD],
+      registrationScope: "global",
+    });
+    // The release image's identity script passes the marker alone (ops/ansible/vars/bot.yml).
+    expect(resolveDeployment({ TARUBOT_ENVIRONMENT: "prod" })).toEqual(
+      resolveDeployment(prodEnv()),
+    );
+    // Without the marker the production application is refused, as ever; the Compose host's
+    // production marker keeps its own profile.
+    for (const marker of ["", undefined])
+      refused(
+        () => resolveDeployment(prodEnv({ TARUBOT_ENVIRONMENT: marker })),
+        "TARUBOT_ENVIRONMENT=production, prod or rehearsal",
+      );
+    expect(resolveDeployment(productionEnv()).name).toBe("production");
+    for (const tool of [
+      scope.migrate,
+      scope.import(PRODUCTION_GUILD),
+      scope.preview(PRODUCTION_GUILD),
+    ])
+      for (const launch of [direct, container])
+        expect(assertToolScope(prodEnv(), tool, launch).name).toBe("prod");
+  });
+
+  test("prod uses tarubot_prod or tarubot_prod_restore, as tarubot_prod, on 27520 with a CA", () => {
+    for (const name of PROD_DATABASES)
+      for (const tool of [scope.migrate, scope.register(), scope.import(PRODUCTION_GUILD)])
+        expect(
+          assertToolScope(prodEnv({ DATABASE_URL: prodUrl(name) }), tool, container).name,
+        ).toBe("prod");
+    // A PITR fork the bot was repointed at holds tarubot_prod on another host.
+    expect(
+      assertToolScope(
+        prodEnv({ DATABASE_URL: prodUrl("tarubot_prod", FORK) }),
+        scope.migrate,
+        container,
+      ).name,
+    ).toBe("prod");
+  });
+
+  test("prod refuses production's, staging's and every other database, user, port and host", () => {
+    for (const [url, fragment] of [
+      // Production's names stay the Compose host's until the owner renames them at the cutover.
+      [prodUrl("tarubot"), notProd],
+      [prodUrl("tarubot_restore"), notProd],
+      [managedUrl("tarubot"), prodRole],
+      [managedUrl("tarubot_prod"), prodRole],
+      [managedUrl("tarubot_prod_restore"), prodRole],
+      // Staging's database or role, by either name.
+      [prodUrl(STAGING_DATABASE), "belongs to staging (tarubot_staging), never to production"],
+      [
+        managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE),
+        "belongs to staging (tarubot_staging), never to production",
+      ],
+      [
+        managedUrl("tarubot_prod", MANAGED, STAGING_DATABASE),
+        "belongs to staging (tarubot_staging), never to production",
+      ],
+      // Any other name on the cluster, the provider's defaults and disposable copies included.
+      [prodUrl("tarubot_prod_2"), notProd],
+      [prodUrl("tarubot_prod_restore_test"), notProd],
+      [prodUrl("tarubot_prod_rehearsal"), notProd],
+      [prodUrl("tarubot_dev"), notProd],
+      [prodUrl("defaultdb"), notProd],
+      [prodUrl("postgres"), notProd],
+      // Never the administrator, and never without a user.
+      [prodUrl("tarubot_prod", MANAGED, "akmadmin"), "not an administrator"],
+      [`postgresql://${MANAGED}:27520/tarubot_prod`, "not an administrator"],
+      // The direct port only: never the 27521 pool, and a URL without a port means 5432.
+      [prodUrl("tarubot_prod", MANAGED, PROD_ROLE, 27521), directPort],
+      [`postgresql://${PROD_ROLE}:${PASSWORD}@${MANAGED}/tarubot_prod`, directPort],
+      // Never local.
+      [localUrl("tarubot_prod"), "is local; prod uses the managed cluster"],
+      [localUrl("tarubot_prod", "postgres"), "is local; prod uses the managed cluster"],
+      [localUrl("tarubot_prod", "127.0.0.1"), "is local; prod uses the managed cluster"],
+    ] as const)
+      for (const tool of [scope.migrate, scope.import(PRODUCTION_GUILD)])
+        refused(() => assertToolScope(prodEnv({ DATABASE_URL: url }), tool, container), fragment);
+    // Verified TLS: the cluster's CA is required.
+    for (const ca of ["", "  ", undefined])
+      refused(
+        () => assertToolScope(prodEnv({ DATABASE_CA_CERT: ca }), scope.migrate, container),
+        "DATABASE_CA_CERT must hold the managed cluster's CA certificate",
+      );
+    refused(
+      () => assertToolScope(prodEnv({ DATABASE_URL: "" }), scope.migrate, container),
+      "DATABASE_URL is required",
+    );
+  });
+
+  test("check-restore: tarubot_prod on a PITR fork, or tarubot_prod_restore on the primary's host", () => {
+    const restore = (url: string, overrides: Environment = {}) =>
+      prodEnv({ RESTORE_DATABASE_URL: url, ...overrides });
+    for (const env of [
+      restore(prodUrl("tarubot_prod", FORK)),
+      restore(prodUrl("tarubot_prod_restore")),
+      // A fork's own CA, or DATABASE_CA_CERT's when the restore line is empty.
+      restore(prodUrl("tarubot_prod", FORK), { RESTORE_DATABASE_CA_CERT: "fork-ca" }),
+      restore(prodUrl("tarubot_prod", FORK), { RESTORE_DATABASE_CA_CERT: "" }),
+      // A bot repointed at the same-cluster restore still checks a fork's tarubot_prod.
+      restore(prodUrl("tarubot_prod", FORK), { DATABASE_URL: prodUrl("tarubot_prod_restore") }),
+    ])
+      expect(assertToolScope(env, scope.restore, direct).name).toBe("prod");
+    for (const [env, fragment] of [
+      // The swapped names: a restore copy on another host, or tarubot_prod on the primary's host.
+      [restore(prodUrl("tarubot_prod_restore", FORK)), restoreRule],
+      [
+        restore(prodUrl("tarubot_prod"), { DATABASE_URL: prodUrl("tarubot_prod_restore") }),
+        restoreRule,
+      ],
+      // The primary itself.
+      [restore(prodUrl("tarubot_prod")), "different database"],
+      // Production's names, a disposable copy, another role, the administrator, local, staging's.
+      [restore(prodUrl("tarubot", FORK)), restoreRule],
+      [restore(prodUrl("tarubot_restore")), restoreRule],
+      [restore(prodUrl("tarubot_prod_restore_test")), restoreRule],
+      [restore(managedUrl("tarubot_prod", FORK)), prodRole],
+      [restore(prodUrl("tarubot_prod", FORK, "akmadmin")), "not an administrator"],
+      [restore(prodUrl("tarubot_prod", FORK, PROD_ROLE, 27521)), directPort],
+      [restore(localUrl("tarubot_prod_restore")), "is local; prod uses the managed cluster"],
+      [
+        restore(managedUrl(STAGING_DATABASE, FORK, STAGING_DATABASE)),
+        "belongs to staging (tarubot_staging), never to production",
+      ],
+    ] as const)
+      refused(() => assertToolScope(env, scope.restore, direct), fragment);
+    refused(() => assertToolScope(prodEnv(), scope.restore, direct), "RESTORE_DATABASE_URL");
+  });
+
+  test("prod runs the production application with no development scoping", () => {
+    const productionApplication = `production application ${PRODUCTION_APP}`;
+    // DevBot's application, none, or another.
+    for (const application of [DEVBOT_APP, "", "123"])
+      refused(
+        () =>
+          assertToolScope(
+            prodEnv({ DISCORD_APPLICATION_ID: application }),
+            scope.preview(PRODUCTION_GUILD),
+            container,
+          ),
+        productionApplication,
+      );
+    // DevBot's settings under the prod marker: its application is refused first.
+    refused(
+      () =>
+        assertToolScope(
+          devbotEnv({ TARUBOT_ENVIRONMENT: "prod" }),
+          scope.preview(PRODUCTION_GUILD),
+          container,
+        ),
+      productionApplication,
+    );
+    for (const [key, value] of [
+      ["TEST_GUILD_ID", DEV_GUILD],
+      ["PUBLIC_TEST_RESPONSES", "true"],
+      ["TEST_PLAN_CHANNEL_ID", "1040379370931507252"],
+    ] as const)
+      refused(() => assertToolScope(prodEnv({ [key]: value }), scope.migrate, container), key);
+    // Only the production guild's data.
+    for (const guild of [DEV_GUILD, "4242"])
+      refused(() => assertToolScope(prodEnv(), scope.preview(guild), container), `guild ${guild}`);
+    // The token must be the production application's.
+    const deployment = assertToolScope(prodEnv(), scope.register(), container);
+    expect(() => assertAuthenticatedApplication(deployment, PRODUCTION_APP)).not.toThrow();
+    refused(() => assertAuthenticatedApplication(deployment, DEVBOT_APP), PRODUCTION_APP);
+  });
+
+  test("prod registers only globally, and has no --restore-rehearsal", () => {
+    expect(assertToolScope(prodEnv(), scope.register(), container).name).toBe("prod");
+    for (const guild of [PRODUCTION_GUILD, DEV_GUILD])
+      refused(
+        () => assertToolScope(prodEnv(), scope.register(guild), container),
+        guild === PRODUCTION_GUILD ? "only in the global scope (--global)" : `guild ${guild}`,
+      );
+    for (const name of ["tarubot_prod_restore_test", "tarubot_prod"])
+      refused(
+        () =>
+          assertToolScope(
+            prodEnv({ DATABASE_URL: prodUrl(name) }),
+            scope.rehearseMigration,
+            container,
+          ),
+        "--restore-rehearsal",
+      );
+  });
+
+  test("prod takes production's launch rule: no auto-loaded env file without --env-file", () => {
+    for (const file of AUTOLOADED_ENV_FILES)
+      refused(
+        () => assertToolScope(prodEnv(), scope.migrate, { execArgv: [], envFiles: [file] }),
+        `${file} in the working directory would be merged into this run`,
+      );
+    expect(assertToolScope(prodEnv(), scope.migrate, direct).name).toBe("prod");
+  });
+
+  test("prod reads its database URL and CA from files, as the bot does", () => {
+    const directory = mkdtempSync(join(tmpdir(), "tarubot-guard-prod-"));
+    try {
+      const file = (name: string, value: string) => {
+        const path = join(directory, name);
+        writeFileSync(path, `${value}\n`);
+        return path;
+      };
+      const env = prodEnv({
+        DATABASE_URL: undefined,
+        DATABASE_CA_CERT: undefined,
+        DATABASE_URL_FILE: file("database_url", prodUrl("tarubot_prod")),
+        DATABASE_CA_CERT_FILE: file("database_ca_cert", CA),
+      });
+      for (const tool of [scope.migrate, scope.register(), scope.preview(PRODUCTION_GUILD)])
+        expect(assertToolScope(env, tool, container).name).toBe("prod");
+      // The file's database still has to be prod's own.
+      refused(
+        () =>
+          assertToolScope(
+            { ...env, DATABASE_URL_FILE: file("production_url", managedUrl("tarubot")) },
+            scope.migrate,
+            container,
+          ),
+        prodRole,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("beside prod, production keeps tarubot, and staging and DevBot refuse prod's names", () => {
+    // The Compose host's production profile is unchanged: tarubot or tarubot_restore, as tarubot.
+    expect(PRODUCTION_DATABASES).toEqual(["tarubot", "tarubot_restore"]);
+    for (const name of PRODUCTION_DATABASES)
+      expect(
+        assertToolScope(productionEnv({ DATABASE_URL: managedUrl(name) }), scope.migrate, container)
+          .name,
+      ).toBe("production");
+    for (const [env, tool, fragment] of [
+      [
+        productionEnv({ DATABASE_URL: managedUrl("tarubot_prod") }),
+        scope.migrate,
+        "not a production database (tarubot or tarubot_restore)",
+      ],
+      [
+        productionEnv({ DATABASE_URL: managedUrl("tarubot_prod_restore") }),
+        scope.migrate,
+        "not a production database (tarubot or tarubot_restore)",
+      ],
+      [
+        productionEnv({ DATABASE_URL: prodUrl("tarubot_prod") }),
+        scope.migrate,
+        "must connect as the tarubot user",
+      ],
+      [
+        productionEnv({ DATABASE_URL: prodUrl("tarubot") }),
+        scope.migrate,
+        "must connect as the tarubot user",
+      ],
+      [
+        productionEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_prod", FORK) }),
+        scope.restore,
+        "must be tarubot on a PITR fork (another host) or tarubot_restore on the primary's host",
+      ],
+      [
+        productionEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_prod_restore") }),
+        scope.restore,
+        "must be tarubot on a PITR fork (another host) or tarubot_restore on the primary's host",
+      ],
+      // Staging: exactly its own database and role.
+      [
+        stagingEnv({ DATABASE_URL: prodUrl("tarubot_prod") }),
+        scope.migrate,
+        `must be staging's database ${STAGING_DATABASE}`,
+      ],
+      [
+        stagingEnv({ DATABASE_URL: managedUrl("tarubot_prod", MANAGED, STAGING_DATABASE) }),
+        scope.migrate,
+        `must be staging's database ${STAGING_DATABASE}`,
+      ],
+      [
+        stagingEnv({ DATABASE_URL: managedUrl(STAGING_DATABASE, MANAGED, PROD_ROLE) }),
+        scope.migrate,
+        `connect as the ${STAGING_DATABASE} user`,
+      ],
+      // DevBot: exactly its local tarubot_dev.
+      [
+        devbotEnv({ DATABASE_URL: prodUrl("tarubot_prod") }),
+        scope.migrate,
+        "DevBot's local database",
+      ],
+      [devbotEnv({ DATABASE_URL: localUrl("tarubot_prod") }), scope.migrate, "tarubot_dev"],
+    ] as const)
+      refused(() => assertToolScope(env, tool, container), fragment);
+    // The prod marker never lends production's identity to DevBot's or staging's settings.
+    refused(
+      () => assertToolScope(stagingEnv({ TARUBOT_ENVIRONMENT: "prod" }), scope.migrate, container),
+      `production application ${PRODUCTION_APP}`,
+    );
+  });
+});
+
 describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
   /** An invented throwaway server: the real one's ID only ever comes from the environment. */
   const THROWAWAY = "1234567890123456789";
@@ -1083,6 +1423,7 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
     const allowance = { DEVBOT_THROWAWAY_GUILD_ID: THROWAWAY };
     for (const [profile, env] of [
       ["production", productionEnv(allowance)],
+      ["prod", prodEnv(allowance)],
       ["rehearsal", rehearsalEnv(allowance)],
       ["staging", stagingEnv(allowance)],
       // Staging's TEST_GUILD_ID pointed at the throwaway as well changes nothing.
@@ -1109,7 +1450,7 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
     // Production credentials without their marker are refused as ever, allowance or not.
     refused(
       () => resolveDeployment(productionEnv({ TARUBOT_ENVIRONMENT: "", ...allowance })),
-      "TARUBOT_ENVIRONMENT=production or rehearsal",
+      "TARUBOT_ENVIRONMENT=production, prod or rehearsal",
     );
   });
 
@@ -1122,7 +1463,7 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
       refused(() => assertToolScope(env, scope.register(guild), container), outside(guild));
     refused(
       () => assertToolScope(env, scope.register(), container),
-      "global command registration belongs to the production profile.",
+      "global command registration belongs to the production and prod profiles.",
     );
     // Guild data and inspection.
     for (const guild of [DEV_GUILD, PRODUCTION_GUILD])
@@ -1198,7 +1539,7 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
           scope.register(THROWAWAY),
           container,
         ),
-      "TARUBOT_ENVIRONMENT=production or rehearsal",
+      "TARUBOT_ENVIRONMENT=production, prod or rehearsal",
     );
   });
 
@@ -1351,6 +1692,7 @@ describe("file-delivered secrets (#50, 2.33.0)", () => {
     for (const [profile, build] of [
       ["staging", stagingEnv],
       ["production", productionEnv],
+      ["prod", prodEnv],
     ] as const)
       withFiles({ DATABASE_CA_CERT: "" }, (paths) => {
         const env = build({ DATABASE_CA_CERT: undefined, ...paths });

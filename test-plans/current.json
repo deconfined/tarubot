@@ -1,16 +1,17 @@
 {
-  "title": "Session: 2.36.0 the simple pipeline",
-  "objective": "2.36.0 (#62) moves staging onto the simple pipeline: OpenTofu builds the VM, cloud-init sets its keys, Ansible from a GitHub runner configures it and deploys the bot, and GitHub environments hold the secrets. There is no bot change and no migration; production keeps its Compose path.",
+  "title": "Session: 2.37.0 one deployment path",
+  "objective": "2.37.0 (#62) makes Deploy the one path: a read-only plan first, one prod approval that applies exactly that plan, pins new host keys and deploys, each release built once, rollback by version, and prod names. There is no migration and nothing members notice; production keeps its Compose path until the owner's cutover.",
   "user": [
-    "Before merging: delete STAGING_DEPLOY_ENABLED and staging's old deploy key and variables; retire the old staging host.",
-    "After merging: create the infra-plan and infra environments, run the import-only apply, build staging, pin its host key, then configure and preflight it."
+    "Before merging: review the PR as code owner and answer its four questions (the agent rule, DEPLOY_ENABLED choosing production's path, staging applies waiting for prod's approval, and the release list).",
+    "After merging: approve the Compose production deploy as usual. Then Phase 0: the ruleset, the state bucket and its scoped keys, the tokens, and the infra-plan, staging and prod environments (delete infra and staging's TARGET_HOST and TARGET_HOST_KEY), then the import-only action=infra run.",
+    "Then build staging with action=infra, configure it twice (the second must report changed=0) and preflight it."
   ],
   "assistant": [
-    "Build DevBot at 2.36.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",
-    "Read the staging runs' logs (read-only), grep them for names, addresses and secrets, and record the verification."
+    "Build DevBot at 2.37.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",
+    "Read the staging and infrastructure runs' public logs (read-only), grep them for names, addresses and secrets, and record the verification."
   ],
   "bot": [
-    "Run 2.35.0 in production until the 2.36.0 deploy; nothing changes for members.",
+    "Run 2.36.0 in production until the 2.37.0 deploy; nothing changes for members.",
     "Post this responsibility-separated session plan in #chat."
   ]
 }

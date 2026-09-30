@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# A simulated curl for publish.yml's "Refuse a release that is already published" step in
+# tests/unit/publish-workflow.test.ts: GHCR's anonymous token endpoint and its manifest HEADs. It
+# records its arguments (after a `== curl` line) in $STUB/argv, each config it read on stdin in
+# $STUB/curl-config.<n>, and `token` or `HEAD <tag>` in $STUB/events.
+#
+#   https://ghcr.io/token?scope=repository:deconfined/tarubot:pull
+#       answers $STUB/token-status (200 by default) with $STUB/token-body (a token by default)
+#   https://ghcr.io/v2/deconfined/tarubot/manifests/<tag>
+#       answers $STUB/manifests/<tag> (404 by default, a tag that doesn't exist), but 401 unless
+#       the config on stdin sends the token as a bearer
+#
+# FAKE_CURL_EXIT fails the transfer with no status. It prints the status as
+# --write-out '%{http_code}' does.
+set -euo pipefail
+{
+  echo "== curl"
+  printf '%s\n' "$@"
+} >>"$STUB/argv"
+config=''
+output='' url='' writeout='' head=false
+while (($#)); do
+  case $1 in
+    --config) if [[ $2 == - ]]; then config=$(cat); fi && shift ;;
+    --output) output=$2 && shift ;;
+    --write-out) writeout=$2 && shift ;;
+    --head) head=true ;;
+    https://*) url=$1 ;;
+  esac
+  shift
+done
+n=$(($(find "$STUB" -maxdepth 1 -name 'curl-config.*' | wc -l) + 1))
+printf '%s\n' "$config" >"$STUB/curl-config.$n"
+if [[ $writeout != '%{http_code}' || -z $output || -z $url ]]; then
+  echo "curl stand-in: unexpected arguments" >&2
+  exit 2
+fi
+if [[ -n ${FAKE_CURL_EXIT-} ]]; then
+  echo "curl: (7) Failed to connect" >&2
+  printf '000'
+  exit "$FAKE_CURL_EXIT"
+fi
+token=$(jq -r '.token // empty' "$STUB/token-body" 2>/dev/null || true)
+case $url in
+  'https://ghcr.io/token?scope=repository:deconfined/tarubot:pull')
+    echo token >>"$STUB/events"
+    status=$(cat "$STUB/token-status" 2>/dev/null || printf 200)
+    if [[ $status == 200 ]]; then cp "$STUB/token-body" "$output"; else printf '{"errors":[]}' >"$output"; fi
+    ;;
+  https://ghcr.io/v2/deconfined/tarubot/manifests/*)
+    tag=${url##*/}
+    echo "HEAD $tag" >>"$STUB/events"
+    [[ $head == true ]] || { echo "curl stand-in: a manifest is only ever asked with HEAD" >&2; exit 2; }
+    if [[ -n $token && $config == *"header = \"Authorization: Bearer $token\""* ]]; then
+      status=$(cat "$STUB/manifests/$tag" 2>/dev/null || printf 404)
+    else
+      status=401
+    fi
+    : >"$output"
+    ;;
+  *)
+    echo "curl stand-in: no such URL" >&2
+    printf '000'
+    exit 6
+    ;;
+esac
+printf '%s' "$status"

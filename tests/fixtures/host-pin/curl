@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# A stand-in for curl in tests/unit/host-pin.test.ts, which runs ops/tofu/ci/host.sh: the pin store
+# as a private bucket under $STUB/store, reached the way host.sh reaches it (SigV4, with the URL and
+# the credentials in a config on stdin). It records its arguments (after a `== curl` line) in
+# $STUB/argv, each config in $STUB/curl-config.<n>, `curl GET|PUT <path>` in $STUB/events, and its
+# name in $STUB/leaked-env when a credential reached its environment.
+#
+# The config's user line decides access: $STUB_RW_USER reads and writes, $STUB_RO_USER only reads (a
+# PUT gets 403, as from infra-plan's or staging's read-only key), and any other user gets 403. The
+# URL's host must be $STUB_HOST. FAKE_GET_STATUS or FAKE_PUT_STATUS forces a status, and
+# FAKE_CURL_EXIT fails the transfer with no status. It prints the status as
+# --write-out '%{http_code}' does.
+set -euo pipefail
+{
+  echo "== curl"
+  printf '%s\n' "$@"
+} >>"$STUB/argv"
+if [[ -n ${AWS_ACCESS_KEY_ID+x}${AWS_SECRET_ACCESS_KEY+x}${ANSIBLE_SSH_KEY+x} ]]; then echo curl >>"$STUB/leaked-env"; fi
+config=$(cat)
+n=$(($(find "$STUB" -maxdepth 1 -name 'curl-config.*' | wc -l) + 1))
+printf '%s\n' "$config" >"$STUB/curl-config.$n"
+
+output='' upload='' sigv4='' writeout=''
+while (($#)); do
+  case $1 in
+    --output) output=$2 && shift ;;
+    --upload-file) upload=$2 && shift ;;
+    --aws-sigv4) sigv4=$2 && shift ;;
+    --write-out) writeout=$2 && shift ;;
+  esac
+  shift
+done
+if [[ $sigv4 != aws:amz:us-east-1:s3 || $writeout != '%{http_code}' || -z $output ]]; then
+  echo "curl stand-in: unexpected arguments" >&2
+  exit 2
+fi
+user=$(sed -n 's/^user = "\(.*\)"$/\1/p' <<<"$config")
+url=$(sed -n 's/^url = "\(.*\)"$/\1/p' <<<"$config")
+if ! [[ $url =~ ^https://([^/]+)/(.+)$ ]] || [[ ${BASH_REMATCH[1]} != "$STUB_HOST" ]]; then
+  echo "curl stand-in: no URL for the stand-in bucket in the config" >&2
+  printf '000'
+  exit 6
+fi
+path=${BASH_REMATCH[2]}
+if [[ -n ${FAKE_CURL_EXIT-} ]]; then
+  echo "curl stand-in: transfer failed for $url" >&2
+  printf '000'
+  exit "$FAKE_CURL_EXIT"
+fi
+
+if [[ -n $upload ]]; then method=PUT; else method=GET; fi
+echo "curl $method $path" >>"$STUB/events"
+if [[ $user == "$STUB_RW_USER" ]]; then
+  access=rw
+elif [[ $user == "$STUB_RO_USER" ]]; then
+  access=ro
+else
+  access=none
+fi
+
+if [[ $method == GET ]]; then
+  status=${FAKE_GET_STATUS-}
+  if [[ -z $status ]]; then
+    if [[ $access == none ]]; then
+      status=403
+    elif [[ -f $STUB/store/$path ]]; then
+      status=200
+    else
+      status=404
+    fi
+  fi
+  if [[ $status == 200 && -f $STUB/store/$path ]]; then
+    cp -- "$STUB/store/$path" "$output"
+  else
+    printf '<Error><Code>%s</Code><Resource>%s</Resource></Error>' "$status" "$path" >"$output"
+  fi
+else
+  status=${FAKE_PUT_STATUS-}
+  if [[ -z $status ]]; then
+    if [[ $access == rw ]]; then status=200; else status=403; fi
+  fi
+  if [[ $status == 200 ]]; then
+    mkdir -p -- "$(dirname -- "$STUB/store/$path")"
+    cp -- "$upload" "$STUB/store/$path"
+  fi
+  : >"$output"
+fi
+printf '%s' "$status"

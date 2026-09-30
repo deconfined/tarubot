@@ -14,11 +14,30 @@
  *   token, and only the publish and latest jobs may write packages.
  * - latest waits for attest and promotes the digest the build returned, not a tag.
  *
- * Since 2.33.0 the deploy plan verifies the signature with `gh attestation verify` before either
+ * - Once, on merge (2.37.0, REQUIREMENTS.md "Approved unified-pipeline amendments (2026-09-29)",
+ *   decision 3): the workflow runs on a push to main alone, with no dispatch, and the publish job's
+ *   first step, before anything is built, refuses a version or sha- tag that already exists. Only
+ *   a registry 404 counts as absent. The step runs here against a simulated GHCR
+ *   (tests/fixtures/publish-workflow/curl) for 404, 200, 401 and 500, and its anonymous token never
+ *   reaches an argument.
+ *
+ * Since 2.33.0 the deploy plan verifies the signature with `gh attestation verify` before any
  * deploy job (tests/unit/deploy-workflow.test.ts pins its flags).
  */
-import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
 import { z } from "zod";
@@ -96,6 +115,9 @@ const image = (() => {
 })();
 
 const workflowFiles = readdirSync(root(".github/workflows")).filter((f) => /\.ya?ml$/u.test(f));
+
+/** The refusal step reads GHCR's token answer with jq, as a runner has it; the image build has none. */
+const hasJq = Bun.which("jq") !== null;
 
 describe("action pins", () => {
   test("every action in every workflow is pinned to a full commit SHA with its version", () => {
@@ -233,5 +255,162 @@ describe("the latest tag", () => {
     expect(run).not.toContain("sha-");
     // Re-running an older publish still leaves a newer main's latest alone.
     expect(run).toContain('if [ "$current" != "$GITHUB_SHA" ]; then');
+  });
+});
+
+describe("once, on merge", () => {
+  test("runs on a push to main alone: no dispatch, no tag, no other trigger", () => {
+    const { on } = YAML.parse(read(".github/workflows/publish.yml")) as { on: unknown };
+    expect(on).toEqual({ push: { branches: ["main"] } });
+    for (const j of [build, attest, latest])
+      expect({ job: j.name, if: j.if }).toEqual({
+        job: j.name,
+        if: "github.ref == 'refs/heads/main'",
+      });
+    // The header says what a failure after the push costs, and what may still be re-run.
+    const header = read(".github/workflows/publish.yml").split("\nname:")[0] ?? "";
+    expect(header.replace(/\n# ?/gu, " ")).toContain(
+      "A publish job that fails after its push therefore needs a version bump; the attest and latest jobs can be re-run alone.",
+    );
+  });
+
+  test("the publish job's first step refuses an existing version or sha- tag, before anything is built", () => {
+    const [first, ...rest] = build.steps;
+    expect(first?.name).toBe("Refuse a release that is already published");
+    expect(first?.env).toEqual({ VERSION: expr("needs.verify.outputs.version") });
+    expect(first?.uses).toBeUndefined();
+    // Checkout, the builders, the login and the build all come after it.
+    expect(rest.map((s) => s.uses?.split("@")[0] ?? s.id)).toEqual([
+      "actions/checkout",
+      "docker/setup-qemu-action",
+      "docker/setup-buildx-action",
+      "docker/login-action",
+      "docker/metadata-action",
+      "docker/build-push-action",
+    ]);
+    // No expression inside the script, no tracing.
+    expect(first?.run ?? "").not.toContain("${{");
+    expect(first?.run ?? "").not.toMatch(/set -[a-zA-Z]*x/u);
+  });
+
+  describe.skipIf(!hasJq)("against a simulated GHCR", () => {
+    const script = stepOf(build, "Refuse a release that is already published").run ?? "";
+    const STUB_DIR = fileURLToPath(new URL("../fixtures/publish-workflow", import.meta.url));
+    const scratch = mkdtempSync(join(tmpdir(), "publish-workflow-"));
+    afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+    let boxes = 0;
+    const VERSION = "2.37.1";
+    const SHA = "0123456789abcdef0123456789abcdef01234567";
+    const TOKEN = "anonymous-pull-token-for-tests";
+
+    /** Run the step with GHCR answering `manifests` per tag, and the token endpoint `token`. */
+    function refuse(
+      manifests: Record<string, string> = {},
+      options: { token?: string; tokenBody?: string; env?: Record<string, string> } = {},
+    ) {
+      const dir = join(scratch, `b${++boxes}`);
+      const bin = join(dir, "bin");
+      mkdirSync(join(dir, "manifests"), { recursive: true });
+      mkdirSync(bin);
+      cpSync(join(STUB_DIR, "curl"), join(bin, "curl"));
+      chmodSync(join(bin, "curl"), 0o755);
+      writeFileSync(join(dir, "token-body"), options.tokenBody ?? JSON.stringify({ token: TOKEN }));
+      if (options.token) writeFileSync(join(dir, "token-status"), options.token);
+      for (const [tag, status] of Object.entries(manifests))
+        writeFileSync(join(dir, "manifests", tag), status);
+      const r = Bun.spawnSync(["bash", "-e", "-c", script], {
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          HOME: dir,
+          TMPDIR: dir,
+          STUB: dir,
+          VERSION,
+          GITHUB_SHA: SHA,
+          ...options.env,
+        },
+        stdin: "ignore",
+      });
+      const file = (name: string) =>
+        existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "";
+      return {
+        code: r.exitCode,
+        stdout: r.stdout.toString(),
+        log: r.stdout.toString() + r.stderr.toString(),
+        events: file("events").trim().split("\n").filter(Boolean),
+        argv: file("argv"),
+        configs: readdirSync(dir)
+          .filter((f) => f.startsWith("curl-config."))
+          .map((f) => file(f)),
+      };
+    }
+
+    test("goes on only when the registry answers 404 for both tags", () => {
+      const r = refuse();
+      expect(r.code).toBe(0);
+      expect(r.events).toEqual(["token", `HEAD ${VERSION}`, `HEAD sha-${SHA}`]);
+      expect(r.stdout).toContain(`ghcr.io/deconfined/tarubot:${VERSION} isn't published yet.`);
+      expect(r.stdout).toContain(`ghcr.io/deconfined/tarubot:sha-${SHA} isn't published yet.`);
+      // The anonymous token is masked, and reaches curl only in its config on stdin.
+      expect(r.stdout).toContain(`::add-mask::${TOKEN}`);
+      expect(r.argv).not.toContain(TOKEN);
+      expect(
+        r.configs.filter((c) => c.includes(`header = "Authorization: Bearer ${TOKEN}"`)),
+      ).toHaveLength(2);
+      // It asks for any of the four manifest types a release can be.
+      expect(r.argv).toContain(
+        "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+      );
+      expect(r.argv).toContain("--head");
+      expect(r.argv).toContain("https://ghcr.io/token?scope=repository:deconfined/tarubot:pull");
+    });
+
+    test("refuses a tag that exists: a release is never pushed twice", () => {
+      for (const tag of [VERSION, `sha-${SHA}`]) {
+        const r = refuse({ [tag]: "200" });
+        expect({ tag, code: r.code }).toEqual({ tag, code: 1 });
+        expect(r.stdout).toContain(
+          `::error::ghcr.io/deconfined/tarubot:${tag} already exists, and a release is never pushed twice: bump the version.`,
+        );
+      }
+      // The version first: an existing version stops before the sha- tag is asked.
+      expect(refuse({ [VERSION]: "200" }).events).toEqual(["token", `HEAD ${VERSION}`]);
+    });
+
+    test("refuses any other answer, since it can't tell whether the tag exists", () => {
+      for (const status of ["401", "403", "429", "500", "503"]) {
+        const r = refuse({ [VERSION]: status });
+        expect({ status, code: r.code }).toEqual({ status, code: 1 });
+        expect(r.stdout).toContain(
+          `::error::GHCR answered HTTP ${status} for ghcr.io/deconfined/tarubot:${VERSION}, so whether it exists is unknown; nothing was pushed.`,
+        );
+      }
+      // A token answer without a token stops before any manifest is asked.
+      const unauthorized = refuse({}, { tokenBody: JSON.stringify({}) });
+      expect(unauthorized.code).toBe(1);
+      expect(unauthorized.stdout).toContain(
+        "::error::GHCR's token answer holds no token; nothing was pushed.",
+      );
+      for (const token of ["401", "500"]) {
+        const r = refuse({}, { token });
+        expect({ token, code: r.code, events: r.events }).toEqual({
+          token,
+          code: 1,
+          events: ["token"],
+        });
+        expect(r.stdout).toContain(
+          `::error::GHCR handed out no anonymous pull token (HTTP ${token}); nothing was pushed.`,
+        );
+      }
+      const lost = refuse({}, { env: { FAKE_CURL_EXIT: "7" } });
+      expect(lost.code).toBe(1);
+      expect(lost.stdout).toContain("(HTTP 000)");
+    });
+
+    test("refuses a version or commit that isn't one, before it asks anything", () => {
+      for (const env of [{ VERSION: "2.37" }, { VERSION: "2.37.1; id" }, { GITHUB_SHA: "main" }]) {
+        const r = refuse({}, { env });
+        expect({ env, code: r.code, events: r.events }).toEqual({ env, code: 1, events: [] });
+      }
+    });
   });
 });

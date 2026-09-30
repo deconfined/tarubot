@@ -1,24 +1,34 @@
 /**
  * Deployment-identity guard for maintenance tools. Before any Discord or database I/O, each tool
  * declares what it will touch; this pure module works out which deployment profile the environment
- * belongs to (production, production rehearsal, staging, DevBot, or unmanaged) and refuses mixed
- * identities: a DevBot env aimed at the production guild, production credentials without an
- * explicit marker, a production or staging run silently merged with a checkout's .env, or a
+ * belongs to (production, prod, production rehearsal, staging, DevBot, or unmanaged) and refuses
+ * mixed identities: a DevBot env aimed at the production guild, production credentials without an
+ * explicit marker, a production, prod or staging run silently merged with a checkout's .env, or a
  * database belonging to another deployment. Errors are Failure("configuration") and name settings,
  * hosts and database names only, never a URL, password or token (OPS-05). The guard leaves env.ts
  * and the bot's startup configuration alone. It reads the file-delivered secrets (NAME_FILE,
  * 2.33.0) as the tools themselves do, through src/config/secrets.ts: in a Quadlet host's container
  * DATABASE_URL and DATABASE_CA_CERT exist only as files.
  *
+ * The prod profile (2.37.0) is the production application on the new pipeline's host (the Deploy
+ * workflow's prod job; ops/ansible/vars/targets/prod.yml), selected only by
+ * TARUBOT_ENVIRONMENT=prod. It takes production's rules, the PITR-fork restore included, under the
+ * prod names: its database is tarubot_prod (or the same-cluster restore tarubot_prod_restore) and
+ * its role tarubot_prod. The owner renames production's database and role to those names inside
+ * the cutover window. Until then the Compose host's production profile, with tarubot and
+ * tarubot_restore, is unchanged; the cleanup release (2.38.0) removes it. Each refuses the other's
+ * names.
+ *
  * The rehearsal allowance (2.35.0, #46 answer 8): DEVBOT_THROWAWAY_GUILD_ID exists for @deconfined's
  * rehearsal of /setup overrides on a throwaway server, while DevBot's TEST_GUILD_ID points there.
  * It is environment-only, passed per tool run and never kept in env.ts, a Compose file or an env
  * template, so no new Discord ID enters the repository. Only the devbot profile takes it, and only
- * when TEST_GUILD_ID names the same server: production, rehearsal, staging and unmanaged refuse it,
- * and so does a managed deployment's guild. Under it the throwaway replaces DevBot's test guild as
- * the profile's only guild and registration scope: that run can't use the real test guild's data,
- * and can't register or clear commands in any managed guild (commands.js list still reads every
- * scope back). The bot process never reads it; the running bot follows TEST_GUILD_ID alone.
+ * when TEST_GUILD_ID names the same server: production, prod, rehearsal, staging and unmanaged
+ * refuse it, and so does a managed deployment's guild. Under it the throwaway replaces DevBot's
+ * test guild as the profile's only guild and registration scope: that run can't use the real test
+ * guild's data, and can't register or clear commands in any managed guild (commands.js list still
+ * reads every scope back). The bot process never reads it; the running bot follows TEST_GUILD_ID
+ * alone.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -31,6 +41,9 @@ import { resolveSettings, secretSetting } from "./secrets.js";
  * registers its commands. A rotated application or a new guild is deliberately a code change.
  * Since 2.28.0 production's guild list also gates /suggest at runtime: a server outside it can't
  * post public suggestions, even if it invites the bot (src/application/suggestions.ts).
+ * `production` is the production application's identity under both of its profiles, the Compose
+ * host's production and the new pipeline's prod (2.37.0). The key keeps its name until the cleanup
+ * release (2.38.0) renames it with the Compose path's removal.
  */
 export const deployments = {
   production: {
@@ -46,12 +59,20 @@ export const deployments = {
 } as const;
 
 /**
+ * `production` is the production application on the Compose host, against `tarubot`, until 2.38.0;
+ * `prod` (2.37.0) is the same application on the new pipeline's host, against `tarubot_prod`.
  * `rehearsal` is the production application against a disposable database, read-only on Discord.
  * `staging` (#50) is DevBot's application on the staging host, against its own database on the
  * managed cluster; `devbot` is the same application on the workstation's local database, until the
  * DevBot move retires it.
  */
-export type DeploymentName = "production" | "rehearsal" | "staging" | "devbot" | "unmanaged";
+export type DeploymentName =
+  | "production"
+  | "prod"
+  | "rehearsal"
+  | "staging"
+  | "devbot"
+  | "unmanaged";
 export type DatabaseSetting = "DATABASE_URL" | "RESTORE_DATABASE_URL";
 
 /** What one tool invocation will touch; the guard checks it before any I/O. */
@@ -67,15 +88,15 @@ export interface ToolScope {
   globalCommands?: boolean;
   /**
    * register.js only: the scope it replaces, "global" or a guild ID. A managed profile registers
-   * only in its own declared registrationScope (production: global; staging and DevBot: the test
-   * guild, or the throwaway server under DevBot's rehearsal allowance), so a production --guild
-   * registration cannot shadow the global set with duplicate commands.
+   * only in its own declared registrationScope (production and prod: global; staging and DevBot:
+   * the test guild, or the throwaway server under DevBot's rehearsal allowance), so a production
+   * --guild registration cannot shadow the global set with duplicate commands.
    */
   registerScope?: string;
   /**
    * migrate.js --restore-rehearsal only: DATABASE_URL names a disposable restore copy (ending in
    * _restore_test) on which a new migration is rehearsed before the live database. DevBot's
-   * profile then accepts that copy in place of tarubot_dev; production, rehearsal and staging
+   * profile then accepts that copy in place of tarubot_dev; production, prod, rehearsal and staging
    * refuse it.
    */
   restoreRehearsal?: boolean;
@@ -140,7 +161,9 @@ export function currentLaunch(cwd = process.cwd()): Launch {
 const snowflake = z.union([z.string().regex(/^[1-9][0-9]{0,19}$/), z.literal("")]);
 /** Only the settings the guard needs; everything else in the environment is ignored. */
 const settingsSchema = z.object({
-  TARUBOT_ENVIRONMENT: z.enum(["production", "rehearsal", "staging", "devbot", ""]).optional(),
+  TARUBOT_ENVIRONMENT: z
+    .enum(["production", "prod", "rehearsal", "staging", "devbot", ""])
+    .optional(),
   DISCORD_APPLICATION_ID: snowflake.optional(),
   TEST_GUILD_ID: snowflake.optional(),
   PUBLIC_TEST_RESPONSES: z.string().optional(),
@@ -185,8 +208,8 @@ function profile(values: Settings): Deployment {
     ? values.DEVBOT_THROWAWAY_GUILD_ID
     : null;
   if (throwaway === null) return base;
-  // Only the local devbot profile takes the allowance. Production, rehearsal, staging and unmanaged
-  // refuse it outright instead of ignoring it, so it can never widen them: their guilds,
+  // Only the local devbot profile takes the allowance. Production, prod, rehearsal, staging and
+  // unmanaged refuse it outright instead of ignoring it, so it can never widen them: their guilds,
   // registration scope and database rules stay exactly the inferred ones, and an operator who
   // passed it to the wrong environment learns so before any I/O.
   if (base.name !== "devbot")
@@ -216,7 +239,9 @@ function profile(values: Settings): Deployment {
 /**
  * Pick the profile from the explicit marker, else infer it from the application ID. Staging shares
  * DevBot's application, so only its marker selects it, and the marker is checked before the
- * inference: DevBot's application ID alone always means the local devbot profile.
+ * inference: DevBot's application ID alone always means the local devbot profile. Production and
+ * prod share the production application, so each needs its own marker too: the application ID
+ * alone selects neither.
  */
 function inferredProfile(values: Settings): Deployment {
   const marker = values.TARUBOT_ENVIRONMENT || null;
@@ -233,15 +258,17 @@ function inferredProfile(values: Settings): Deployment {
     guilds: deployments.devbot.guilds,
     registrationScope: deployments.devbot.registrationScope,
   };
-  if (marker === "production" || marker === "rehearsal") return { name: marker, ...production };
+  if (marker === "production" || marker === "prod" || marker === "rehearsal")
+    return { name: marker, ...production };
   if (marker === "staging") return { name: "staging", ...devbotIdentity };
   if (marker === "devbot" || application === deployments.devbot.applicationId)
     return { name: "devbot", ...devbotIdentity };
-  // Production credentials must say so explicitly: they come only from the production env file.
+  // Production credentials must say so explicitly: they come only from the production env file,
+  // or from the prod host's settings (vars/targets/prod.yml), each of which sets the marker.
   if (application === deployments.production.applicationId)
     throw new Failure(
       "configuration",
-      "Production credentials require TARUBOT_ENVIRONMENT=production or rehearsal from the production env file.",
+      "Production credentials require TARUBOT_ENVIRONMENT=production, prod or rehearsal, from the production env file or the prod host's settings.",
     );
   return { name: "unmanaged", applicationId: application, guilds: [], registrationScope: "global" };
 }
@@ -335,6 +362,17 @@ export const MANAGED_ADMIN_USERS: readonly string[] = ["akmadmin"];
 export const PRODUCTION_DATABASES: readonly string[] = ["tarubot", "tarubot_restore"];
 
 /**
+ * The prod profile's databases (2.37.0), as production's above under the prod names: the live
+ * `tarubot_prod`, or `tarubot_prod_restore` after a same-cluster restore the bot was repointed at
+ * (a PITR fork is a new cluster that holds `tarubot_prod`). Production's `tarubot` and
+ * `tarubot_restore` are refused, and so is staging's database.
+ */
+export const PROD_DATABASES: readonly string[] = ["tarubot_prod", "tarubot_prod_restore"];
+
+/** The role the prod profile connects as (2.37.0); the owner renames `tarubot` to it at cutover. */
+export const PROD_ROLE = "tarubot_prod";
+
+/**
  * Staging's database and the role it connects as (#50), on the same managed cluster as production.
  * Both are exactly this name, and the role owns its database. The production application refuses
  * every database or user whose name starts with it, so a staging URL never passes as production's.
@@ -365,7 +403,8 @@ export function assertToolScope(
   const { name } = deployment;
   const refuse = (reason: string) =>
     new Failure("configuration", `Refusing ${scope.tool} under the ${name} profile: ${reason}`);
-  const productionApp = name === "production" || name === "rehearsal";
+  /** Profiles that run the production application: production and prod, and a rehearsal. */
+  const productionApp = name === "production" || name === "prod" || name === "rehearsal";
   /** Profiles that run DevBot's application: staging on its host, devbot on the workstation. */
   const devbotApp = name === "staging" || name === "devbot";
   const application = values.DISCORD_APPLICATION_ID || null;
@@ -377,8 +416,8 @@ export function assertToolScope(
   const throwaway = name === "devbot" ? (deployment.throwawayGuild ?? null) : null;
 
   // Launch: `bun run` children and plain `bun` reload the checkout's env files, which would fill
-  // any gap in the production or staging settings with development values. Containers have none
-  // of these; staging's tools run in the bot's container on its host.
+  // any gap in the production, prod or staging settings with development values. Containers have
+  // none of these; staging's and prod's tools run in the bot's container on their hosts.
   if (
     (productionApp || name === "staging") &&
     launch.envFiles.length &&
@@ -402,8 +441,9 @@ export function assertToolScope(
       `DISCORD_APPLICATION_ID must be DevBot's application ${deployments.devbot.applicationId}.`,
     );
 
-  // Test scope: production never carries development scoping; DevBot's application always does,
-  // on staging too. Staging may show replies publicly and name its test-plan channel, like DevBot.
+  // Test scope: production and prod never carry development scoping; DevBot's application always
+  // does, on staging too. Staging may show replies publicly and name its test-plan channel, like
+  // DevBot.
   if (productionApp) {
     if (present(values.TEST_GUILD_ID)) throw refuse("TEST_GUILD_ID must be empty.");
     if (values.PUBLIC_TEST_RESPONSES?.trim() === "true")
@@ -449,7 +489,7 @@ export function assertToolScope(
 
   // Commands and Discord writes. Staging writes to Discord like DevBot, in the test guild only.
   if (scope.globalCommands && (devbotApp || name === "rehearsal"))
-    throw refuse("global command registration belongs to the production profile.");
+    throw refuse("global command registration belongs to the production and prod profiles.");
   if (name === "rehearsal" && scope.discord === "write")
     throw refuse("a rehearsal is read-only on Discord.");
   if (
@@ -462,7 +502,8 @@ export function assertToolScope(
     );
 
   // A restore-copy migration rehearsal is DevBot's (and unmanaged installations') procedure; the
-  // production application rehearses migrations in its *_rehearsal database (docs/MIGRATION.md E2).
+  // production application rehearses migrations in its *_rehearsal database (docs/MIGRATION.md E2),
+  // under production, prod and rehearsal alike.
   if (scope.restoreRehearsal && productionApp)
     throw refuse(
       "--restore-rehearsal is DevBot's restore-copy rehearsal; the production application rehearses in a *_rehearsal database.",
@@ -525,10 +566,12 @@ function checkDatabase(
       throw refuse("RESTORE_DATABASE_URL must be a different database from DATABASE_URL.");
   }
 
-  // The production application never touches staging's database or role, whichever its profile:
-  // they share a cluster, so the name is what tells them apart.
+  // The production application never touches staging's database or role, whichever its profile
+  // (production, prod or rehearsal): they share a cluster, so the name is what tells them apart.
   if (
-    (deployment.name === "production" || deployment.name === "rehearsal") &&
+    (deployment.name === "production" ||
+      deployment.name === "prod" ||
+      deployment.name === "rehearsal") &&
     (target.name.startsWith(STAGING_DATABASE) || target.user.startsWith(STAGING_DATABASE))
   )
     throw refuse(`${where} belongs to staging (${STAGING_DATABASE}), never to production.`);
@@ -550,6 +593,29 @@ function checkDatabase(
         if (target.name !== expected)
           throw refuse(
             `${where} must be tarubot on a PITR fork (another host) or tarubot_restore on the primary's host.`,
+          );
+      }
+      return;
+    }
+    case "prod": {
+      // Production's rules under the prod names (2.37.0): the managed cluster over verified TLS,
+      // the direct port, and exactly the prod role. Production's tarubot and tarubot_restore fail
+      // the exact lists below, as staging's names fail them (and the refusal above).
+      if (local) throw refuse(`${where} is local; prod uses the managed cluster.`);
+      managed();
+      if (target.user !== PROD_ROLE)
+        throw refuse(`${where} must connect as the ${PROD_ROLE} user.`);
+      if (source === null) {
+        // The live database, or the same-cluster restore the bot was repointed at.
+        if (!PROD_DATABASES.includes(target.name))
+          throw refuse(`${where} is not a prod database (${PROD_DATABASES.join(" or ")}).`);
+      } else {
+        // A PITR fork is a new cluster holding tarubot_prod; a same-cluster restore is
+        // tarubot_prod_restore.
+        const expected = source.host === target.host ? "tarubot_prod_restore" : "tarubot_prod";
+        if (target.name !== expected)
+          throw refuse(
+            `${where} must be tarubot_prod on a PITR fork (another host) or tarubot_prod_restore on the primary's host.`,
           );
       }
       return;
@@ -588,8 +654,9 @@ function checkDatabase(
       return;
     }
     case "unmanaged":
-      // CI and other developers: no deployment-specific database. (The production and staging
-      // hosts' containers set TARUBOT_ENVIRONMENT, so their tools get their own profile's rules.)
+      // CI and other developers: no deployment-specific database. (The production, prod and
+      // staging hosts' containers set TARUBOT_ENVIRONMENT, so their tools get their own profile's
+      // rules.)
       return;
   }
 }

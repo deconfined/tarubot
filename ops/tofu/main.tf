@@ -1,4 +1,4 @@
-# What TaruBot's OpenTofu module builds (2.36.0, issue #62):
+# What TaruBot's OpenTofu module builds (2.36.0, issue #62; prod names since 2.37.0):
 #
 #   per host (var.hosts)       a Linode with disk encryption, its Cloud Firewall, and an A and an
 #                              AAAA record. cloud-init user data (cloud-init.yaml.tftpl) sets its
@@ -6,9 +6,14 @@
 #   per cluster (database_ids) the managed PostgreSQL cluster's whole access list: every host's
 #                              addresses plus db_allow_extra. The clusters stay outside OpenTofu.
 #
-# It never builds SSH host keys (each host makes its own at first boot, and the owner pins it from
-# their own machine: README.md, "Pinning a new host key"), SSH fingerprint records in DNS, or
-# database clusters.
+# Deploy's Infrastructure plan job (.github/workflows/deploy.yml) plans it with read-only
+# credentials and no approval. Applies run only in approved `prod` jobs
+# (.github/workflows/host.yml), serialized by their shared `host-prod` concurrency group, and
+# apply exactly that saved plan.
+#
+# It never builds SSH host keys (each host makes its own at first boot, and the approving job pins
+# it on first use through ops/tofu/ci/host.sh pin; nothing is pinned by hand), SSH fingerprint
+# records in DNS, or database clusters.
 
 locals {
   # The host and cluster keys, which appear in resource addresses. The maps are sensitive; their
@@ -107,8 +112,8 @@ resource "linode_instance" "host" {
 
   lifecycle {
     # A template, key or hash change must never plan a rebuild of every host: user data takes
-    # effect only through a deliberate replace (infra.yml's replace input, README.md "Rebuilding
-    # a host"). root_pass is new on every plan, and only the create uses it.
+    # effect only through a deliberate replace (Deploy's rebuild input, which replaces exactly
+    # this instance of its target). root_pass is new on every plan, and only the create uses it.
     ignore_changes = [metadata, root_pass]
 
     precondition {
@@ -118,9 +123,9 @@ resource "linode_instance" "host" {
   }
 }
 
-# Unproxied records with a short TTL: the name must lead to the host itself, for SSH and for the
-# owner's ssh-keyscan. No SSH fingerprint records: the owner pins each new host's key (trust on
-# first use).
+# Unproxied records with a short TTL: the name must lead to the host itself, for a hand run. The
+# Deploy jobs connect by the addresses in each host's pin (host_connection, outputs.tf), not by
+# name. No SSH fingerprint records: the approving job pins each new host's key on first use.
 resource "cloudflare_dns_record" "a" {
   for_each = local.host_keys
 

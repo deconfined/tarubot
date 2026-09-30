@@ -1,49 +1,66 @@
-# Deploys a release to production over SSH, after the owner's approval (2.30.0, issue #41), and to
-# staging through the reusable host.yml, without one (2.36.0, issue #62). The owner's decisions are
-# REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)" and "Approved pipeline amendments
-# (2026-09-29)"; docs/HOSTING.md has the flow and the outcomes, and docs/CI_CD.md the settings.
+# The one way TaruBot reaches its hosts and its infrastructure (2.37.0; REQUIREMENTS.md "Approved
+# unified-pipeline amendments (2026-09-29)", built on "Approved SSH-deploy amendments (2026-09-26)"
+# and "Approved pipeline amendments (2026-09-29)"). docs/DEPLOYMENT.md is the runbook, and
+# docs/CI_CD.md lists the environments and their secrets.
 #
-#   plan            Public data only (no secret, no environment): the release, its image digest,
-#                   the image's signed build provenance, the diff and whether anything that runs on
-#                   the hosts changed. It writes the plan to the run summary and decides which
-#                   targets this run deploys, and what staging does. Docs-, test- and CI-only merges
-#                   end here, with a quiet Pushover message.
-#   deploy          The `production` environment: it waits for @deconfined's approval, and only
-#                   then do the deploy key and the host settings load. It opens one SSH connection,
-#                   whose forced command is ops/deploy.sh's Compose path on the host; the host
-#                   checks the approval with GitHub itself. Unchanged until production moves to
-#                   host.yml in 2.37.0.
-#   deploy-staging  Calls .github/workflows/host.yml in the `staging` environment, which has no
-#                   reviewer: Configure (ops/ansible/site.yml at main's head, as root), then the
-#                   release's own ops/ansible/bot.yml, as the `action` input says. It runs beside
-#                   production's approval request: production never waits for it, and its failure
-#                   never holds production up.
-#   notify          One Pushover message from the `notify` environment, about production only.
+#   plan        Public data only (no secret, no environment): the release, its image digest and
+#               signed build provenance, the diff, and whether anything that runs on a host changed.
+#               It decides what the run asks for and writes the plan to the run summary before
+#               anything waits for an approval. Docs-, test- and CI-only merges end here.
+#   infra-plan  "Infrastructure plan", in the reviewer-free `infra-plan` environment: read-only
+#               provider tokens, the read-only state key and the one copy of TOFU_VARS. It plans
+#               ops/tofu at main's head without a state lock, runs the guards, lists the host keys
+#               the approving job must pin (ops/tofu/ci/host.sh status), and keeps the encrypted
+#               saved plan for one day when it has changes or keys to pin. It runs only for a
+#               request that plans: a prod request other than action=bot, action=infra, or a
+#               rebuild.
+#   infra       "Infrastructure": host.yml in `prod`, for a run without a prod host job (action=infra
+#               or a staging rebuild). After @deconfined's approval it adopts exactly that saved plan,
+#               applies it when it has changes and pins the keys it listed. Nothing else.
+#   staging     "Staging": host.yml in `staging`, which has no reviewer and holds no
+#               infrastructure write credential: Configure, then the release's own
+#               ops/ansible/bot.yml. It never plans and waits for no approval; after a staging
+#               rebuild it waits for Infrastructure, which built the new host.
+#   prod        "Prod": host.yml in `prod`, where one approval covers the whole job: the saved plan
+#               adopted and applied when it has changes, the listed keys pinned, Configure, then the
+#               release's own bot.yml, which registers the commands globally.
+#   report      "Report": one Pushover message from `notify` about prod and the infrastructure.
+#               Staging stays quiet; a red staging run still sends GitHub's failure email.
+#   deploy      "Deploy", the Compose production host's job in `production`, whose forced command
+#   notify      is ops/deploy.sh, and "Notify", its Pushover message. Both stay byte-identical
+#               until 2.38.0 removes them after the cutover: the Compose host checks this file's path,
+#               the run's title and the "Deploy" job itself.
 #
-# An automatic run (after a publish of main) asks for both targets and deploys staging; a dispatch
-# asks for the one its `target` input names, and for staging does what its `action` input names:
-# deploy (Configure, then the bot), bot (the bot alone: a rollback or a rotated secret), configure
-# (the host alone) or preflight (a new host's database and backup, with no bot). Production has a
-# switch, the repository variable DEPLOY_ENABLED: while it is off, production is left out. Staging
-# has none; to pause it, add a reviewer to its environment.
+# An automatic run (after a publish of main) deploys staging and asks for production: the Compose
+# host while the repository variable DEPLOY_ENABLED is exactly `true`, and the prod host otherwise.
+# A dispatch asks for the one target it names (staging, prod, or production, the Compose host) and
+# does what its action says: deploy (Configure, then the bot), bot (the bot alone: the rollback
+# lever with an older version, and the way to roll out a rotated secret), configure (the host
+# alone), preflight (a new host's database and backup, with no bot) or infra (OpenTofu alone, for
+# every host). rebuild replaces the target's own instance. Staging has no switch (to pause it, add a
+# reviewer to its environment), and the prod host needs none: rejecting its requests pauses it. A
+# request left waiting for its approval holds host-prod, so every later prod and Infrastructure
+# job, a rollback included, waits behind it until it is approved or rejected.
 #
-# No job here checks out the repository or runs an action; host.yml does both for staging. Every
-# ${{ }} reaches a script through env:. Re-runs are refused (every job requires the first attempt):
-# start a new run instead. This file has no concurrency group: several production approval requests
-# may wait, an older one approved later ends as superseded, and the production host's lock
-# serializes its runs; host.yml holds one concurrency group per target. The repository names no
-# host: DEPLOY_HOST and DEPLOY_KNOWN_HOSTS are production's variables, and staging's host is a
-# secret of its environment, read in host.yml.
+# The infrastructure write tokens live only in `prod`, so every apply, for either host, waits for
+# @deconfined's approval there, and only when the plan has changes or keys to pin. host.yml's
+# per-environment concurrency group (host-prod or host-staging, queue: max) keeps applies, pin
+# writes and host runs apart; there is no state lock. Re-runs are refused (every job requires the
+# first attempt): start a new run instead. Every ${{ }} reaches a script through env:. The
+# repository and its Actions logs are public and name no host: the Compose host is production's
+# variable, and the new hosts' addresses and keys are read from the pin store and masked first.
 name: Deploy
-# The title names the target; production's ops/deploy.sh requires the same title before it acts,
-# and refuses every title that ends in " to staging". A staging dispatch whose action isn't deploy
-# names it: "Deploy 2.36.0 configure to staging".
+# The Compose titles stay 2.35.0's, which ops/deploy.sh requires before it acts: "Deploy V",
+# "Deploy V rollback from F", and "Deploy <commit>" for an automatic run. Every other title ends in
+# " to staging" or " to prod", which the Compose host refuses, names any action but deploy and
+# shows a rebuild: "Deploy 2.37.0 infra to prod (rebuild)".
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-      && format('Deploy {0}{1}{2}{3}', inputs.version,
+      && format('Deploy {0}{1}{2}{3}{4}', inputs.version,
                 inputs.rollback && format(' rollback from {0}', inputs.from) || '',
-                inputs.target == 'staging' && inputs.action != 'deploy' && format(' {0}', inputs.action) || '',
-                inputs.target == 'staging' && ' to staging' || '')
+                inputs.target != 'production' && inputs.action != 'deploy' && format(' {0}', inputs.action) || '',
+                inputs.target != 'production' && format(' to {0}', inputs.target) || '',
+                inputs.target != 'production' && inputs.rebuild && ' (rebuild)' || '')
       || format('Deploy {0}', github.event.workflow_run.head_sha) }}
 
 on:
@@ -55,27 +72,39 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release X.Y.Z (the live one is re-verified and its commands registered again; configure ignores it)"
+        description: "Release X.Y.Z; an older one with action=bot rolls back (configure and infra ignore it)"
         required: true
         type: string
+      target:
+        description: "staging (no approval), prod (your approval) or production (the Compose host, until 2.38.0)"
+        type: choice
+        options: [staging, prod, production]
+        default: staging
+      action:
+        description: "deploy (Configure, then the bot), bot (the bot alone), configure (the host alone), preflight (a new host, no bot) or infra (OpenTofu alone); production takes deploy"
+        type: choice
+        options: [deploy, bot, configure, preflight, infra]
+        default: deploy
+      rebuild:
+        description: "Replace the target's own host (staging or prod) with a new Linode; not with action=bot"
+        type: boolean
+        default: false
+      allow_destroy:
+        description: "Allow a plan that deletes or replaces anything beyond a rebuild's own host"
+        type: boolean
+        default: false
+      allow_access_removal:
+        description: "Allow a plan that removes database access-list entries beyond a rebuilt host's own two"
+        type: boolean
+        default: false
       rollback:
-        description: "Production only: go back to an older release on the same schema"
+        description: "Production (Compose) only: go back to an older release on the same schema"
         type: boolean
         default: false
       from:
-        description: "Production rollback only: the live version you are leaving"
+        description: "Production (Compose) rollback only: the live version you are leaving"
         type: string
         default: ""
-      target:
-        description: "Where to deploy: production waits for your approval, staging needs none"
-        type: choice
-        options: [production, staging]
-        default: production
-      action:
-        description: "Staging only: deploy (Configure, then the bot), bot (the bot alone), configure (the host alone) or preflight (a new host, no bot)"
-        type: choice
-        options: [deploy, bot, configure, preflight]
-        default: deploy
 
 permissions: {}
 
@@ -86,9 +115,8 @@ defaults:
 jobs:
   plan:
     name: Plan
-    # Every run plans; production's switch, DEPLOY_ENABLED, is checked in the plan and again in its
-    # deploy job, and staging deploys whenever it is asked (to pause it, add a reviewer to its
-    # environment).
+    # Every run plans. DEPLOY_ENABLED, which picks production's path, is read inside the plan;
+    # staging and prod have no switch.
     if: >-
       github.run_attempt == '1' && (
         (github.event_name == 'workflow_run'
@@ -102,11 +130,14 @@ jobs:
     timeout-minutes: 10
     # No packages permission and no registry login: the package is public, so the digests and
     # `gh attestation verify oci://…` resolve anonymously, and no job token is written to disk.
+    # The environments' own rules are the owner's settings, read back once when they are made; no
+    # run checks them (REQUIREMENTS.md, decision 8).
     permissions:
       contents: read # package.json, CHANGELOG.md, migrations/ and the compare API
-      actions: read # the environments' protection rules and branch policies
       attestations: read # the image's build-provenance attestations, for gh attestation verify
     outputs:
+      notify: ${{ steps.plan.outputs.notify }}
+      report: ${{ steps.plan.outputs.report }}
       deploy: ${{ steps.plan.outputs.deploy }}
       action: ${{ steps.plan.outputs.action }}
       version: ${{ steps.plan.outputs.version }}
@@ -115,10 +146,15 @@ jobs:
       from: ${{ steps.plan.outputs.from }}
       reason: ${{ steps.plan.outputs.reason }}
       production: ${{ steps.plan.outputs.production }}
-      staging: ${{ steps.plan.outputs.staging }}
       production_reason: ${{ steps.plan.outputs.production_reason }}
-      notify: ${{ steps.plan.outputs.notify }}
-      staging_action: ${{ steps.plan.outputs.staging_action }}
+      staging: ${{ steps.plan.outputs.staging }}
+      prod: ${{ steps.plan.outputs.prod }}
+      host_action: ${{ steps.plan.outputs.host_action }}
+      infra: ${{ steps.plan.outputs.infra }}
+      pin_scope: ${{ steps.plan.outputs.pin_scope }}
+      rebuild: ${{ steps.plan.outputs.rebuild }}
+      allow_destroy: ${{ steps.plan.outputs.allow_destroy }}
+      allow_access_removal: ${{ steps.plan.outputs.allow_access_removal }}
       config_commit: ${{ steps.plan.outputs.config_commit }}
       schema_head: ${{ steps.plan.outputs.schema_head }}
     steps:
@@ -129,11 +165,15 @@ jobs:
           EVENT: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_ROLLBACK: ${{ inputs.rollback }}
-          INPUT_FROM: ${{ inputs.from }}
           INPUT_TARGET: ${{ inputs.target }}
           INPUT_ACTION: ${{ inputs.action }}
-          # Main's head when this run was created: staging's Configure applies site.yml from it.
+          INPUT_REBUILD: ${{ inputs.rebuild }}
+          INPUT_ALLOW_DESTROY: ${{ inputs.allow_destroy }}
+          INPUT_ALLOW_ACCESS_REMOVAL: ${{ inputs.allow_access_removal }}
+          INPUT_ROLLBACK: ${{ inputs.rollback }}
+          INPUT_FROM: ${{ inputs.from }}
+          # Main's head when this run was created: Configure applies site.yml from it, and the
+          # Infrastructure plan plans ops/tofu at it.
           CONFIG_COMMIT: ${{ github.sha }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
         run: |
@@ -142,23 +182,26 @@ jobs:
           R=$GITHUB_REPOSITORY
           IMAGE=ghcr.io/deconfined/tarubot
           VER='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
-          # The one account that approves production (ops/deploy.sh's REVIEWER; the test keeps
-          # them equal).
+          # The one account that approves production and prod (ops/deploy.sh's REVIEWER; the test
+          # keeps them equal).
           REVIEWER=deconfined
-          # The first release whose own ops/ansible/bot.yml deploys staging (#62): staging's deploy,
-          # bot and preflight take nothing older, since each release deploys with its own bot.yml.
+          # The first releases whose own ops/ansible/bot.yml deploys each host: staging (#62) and
+          # prod (2.37.0). deploy, bot and preflight take nothing older, since each release deploys
+          # with its own bot.yml.
           STAGING_MIN_RELEASE=2.36.0
+          PROD_MIN_RELEASE=2.37.0
           # Paths that never change what runs on a host; every other path is a runtime change.
-          # ops/tofu/ reaches the hosts only through the Infrastructure workflow, and ansible-lint's
-          # pins feed only CI; ops/ansible/requirements.txt is staging's Ansible, so it counts.
+          # ops/tofu/ reaches the hosts only through the Infrastructure plan and its approval, and
+          # ansible-lint's pins feed only CI; ops/ansible/requirements.txt is the hosts' Ansible, so
+          # it counts.
           NON_RUNTIME='^(docs/|site/|tests/|test-plans/|\.github/|[^/]+\.md$|docker-compose(\.devbot|\.tools|\.build)?\.yml$|\.env\.example$|production\.env\.example$|staging\.env\.example$|ops/tofu/|ops/ansible/requirements-lint\.txt$|biome\.json$)'
           ALWAYS_RUNTIME='^\.github/workflows/publish\.yml$'
           # Files that run on a host, or shape its settings: on production's Docker host as a
-          # docker-group user, which is root-equivalent there; on the staging host, Configure runs
-          # ops/ansible/site.yml as root and the release's ops/ansible/bot.yml runs the bot as the
-          # unprivileged tarubot user.
+          # docker-group user, which is root-equivalent there; on the staging and prod hosts,
+          # Configure runs ops/ansible/site.yml as root and the release's ops/ansible/bot.yml runs
+          # the bot as the unprivileged tarubot user.
           HOST_SIDE='^(ops/|docker-compose\.production\.yml$|production\.env\.example$|staging\.env\.example$)'
-          HOST_RUN="on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging host Configure runs \`ops/ansible/site.yml\` as root, and the release's \`ops/ansible/bot.yml\` runs the bot as the unprivileged \`tarubot\` user"
+          HOST_RUN="on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging and prod hosts Configure runs \`ops/ansible/site.yml\` as root, and the release's \`ops/ansible/bot.yml\` runs the bot as the unprivileged \`tarubot\` user"
           out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
           fail() { out reason "$1"; echo "::error::$2"; exit 1; }
           summary() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
@@ -177,110 +220,154 @@ jobs:
             (( n < 300 )) || fail compare-too-large "$2 changes 300 files or more, more than GitHub's compare API lists, so the plan can't show the host-side changes or check the migrations. Deploy by hand per docs/HOSTING.md."
           }
 
-          # 1. The targets: an automatic run asks for both, a dispatch for the one it names.
-          #    Production has a switch, DEPLOY_ENABLED: while it isn't exactly `true`, production is
-          #    left out, and a run left with nothing is paused. Staging has none (#62): pausing it
-          #    means adding a reviewer to its environment, whose job then waits for that reviewer.
-          #
-          #    First, before anything can fail: whether notify reports this run. It does for every
-          #    run that asks for production while DEPLOY_ENABLED reads as true to GitHub's
-          #    expressions, which ignore case (notify's own condition reads it so). The decision
-          #    is made here, when the run plans, because notify starts only after the Deploy job
-          #    ends: switching deploys off meanwhile must not silence the outcome of a request
-          #    already waiting or a deploy already running (a `paused` refusal, a NEEDS YOU). An
-          #    output written before `fail` still reaches the job, as `reason` does.
-          if [[ $EVENT == workflow_run || $INPUT_TARGET == production ]] && [[ ${DEPLOY_ENABLED,,} == true ]]; then
+          # 1. Which job reports this run, decided first, before anything can fail (an output
+          #    written before `fail` still reaches the job, as `reason` does), and here, when the
+          #    run plans, so a switch turned meanwhile never silences a request already waiting.
+          #    Notify reports the Compose host, as in 2.35.0: an automatic run while DEPLOY_ENABLED
+          #    is exactly `true`, and a production dispatch while it reads as true to GitHub's
+          #    expressions, which ignore case (a `True` is then reported as paused). Report reports
+          #    the new path: an automatic run that asks for prod, and a dispatch to prod, of
+          #    action=infra or of a staging rebuild. Staging alone is reported by neither.
+          if [[ $EVENT == workflow_run && $DEPLOY_ENABLED == true ]] ||
+            [[ $EVENT == workflow_dispatch && $INPUT_TARGET == production && ${DEPLOY_ENABLED,,} == true ]]; then
             out notify true
           else
             out notify false
           fi
-          # Why production is off in a run that goes on for staging: paused (its switch isn't
-          # exactly `true`) or gate; "-" when it deploys or wasn't asked for. Notify names it.
-          PRODUCTION=false STAGING=false PRODUCTION_REASON=- target_notes=()
-          # What staging does: an automatic run deploys, a staging dispatch names its action.
-          STAGING_ACTION=deploy
-          if [[ $EVENT == workflow_run ]]; then
-            requested=(production staging)
+          if [[ $EVENT == workflow_run && $DEPLOY_ENABLED != true ]] ||
+            [[ $EVENT == workflow_dispatch && ( $INPUT_TARGET == prod || $INPUT_ACTION == infra ||
+                  ( $INPUT_TARGET == staging && $INPUT_REBUILD == true ) ) ]]; then
+            out report true
           else
-            [[ $INPUT_TARGET == production || $INPUT_TARGET == staging ]] || fail target "The target must be production or staging."
-            requested=("$INPUT_TARGET")
-            # The dispatch's inputs, before anything else: `action` is staging's until production
-            # moves to host.yml (2.37.0), and a rollback is production's (staging goes back with
-            # action=bot and the older version).
-            [[ $INPUT_ACTION =~ ^(deploy|bot|configure|preflight)$ ]] || fail action "The action must be deploy, bot, configure or preflight."
-            if [[ $INPUT_TARGET == production ]]; then
-              [[ $INPUT_ACTION == deploy ]] || fail action "Production takes action=deploy (a rollback sets rollback and from); bot, configure and preflight are staging's until 2.37.0."
+            out report false
+          fi
+
+          # 2. The request. An automatic run deploys staging and asks for production: the Compose
+          #    host while DEPLOY_ENABLED is exactly `true`, the prod host otherwise (the owner turns
+          #    it off inside the cutover window; 2.38.0 removes the Compose host). A dispatch asks
+          #    for the target it names, with its action.
+          PRODUCTION=false STAGING=false PROD=false INFRA=false PRODUCTION_REASON=-
+          HOST_ACTION=deploy PIN_SCOPE='' REBUILD='' ALLOW_DESTROY=false ALLOW_ACCESS_REMOVAL=false
+          target_notes=()
+          if [[ $EVENT == workflow_run ]]; then
+            STAGING=true
+            if [[ $DEPLOY_ENABLED == true ]]; then
+              PRODUCTION=true
             else
-              [[ $INPUT_ROLLBACK != true && -z $INPUT_FROM ]] || fail staging-rollback "Staging takes no rollback or from: dispatch the older version with action=bot."
-              STAGING_ACTION=$INPUT_ACTION
+              PROD=true INFRA=true PIN_SCOPE=prod
+              target_notes+=("**Production is the \`prod\` host:** \`DEPLOY_ENABLED\` isn't exactly \`true\`, so the Compose host's job is left out.")
+            fi
+          else
+            [[ $INPUT_TARGET =~ ^(staging|prod|production)$ ]] || fail target "The target must be staging, prod or production."
+            [[ $INPUT_ACTION =~ ^(deploy|bot|configure|preflight|infra)$ ]] || fail action "The action must be deploy, bot, configure, preflight or infra."
+            if [[ $INPUT_TARGET == production ]]; then
+              [[ $INPUT_ACTION == deploy ]] || fail action "Production, the Compose host, takes action=deploy alone (a rollback sets rollback and from); bot, configure, preflight and infra are for staging and prod."
+              [[ $INPUT_REBUILD != true ]] || fail rebuild "Production, the Compose host, is never rebuilt from here: rebuild is for staging and prod."
+            else
+              [[ $INPUT_ROLLBACK != true && -z $INPUT_FROM ]] || fail rollback-target "Only production, the Compose host, takes rollback and from: $INPUT_TARGET goes back with the older version and action=bot."
+            fi
+            if [[ $INPUT_REBUILD == true ]]; then
+              [[ $INPUT_ACTION != bot ]] || fail rebuild "action=bot never plans, so it can't rebuild: dispatch the rebuild with deploy, configure, preflight or infra."
+              REBUILD=$INPUT_TARGET
+            fi
+            HOST_ACTION=$INPUT_ACTION
+            # Who plans: action=infra (every host's keys), a staging rebuild, and every prod request
+            # but action=bot, the rollback lever, which never waits for a plan.
+            case $INPUT_TARGET:$INPUT_ACTION in
+              *:infra) INFRA=true PIN_SCOPE=all ;;
+              staging:*)
+                STAGING=true
+                if [[ -n $REBUILD ]]; then INFRA=true PIN_SCOPE=staging; fi
+                ;;
+              prod:bot) PROD=true ;;
+              prod:*) PROD=true INFRA=true PIN_SCOPE=prod ;;
+            esac
+            if [[ $INPUT_ALLOW_DESTROY == true ]]; then ALLOW_DESTROY=true; fi
+            if [[ $INPUT_ALLOW_ACCESS_REMOVAL == true ]]; then ALLOW_ACCESS_REMOVAL=true; fi
+            if [[ $ALLOW_DESTROY == true || $ALLOW_ACCESS_REMOVAL == true ]] && [[ $INFRA != true ]]; then
+              fail allow "allow_destroy and allow_access_removal belong to a run that plans the infrastructure: action=infra, a rebuild, or a prod request other than action=bot."
             fi
           fi
-          for target in "${requested[@]}"; do
-            if [[ $target == staging ]]; then
-              STAGING=true
-            elif [[ $DEPLOY_ENABLED == true ]]; then
+          out host_action "$HOST_ACTION"
+          # The outputs that say what runs, written once, where the plan ends.
+          targets() {
+            out production "$PRODUCTION"
+            out staging "$STAGING"
+            out prod "$PROD"
+            out production_reason "$PRODUCTION_REASON"
+            out infra "$INFRA"
+            out pin_scope "$PIN_SCOPE"
+            out rebuild "$REBUILD"
+            out allow_destroy "$ALLOW_DESTROY"
+            out allow_access_removal "$ALLOW_ACCESS_REMOVAL"
+          }
+
+          # A production dispatch while the Compose host's switch isn't exactly `true` plans
+          # nothing, as in 2.35.0.
+          if [[ $EVENT == workflow_dispatch && $INPUT_TARGET == production ]]; then
+            if [[ $DEPLOY_ENABLED == true ]]; then
               PRODUCTION=true
             else
               PRODUCTION_REASON=paused
-              target_notes+=("**Production is paused:** \`DEPLOY_ENABLED\` isn't true.")
+              out deploy false
+              out reason paused
+              targets
+              summary "## Deploy: paused" "" "Production's switch, \`DEPLOY_ENABLED\`, is off, so nothing is planned or deployed."
+              exit 0
             fi
-          done
-          if [[ $PRODUCTION == false && $STAGING == false ]]; then
-            out deploy false
-            out reason paused
-            out production false
-            out staging false
-            out production_reason "$PRODUCTION_REASON"
-            summary "## Deploy: paused" "" "Production's switch, \`DEPLOY_ENABLED\`, is off, so nothing is planned or deployed."
-            exit 0
           fi
           [[ $CONFIG_COMMIT =~ ^[0-9a-f]{40}$ ]] || fail config-commit "This run names no commit of main to configure the host from."
-          out staging_action "$STAGING_ACTION"
           out config_commit "$CONFIG_COMMIT"
 
-          # 2. The gates are real. Production needs @deconfined alone and admins can't bypass it.
-          #    Every environment accepts only main (one a typo auto-created has no policy); staging
-          #    needs nothing more, since a reviewer there is how the owner pauses it. A failed gate
-          #    turns off only its own target; notify's fails the plan.
-          gate() {
-            local json
-            json=$(gh api "repos/$R/environments/$1") || return 1
-            jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}' <<< "$json" > /dev/null || return 1
-            [[ $(gh api "repos/$R/environments/$1/deployment-branch-policies" | jq -c '[.branch_policies[] | {name, type}]') == '[{"name":"main","type":"branch"}]' ]] || return 1
-            [[ $1 == production ]] || return 0
-            jq -e '.can_admins_bypass == false
-              and ([.protection_rules[] | select(.type == "required_reviewers")]
-                | length == 1
-                  and .[0].prevent_self_review == false
-                  and ([.[0].reviewers[] | {type, login: .reviewer.login}] == [{type: "User", login: "deconfined"}]))' <<< "$json" > /dev/null
+          # What approving `prod` does with the infrastructure, and what a rebuild replaces.
+          ADOPT="adopts the **Infrastructure plan** job's saved plan (only if it is that file, with the change list that job shows under **Infrastructure plan**), applies it only if it has changes, and pins the host keys that job lists under **Host keys** (a new host's key is trusted on first use)"
+          infra_notes() {
+            if [[ $INFRA == true ]]; then
+              summary "**Infrastructure:** the **Infrastructure plan** job plans \`ops/tofu\` at main's head (\`${CONFIG_COMMIT:0:12}\`) with read-only credentials and no approval, and lists its changes and the host keys to pin in this run's summary. Nothing is applied or pinned unless @$REVIEWER approves \`prod\`, and nothing asks unless it has changes or keys to pin." ""
+            fi
+            if [[ -n $REBUILD ]]; then
+              summary "**Rebuild:** the plan replaces the \`$REBUILD\` host's instance (\`linode_instance.host[\"$REBUILD\"]\`) with a new Linode. Approving \`prod\` applies it and pins the new host's key on first use; the rebuild alone allows only that replace and the removal of the old instance's two database access-list entries. A bot on the old instance stops with it: \`action=deploy\` starts the release on the new host; after \`configure\` or \`preflight\` the host runs no bot until you dispatch the live version with \`action=bot\`, and after \`infra\`, with \`action=deploy\`." ""
+            fi
+            if [[ $ALLOW_DESTROY == true ]]; then summary "**Allowed in this plan:** deletes and replaces (\`allow_destroy\`)." ""; fi
+            if [[ $ALLOW_ACCESS_REMOVAL == true ]]; then summary "**Allowed in this plan:** removals from a database access list (\`allow_access_removal\`)." ""; fi
+            return 0
           }
-          gate notify || fail gate "The notify environment must accept only main."
-          if [[ $PRODUCTION == true ]] && ! gate production; then
-            PRODUCTION=false PRODUCTION_REASON=gate
-            echo "::error::The production environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main."
-            target_notes+=("**Production is off in this run:** its environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main.")
-          fi
-          if [[ $STAGING == true ]] && ! gate staging; then
-            STAGING=false
-            echo "::error::The staging environment must accept only main."
-            target_notes+=("**Staging is off in this run:** its environment must accept only main.")
-          fi
-          [[ $PRODUCTION == true || $STAGING == true ]] || fail gate "No requested target passed its environment's gate."
 
-          # 3. A staging `configure` dispatch configures the host alone, from main's head: there is
-          #    no release, image or provenance to check, and no runtime rule.
-          if [[ $STAGING_ACTION == configure ]]; then
-            out production false
-            out staging true
-            out production_reason "$PRODUCTION_REASON"
+          # 3. configure and infra touch no release: no image, provenance or runtime rule. Configure
+          #    runs site.yml from main's head; infra runs OpenTofu alone.
+          if [[ $EVENT == workflow_dispatch && ( $HOST_ACTION == configure || $HOST_ACTION == infra ) ]]; then
             out deploy true
             out reason -
-            summary "## Configure staging" "" \
-              "**Staging** runs Configure at once, without approval: \`ops/ansible/site.yml\` at main's head ([\`${CONFIG_COMMIT:0:12}\`](https://github.com/$R/commit/$CONFIG_COMMIT)), as root on the staging host. The bot and its release don't change." ""
+            targets
+            at="[\`${CONFIG_COMMIT:0:12}\`](https://github.com/$R/commit/$CONFIG_COMMIT)"
+            # Configure leaves a running bot alone, but a rebuild's bot stops with the old instance
+            # (infra_notes says so).
+            kept="The bot and its release don't change."
+            if [[ -n $REBUILD ]]; then kept="It deploys no release."; fi
+            case $INPUT_TARGET:$HOST_ACTION in
+              *:infra)
+                summary "## Infrastructure${REBUILD:+ (rebuild)}" "" \
+                  "**Infrastructure only:** the **Infrastructure plan** job plans \`ops/tofu\` at main's head ($at) for every host. If it has changes or host keys to pin, **approving \`prod\`** in the **Infrastructure** job $ADOPT. Nothing runs on any host." ""
+                ;;
+              staging:configure)
+                if [[ -n $REBUILD ]]; then
+                  summary "## Configure staging (rebuild)" "" \
+                    "**Staging** runs Configure once the **Infrastructure** job has built the new host and pinned its key, without an approval of its own: \`ops/ansible/site.yml\` at main's head ($at), as root on the staging host. It deploys no release. Applying the rebuild waits for @$REVIEWER's approval of \`prod\` in the **Infrastructure** job, which $ADOPT." ""
+                else
+                  summary "## Configure staging" "" \
+                    "**Staging** runs Configure at once, without approval: \`ops/ansible/site.yml\` at main's head ($at), as root on the staging host. The bot and its release don't change." ""
+                fi
+                ;;
+              prod:configure)
+                summary "## Configure prod${REBUILD:+ (rebuild)}" "" \
+                  "**Approving \`prod\`** runs one job on the prod host: it $ADOPT, then runs Configure, \`ops/ansible/site.yml\` at main's head ($at), as root on the prod host. $kept Approval comments are public." ""
+                ;;
+            esac
+            infra_notes
             exit 0
           fi
 
-          # 4. The target: version V, commit C and image digest D.
+          # 4. The release: version V, commit C and image digest D.
           ACTION=deploy FROM=- C_FROM=
           if [[ $EVENT == workflow_run ]]; then
             [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || fail target "The publish run names no commit."
@@ -311,14 +398,15 @@ jobs:
           fi
 
           # 5. Binding: the version tag and the commit tag are the same image, and C is on main.
+          #    publish.yml pushes each release once and never again, so neither tag moves.
           [[ $(digest_of "sha-$C" || true) == "$D" ]] || fail digest-mismatch "The tags $V and sha-$C point at different images."
           status=$(gh api "repos/$R/compare/$C...main" --jq .status) || fail not-on-main "The compare API didn't answer."
           [[ $status == identical || $status == ahead ]] || fail not-on-main "$C isn't on main."
 
-          # 6. Provenance, before any early exit and before either deploy job: main's publish.yml
-          #    built D from C on a GitHub-hosted runner and signed it (2.32.0 and later). Tags can
-          #    move, and any workflow in this repository could push one; only main's publish.yml can
-          #    make this signature. The signer is the certificate's exact identity: gh turns
+          # 6. Provenance, before any early exit and before any host job: main's publish.yml built D
+          #    from C on a GitHub-hosted runner and signed it (2.32.0 and later). Tags can move, and
+          #    any workflow in this repository could push one; only main's publish.yml can make this
+          #    signature. The signer is the certificate's exact identity: gh turns
           #    --signer-workflow into a pattern anchored only at its start, which a workflow named
           #    publish.yml-anything would match too. gh also exits 1 on network or TUF errors, so a
           #    failure may be temporary: a new dispatch retries, since re-runs are refused.
@@ -336,13 +424,20 @@ jobs:
           out digest "$D"
           out from "$FROM"
 
-          # 7. Staging takes STAGING_MIN_RELEASE or later: an older release has no bot.yml of its
-          #    own that knows staging. A dispatch fails; beside production, staging is left out.
+          # 7. Each new host takes its first release or later: an older one has no bot.yml of its
+          #    own that knows it. A dispatch fails; in an automatic run the host is left out while
+          #    another target goes on.
           if [[ $STAGING == true ]] && older "$V" "$STAGING_MIN_RELEASE"; then
             STAGING=false
-            [[ $PRODUCTION == true ]] || fail below-floor "$V is older than $STAGING_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys staging."
+            [[ $PRODUCTION == true || $PROD == true ]] || fail below-floor "$V is older than $STAGING_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys staging."
             echo "::warning::$V is older than $STAGING_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys staging; staging is off in this run."
             target_notes+=("**Staging is off in this run:** $V is older than $STAGING_MIN_RELEASE, the first release whose \`ops/ansible/bot.yml\` deploys staging.")
+          fi
+          if [[ $PROD == true ]] && older "$V" "$PROD_MIN_RELEASE"; then
+            PROD=false INFRA=false PIN_SCOPE=''
+            [[ $STAGING == true ]] || fail below-floor "$V is older than $PROD_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys prod."
+            echo "::warning::$V is older than $PROD_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys prod; prod is off in this run."
+            target_notes+=("**Prod is off in this run:** $V is older than $PROD_MIN_RELEASE, the first release whose \`ops/ansible/bot.yml\` deploys prod.")
           fi
 
           # 8. Automatic runs: did anything that runs on a host change in this merge?
@@ -371,28 +466,27 @@ jobs:
             [[ -z $changed ]] || fail applied-migration-changed "This merge edits, renames or removes an applied migration: $(tr -c 'A-Za-z0-9._/-' ' ' <<< "$changed")"
             mapfile -t added < <(jq -r '.files[] | select(.status == "added" and (.filename | startswith("migrations/"))) | .filename' <<< "$cmp")
             if [[ $runtime == false ]]; then
+              PRODUCTION=false STAGING=false PROD=false INFRA=false PIN_SCOPE=''
               out deploy false
               out reason no-runtime-change
-              out production false
-              out staging false
-              out production_reason "$PRODUCTION_REASON"
+              targets
               summary "## Deploy $V: nothing to deploy" "" \
-                "This merge ([$P...$C](https://github.com/$R/compare/$P...$C)) changes nothing that runs on the hosts (documentation, tests, CI or the version only), so nothing deploys and no approval is requested." \
-                "If an earlier release wasn't deployed, run **Deploy** with the newest version." "" "$provenance"
+                "This merge ([$P...$C](https://github.com/$R/compare/$P...$C)) changes nothing that runs on the hosts (documentation, tests, CI, OpenTofu or the version only), so nothing deploys and no approval is requested." \
+                "If an earlier release wasn't deployed, run **Deploy** with the newest version. An OpenTofu change is applied by dispatching **Deploy** with action=infra." "" "$provenance"
               exit 0
             fi
           elif [[ $ACTION == rollback ]]; then
             mapfile -t host_files < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$back" | grep -E "$HOST_SIDE" || true)
           fi
-          # The release's schema head: the newest migration at C (staging's summary names it).
+          # The release's schema head: the newest migration at C (the summaries name it).
           newest=$(gh api "repos/$R/contents/migrations?ref=$C" --jq '[.[].name | select(test("^[0-9]{3}_[a-z0-9_]+\\.sql$"))] | sort | last // "none"') || newest=unknown
           out schema_head "$newest"
 
-          # 10. The plan, public data only.
+          # 10. The plan, public data only, before anything waits for an approval.
           if [[ $ACTION == rollback ]]; then
             summary "## Roll back from $FROM to $V" ""
           else
-            summary "## Deploy $V" ""
+            summary "## Deploy $V${REBUILD:+ (rebuild)}" ""
           fi
           summary "| | |" "| --- | --- |" \
             "| Version | \`$V\` |" \
@@ -402,8 +496,14 @@ jobs:
           summary "| Newest migration at this commit | \`$newest\` |" ""
           if [[ $PRODUCTION == true && $STAGING == true ]]; then
             summary "**Targets:** production, once @$REVIEWER approves it, and staging, which deploys at once beside the approval request, without one."
+          elif [[ $PROD == true && $STAGING == true ]]; then
+            summary "**Targets:** prod, once @$REVIEWER approves \`prod\`, and staging, which deploys beside the approval request, without one."
           elif [[ $PRODUCTION == true ]]; then
             summary "**Target:** production, once @$REVIEWER approves it."
+          elif [[ $PROD == true ]]; then
+            summary "**Target:** prod, once @$REVIEWER approves \`prod\`."
+          elif [[ -n $REBUILD ]]; then
+            summary "**Target:** staging, once @$REVIEWER approves its rebuild in \`prod\`."
           else
             summary "**Target:** staging, which deploys at once, without approval."
           fi
@@ -435,7 +535,7 @@ jobs:
           elif [[ -n $label ]]; then
             summary "$label: no file under \`ops/\`, \`docker-compose.production.yml\` or \`production.env.example\` changed." ""
           fi
-          if [[ $PRODUCTION == true ]]; then check="Before approving, check"; else check="Check"; fi
+          if [[ $PRODUCTION == true || $PROD == true ]]; then check="Before approving, check"; else check="Check"; fi
           if [[ $EVENT == workflow_run ]]; then
             summary "If a host is older than the previous release, the host-side changes of the releases in between run too: check the history of $history up to this commit." ""
           elif [[ $ACTION == deploy ]]; then
@@ -450,53 +550,429 @@ jobs:
             echo "::warning::The daily backup runs around now; the host waits up to 5 minutes for it."
             summary "> [!WARNING]" "> The daily backup runs around now. The host waits up to 5 minutes for it, and a migration that meets it rolls back safely." ""
           fi
-          # Test on staging before approving production (#62, answer 6): this run's staging job,
-          # and DevBot there once it has moved.
-          if [[ $PRODUCTION == true && $STAGING == true ]]; then
-            summary "**Tried on staging?** Check before approving. Staging deploys beside this request: its **Deploy staging** job shows how $V went there, and once DevBot runs on staging, DevBot shows it." ""
-          elif [[ $PRODUCTION == true ]]; then
-            summary "**Tried on staging?** Check before approving: the **Deploy staging** job of $V's automatic run shows how it went there, and once DevBot runs on staging, DevBot shows it." ""
+          # Test on staging before approving production or prod (#62, answer 6): this run's staging
+          # job, and DevBot there once it has moved.
+          if [[ ( $PRODUCTION == true || $PROD == true ) && $STAGING == true ]]; then
+            summary "**Tried on staging?** Check before approving. Staging deploys beside this request: its **Staging** job shows how $V went there, and once DevBot runs on staging, DevBot shows it." ""
+          elif [[ $PRODUCTION == true || $PROD == true ]]; then
+            summary "**Tried on staging?** Check before approving: the **Staging** job of $V's automatic run shows how it went there, and once DevBot runs on staging, DevBot shows it." ""
           fi
           # Production's host-side files run on its Docker host as a docker-group user, which is
-          # root-equivalent there. Staging's paragraphs below say how its files run.
+          # root-equivalent there. The paragraphs below say how the other hosts run theirs.
           if [[ $PRODUCTION == true && $ACTION == rollback ]]; then
             summary "**Approving** rolls production back from $FROM to $V (\`${C:0:12}\`, \`$D\`), on the same schema: the host restarts onto $V, puts $FROM back automatically if $V never took the writer lease, then registers $V's commands globally and reads them back. Work only $FROM understands then fails as \`invalid_job\`: check \`/sync status\` and requeue it with \`retry.js\`." ""
           elif [[ $PRODUCTION == true ]]; then
             summary "**Approving** runs Deploy $V (\`${C:0:12}\`, \`$D\`) on production. The host restarts onto $V; or, if $V carries migration files the live release lacks, it stops the bot, takes an encrypted \`ops/backup.sh\` dump, runs \`migrate.js\` in $V's image and starts $V. It puts the previous release back automatically if $V never took the writer lease or the migration did not commit. It registers $V's commands globally and reads them back. It puts this commit's host-side files in place on production's Docker host, where they run as a docker-group user, which is root-equivalent there: the Compose file at once, \`ops/backup.sh\` for a migration's dump, and \`ops/deploy.sh\` from the next deploy on, including changes from releases production hasn't had yet. Approval comments are public." ""
           fi
-          # Staging runs host.yml at once, without approval: Configure as root from main's head
-          # (not for action=bot), then the release's own bot.yml as the unprivileged tarubot user.
-          if [[ $PRODUCTION == true ]]; then when="at once, beside the approval request and without one"; else when="at once, without approval"; fi
+          # Prod: one approval covers the whole host job. Configure applies site.yml from main's
+          # head as root; the release's own bot.yml runs the bot as the unprivileged tarubot user.
+          if [[ $PROD == true ]]; then
+            configure="runs Configure, \`ops/ansible/site.yml\` at main's head (\`${CONFIG_COMMIT:0:12}\`), as root on the prod host"
+            case $HOST_ACTION in
+              deploy)
+                summary "**Approving \`prod\`** runs one job on the prod host: it $ADOPT; $configure; then $V's own \`ops/ansible/bot.yml\` (\`${C:0:12}\`, \`$D\`) writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It waits for healthy, then registers $V's commands globally. An unhealthy $V stays in place: the way back is a dispatch of the previous version with target=prod and action=bot. Approval comments are public." ""
+                ;;
+              bot)
+                summary "**Approving \`prod\`** moves prod to $V (\`${C:0:12}\`, \`$D\`) without a plan or Configure: $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It refuses before anything stops if the live bot runs and the live release has a migration $V lacks; if the bot is down, $V's own \`migrate.js\` decides at the restart and refuses a newer schema without writing. It waits for healthy, then registers $V's commands globally. Approval comments are public." ""
+                ;;
+              preflight)
+                summary "**Approving \`prod\`** preflights $V (\`${C:0:12}\`, \`$D\`) on the prod host: it $ADOPT; $configure; then $V's own \`ops/ansible/bot.yml\` writes the database and backup secrets as the unprivileged \`tarubot\` user, runs \`migrate.js\` to the schema head \`$newest\` and one backup, and starts no bot. It refuses a host where a bot unit exists. Approval comments are public." ""
+                ;;
+            esac
+          fi
+          # Staging runs host.yml without approval: Configure as root from main's head (not for
+          # action=bot), then the release's own bot.yml as the unprivileged tarubot user.
+          if [[ -n $REBUILD ]]; then
+            when="once the **Infrastructure** job has built the new host and pinned its key, without an approval of its own"
+          elif [[ $PRODUCTION == true || $PROD == true ]]; then
+            when="at once, beside the approval request and without one"
+          else
+            when="at once, without approval"
+          fi
           if [[ $STAGING == true ]]; then
-            case $STAGING_ACTION in
+            case $HOST_ACTION in
               deploy)
                 summary "**Staging** takes $V (\`${C:0:12}\`, \`$D\`) $when. Configure runs \`ops/ansible/site.yml\` at main's head (\`${CONFIG_COMMIT:0:12}\`) as root on the staging host; then $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It waits for healthy, then registers $V's commands in the test guild. While staging's environment holds no \`DISCORD_TOKEN\` and no bot runs there, a deploy only configures the host. A failed staging deploy never holds production up." ""
                 ;;
               bot)
-                summary "**Staging** moves to $V (\`${C:0:12}\`, \`$D\`) $when, without Configure: $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It refuses before anything stops if a migration lies between the live release and $V. It waits for healthy, then registers $V's commands in the test guild." ""
+                summary "**Staging** moves to $V (\`${C:0:12}\`, \`$D\`) $when, without Configure: $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It refuses before anything stops if the live bot runs and the live release has a migration $V lacks; if the bot is down, $V's own \`migrate.js\` decides at the restart and refuses a newer schema without writing. It waits for healthy, then registers $V's commands in the test guild." ""
                 ;;
               preflight)
                 summary "**Staging** preflights $V (\`${C:0:12}\`, \`$D\`) $when. Configure runs \`ops/ansible/site.yml\` at main's head (\`${CONFIG_COMMIT:0:12}\`) as root on the staging host; then $V's own \`ops/ansible/bot.yml\` writes the database and backup secrets as the unprivileged \`tarubot\` user, runs \`migrate.js\` to the schema head \`$newest\` and one backup, and starts no bot. It refuses a host where a bot unit exists." ""
                 ;;
             esac
           fi
+          infra_notes
           notes=$(raw CHANGELOG.md "$C" | awk -v v="$V" 'index($0, "## " v " ") == 1 { on = 1 } on && /^## / && index($0, "## " v " ") != 1 { exit } on { print }' || true)
           if [[ -n $notes ]]; then
             summary "<details><summary>Changelog</summary>" "" "$notes" "" "</details>"
           fi
 
-          # 11. Outputs for the deploy jobs.
-          out production "$PRODUCTION"
-          out staging "$STAGING"
-          out production_reason "$PRODUCTION_REASON"
+          # 11. The outputs for the host jobs.
+          targets
           out deploy true
           out reason -
 
-  # Production's job and staging's run beside each other, and production never needs staging's. A
-  # run can therefore fail because of its staging job while production deployed: whether production
-  # deployed a run is the Deploy job's conclusion together with the production approval, never the
-  # run's conclusion. Notify reads it that way. This job is byte-identical to 2.35.0's until
-  # production moves to host.yml in 2.37.0 (tests/unit/deploy-workflow.test.ts pins its SHA-256).
+  # OpenTofu's plan, with read-only credentials and no approval. Its change list and the host keys
+  # it would pin go to this run's summary; the approving job (Infrastructure or Prod) adopts
+  # exactly its encrypted saved plan, the one file that leaves the job: a one-day artifact, which
+  # anyone signed in to GitHub can download from this public repository, so it is only ever
+  # OpenTofu's own encrypted file (ops/tofu/versions.tf enforces plan encryption with the state
+  # passphrase, at least 32 characters), kept only when there is something to apply or pin. Each
+  # step runs one phase of ops/tofu/ci/tofu-ci.sh or host.sh with only the secrets that phase
+  # needs; the values phase masks every identifying value in TOFU_VARS before anything else prints.
+  infra-plan:
+    name: Infrastructure plan
+    needs: plan
+    if: github.run_attempt == '1' && github.ref == 'refs/heads/main' && needs.plan.outputs.infra == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: infra-plan
+    permissions:
+      contents: read # the checkout of this public repository at main's head
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    outputs:
+      has_changes: ${{ steps.summarize.outputs.has_changes }}
+      digest: ${{ steps.summarize.outputs.digest }}
+      changes: ${{ steps.summarize.outputs.changes }}
+      pins_needed: ${{ steps.status.outputs.pins_needed }}
+      # A guard refused a plan it could read: summarize writes the digest before its guards.
+      refused: ${{ steps.summarize.outcome == 'failure' && steps.summarize.outputs.digest != '' && 'true' || 'false' }}
+    steps:
+      # The same checkout path as host.yml's, so the saved plan is applied from where it was made.
+      - name: Check out main's configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.config_commit }}
+          path: config
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install the pinned OpenTofu
+        run: bash config/ops/tofu/ci/tofu-ci.sh install
+      - name: Write the backend settings
+        env:
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh backend
+      # The rebuild target is the plan's checked output (empty, staging or prod), never free text.
+      - name: Prepare the values and the masks
+        env:
+          TOFU_VARS: ${{ secrets.TOFU_VARS }}
+          REBUILD_TARGET: ${{ needs.plan.outputs.rebuild }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh values
+      - name: Initialize OpenTofu
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh init
+      - name: Plan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh plan
+      - name: Summarize the plan
+        id: summarize
+        env:
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          ALLOW_DESTROY: ${{ needs.plan.outputs.allow_destroy }}
+          ALLOW_ACCESS_REMOVAL: ${{ needs.plan.outputs.allow_access_removal }}
+          REBUILD_TARGET: ${{ needs.plan.outputs.rebuild }}
+        run: bash config/ops/tofu/ci/tofu-ci.sh summarize
+      - name: List the host keys to pin
+        id: status
+        env:
+          PIN_SCOPE: ${{ needs.plan.outputs.pin_scope }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
+        run: bash config/ops/tofu/ci/host.sh status
+      # Only a plan that passed the guards, with changes or host keys to pin, leaves the job: the
+      # encrypted file alone.
+      - name: Keep the saved plan for the approving job
+        if: steps.summarize.outputs.has_changes == 'true' || steps.status.outputs.pins_needed != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: saved-plan
+          path: ${{ runner.temp }}/tofu/plan.bin
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Clean up
+        if: always()
+        run: rm -rf -- "${RUNNER_TEMP:?}/tofu" "${RUNNER_TEMP:?}/pin"
+
+  # The three calls of host.yml, Deploy's one reusable host job. Each names one environment, whose
+  # secrets load in host.yml's job and nowhere else; `secrets: inherit` only lets that job read
+  # them. Each shares its environment's concurrency group there (host-prod or host-staging), so the
+  # Infrastructure call and the Prod call never overlap on the unlocked state. None starts once the
+  # run is cancelled.
+  #
+  # Infrastructure: a run with no Prod job (action=infra, or a staging rebuild) whose plan has
+  # changes or host keys to pin. It waits for @deconfined's approval of `prod`, which holds the
+  # infrastructure write tokens, and then applies exactly the saved plan and pins what it listed.
+  infra:
+    name: Infrastructure
+    needs: [plan, infra-plan]
+    if: >-
+      github.run_attempt == '1' && needs.plan.outputs.infra == 'true' && needs.plan.outputs.prod != 'true'
+      && needs.infra-plan.result == 'success'
+      && (needs.infra-plan.outputs.has_changes == 'true' || needs.infra-plan.outputs.pins_needed != '')
+    permissions:
+      contents: read # host.yml's checkout of this public repository, and nothing else
+    uses: ./.github/workflows/host.yml
+    with:
+      environment: prod
+      action: infra
+      tofu: true
+      apply: ${{ needs.infra-plan.outputs.has_changes == 'true' }}
+      pins: ${{ needs.infra-plan.outputs.pins_needed }}
+      plan_digest: ${{ needs.infra-plan.outputs.digest }}
+      plan_changes: ${{ needs.infra-plan.outputs.changes }}
+      config_commit: ${{ needs.plan.outputs.config_commit }}
+    secrets: inherit
+
+  # Staging: no reviewer and no infrastructure credential but the read-only state key, used only to
+  # read its pin. It never waits for prod's approval: only a staging rebuild waits, for
+  # Infrastructure, which built the new host and pinned its key. In an automatic run that asks for
+  # prod it starts once prod's Infrastructure plan has finished, whatever that plan's result: an
+  # expired read-only token holds up prod, never staging.
+  staging:
+    name: Staging
+    needs: [plan, infra-plan, infra]
+    if: >-
+      github.run_attempt == '1' && !cancelled()
+      && needs.plan.result == 'success' && needs.plan.outputs.staging == 'true'
+      && (needs.plan.outputs.rebuild != 'staging'
+          || (needs.infra-plan.result == 'success'
+              && (needs.infra.result == 'success' || needs.infra.result == 'skipped')))
+    permissions:
+      contents: read # host.yml's checkouts of this public repository, and nothing else
+    uses: ./.github/workflows/host.yml
+    with:
+      environment: staging
+      action: ${{ needs.plan.outputs.host_action }}
+      tofu: false
+      apply: false
+      version: ${{ needs.plan.outputs.version }}
+      commit: ${{ needs.plan.outputs.commit }}
+      digest: ${{ needs.plan.outputs.digest }}
+      config_commit: ${{ needs.plan.outputs.config_commit }}
+    secrets: inherit
+
+  # Prod: one approval of `prod` covers the whole job. OpenTofu runs in it only when the
+  # Infrastructure plan has changes or host keys to pin; action=bot never plans. It needs nothing
+  # from staging, which runs beside it.
+  prod:
+    name: Prod
+    needs: [plan, infra-plan]
+    if: >-
+      github.run_attempt == '1' && !cancelled()
+      && needs.plan.result == 'success' && needs.plan.outputs.prod == 'true'
+      && (needs.infra-plan.result == 'success'
+          || (needs.infra-plan.result == 'skipped' && needs.plan.outputs.infra != 'true'))
+    permissions:
+      contents: read # host.yml's checkouts of this public repository, and nothing else
+    uses: ./.github/workflows/host.yml
+    with:
+      environment: prod
+      action: ${{ needs.plan.outputs.host_action }}
+      tofu: ${{ needs.infra-plan.result == 'success' && (needs.infra-plan.outputs.has_changes == 'true' || needs.infra-plan.outputs.pins_needed != '') }}
+      apply: ${{ needs.infra-plan.outputs.has_changes == 'true' }}
+      pins: ${{ needs.infra-plan.outputs.pins_needed }}
+      plan_digest: ${{ needs.infra-plan.outputs.digest }}
+      plan_changes: ${{ needs.infra-plan.outputs.changes }}
+      version: ${{ needs.plan.outputs.version }}
+      commit: ${{ needs.plan.outputs.commit }}
+      digest: ${{ needs.plan.outputs.digest }}
+      config_commit: ${{ needs.plan.outputs.config_commit }}
+    secrets: inherit
+
+  # One Pushover message about the new path: prod's outcome, or the infrastructure's for a run
+  # without a Prod job. Staging's outcomes aren't paged. The plan decides whether this run is
+  # reported, at its start (its `report` output); only a plan that never got to write it (its
+  # runner failed) falls back to what the request itself says.
+  report:
+    name: Report
+    needs: [plan, infra-plan, infra, prod]
+    if: >-
+      github.run_attempt == '1' && always() && needs.plan.result != 'skipped' && (
+        needs.plan.outputs.report == 'true'
+        || (needs.plan.outputs.report == '' && (
+              (github.event_name == 'workflow_run' && vars.DEPLOY_ENABLED != 'true')
+              || (github.event_name == 'workflow_dispatch' && (inputs.target == 'prod' || inputs.action == 'infra')))))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: notify
+    permissions: {}
+    steps:
+      - name: Send one Pushover message
+        env:
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_DEPLOY: ${{ needs.plan.outputs.deploy }}
+          PLAN_REASON: ${{ needs.plan.outputs.reason }}
+          PLAN_VERSION: ${{ needs.plan.outputs.version }}
+          PLAN_PROD: ${{ needs.plan.outputs.prod }}
+          PLAN_INFRA: ${{ needs.plan.outputs.infra }}
+          PLAN_HOST_ACTION: ${{ needs.plan.outputs.host_action }}
+          PLAN_REBUILD: ${{ needs.plan.outputs.rebuild }}
+          INFRA_PLAN_RESULT: ${{ needs.infra-plan.result }}
+          INFRA_PLAN_REFUSED: ${{ needs.infra-plan.outputs.refused }}
+          INFRA_RESULT: ${{ needs.infra.result }}
+          INFRA_OUTCOME: ${{ needs.infra.outputs.outcome }}
+          INFRA_STEP: ${{ needs.infra.outputs.step }}
+          INFRA_PINNED: ${{ needs.infra.outputs.pinned }}
+          PROD_RESULT: ${{ needs.prod.result }}
+          OUTCOME: ${{ needs.prod.outputs.outcome }}
+          REASON: ${{ needs.prod.outputs.reason }}
+          STEP: ${{ needs.prod.outputs.step }}
+          PREVIOUS: ${{ needs.prod.outputs.previous }}
+          RESTORE_POINT: ${{ needs.prod.outputs.restore_point }}
+          WARNINGS: ${{ needs.prod.outputs.warnings }}
+          PINNED: ${{ needs.prod.outputs.pinned }}
+          INFRASTRUCTURE: ${{ needs.prod.outputs.infrastructure }}
+        run: |
+          set -Eeuo pipefail
+          export LC_ALL=C
+          # Every value is checked against its token pattern before it reaches the message.
+          tok() { if [[ $2 =~ $1 ]]; then printf '%s' "$2"; else printf '?'; fi; }
+          VER='^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$'
+          WORD='^[a-z0-9-]{1,40}$'
+          KEYS='^(staging|prod)(-[0-9]{1,2})?( (staging|prod)(-[0-9]{1,2})?)*$'
+          V=$(tok "$VER" "$PLAN_VERSION")
+          prev=$(tok "$VER" "$PREVIOUS")
+          reason=$(tok "$WORD" "$REASON")
+          step=$(tok "$WORD" "$STEP")
+          point=$(tok '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{15}Z$' "$RESTORE_POINT")
+          action=$(tok '^(deploy|bot|configure|preflight|infra)$' "$PLAN_HOST_ACTION")
+          rebuild=
+          if [[ -n $PLAN_REBUILD ]]; then rebuild=$(tok '^(staging|prod)$' "$PLAN_REBUILD"); fi
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          priority=0
+          # What the run was for, as the message's first words.
+          case $action in
+            infra) what=Infrastructure ;;
+            configure) what="prod configure" ;;
+            *) what=$V ;;
+          esac
+          # What the approving job did to the infrastructure: applied, and the keys it pinned.
+          infra_done() {
+            local keys=''
+            if [[ -n $1 ]]; then keys=$(tok "$KEYS" "$1"); fi
+            if [[ $2 == applied ]]; then printf '; infrastructure applied'; fi
+            if [[ -n $keys ]]; then printf '; host keys pinned: %s' "$keys"; fi
+            return 0
+          }
+          if [[ $PLAN_RESULT != success ]]; then
+            msg="$what: the plan stopped ($(tok "$WORD" "$PLAN_REASON")); nothing ran (see the run)"
+          elif [[ $PLAN_DEPLOY != true ]]; then
+            msg="$V: no runtime change in this merge. If an earlier release wasn't deployed, run Deploy with the newest version."
+            priority=-1
+          elif [[ $PLAN_INFRA == true && $INFRA_PLAN_RESULT != success ]]; then
+            if [[ $INFRA_PLAN_REFUSED == true ]]; then
+              msg="$what: the Infrastructure plan's guards refused it, so nothing was applied or deployed. Dispatch again with allow_destroy or allow_access_removal if you meant it."
+            else
+              msg="$what: the Infrastructure plan failed, so nothing was applied or deployed (see the run)."
+              if [[ $PLAN_PROD == true && $action != configure && $V != '?' ]]; then
+                msg+=" To deploy $V without a plan, dispatch Deploy with target=prod, version=$V and action=bot."
+              fi
+            fi
+          elif [[ $PLAN_PROD == true ]]; then
+            if [[ -z $OUTCOME ]]; then
+              # The job never started: its approval was rejected or expired, or the run was
+              # cancelled first.
+              priority=-1
+              case $PROD_RESULT in
+                cancelled) msg="$what: the run was cancelled before prod started" ;;
+                skipped) msg="$what: prod didn't run (see the run)"; priority=0 ;;
+                *) msg="$what not approved for prod (rejected or expired)" ;;
+              esac
+            else
+              done_=$(infra_done "$PINNED" "$(tok '^(applied|pinned|unchanged|failed|-)$' "$INFRASTRUCTURE")")
+              case $OUTCOME in
+                deployed) msg="$V deployed to prod; commands registered$done_" ;;
+                superseded) msg="$V skipped on prod: newer release $prev is live$done_"; priority=-1 ;;
+                configured) msg="prod configured$done_" ;;
+                preflight-ok) msg="$V preflight passed on prod (database and backup, no bot)$done_" ;;
+                refused) msg="$what not deployed to prod, nothing changed on the host: $reason$done_" ;;
+                # The rollback: a request waiting for its prod approval holds host-prod, so the
+                # dispatch would wait behind it until it is rejected.
+                unhealthy)
+                  priority=1
+                  if [[ $prev != '?' ]]; then
+                    msg="NEEDS YOU: $V isn't healthy on prod. To roll back, reject any prod request still waiting, then dispatch Deploy with target=prod, version=$prev and action=bot."
+                  else
+                    msg="NEEDS YOU: $V isn't healthy on prod, and no earlier release is recorded there."
+                  fi
+                  ;;
+                *)
+                  priority=1
+                  msg="NEEDS YOU: $what failed on prod at $step ($reason)"
+                  if [[ $point != '?' ]]; then msg+="; restore point $point"; fi
+                  msg+="$done_"
+                  # A failed start leaves the bot down; bot.yml lets the rollback through then.
+                  if [[ $reason == restart-failed && $prev != '?' ]]; then
+                    msg+=". To roll back, reject any prod request still waiting, then dispatch Deploy with target=prod, version=$prev and action=bot."
+                  fi
+                  ;;
+              esac
+              # The host warns when the run fell in the cluster's Tuesday maintenance window with
+              # migration files new to it: every file on a first start, even on a database already
+              # at the head, so the sentence claims no migration. A refused, superseded or
+              # configured run never reached migrate.js and leaves it out.
+              if [[ $WARNINGS == *db-maintenance-window* && ! $OUTCOME =~ ^(refused|superseded|configured)$ ]]; then
+                [[ $msg == *. ]] || msg+=.
+                msg+=" The run fell in the database maintenance window, with migration files new to this host."
+              fi
+            fi
+          else
+            # A run without a Prod job: action=infra, or a staging rebuild (whose staging outcome
+            # isn't paged).
+            if [[ -n $rebuild ]]; then label="Rebuild of $rebuild"; else label=Infrastructure; fi
+            if [[ $INFRA_RESULT == skipped ]]; then
+              msg="$label: unchanged, with no changes and no host key to pin"
+              priority=-1
+            elif [[ -z $INFRA_OUTCOME ]]; then
+              priority=-1
+              if [[ $INFRA_RESULT == cancelled ]]; then msg="$label: the run was cancelled before the Infrastructure job started"; else msg="$label not approved (rejected or expired)"; fi
+            else
+              case $INFRA_OUTCOME in
+                applied) msg="$label: applied$(infra_done "$INFRA_PINNED" -)" ;;
+                pinned) msg="$label: host keys pinned: $(tok "$KEYS" "$INFRA_PINNED")" ;;
+                unchanged) msg="$label: unchanged"; priority=-1 ;;
+                *) msg="NEEDS YOU: $label failed at $(tok "$WORD" "$INFRA_STEP") (see the run)"; priority=1 ;;
+              esac
+            fi
+          fi
+          echo "Message (priority $priority): $msg"
+          if [[ -z $PUSHOVER_TOKEN || -z $PUSHOVER_USER ]]; then
+            echo "::notice::Pushover isn't set up in the notify environment; nothing was sent."
+            exit 0
+          fi
+          # The credentials reach curl on stdin, never in its arguments.
+          printf 'form-string = "token=%s"\nform-string = "user=%s"\n' "$PUSHOVER_TOKEN" "$PUSHOVER_USER" |
+            curl --config - --silent --show-error --fail --max-time 20 --retry 3 \
+              --form-string "title=TaruBot deploy" --form-string "message=$msg" \
+              --form-string "priority=$priority" --form-string "url=$run_url" \
+              --form-string "url_title=Deploy run" --output /dev/null \
+              https://api.pushover.net/1/messages.json ||
+            echo "::warning::The Pushover message could not be sent; the outcome is unchanged."
+
+  # The Compose production host's job and its message, until 2.38.0 removes them. Production's job
+  # and staging's run beside each other, and production never needs staging's. A run can therefore
+  # fail because of its staging job while production deployed: whether production deployed a run is
+  # the Deploy job's conclusion together with the production approval, never the run's conclusion.
+  # Notify reads it that way. This job is byte-identical to 2.35.0's until 2.38.0 removes it
+  # (tests/unit/deploy-workflow.test.ts pins its SHA-256); its own condition leaves out every
+  # target but production.
   deploy:
     name: Deploy
     needs: plan
@@ -643,35 +1119,13 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/ssh"
 
-  # Staging deploys without approval: the `staging` environment has no reviewer and accepts only
-  # main. host.yml's job names that environment, so staging's secrets (its host, pinned host key,
-  # Configure key and the bot's settings) load there and nowhere else; `secrets: inherit` only lets
-  # the called job read them. It runs Configure (ops/ansible/site.yml at config_commit, main's head
-  # when this run was created) unless the action is bot, then the release's own
-  # ops/ansible/bot.yml unless the action is configure. Its concurrency group keeps two staging
-  # runs apart, and an environment without TARGET_HOST ends an automatic run green, with a notice.
-  deploy-staging:
-    name: Deploy staging
-    needs: plan
-    if: github.run_attempt == '1' && needs.plan.outputs.staging == 'true' && (github.event_name == 'workflow_run' || inputs.target == 'staging')
-    permissions:
-      contents: read # host.yml's two checkouts of this public repository, and nothing else
-    uses: ./.github/workflows/host.yml
-    with:
-      target: staging
-      action: ${{ needs.plan.outputs.staging_action }}
-      version: ${{ needs.plan.outputs.version }}
-      commit: ${{ needs.plan.outputs.commit }}
-      digest: ${{ needs.plan.outputs.digest }}
-      config_commit: ${{ needs.plan.outputs.config_commit }}
-    secrets: inherit
-
-  # About production only: staging dispatches are skipped, and a run's staging job never changes
+  # About the Compose host only: every new-path request (prod, action=infra, a staging rebuild) and
+  # every staging dispatch writes notify=false and is skipped, and a run's other jobs never change
   # the message (it reads the Deploy job, not the run's conclusion). The plan decides whether this
   # run is reported, at its start (its `notify` output), so a switch turned off while a request
   # waits or a deploy runs never silences its outcome. Only a plan that never got to write that
   # output (its runner failed) falls back to the switch as it reads now. This job is byte-identical
-  # to 2.35.0's until 2.37.0 (tests/unit/deploy-workflow.test.ts pins its SHA-256).
+  # to 2.35.0's until 2.38.0 removes it (tests/unit/deploy-workflow.test.ts pins its SHA-256).
   notify:
     name: Notify
     needs: [plan, deploy]

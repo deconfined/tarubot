@@ -1,10 +1,16 @@
 # Merged main commits publish deployable images; pull requests never receive registry write access.
+# Each release is built and pushed once, on its merge, and never again (REQUIREMENTS.md "Approved
+# unified-pipeline amendments (2026-09-29)", decision 3): Deploy runs after this workflow, deploys
+# that digest to staging at once and to production after @deconfined's approval, and a rollback
+# dispatches an older version, whose tags still name the image it was built as. So there is no
+# dispatch trigger, and the publish job refuses before it builds when the version tag or the sha-
+# tag already exists. A publish job that fails after its push therefore needs a version bump; the
+# attest and latest jobs can be re-run alone.
 name: Publish containers
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,6 +50,46 @@ jobs:
           - target: tarubot
             suffix: ""
     steps:
+      - name: Refuse a release that is already published
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          # A release is pushed once: its version tag and its sha- tag must both be absent. The
+          # package is public, so an anonymous pull token asks the registry; only a 404 counts as
+          # absent, and any other answer stops the job before it builds, since it can't tell. The
+          # token reaches curl in a config on stdin, never as an argument.
+          set -Eeuo pipefail
+          export LC_ALL=C
+          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]] ||
+            { echo "::error::The verified version isn't X.Y.Z; nothing was pushed."; exit 1; }
+          [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error::This run names no commit; nothing was pushed."; exit 1; }
+          dir=$(mktemp -d)
+          trap 'rm -rf -- "${dir:?}"' EXIT
+          code=$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 --retry 3 \
+            --output "$dir/token.json" --write-out '%{http_code}' \
+            'https://ghcr.io/token?scope=repository:deconfined/tarubot:pull' 2> "$dir/curl.err") || code=000
+          [[ $code == 200 ]] || { echo "::error::GHCR handed out no anonymous pull token (HTTP $code); nothing was pushed."; exit 1; }
+          token=$(jq -er '.token | select(type == "string" and test("^[A-Za-z0-9._~+/=-]{1,4096}$"))' "$dir/token.json" 2> /dev/null) ||
+            { echo "::error::GHCR's token answer holds no token; nothing was pushed."; exit 1; }
+          echo "::add-mask::$token"
+          for tag in "$VERSION" "sha-$GITHUB_SHA"; do
+            code=$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+              curl --config - --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 --retry 3 \
+                --head --output /dev/null --write-out '%{http_code}' \
+                --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+                "https://ghcr.io/v2/deconfined/tarubot/manifests/$tag" 2> "$dir/curl.err") || code=000
+            case $code in
+              404) echo "ghcr.io/deconfined/tarubot:$tag isn't published yet." ;;
+              200)
+                echo "::error::ghcr.io/deconfined/tarubot:$tag already exists, and a release is never pushed twice: bump the version."
+                exit 1
+                ;;
+              *)
+                echo "::error::GHCR answered HTTP $code for ghcr.io/deconfined/tarubot:$tag, so whether it exists is unknown; nothing was pushed."
+                exit 1
+                ;;
+            esac
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

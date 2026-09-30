@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# A stand-in for ssh in tests/unit/host-pin.test.ts, which runs ops/tofu/ci/host.sh's connect. It
+# answers `ssh [OPTIONS] root@ADDRESS true` for the address's family (6 when it holds a colon, else
+# 4) the way ssh at LogLevel=FATAL does:
+#   FAKE_SSH_6 / FAKE_SSH_4   ok (the default); silent, an exit 255 with nothing printed, as for no
+#                             route, a refusal or a connect timeout; hung, the 124 of `timeout`
+#                             ending a session that stopped answering; or denied, "Permission
+#                             denied"
+#   FAKE_SSH_FAILS_6 / _4     that many silent failures on the family before its behaviour applies
+#   FAKE_HOSTKEY_6 / _4       the host key it offers (default FAKE_HOSTKEY). Unless the
+#                             UserKnownHostsFile holds exactly `target <that key>`, it ends with
+#                             "Host key verification failed."
+# Noisier than ssh on purpose, it prints the address and the offered key with every refusal, so the
+# test can prove host.sh keeps ssh's output private. It records its arguments (after a `== ssh`
+# line) in $STUB/argv, `ssh 6|4` in $STUB/events, and its name in $STUB/leaked-env when a credential
+# reached its environment.
+set -euo pipefail
+{
+  echo "== ssh"
+  printf '%s\n' "$@"
+} >>"$STUB/argv"
+if [[ -n ${AWS_ACCESS_KEY_ID+x}${AWS_SECRET_ACCESS_KEY+x}${ANSIBLE_SSH_KEY+x} ]]; then echo ssh >>"$STUB/leaked-env"; fi
+args=("$@")
+known='' identity=''
+for ((i = 0; i + 1 < $#; i++)); do
+  case ${args[i]} in
+    -o) if [[ ${args[i + 1]} == UserKnownHostsFile=* ]]; then known=${args[i + 1]#*=}; fi ;;
+    -i) identity=${args[i + 1]} ;;
+  esac
+done
+dest=${args[$# - 2]}
+command=${args[$# - 1]}
+if [[ $dest != root@* || $command != true || -z $known || ! -f $identity ]]; then
+  echo "ssh stand-in: unexpected arguments" >&2
+  exit 2
+fi
+addr=${dest#root@}
+if [[ $addr == *:* ]]; then fam=6; else fam=4; fi
+echo "ssh $fam" >>"$STUB/events"
+
+n=$(($(cat "$STUB/ssh-count.$fam" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$STUB/ssh-count.$fam"
+fails=FAKE_SSH_FAILS_$fam
+((n > ${!fails:-0})) || exit 255
+behaviour=FAKE_SSH_$fam
+case ${!behaviour:-ok} in
+  silent) exit 255 ;;
+  hung) exit 124 ;;
+  denied | ok) ;;
+  *) exit 2 ;;
+esac
+offer=FAKE_HOSTKEY_$fam
+offered=${!offer:-$FAKE_HOSTKEY}
+if ! grep -Fxq "target $offered" "$known"; then
+  echo "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! $addr offered ${offered#ssh-ed25519 }" >&2
+  echo "Host key verification failed." >&2
+  exit 255
+fi
+if [[ ${!behaviour:-ok} == denied ]]; then
+  echo "root@$addr: Permission denied (publickey)." >&2
+  exit 255
+fi
+exit 0

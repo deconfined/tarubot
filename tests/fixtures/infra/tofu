@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 # A stand-in for OpenTofu in tests/unit/infra.test.ts, which runs ops/tofu/ci/tofu-ci.sh's phases.
 # It records each call's arguments (one a line) in $STUB/calls/<n>, then answers the subcommand
-# that follows -chdir=...: `show -json` prints $STUB/plan.json, `plan` and `apply` print
-# $STUB/<subcommand>.jsonl (OpenTofu's JSON messages), `plan` also writes a stand-in saved plan to
-# its -out= file, and `init` prints a line. Each exits with $STUB/exit.<subcommand>, 0 when there
-# is none.
+# that follows -chdir=...:
+#   - `show -json FILE` prints $STUB/plan.json, and fails like OpenTofu when FILE is missing;
+#   - `plan` and `apply` print $STUB/<subcommand>.jsonl (OpenTofu's JSON messages), and `plan`
+#     also writes a stand-in saved plan to its -out= file;
+#   - `output -json` prints $STUB/outputs.json, or {} (a state with no outputs) when there is none;
+#   - `init` prints a line.
+# Each prints $STUB/<subcommand>.stderr to its standard error when there is one (the phases must
+# keep it private), and exits with $STUB/exit.<subcommand>, 0 when there is none.
 set -euo pipefail
 mkdir -p "$STUB/calls"
 n=$(($(find "$STUB/calls" -type f | wc -l) + 1))
 printf '%s\n' "$@" >"$STUB/calls/$n"
 [[ ${1-} == -chdir=* ]] || exit 64
 sub=${2-}
+if [[ -f $STUB/$sub.stderr ]]; then cat -- "$STUB/$sub.stderr" >&2; fi
 case $sub in
-  show) cat -- "$STUB/plan.json" ;;
+  show)
+    [[ ${3-} == -json && -f ${4-} ]] || exit 1
+    cat -- "$STUB/plan.json"
+    ;;
   plan | apply)
     if [[ $sub == plan ]]; then
       for a in "$@"; do
@@ -20,6 +28,10 @@ case $sub in
       done
     fi
     if [[ -f $STUB/$sub.jsonl ]]; then cat -- "$STUB/$sub.jsonl"; fi
+    ;;
+  output)
+    [[ ${3-} == -json ]] || exit 64
+    if [[ -f $STUB/outputs.json ]]; then cat -- "$STUB/outputs.json"; else echo "{}"; fi
     ;;
   init) echo "OpenTofu has been successfully initialized!" ;;
   *) exit 64 ;;

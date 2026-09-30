@@ -60,11 +60,12 @@ const schema = z.object({
 export type Configuration = z.infer<typeof schema>;
 
 /**
- * The deployments whose bot must verify the managed cluster's certificate. Without a CA,
- * postgresConnection falls back to the URL's own SSL flags, which don't verify it; a CA lost on
- * the way (a missing DATABASE_CA_CERT_FILE line, say) must stop the start instead.
+ * The deployments whose bot must verify the managed cluster's certificate: the Compose host's
+ * production, the new pipeline's prod (2.37.0) and staging. Without a CA, postgresConnection falls
+ * back to the URL's own SSL flags, which don't verify it; a CA lost on the way (a missing
+ * DATABASE_CA_CERT_FILE line, say) must stop the start instead.
  */
-const CA_REQUIRED = ["production", "staging"];
+const CA_REQUIRED = ["production", "prod", "staging"];
 
 /**
  * Report setting names and expected formats while avoiding raw environment values. File-delivered

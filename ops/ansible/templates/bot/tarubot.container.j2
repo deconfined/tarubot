@@ -24,10 +24,11 @@ Pull=never
 EnvironmentFile=%h/.config/tarubot/tarubot.env
 # The secrets reach the bot as files, never as environment variables, which every dependency in
 # the process could read. bot.yml writes each Podman secret from the job's environment; the
-# settings file's NAME_FILE lines tell the bot where each one is. Each file belongs to the image's
-# bun user (uid and gid 1000) and only it may read it. The mount is read-only only because the
-# container is (ReadOnly=true): Podman bind-mounts its per-container copy of the secret and adds ro
-# to that mount only for a read-only container.
+# settings file's NAME_FILE lines tell the bot where each one is. On a target that runs /suggest
+# (prod), the GitHub App's private key is one of them once the environment has a client ID. Each
+# file belongs to the image's bun user (uid and gid 1000) and only it may read it. The mount is
+# read-only only because the container is (ReadOnly=true): Podman bind-mounts its per-container
+# copy of the secret and adds ro to that mount only for a read-only container.
 {% for mount in tb_mounts %}
 Secret={{ mount.secret }},type=mount,target=/run/secrets/{{ mount.target }},uid=1000,gid=1000,mode=0400
 {% endfor %}

@@ -67,7 +67,10 @@ async function staging(digest = `sha256:${"5a".repeat(32)}`) {
   };
 }
 
-/** The bot's service in docker-compose.production.yml, the parity reference until 2.37.0. */
+/**
+ * The bot's service in docker-compose.production.yml, the parity reference until the owner's
+ * cutover (2.38.0 removes it).
+ */
 const composeBot = async () =>
   z
     .object({

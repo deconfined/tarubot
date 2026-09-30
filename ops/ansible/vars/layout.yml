@@ -1,9 +1,10 @@
 ---
 # site.yml's fixed layout (#62). The one setting, the host's role, arrives as an extra var
-# (-e tarubot_role=staging|production; host.example.yml), and tb_role only reads it once, so every
+# (-e tarubot_role=staging|prod; host.example.yml), and tb_role only reads it once, so every
 # task uses the same value. site.yml asserts it before anything changes.
 
-# staging or production. They differ only in when dnf-automatic runs (tb_production_timer).
+# staging or prod (named prod since 2.37.0). They differ only in when dnf-automatic runs
+# (tb_prod_timer).
 tb_role: "{{ tarubot_role | default('') }}"
 
 # The account the bot runs as, under rootless Podman. Nothing logs in as it over SSH (the sshd
@@ -38,7 +39,7 @@ tb_packages:
 tb_epel_packages:
   - age
 
-# Production's drop-in for dnf-automatic's timer (files/dnf-automatic-timer-production.conf). It
-# moves production's updates to 10:00 UTC, after staging's 06:00 run and its random delay of up
-# to an hour. On staging the playbook makes sure it is absent.
-tb_production_timer: /etc/systemd/system/dnf-automatic.timer.d/50-tarubot.conf
+# Prod's drop-in for dnf-automatic's timer (files/dnf-automatic-timer-prod.conf). It moves prod's
+# updates to 10:00 UTC, after staging's 06:00 run and its random delay of up to an hour. On staging
+# the playbook makes sure it is absent.
+tb_prod_timer: /etc/systemd/system/dnf-automatic.timer.d/50-tarubot.conf

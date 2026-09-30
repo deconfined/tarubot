@@ -2,7 +2,8 @@
 # A simulated gh for the plan job in tests/unit/deploy-workflow.test.ts.
 #
 # `gh api [-H …] PATH [--jq FILTER]` answers from $STUB/api/<PATH with / ? = as _>, filtered
-# through jq like gh; a missing file is GitHub's 404.
+# through jq like gh; a missing file is GitHub's 404. Each PATH is recorded in $STUB/api-calls, so
+# the tests can show what the plan asks GitHub (never an environment's settings).
 #
 # `gh attestation verify oci://IMAGE@DIGEST … --source-digest COMMIT … --format json` appends its
 # arguments to $STUB/attest-calls (a `call` line, then one argument per line) and answers like gh:
@@ -64,6 +65,7 @@ while (($#)); do
     *) path=$1; shift ;;
   esac
 done
+printf '%s\n' "$path" >>"$STUB/api-calls"
 file=$STUB/api/$(printf '%s' "$path" | tr '/?=' '___')
 if [[ ! -f $file ]]; then
   printf 'gh: Not Found (HTTP 404) %s\n' "$path" >&2
