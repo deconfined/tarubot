@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.18**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.19**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.19 — Private host bridge framing
+
+- Add bounded binary framing for one future command or file-transfer exchange, with exact operation nonce, directional sequence, private channel identity, strict metadata and ordered backpressure.
+- Require complete request delivery and clean response EOF before exposing a known remote result. Uncertain outcomes immediately fence ordinary I/O; only an already reserved uncertain terminal may flush under the original deadline.
+- Keep SSH authorization, the Ansible plugin, launcher and operational integration separate. Frames cannot supply a descriptor, key, approval or transport proof; no host is contacted by these stream fixtures.
 
 ## 2.36.18 — Mandatory owner-guarded journal factories
 
