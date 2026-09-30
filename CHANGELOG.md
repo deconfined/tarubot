@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.36.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.1 — Task-focused contributor documentation
+
+- Add one contributor guide with credential-free synthetic testing, the change checklist and the separate pnpm/Node site workflow; shorten the README and agent guides to point at it.
+- Replace duplicated engineering/operations narrative with focused references and a documentation index. Distinguish the implemented Compose/staging paths from future pipeline plans, and a healthy deployment from skipped/configure-only jobs.
+- Preserve approved decisions, manual evidence and retired runbooks through immutable Git links in `docs/archive/README.md`, rather than keeping long handoff/backlog/verification diaries in the current tree. Keep the confirmed deployment rules verbatim and acceptance gaps explicit.
+- Add internal-link/archive regression checks. No bot behavior, migration, dependency, live deployment or pipeline change; the documentation site's content and structure are unchanged.
 
 ## 2.36.0 — The simple pipeline for staging
 

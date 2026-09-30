@@ -29,7 +29,7 @@ src/
 - Runtime dispatch and `commands:register` use the same `loadCommands()` function. Registration loads definitions without connecting application services to PostgreSQL or logging a gateway client into Discord.
 - `bun run build` cleans generated `dist/` first. Removing or renaming a source module therefore removes its stale compiled route as well.
 - Deploy definition changes with `bun run commands:register --guild ID` for development or `--global` at production cutover. Rebuild/restart to load changed execution code. Event/component additions are loaded on restart.
-- `scripts/commands.ts` reads back every command scope against the same discovered declarations (`list`, which exits 0 only when the declared scope matches and every other scope is empty) and clears leftover guild-scoped commands after a fingerprint-confirmed dry run (`clear-guild`). Production runs the compiled tools with an explicit env file ([MIGRATION.md](MIGRATION.md) E0).
+- `scripts/commands.ts` reads back every command scope against the same discovered declarations (`list`, which exits 0 only when the declared scope matches and every other scope is empty) and clears leftover guild-scoped commands after a fingerprint-confirmed dry run (`clear-guild`). Production tools require [launch isolation](CONFIGURATION.md#launch-isolation).
 
 ## Maintenance tooling boundaries
 

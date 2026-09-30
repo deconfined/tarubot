@@ -3,7 +3,7 @@
  * argument, the production Compose file's `backup` service dumps the database. These pin the
  * properties that keep it safe: strict shell error handling, no unencrypted dump on disk, secrets
  * kept out of process arguments, a failure reported to healthchecks.io, and a service `up` never
- * starts. The live run is recorded in docs/VERIFICATION.md. Staging's backup script,
+ * starts. The live run's record is linked from docs/archive/README.md. Staging's backup script,
  * ops/ansible/files/bot/tarubot-backup (2.36.0), and its systemd units are pinned in
  * backup-quadlet.test.ts beside this Compose path, which that file also runs with stand-ins.
  */

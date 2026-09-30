@@ -14,7 +14,7 @@
  *   with bash in POSIX mode standing in for the image's BusyBox sh), the dump streams into age,
  *   uploads and pings go as before, and failures ping /fail by step.
  * The byte-exact stream through `--log-driver=none` was checked on a local Podman 5.8.2 with a real
- * PostgreSQL 18.4 dump (2.33.0's verification record, docs/VERIFICATION.md).
+ * PostgreSQL 18.4 dump (2.33.0's verification record, linked from docs/archive/README.md).
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
@@ -719,7 +719,7 @@ describe("tarubot-backup's units (ops/ansible/files/bot/)", () => {
  * The dump container's program (tarubot-backup's DUMP), run by bash in POSIX mode with a stand-in
  * pg_dump that prints its arguments and libpq's variables. The image runs it with BusyBox sh; the
  * lab ran these same URLs there, and a real dump with a percent-encoded password
- * (docs/VERIFICATION.md). bash stands in because it also expands \xHH in printf's %b.
+ * (docs/archive/README.md). bash stands in because it also expands \xHH in printf's %b.
  */
 describe("tarubot-backup's dump program", () => {
   const run = async (url: string) => {

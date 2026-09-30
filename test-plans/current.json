@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.0 the simple pipeline",
-  "objective": "2.36.0 (#62) moves staging onto the simple pipeline: OpenTofu builds the VM, cloud-init sets its keys, Ansible from a GitHub runner configures it and deploys the bot, and GitHub environments hold the secrets. There is no bot change and no migration; production keeps its Compose path.",
+  "title": "Session: 2.36.1 documentation cleanup",
+  "objective": "Consolidate contributor setup and checks, shorten internal references, and preserve approved decisions and evidence in Git. No bot behavior, migration or pipeline change; the documentation site stays unchanged. This release does not complete outstanding live acceptance.",
   "user": [
-    "Before merging: delete STAGING_DEPLOY_ENABLED and staging's old deploy key and variables; retire the old staging host.",
-    "After merging: create the infra-plan and infra environments, run the import-only apply, build staging, pin its host key, then configure and preflight it."
+    "Review CONTRIBUTING.md and docs/README.md: setup, checks and the task links should be easy to find.",
+    "Confirm the shortened constraints/runbooks preserve the approved safety boundaries; prior manual acceptance remains owed unless explicitly completed or waived."
   ],
   "assistant": [
-    "Build DevBot at 2.36.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",
-    "Read the staging runs' logs (read-only), grep them for names, addresses and secrets, and record the verification."
+    "Check internal links, immutable archive references and the verbatim confirmed deployment rules.",
+    "Run source-quality, unit/contract, build and version checks; leave shared DevBot, production and infrastructure untouched."
   ],
   "bot": [
-    "Run 2.35.0 in production until the 2.36.0 deploy; nothing changes for members.",
-    "Post this responsibility-separated session plan in #chat."
+    "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
+    "Continue the existing behavior; documentation cleanup triggers no migration or new Discord action."
   ]
 }

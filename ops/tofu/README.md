@@ -38,7 +38,7 @@ User data takes effect only when a Linode is created (`ignore_changes = [metadat
 - **`infra-plan`** has no required reviewer, so a plan runs without an approval. It holds read-only credentials only.
 - **`infra`** has a required reviewer (@deconfined, self-review allowed), and admins can't bypass it. It holds the write credentials.
 
-`infra-plan`'s branch rule is the only thing between another ref's code and its secrets, and GitHub leaves it off by default: an environment made in the UI starts with no branch rule, and one a workflow creates by naming it (a typo) has no rules at all. No run checks the rules: they are @deconfined's own settings, which they read back once when they make the environments ([docs/HOSTING.md](../docs/HOSTING.md#owner-steps-for-2360), step 6) and again after any change to either (REQUIREMENTS.md "Approved pipeline amendments (2026-09-29)").
+`infra-plan`'s branch rule is the only thing between another ref's code and its secrets, and GitHub leaves it off by default: an environment made in the UI starts with no branch rule, and one a workflow creates by naming it (a typo) has no rules at all. No run checks the rules: the owner reads them back at setup and after any change ([owner checklist](../../docs/DEPLOYMENT.md#first-host-setup-owner-checklist)); the original approval is linked from [REQUIREMENTS.md](../../REQUIREMENTS.md).
 
 | Secret | Environment | What it holds |
 |---|---|---|
@@ -147,7 +147,7 @@ Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_
 
 The workflow reads `replace` from the dispatch's event payload, never from a step's `env:`, which GitHub prints unmasked, and refuses any other value without echoing it. So a host name or address typed there by mistake stays out of the public log.
 
-A new owner key, Configure key or root hash reaches a host only through a rebuild, since user data applies only at creation. A new Configure key is made the way docs/HOSTING.md's owner step 5 makes the first one: without a passphrase, its private half straight into the environment's `ANSIBLE_SSH_KEY`. Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key.
+A new owner key, Configure key or root hash reaches a host only through a rebuild, since user data applies only at creation. Make a new Configure key using the [owner checklist](../../docs/DEPLOYMENT.md#first-host-setup-owner-checklist): without a passphrase, its private half straight into the environment's `ANSIBLE_SSH_KEY`. Until then, root's `authorized_keys` can be edited by hand, logged in with the FIDO2 key.
 
 ## A hand run when Actions is down
 

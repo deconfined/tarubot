@@ -2,13 +2,6 @@
 
 TaruBot reads the Lodestone inside the bot process (`src/infrastructure/lodestone/`). It fetches pages under strict bounds, parses them in isolated workers with TaruBot's own parser, and validates every field before it becomes an application fact. There is no sidecar service and no Nodestone.
 
-## History
-
-- **Until 2.19.x** a sidecar service wrapped the `xivapi/nodestone` parser library. It was a `vendor/nodestone` Git submodule with seven source patches, an Axios adapter bridging its fetches into the sidecar's bounded transport, and a stubbed logger. The bot reached it over HTTP (`NODESTONE_URL`).
-- **2.19.0** made the `xivapi/lodestone-css-selectors` selectors follow upstream HEAD live.
-- **2.20.0** replaced Nodestone with TaruBot's own parser, at the owner's request: "get rid of Nodestone entirely, pull xivapi/lodestone-css-selectors for ourselves, and do the parsing internally". Before the switch, the 2.19.0 Nodestone build and the 2.20.0 build parsed the same live pages with identical output and requested URLs. The pages were a profile (with and without the biography), an FC page, the first and last member pages (50 and 5 entries), a search hit and an empty search. The first-party worker took about half the time.
-- **2.21.0** removed the sidecar, at the owner's request: "I would rather reduce complexity and places where things can break." The parser, the gate and the live selectors moved into the bot. The HTTP API, the `nodestone` Compose service and image, `NODESTONE_URL`, the fetch bridge between workers and server, and the on-disk selector sets went with it. The `tarubot-nodestone` image is no longer published.
-
 ## How a request runs
 
 1. **The adapter** (`client.ts`, class `Lodestone`) takes a parse slot. At most `LODESTONE_CONCURRENCY` parses run at once; more requests wait in arrival order until their deadline, and are never refused as busy.
@@ -23,7 +16,7 @@ TaruBot reads the Lodestone inside the bot process (`src/infrastructure/lodeston
 
 ## The parser (`parser.ts`)
 
-The parser applies the selector definitions directly, with the semantics TaruBot relied on from Nodestone plus the fixes the old sidecar patched into it:
+The parser applies the selector definitions directly:
 
 - A definition selects one element, or all of them with `multiple`, and yields its `innerHTML` or an attribute (`''` when absent). Values stay raw strings, so large IDs and explicit zero survive and the adapter decodes display text.
 - A definition's `regex` yields its named groups, spread into the enclosing record (`SERVER` → `World`, `DC`). Python-style `(?P<name>` groups and `(?P=name)` references are translated to JavaScript. A regex column whose element is missing keeps its own `null` field.
@@ -36,7 +29,7 @@ The parser's only dependency is `linkedom`. `pages.ts` is kept apart from it, so
 
 ## Live selectors
 
-The owner decided on 2026-09-25 that `xivapi/lodestone-css-selectors` **always runs at its latest version**:
+`xivapi/lodestone-css-selectors` **follows its latest HEAD** after validation:
 
 - **The bundled set.** `bundled.ts` imports the 6 files the parser reads (`SELECTOR_FILES`) straight from the `lodestone-css-selectors` package that `bun.lock` pins, with the commit recorded in `upstream-revisions.json`. A unit test checks that the two agree. This set runs until the first check, and whenever HEAD is rejected.
 - **Following upstream.** The writer checks the repository's HEAD at startup (in the background, so readiness never waits for GitHub), then every `LODESTONE_SELECTOR_CHECK_SECONDS` (15 minutes by default). A new HEAD goes to `SelectorStore.activate()` (`selectors.ts`):
@@ -84,9 +77,7 @@ Verification always requests biography data through a new operation, independent
 
 ## Settings
 
-The `LODESTONE_*` settings, with their defaults and ranges, are on the documentation site's [configuration page](../site/src/content/docs/deploy/configuration.md#lodestone) (moved there in 2.27.0). `client.ts` validates them at startup.
-
-2.21.0 removed `NODESTONE_URL`, `NODESTONE_RESPONSE_BYTES`, `NODESTONE_UPSTREAM_CHECK_SECONDS`, `NODESTONE_SELECTORS_DIR` and `PAGE_REGION`. Leftover values are ignored.
+The `LODESTONE_*` settings, with their defaults and ranges, are on the documentation site's [configuration page](../site/src/content/docs/deploy/configuration.md#lodestone). `client.ts` validates them at startup.
 
 **Lodestone gate (2.17.0).** Start spacing and a shared cooldown live in `gate.ts`, one per process. The first Lodestone 429 closes the gate for every request: new starts are refused locally with the remaining cooldown, without contacting the Lodestone. The cooldown starts at 15 s and doubles on each consecutive 429 up to 5 min, or follows a longer Retry-After of up to 15 min. Any other Lodestone answer resets the escalation. Each 429 logs one "The Lodestone throttled TaruBot" line. A maintenance tool that reads the Lodestone has a gate of its own, so avoid running `acquire.js` alongside a busy bot.
 
