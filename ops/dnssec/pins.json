@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "unbound_version": "1.26.1",
+  "source_url": "https://www.nlnetlabs.nl/downloads/unbound/unbound-1.26.1.tar.gz",
+  "source_sha256": "35a6dc0e425a9282c3426d9a3043144011bf0534aed4b73ab62c52aee0af1503",
+  "signature_sha256": "c52227c2a6918f991443c72709313fcd8530c41ea61268dbe820278a1c60a996",
+  "release_fingerprint": "231018690C4D903EF419146AA144323DEAACDF45",
+  "release_key_sha256": "9779ccb2c448bb8cc099c3ab7d0fc40e5cd72fcc9627a85853dd646cd360139b",
+  "iana_xml_sha256": "3ccaab38830025ee0a0f6c1f25769427544f81ea2865aa860468f3ef5278b908",
+  "iana_signature_sha256": "644e0e22842c6b7a57fda13d286941fd7449a179f0a3763578fa9a251d307dd1",
+  "icann_ca_sha256": "18ce7215812d1a2cad8d9d4d3d7c26f7235a9b5ec6f0c1e214e15230fd4f9e24",
+  "iana_signer": "dnssec@iana.org",
+  "root_key_tags": [20326, 38696]
+}

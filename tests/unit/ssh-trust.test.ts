@@ -36,6 +36,7 @@ const pin: ValidatorPin = {
   mode: "local-validating",
   binary_sha256: "b".repeat(64),
   anchor_sha256: "c".repeat(64),
+  runtime_manifest_sha256: "d".repeat(64),
 };
 // RFC 7479 section 4 hashes the complete SSH key blob, including its SSH string framing.
 const rfcKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGPKSUTyz1HwHReFVvD5obVsALAgJRNarH4TRpNePnAS";
@@ -318,6 +319,7 @@ describe("pinned local DNSSEC SSHFP evidence", () => {
       { validator: { ...pin, version: "1.26.0" } },
       { validator: { ...pin, binary_sha256: "0".repeat(64) } },
       { validator: { ...pin, anchor_sha256: "0".repeat(64) } },
+      { validator: { ...pin, runtime_manifest_sha256: "0".repeat(64) } },
       { name: "other.example.org" },
       { secure: false },
       { bogus: true },

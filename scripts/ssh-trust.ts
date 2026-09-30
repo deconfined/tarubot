@@ -243,10 +243,18 @@ export interface ValidatorPin {
   mode: "local-validating";
   binary_sha256: string;
   anchor_sha256: string;
+  runtime_manifest_sha256: string;
 }
 
 function validatorPin(value: unknown): ValidatorPin {
-  const pin = exact(value, ["name", "version", "mode", "binary_sha256", "anchor_sha256"]);
+  const pin = exact(value, [
+    "name",
+    "version",
+    "mode",
+    "binary_sha256",
+    "anchor_sha256",
+    "runtime_manifest_sha256",
+  ]);
   requireTrust(
     pin.name === "unbound" &&
       pin.version === dnssecValidatorVersion &&
@@ -254,6 +262,7 @@ function validatorPin(value: unknown): ValidatorPin {
   );
   fingerprint(pin.binary_sha256);
   fingerprint(pin.anchor_sha256);
+  fingerprint(pin.runtime_manifest_sha256);
   return structuredClone(pin) as unknown as ValidatorPin;
 }
 

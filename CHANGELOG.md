@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.8**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.9**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.9 — Trust transport and completed-history recovery
+
+- Add bounded two-round Ed25519 observation and strict literal-address SSH with private durable-key pins, isolated authentication/configuration, fresh connection proof and no pooled connection or automatic retry. Preserve trust across safe applied-baseline updates and snapshot requests across asynchronous verification.
+- Add an authenticated Unbound build, pinned root anchors and measured private runtime dependencies for local SSHFP/A/AAAA validation. Bind the runtime manifest into durable trust evidence; remote AD flags, unsigned answers and different validated addresses cannot satisfy it. Add read-only owner-approved workflow evidence and a localhost DNSSEC rehearsal with a separate lab helper.
+- Add owner-fenced restoration of exact encrypted versions from fully completed infrastructure or target-trust history. Require independent fresh remote outcome verification, exact latest-object checks, persistence readback and a consumer guard bound to an owner-recorded repair generation and independently successful repair run. Incomplete outcomes remain blocked; operational workflow integration and activation remain fenced.
 
 ## 2.36.8 — Durable SSH trust foundation
 
