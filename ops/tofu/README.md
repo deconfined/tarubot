@@ -60,6 +60,8 @@ The four secrets marked "both" must hold the same value in each environment:
 
 The `_READ_` and `_WRITE_` names keep each job to its own kind: the Plan job reads only `_READ_` secrets and the Apply job only `_WRITE_` ones (`tests/unit/infra.test.ts` checks).
 
+Plan and Apply also compare a passphrase-keyed binding of the saved plan, private backend/settings, workflow commit/run and policy code. A backend mismatch is refused before provider writes, and Apply rechecks the binding after Compare. The full-plan policy in `scripts/infra-policy.ts` is currently **advisory**: it never removes the `infra` approval requirement or enables auto-apply. Without an independently persisted applied-input baseline it cannot grant a safe decision. See the [pipeline specification](../../docs/PIPELINE.md) for the next milestones.
+
 ### `TOFU_VARS`
 
 One JSON object with exactly these seven keys. `examples/example.tfvars.json` shows the shape with placeholders. Store it compact, on one line, so GitHub masks it as one value, in both environments:

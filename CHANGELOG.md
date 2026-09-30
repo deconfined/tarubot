@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.2**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.3**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.3 — Infrastructure safety foundation
+
+- Add an advisory, credential-free full-plan classifier with a narrow label/TTL/known-host access-addition allowlist, explicit baseline-intent requirements and adversarial synthetic tests. It grants no automatic write authority; existing infrastructure review and production gates stay intact.
+- Bind the encrypted saved plan to private backend/inputs, workflow commit/run and policy code using a passphrase-keyed digest. Refuse backend/input/run mismatches before provider writes and recheck after Compare, including direct-Apply and post-comparison file changes.
+- Install pinned Bun in infrastructure jobs without package installation. Document the completed foundation and remaining adoption, enrollment, staging and separately reviewed production work; no live infrastructure or deployment operations.
 
 ## 2.36.2 — Self-contained pipeline specification
 

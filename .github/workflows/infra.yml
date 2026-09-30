@@ -89,11 +89,17 @@ jobs:
       changes: ${{ steps.summary.outputs.changes }}
       has_changes: ${{ steps.summary.outputs.has_changes }}
       digest: ${{ steps.summary.outputs.digest }}
+      binding: ${{ steps.summary.outputs.binding }}
+      policy_decision: ${{ steps.summary.outputs.policy_decision }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the project Bun version
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       # The replace input reaches the script through the event payload, never env:, which the
@@ -156,6 +162,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the project Bun version
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Prepare the values and the masks
@@ -179,6 +189,7 @@ jobs:
         env:
           DIGEST: ${{ needs.plan.outputs.digest }}
           APPROVED: ${{ needs.plan.outputs.changes }}
+          BINDING: ${{ needs.plan.outputs.binding }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh compare
       - name: Apply

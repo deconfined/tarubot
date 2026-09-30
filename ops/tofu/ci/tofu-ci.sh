@@ -34,6 +34,8 @@
 # applied) hold the rules; tests/unit/infra.test.ts runs them against sample plans and runs these
 # phases with a stand-in tofu.
 # Nothing here traces its commands, and the workflow's last step removes $RUNNER_TEMP/tofu.
+# The Bun policy helper adds an advisory full-plan classification and a keyed handoff binding.
+# This does not enable unattended Apply or change the owner's existing review gate.
 set -Eeuo pipefail
 umask 077
 
@@ -186,12 +188,24 @@ summarize() {
   # the list goes out whole, under a random delimiter no change line can hold.
   delimiter="changes_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
+  # Bind private backend/inputs, run, code and plan bytes without publishing a dictionary hash
+  # of the backend's identifying values. Only the passphrase-keyed digest leaves the runner.
+  local binding decision
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be bound to this run and backend; nothing was applied."
+  bun "$module/../../scripts/infra-policy.ts" classify "$d" >"$d/policy.json" 2>"$d/policy.stderr" ||
+    fail "The infrastructure policy couldn't read its evidence; nothing was applied."
+  decision=$(jq -er '.decision | select(. == "invalid" or . == "review-required" or . == "safe" or . == "no-changes")' "$d/policy.json" 2>/dev/null) ||
+    fail "The infrastructure policy returned no recognized decision."
+  printf '\nAdvisory safe-plan policy: `%s`. The owner-approved Apply gate remains required.\n' "$decision" >>"$GITHUB_STEP_SUMMARY"
   {
     echo "changes<<$delimiter"
     cat -- "$d/changes.txt"
     echo "$delimiter"
     echo "has_changes=$has_changes"
     echo "digest=$digest"
+    echo "binding=$binding"
+    echo "policy_decision=$decision"
   } >>"$GITHUB_OUTPUT"
 
   # The guards: a change this can't name is never applied; a delete or replace needs
@@ -212,6 +226,8 @@ summarize() {
 }
 
 compare() {
+  # A failed comparison must never retain an earlier successful marker.
+  rm -f -- "$d/verified.binding"
   # Apply applies only what was reviewed: the Plan job's saved plan, byte for byte, and only when
   # its change list is the one the Plan job showed. GitHub drops a job output that looks like a
   # secret, so a missing digest or an empty list is refused rather than taken as "no changes".
@@ -221,6 +237,11 @@ compare() {
   local digest current
   digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
   [[ $digest == "${DIGEST-}" ]] || fail "The saved plan isn't the file the Plan job made; nothing was applied. Dispatch a new run."
+  [[ ${BINDING-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's handoff binding didn't arrive; nothing was applied."
+  local binding
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be checked; nothing was applied."
+  [[ $binding == "${BINDING-}" ]] || fail "The plan's backend, inputs, run or code differs from Plan; nothing was applied."
   changes
   current=$(<"$d/changes.txt")
   [[ $current == "${APPROVED-}" ]] || fail "The saved plan's changes differ from the ones the Plan job showed; nothing was applied. Dispatch a new run."
@@ -229,12 +250,20 @@ compare() {
   # hosts and db_allow_extra, so a key or hash set in one copy alone would otherwise pass unseen.
   jq -e --slurpfile v "$d/values.tfvars.json" '(.variables | map_values(.value) | del(.state_passphrase)) == $v[0]' "$d/plan.json" >/dev/null 2>&1 ||
     fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
+  printf '%s' "$binding" >"$d/verified.binding"
   echo "The saved plan is the reviewed one."
 }
 
 apply() {
   state_settings
   provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."
+  # Recheck immediately before the provider write; directly invoking Apply cannot skip Compare.
+  local binding verified
+  [[ -f $d/verified.binding ]] || fail "Apply has no successful plan comparison; nothing was applied."
+  verified=$(<"$d/verified.binding")
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be rechecked; nothing was applied."
+  [[ $binding == "$verified" ]] || fail "The plan handoff changed after comparison; nothing was applied."
   local rc=0 action address line
   # The saved plan alone, with no option that could change it: OpenTofu applies exactly what it
   # holds, and refuses it as "Saved plan is stale" if the state changed since the Plan job read it.

@@ -44,4 +44,6 @@ Production's Quadlet cutover is not implemented here. It needs a separately revi
 
 ## Boundaries
 
+The infrastructure workflow binds the encrypted saved plan to its private backend/inputs and workflow run before writes, and emits an advisory full-plan policy decision. It is still dispatch-only with owner-approved Apply; database-cluster adoption, automatic SSH enrollment and release-integrated safe apply are not shipped. See [implementation milestones](PIPELINE.md#implementation-milestones-and-acceptance).
+
 The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened to Infrastructure/every deployment environment. [AGENTS.md](../AGENTS.md) carries it verbatim. Agents hold no host-access key/environment secret, never approve or bypass a gate, and dispatch only when asked in that session. Environment, provider, token and key changes remain owner actions.

@@ -135,7 +135,7 @@ Each milestone is a coherent signed commit/version change with tests. Code avail
 | Milestone | Deliverable | Status |
 | --- | --- | --- |
 | 1. Specification | This document and contributor/deployment links | Documented; no runtime change |
-| 2. Safety foundation | Full-plan classifier, adversarial fixtures, plan/backend/input binding; reviewed lane intact | Next implementation work |
+| 2. Safety foundation | Full-plan classifier, adversarial fixtures, plan/backend/input binding; reviewed lane intact | Implemented locally; classification advisory, activation not performed |
 | 3. Database adoption | Import-only v2 cluster configuration and independent guards | Pending; no agent-run live import |
 | 4. Enrollment | Durable TOFU, conditional storage, DNS-only SSHFP writer, local DNSSEC validation | Pending prerequisites/tests |
 | 5. Staging delivery | Reusable infrastructure flow, owner-enabled safe lane, recovery fixes, exact-release acceptance | Pending |
@@ -151,6 +151,8 @@ Enrollment fixtures cover first/repeat trust, changed key/instance/address, lost
 Owner-authorized disposable-lab rehearsal precedes activation: TLS database/S3, DNSSEC, TOFU persistence/conflict/rebuild, two idempotent Configures, isolated healthy deploy/stability/readback, reboot, backup/restore, migration and partial-failure recovery. Only separate live acceptance proves real staging runs.
 
 ### Remaining inputs and prerequisites
+
+The classifier (`scripts/infra-policy.ts`) has no provider/network access or package dependency. The workflow reports its decision but grants no automatic write authority. Its pure API needs an independently persisted applied-input baseline to allow even a no-change plan; baseline persistence and real-provider plan-shape rehearsal remain prerequisites for the automatic lane. The handoff binding is enforced in the current reviewed lane and checked again immediately before Apply. Run its invented-data tests with `bun test tests/unit/infra-policy.test.ts tests/unit/infra.test.ts`.
 
 - Owner's private cluster baseline, supported v2 schema/import behavior and state mapping; no agent credential/state retrieval.
 - Owner creation/readback of the safe-apply gate and scoped credentials; no environment setup as a code side effect.

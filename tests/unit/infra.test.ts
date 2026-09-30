@@ -51,6 +51,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
 import { z } from "zod";
+import { handoffBinding } from "../../scripts/infra-policy.js";
 
 /** A repository path, resolved relative to this test. */
 const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
@@ -137,6 +138,7 @@ const expr = (inner: string) => `\${{ ${inner} }}`;
 /** The steps Plan and Apply start with, in order, with the script phase each runs (none for an action). */
 const SHARED: [string, string | null][] = [
   ["Check out source", null],
+  ["Install the project Bun version", null],
   ["Install the pinned OpenTofu", "install"],
   ["Prepare the values and the masks", "prepare"],
   ["Initialize OpenTofu", "init"],
@@ -260,6 +262,8 @@ describe("infra.yml's shape", () => {
       changes: expr("steps.summary.outputs.changes"),
       has_changes: expr("steps.summary.outputs.has_changes"),
       digest: expr("steps.summary.outputs.digest"),
+      binding: expr("steps.summary.outputs.binding"),
+      policy_decision: expr("steps.summary.outputs.policy_decision"),
     });
     expect(apply.outputs).toBeUndefined();
   });
@@ -322,8 +326,10 @@ describe("infra.yml's shape", () => {
       const uses = j.steps.filter((s) => s.uses);
       expect(uses[0]?.uses).toBe(ciPin?.[1]);
       expect(uses[0]?.with).toEqual({ "persist-credentials": false });
-      expect(uses).toHaveLength(2);
-      expect(uses[1]?.uses).toMatch(pinned(artifact));
+      expect(uses).toHaveLength(3);
+      expect(uses[1]?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+      expect(uses[1]?.with).toEqual({ "bun-version-file": "package.json" });
+      expect(uses[2]?.uses).toMatch(pinned(artifact));
     }
   });
 
@@ -420,7 +426,7 @@ describe("infra.yml's shape", () => {
     for (const e of expressions)
       expect({
         e,
-        ok: /^(secrets\.[A-Z_]+|inputs\.[a-z_]+|steps\.summary\.outputs\.[a-z_]+|needs\.plan\.outputs\.(changes|digest)|runner\.temp)$/u.test(
+        ok: /^(secrets\.[A-Z_]+|inputs\.[a-z_]+|steps\.summary\.outputs\.[a-z_]+|needs\.plan\.outputs\.(changes|digest|binding)|runner\.temp)$/u.test(
           e ?? "",
         ),
       }).toMatchObject({
@@ -462,6 +468,7 @@ describe("infra.yml's shape", () => {
     expect(compare.env).toEqual({
       DIGEST: expr("needs.plan.outputs.digest"),
       APPROVED: expr("needs.plan.outputs.changes"),
+      BINDING: expr("needs.plan.outputs.binding"),
       TF_VAR_state_passphrase: expr("secrets.TOFU_STATE_PASSPHRASE"),
     });
     const COMPARE = phaseOf("compare");
@@ -1369,7 +1376,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", root(SCRIPT), name],
         {
           env: {
-            PATH: `${join(dir, "bin")}:/usr/bin:/bin`,
+            PATH: `${join(dir, "bin")}:${process.execPath.slice(0, process.execPath.lastIndexOf("/"))}:/usr/bin:/bin`,
             HOME: dir,
             STUB: join(dir, "stub"),
             RUNNER_TEMP: join(dir, "temp"),
@@ -1378,6 +1385,9 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
             GITHUB_STEP_SUMMARY: join(dir, "summary"),
             GITHUB_PATH: join(dir, "path"),
             GITHUB_EVENT_PATH: join(dir, "event.json"),
+            GITHUB_SHA: "1".repeat(40),
+            GITHUB_RUN_ID: "1234",
+            GITHUB_RUN_ATTEMPT: "1",
             ...env,
           },
           stdin: "ignore",
@@ -1607,6 +1617,12 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       DIGEST: digest,
       APPROVED: list,
       TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+      BINDING: handoffBinding(join(r.dir, "temp", "tofu"), {
+        TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+        GITHUB_SHA: "1".repeat(40),
+        GITHUB_RUN_ID: "1234",
+        GITHUB_RUN_ATTEMPT: "1",
+      }),
     };
     expect(r.phase("compare", reviewed)).toEqual({
       code: 0,
@@ -1618,6 +1634,12 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     for (const [what, env, message] of [
       ["no digest", { DIGEST: "" }, "::error::The Plan job's digest didn't arrive"],
       ["no list", { APPROVED: "" }, "::error::The Plan job's change list didn't arrive"],
+      ["no binding", { BINDING: "" }, "::error::The Plan job's handoff binding didn't arrive"],
+      [
+        "wrong binding",
+        { BINDING: "0".repeat(64) },
+        "::error::The plan's backend, inputs, run or code differs",
+      ],
       [
         "another file",
         { DIGEST: "0".repeat(64) },
@@ -1662,11 +1684,36 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(r.phase("compare", reviewed).out).toBe(VARS_DIFFER);
     savedPlan(example());
     expect(r.phase("compare", reviewed).code).toBe(0);
+    // Backend identity is privately bound too: refuse a mismatch before provider writes.
+    const backend = r.file("temp/tofu/backend.hcl");
+    writeFileSync(
+      join(r.dir, "temp", "tofu", "backend.hcl"),
+      backend.replace("us-east-1", "us-west-1"),
+    );
+    expect(r.phase("compare", reviewed)).toEqual({
+      code: 1,
+      out: "::error::The plan's backend, inputs, run or code differs from Plan; nothing was applied.\n",
+      err: "",
+    });
+    const writeTokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
+    // Failed Compare removes a previous success marker; direct Apply must then fail.
+    expect(r.phase("apply", writeTokens).out).toBe(
+      "::error::Apply has no successful plan comparison; nothing was applied.\n",
+    );
+    writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), backend);
+    expect(r.phase("compare", reviewed).code).toBe(0);
+    writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), `${saved}-changed-after-compare`);
+    expect(r.phase("apply", writeTokens)).toEqual({
+      code: 1,
+      out: "::error::The plan handoff changed after comparison; nothing was applied.\n",
+      err: "",
+    });
+    writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), saved);
+    expect(r.phase("compare", reviewed).code).toBe(0);
     writeFileSync(
       join(r.dir, "stub", "apply.jsonl"),
       `${JSON.stringify({ type: "change_summary", changes: { add: 4, change: 1, import: 0, remove: 0 } })}\n`,
     );
-    const writeTokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
     const applied = r.phase("apply", writeTokens);
     expect(applied).toEqual({
       code: 0,
