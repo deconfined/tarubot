@@ -12,7 +12,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
+import { performance } from "node:perf_hooks";
+import { isDeepStrictEqual, types } from "node:util";
 import pins from "../ops/dnssec/pins.json" with { type: "json" };
 import { verifyElfClosure } from "../ops/dnssec/elf.js";
 import {
@@ -40,6 +41,216 @@ const allowedLibraries = new Set([
 ]);
 function requireDns(value: unknown): asserts value {
   if (!value) throw new Error("invalid-local-dnssec");
+}
+const nativeThen = Promise.prototype.then;
+const nativeSet = Uint8Array.prototype.set;
+const nativeLength = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "byteLength",
+)?.get;
+/** Refused native promises are drained without consulting a caller's then getter. */
+function drain(value: unknown): void {
+  try {
+    void Reflect.apply(nativeThen, value, [undefined, () => {}]);
+  } catch {
+    /* An ordinary value or non-native thenable is still a refusal. */
+  }
+}
+function copyBytes(value: unknown, maximum: number, check: () => void): Buffer {
+  check();
+  requireDns(types.isUint8Array(value) && typeof nativeLength === "function");
+  const length: unknown = Reflect.apply(nativeLength, value, []);
+  requireDns(typeof length === "number" && length >= 0 && length <= maximum);
+  const bytes = new Uint8Array(length);
+  Reflect.apply(nativeSet, bytes, [value]);
+  check();
+  requireDns(Reflect.apply(nativeLength, value, []) === length);
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+/** Plain bounded snapshots reserve their original operation before any reflection hook. */
+function snapshot(value: unknown, check: () => void): unknown {
+  let nodes = 0,
+    size = 0;
+  const ancestors = new Set<object>();
+  const copy = (input: unknown, depth: number): unknown => {
+    check();
+    requireDns(++nodes <= 2048 && depth <= 16);
+    if (input === undefined || input === null || typeof input === "boolean") return input;
+    if (typeof input === "number") {
+      requireDns(Number.isFinite(input));
+      return input;
+    }
+    if (typeof input === "string") {
+      size += Buffer.byteLength(input);
+      requireDns(size <= 65_536);
+      return input;
+    }
+    requireDns(input !== null && typeof input === "object" && !ancestors.has(input));
+    requireDns(Object.getOwnPropertySymbols(input).length === 0);
+    check();
+    const properties = Object.getOwnPropertyDescriptors(input);
+    check();
+    ancestors.add(input);
+    let result: unknown;
+    if (Array.isArray(input)) {
+      const length: unknown = properties.length?.value;
+      requireDns(
+        typeof length === "number" &&
+          Number.isInteger(length) &&
+          length >= 0 &&
+          length <= 64 &&
+          Object.keys(properties).length === length + 1,
+      );
+      result = Array.from({ length }, (_, index) => {
+        const property = properties[String(index)];
+        requireDns(property?.enumerable && Object.hasOwn(property, "value"));
+        return copy(property.value, depth + 1);
+      });
+    } else {
+      const prototype = Object.getPrototypeOf(input);
+      check();
+      requireDns(prototype === Object.prototype || prototype === null);
+      const resultObject: Record<string, unknown> = {};
+      for (const [key, property] of Object.entries(properties)) {
+        requireDns(property.enumerable && Object.hasOwn(property, "value"));
+        size += Buffer.byteLength(key);
+        requireDns(size <= 65_536);
+        Object.defineProperty(resultObject, key, {
+          enumerable: true,
+          value: copy(property.value, depth + 1),
+        });
+      }
+      result = resultObject;
+    }
+    ancestors.delete(input);
+    return result;
+  };
+  return copy(value, 0);
+}
+/** This window can only refuse. No deadline, plain DNS evidence or callback mints authority. */
+class ValidationWindow {
+  #fenced = false;
+  #checking = false;
+  #started = 0;
+  #previous = 0;
+  #physicalEnd: number;
+  #wallEnd = Number.POSITIVE_INFINITY;
+  #remainingCaptured = false;
+  #queryPhysicalEnd = Number.POSITIVE_INFINITY;
+  #queryWallEnd = Number.POSITIVE_INFINITY;
+  constructor(
+    readonly physical: number,
+    readonly now: () => number,
+    readonly denial?: () => void,
+    readonly remainingMs?: () => number,
+  ) {
+    this.#physicalEnd = physical + 60_000;
+  }
+  fence(): void {
+    this.#fenced = true;
+  }
+  #live(): void {
+    requireDns(
+      !this.#fenced && performance.now() < Math.min(this.#physicalEnd, this.#queryPhysicalEnd),
+    );
+  }
+  tick(): number {
+    let owns = false;
+    try {
+      this.#live();
+      requireDns(!this.#checking);
+      this.#checking = true;
+      owns = true;
+      const refuse = () => {
+        if (this.denial !== undefined) {
+          requireDns(typeof this.denial === "function");
+          const value = this.denial();
+          if (value !== undefined) {
+            this.fence();
+            drain(value);
+          }
+          requireDns(value === undefined);
+        }
+        this.#live();
+        requireDns(this.#checking);
+      };
+      const clock = () => {
+        refuse();
+        const value: unknown = this.now();
+        if (typeof value !== "number") {
+          this.fence();
+          drain(value);
+        }
+        requireDns(typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+        refuse();
+        if (this.#started === 0) {
+          this.#started = value;
+          this.#wallEnd = value + 60_000;
+        }
+        requireDns(value >= this.#previous && value < Math.min(this.#wallEnd, this.#queryWallEnd));
+        this.#previous = value;
+        return value;
+      };
+      let value = clock();
+      if (this.remainingMs !== undefined) {
+        requireDns(typeof this.remainingMs === "function");
+        const before = performance.now();
+        const remaining: unknown = this.remainingMs();
+        if (typeof remaining !== "number") {
+          this.fence();
+          drain(remaining);
+        }
+        requireDns(
+          typeof remaining === "number" && Number.isSafeInteger(remaining) && remaining > 0,
+        );
+        // The first smaller cap includes all work before the callback; later caps only shrink.
+        this.#physicalEnd = Math.min(
+          this.#physicalEnd,
+          (this.#remainingCaptured ? before : this.physical) + remaining,
+        );
+        this.#wallEnd = Math.min(this.#wallEnd, value + remaining);
+        this.#remainingCaptured = true;
+        refuse();
+        value = clock();
+      }
+      this.#live();
+      requireDns(this.#checking);
+      return value;
+    } catch {
+      this.fence();
+      throw new Error("invalid-local-dnssec");
+    } finally {
+      if (owns) this.#checking = false;
+    }
+  }
+  remaining(): number {
+    const value = this.tick();
+    const remaining = Math.floor(
+      Math.min(
+        22_000,
+        this.#physicalEnd - performance.now(),
+        this.#wallEnd - value,
+        this.#queryPhysicalEnd - performance.now(),
+        this.#queryWallEnd - value,
+      ),
+    );
+    requireDns(remaining > 0);
+    return remaining;
+  }
+  query(): number {
+    requireDns(this.#queryPhysicalEnd === Number.POSITIVE_INFINITY && this.#previous > 0);
+    this.#queryPhysicalEnd = performance.now() + 22_000;
+    const value = this.#previous;
+    this.#queryWallEnd = value + 22_000;
+    this.tick();
+    return value;
+  }
+  offer<T>(work: () => T): T {
+    this.tick();
+    const value = work();
+    this.tick();
+    return value;
+  }
 }
 function exact(value: unknown, keys: string[]): Record<string, unknown> {
   requireDns(value !== null && typeof value === "object" && !Array.isArray(value));
@@ -181,32 +392,74 @@ export interface ValidatorExecution {
   maxBuffer: number;
 }
 /** Injection is an internal invented-test seam, never an environment variable or CLI override. */
-export type ValidatorExecutor = (request: ValidatorExecution) => {
+export type ValidatorExecutor = (
+  request: ValidatorExecution,
+  beforeExecute?: () => void,
+) => {
   exitCode: number;
   signalCode: string | null;
   stdout: Uint8Array;
   stderr: Uint8Array;
 };
-const execute: ValidatorExecutor = (request) => {
-  const result = Bun.spawnSync(request.argv, {
-    cwd: request.cwd,
-    env: request.env,
+/** The final native guard follows every argv/environment/method capture, with no resolver retry. */
+function execute(
+  request: ValidatorExecution,
+  beforeExecute: () => void,
+  remaining: () => number,
+): ReturnType<ValidatorExecutor> {
+  const argv = [...request.argv],
+    cwd = request.cwd,
+    env = { ...request.env };
+  const options = {
+    cwd,
+    env,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
     timeout: request.timeout,
     maxBuffer: request.maxBuffer,
-  });
-  return { ...result, signalCode: result.signalCode ?? null };
-};
+  } as const;
+  const offer = Bun.spawnSync.bind(Bun);
+  beforeExecute();
+  const timeout = Math.min(request.timeout, remaining());
+  const result = offer(argv, { ...options, timeout });
+  beforeExecute();
+  const properties = Object.getOwnPropertyDescriptors(result);
+  beforeExecute();
+  for (const key of ["exitCode", "stdout", "stderr"])
+    requireDns(properties[key] && Object.hasOwn(properties[key], "value"));
+  requireDns(properties.signalCode === undefined || Object.hasOwn(properties.signalCode, "value"));
+  const exitCode = properties.exitCode?.value;
+  const signalCode = properties.signalCode?.value ?? null;
+  requireDns(
+    typeof exitCode === "number" && (signalCode === null || typeof signalCode === "string"),
+  );
+  return {
+    exitCode,
+    signalCode,
+    stdout: copyBytes(properties.stdout?.value, 32768, beforeExecute),
+    stderr: copyBytes(properties.stderr?.value, 0, beforeExecute),
+  };
+}
 
-function regular(path: string, maximum: number, executable = false): Buffer {
-  const stat = lstatSync(path);
+function regular(
+  path: string,
+  maximum: number,
+  window: ValidationWindow,
+  executable = false,
+): Buffer {
+  const stat = window.offer(() => lstatSync(path));
   requireDns(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1);
   requireDns(stat.uid === process.getuid?.() && (stat.mode & 0o022) === 0);
   requireDns(stat.size > 0 && stat.size <= maximum);
   if (executable) requireDns((stat.mode & 0o100) !== 0);
-  return readFileSync(path);
+  return copyBytes(
+    window.offer(() => readFileSync(path)),
+    maximum,
+    () => {
+      window.tick();
+    },
+  );
 }
 function cleanup(working: string | undefined): void {
   try {
@@ -238,7 +491,8 @@ export class LocalDnssecValidator {
     runtime: { directory: string; manifest_sha256: string };
     now: () => number;
   };
-  readonly #run: ValidatorExecutor;
+  readonly #run: ValidatorExecutor | undefined;
+  #active: ValidationWindow | undefined;
   constructor(
     options: {
       helper: string;
@@ -247,20 +501,62 @@ export class LocalDnssecValidator {
       runtime: { directory: string; manifest_sha256: string };
       now?: () => number;
     },
-    run: ValidatorExecutor = execute,
+    run?: ValidatorExecutor,
   ) {
     try {
-      const { now, ...configuration } = options;
-      this.#options = { ...structuredClone(configuration), now: now ?? Date.now };
+      // Factory construction captures reviewed configuration only, never a lasting authority window.
+      const properties = Object.getOwnPropertyDescriptors(options);
+      requireDns(Object.getOwnPropertySymbols(options).length === 0);
+      const configuration: Record<string, unknown> = {};
+      for (const [key, property] of Object.entries(properties)) {
+        requireDns(property.enumerable && Object.hasOwn(property, "value"));
+        if (key !== "now")
+          Object.defineProperty(configuration, key, { enumerable: true, value: property.value });
+      }
+      const now = properties.now?.value ?? Date.now;
+      requireDns(typeof now === "function" && (run === undefined || typeof run === "function"));
+      this.#options = {
+        ...(snapshot(configuration, () => {}) as {
+          helper: string;
+          anchors: string;
+          pin: ValidatorPin;
+          runtime: { directory: string; manifest_sha256: string };
+        }),
+        now,
+      };
       this.#run = run;
     } catch {
       throw new Error("invalid-local-dnssec");
     }
   }
   /** Every invocation copies and rehashes the entire reviewed closure into a private fresh cwd. */
-  async validate(descriptor: TargetDescriptor, expected: Sshfp): Promise<DnssecEvidence> {
+  async validate(
+    descriptor: TargetDescriptor,
+    expected: Sshfp,
+    denial?: () => void,
+    remainingMs?: () => number,
+  ): Promise<DnssecEvidence> {
+    const physical = performance.now();
     let working: string | undefined;
+    let window: ValidationWindow | undefined;
+    let owns = false,
+      failed = false;
+    let evidence: DnssecEvidence | undefined;
     try {
+      if (this.#active) {
+        this.#active.fence();
+        throw new Error("invalid-local-dnssec");
+      }
+      window = new ValidationWindow(physical, this.#options.now, denial, remainingMs);
+      this.#active = window;
+      owns = true;
+      const original = window;
+      const check = () => {
+        original.tick();
+      };
+      check();
+      descriptor = snapshot(descriptor, check) as TargetDescriptor;
+      expected = snapshot(expected, check) as Sshfp;
       const d = targetDescriptor(descriptor);
       const o = this.#options;
       const p = exact(o.pin, [
@@ -292,8 +588,8 @@ export class LocalDnssecValidator {
       );
       requireDns(digest.test(o.runtime.manifest_sha256));
       const directory = resolve(o.runtime.directory);
-      requireDns(realpathSync(directory) === directory);
-      const dirStat = lstatSync(directory);
+      requireDns(original.offer(() => realpathSync(directory)) === directory);
+      const dirStat = original.offer(() => lstatSync(directory));
       requireDns(
         dirStat.isDirectory() &&
           !dirStat.isSymbolicLink() &&
@@ -301,8 +597,8 @@ export class LocalDnssecValidator {
           (dirStat.mode & 0o077) === 0,
       );
       const libraryDirectory = join(directory, "lib");
-      requireDns(realpathSync(libraryDirectory) === libraryDirectory);
-      const libStat = lstatSync(libraryDirectory);
+      requireDns(original.offer(() => realpathSync(libraryDirectory)) === libraryDirectory);
+      const libStat = original.offer(() => lstatSync(libraryDirectory));
       requireDns(
         libStat.isDirectory() &&
           !libStat.isSymbolicLink() &&
@@ -313,17 +609,22 @@ export class LocalDnssecValidator {
         resolve(o.helper) === join(directory, "validator") &&
           resolve(o.anchors) === join(directory, "root.ds"),
       );
-      const manifestBytes = regular(join(directory, "runtime-manifest.json"), 32768);
-      requireDns(hash(manifestBytes) === o.runtime.manifest_sha256);
-      const raw = exact(JSON.parse(manifestBytes.toString("utf8")), [
-        "schema",
-        "unbound_version",
-        "source_sha256",
-        "helper_sha256",
-        "anchor_sha256",
-        "loader",
-        "libraries",
-      ]);
+      const manifestBytes = regular(join(directory, "runtime-manifest.json"), 32768, original);
+      requireDns(original.offer(() => hash(manifestBytes)) === o.runtime.manifest_sha256);
+      const raw = exact(
+        original.offer(() =>
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)),
+        ),
+        [
+          "schema",
+          "unbound_version",
+          "source_sha256",
+          "helper_sha256",
+          "anchor_sha256",
+          "loader",
+          "libraries",
+        ],
+      );
       requireDns(
         raw.schema === 1 &&
           raw.unbound_version === pins.unbound_version &&
@@ -352,34 +653,48 @@ export class LocalDnssecValidator {
             names.includes(name),
           ),
       );
-      const helper = regular(o.helper, 32 * 1024 * 1024, true);
-      const anchors = regular(o.anchors, 4096);
+      const helper = regular(o.helper, 32 * 1024 * 1024, original, true);
+      const anchors = regular(o.anchors, 4096, original);
       const closure = new Set(names);
-      verifyElfClosure(helper, closure);
-      requireDns(hash(helper) === o.pin.binary_sha256 && hash(anchors) === o.pin.anchor_sha256);
+      original.offer(() => verifyElfClosure(helper, closure));
+      requireDns(
+        original.offer(() => hash(helper)) === o.pin.binary_sha256 &&
+          original.offer(() => hash(anchors)) === o.pin.anchor_sha256,
+      );
+      // Assign accepted temp ownership before the post-offer check, so late acknowledgement still cleans up.
+      check();
       working = mkdtempSync(join(tmpdir(), "tarubot-local-dnssec-"));
-      chmodSync(working, 0o700);
-      mkdirSync(join(working, "lib"), { mode: 0o700 });
-      writeFileSync(join(working, "validator"), helper, { mode: 0o700 });
-      writeFileSync(join(working, "root.ds"), anchors, { mode: 0o600 });
+      check();
+      const privateDirectory = working;
+      original.offer(() => chmodSync(privateDirectory, 0o700));
+      original.offer(() => mkdirSync(join(privateDirectory, "lib"), { mode: 0o700 }));
+      original.offer(() =>
+        writeFileSync(join(privateDirectory, "validator"), helper, { mode: 0o700 }),
+      );
+      original.offer(() =>
+        writeFileSync(join(privateDirectory, "root.ds"), anchors, { mode: 0o600 }),
+      );
       let total = helper.length;
       for (const lib of libraries) {
-        const bytes = regular(join(directory, "lib", lib.file), 32 * 1024 * 1024);
-        verifyElfClosure(bytes, closure);
+        const bytes = regular(join(directory, "lib", lib.file), 32 * 1024 * 1024, original);
+        original.offer(() => verifyElfClosure(bytes, closure));
         total += bytes.length;
-        requireDns(total <= 128 * 1024 * 1024 && hash(bytes) === lib.sha256);
-        const destination = join(working, "lib", lib.file);
-        writeFileSync(destination, bytes, { mode: 0o700 });
-        requireDns(hash(readFileSync(destination)) === lib.sha256);
+        requireDns(total <= 128 * 1024 * 1024 && original.offer(() => hash(bytes)) === lib.sha256);
+        const destination = join(privateDirectory, "lib", lib.file);
+        original.offer(() => writeFileSync(destination, bytes, { mode: 0o700 }));
+        const reopened = regular(destination, 32 * 1024 * 1024, original, true);
+        requireDns(original.offer(() => hash(reopened)) === lib.sha256);
       }
       requireDns(
-        hash(readFileSync(join(working, "validator"))) === o.pin.binary_sha256 &&
-          hash(readFileSync(join(working, "root.ds"))) === o.pin.anchor_sha256,
+        original.offer(() =>
+          hash(regular(join(privateDirectory, "validator"), 32 * 1024 * 1024, original, true)),
+        ) === o.pin.binary_sha256 &&
+          original.offer(() => hash(regular(join(privateDirectory, "root.ds"), 4096, original))) ===
+            o.pin.anchor_sha256,
       );
-      const started = o.now();
-      time(started);
-      rejectAmbientLoaderPreload();
-      const result = this.#run({
+      original.offer(() => rejectAmbientLoaderPreload());
+      const started = original.query();
+      const request: ValidatorExecution = {
         argv: [
           join(working, "lib", raw.loader as string),
           "--inhibit-cache",
@@ -401,28 +716,55 @@ export class LocalDnssecValidator {
           OPENSSL_CONF: "/dev/null",
           OPENSSL_MODULES: join(working, "no-provider-modules"),
         },
-        timeout: 22000,
+        timeout: original.remaining(),
         maxBuffer: 32768,
-      });
+      };
+      check();
+      const result =
+        this.#run === undefined
+          ? execute(request, check, () => original.remaining())
+          : this.#run(request, check);
+      if (types.isPromise(result)) {
+        original.fence();
+        drain(result);
+        throw new Error("invalid-local-dnssec");
+      }
+      check();
+      const properties = Object.getOwnPropertyDescriptors(result);
+      check();
+      for (const key of ["exitCode", "signalCode", "stdout", "stderr"])
+        requireDns(properties[key] && Object.hasOwn(properties[key], "value"));
+      const stdout = copyBytes(properties.stdout?.value, 32768, check);
+      const stderr = copyBytes(properties.stderr?.value, 0, check);
       requireDns(
-        result.exitCode === 0 &&
-          result.signalCode === null &&
-          result.stderr.length === 0 &&
-          result.stdout.length > 0 &&
-          result.stdout.length <= 32768,
+        properties.exitCode?.value === 0 &&
+          properties.signalCode?.value === null &&
+          stderr.length === 0 &&
+          stdout.length > 0,
       );
-      return localDnssecEvidence(
-        JSON.parse(Buffer.from(result.stdout).toString("utf8")),
-        d,
-        expected,
-        o.pin,
-        started,
-        o.now(),
+      const parsed = original.offer(() =>
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(stdout)),
       );
+      evidence = localDnssecEvidence(parsed, d, expected, o.pin, started, original.tick());
+      check();
     } catch {
-      throw new Error("invalid-local-dnssec");
+      window?.fence();
+      failed = true;
     } finally {
-      cleanup(working);
+      // Always remove only the already-owned private cwd, even after denial/unknown outcomes.
+      try {
+        cleanup(working);
+        if (owns && !failed) window?.tick();
+      } catch {
+        failed = true;
+        window?.fence();
+      }
+      if (owns) {
+        window?.fence();
+        this.#active = undefined;
+      }
     }
+    if (failed || evidence === undefined) throw new Error("invalid-local-dnssec");
+    return evidence;
   }
 }

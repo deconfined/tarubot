@@ -165,23 +165,21 @@ function fixture() {
       stderr: new Uint8Array(),
     };
   };
-  const validator = (run = executor, alteredPin?: ValidatorPin) =>
-    new LocalDnssecValidator(
-      {
-        helper: join(directory, "validator"),
-        anchors: join(directory, "root.ds"),
-        pin: alteredPin ?? {
-          ...pin,
-          binary_sha256: manifest.helper_sha256,
-          anchor_sha256: manifest.anchor_sha256,
-          runtime_manifest_sha256: measured,
-        },
-        runtime: { directory, manifest_sha256: measured },
-        now: () => now,
-      },
-      run,
-    );
-  return { directory, manifest, calls, executor, validator, rewrite };
+  const options = (alteredPin?: ValidatorPin, clock: () => number = () => now) => ({
+    helper: join(directory, "validator"),
+    anchors: join(directory, "root.ds"),
+    pin: alteredPin ?? {
+      ...pin,
+      binary_sha256: manifest.helper_sha256,
+      anchor_sha256: manifest.anchor_sha256,
+      runtime_manifest_sha256: measured,
+    },
+    runtime: { directory, manifest_sha256: measured },
+    now: clock,
+  });
+  const validator = (run = executor, alteredPin?: ValidatorPin, clock: () => number = () => now) =>
+    new LocalDnssecValidator(options(alteredPin, clock), run);
+  return { directory, manifest, calls, executor, validator, rewrite, options };
 }
 async function refusal(action: Promise<unknown>) {
   try {
@@ -393,7 +391,8 @@ describe("measured private native execution", () => {
       join(request.cwd, "root.ds"),
       target.fqdn,
     ]);
-    expect(request.timeout).toBe(22000);
+    expect(request.timeout).toBeGreaterThan(0);
+    expect(request.timeout).toBeLessThanOrEqual(22000);
     expect(request.maxBuffer).toBe(32768);
     expect(request.env).toEqual({
       HOME: request.cwd,
@@ -518,5 +517,304 @@ describe("authenticated public root anchor material", () => {
       writeFileSync(join(directory, name), "invented replaced trust material");
       expect(() => verifyRootAnchors(directory, directory)).toThrow("invalid-dnssec-build");
     }
+  });
+});
+
+const validatorModule = new URL("../../scripts/dnssec-validator.ts", import.meta.url).href;
+/** Native offers are replaced and verified in an isolated local process; no DNS is performed. */
+function isolatedValidation(source: string, f: ReturnType<typeof fixture>): void {
+  const { now: _clock, ...configuration } = f.options();
+  const script = `
+    import {performance} from "node:perf_hooks";
+    let elapsed=0,wall=${now};
+    Object.defineProperty(performance,"now",{value:()=>elapsed});
+    const options=${JSON.stringify(configuration)};
+    options.now=()=>wall;
+    const target=${JSON.stringify(target)},sshfp=${JSON.stringify(sshfp)};
+    const response={exitCode:0,signalCode:null,stdout:new TextEncoder().encode(${JSON.stringify(JSON.stringify(result()))}),stderr:new Uint8Array()};
+    ${source}
+  `;
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], {
+    env: { TZ: "UTC" },
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 5000,
+    maxBuffer: 65_536,
+  });
+  expect({ code: child.exitCode, diagnostic: Buffer.from(child.stderr).toString() }).toEqual({
+    code: 0,
+    diagnostic: "",
+  });
+  expect(child.stdout.byteLength).toBe(0);
+}
+
+describe("original measured DNS preparation and refusal", () => {
+  test("first clock/input/refusal/remaining hooks cannot renew the original physical cap", () => {
+    isolatedValidation(
+      `
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      for(const phase of ["clock","input","denial","remaining"]){
+        elapsed=0;let offers=0,once=true;
+        options.now=()=>{if(phase==="clock"&&once){once=false;elapsed=60;}return wall;};
+        const validator=new LocalDnssecValidator(options,()=>{offers++;return response;});
+        const input=phase==="input"?new Proxy(target,{ownKeys(value){elapsed=60;return Reflect.ownKeys(value);}}):target;
+        const denial=()=>{if(phase==="denial"&&once){once=false;elapsed=60;}};
+        const remaining=()=>{if(phase==="remaining"&&once){once=false;elapsed=60;}return 50;};
+        let failed=false;try{await validator.validate(input,sshfp,denial,remaining);}catch(error){failed=error.message==="invalid-local-dnssec";}
+        if(!failed||offers!==0)throw Error("original DNS capture offered");
+      }
+    `,
+      fixture(),
+    );
+  });
+  test("the first late metadata return stops all later measurement, copies and resolver offers", () => {
+    isolatedValidation(
+      `
+      import * as fs from "node:fs";import {spyOn} from "bun:test";
+      const original=fs.lstatSync;let metadata=0,offers=0;
+      const patched=spyOn(fs,"lstatSync").mockImplementation((...args)=>{metadata++;const result=original(...args);elapsed=50;return result;});
+      const captured=await import("node:fs");if(captured.lstatSync!==patched)throw Error("fake filesystem not installed");
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      const validator=new LocalDnssecValidator(options,()=>{offers++;return response;});
+      let failed=false;try{await validator.validate(target,sshfp,undefined,()=>50);}catch(error){failed=error.message==="invalid-local-dnssec";}
+      if(!failed||metadata!==1||offers!==0)throw Error("late metadata offered next read");
+    `,
+      fixture(),
+    );
+  });
+  test("same-instance caught correct and wrong calls fence the original input/clock/refusal/result", async () => {
+    for (const phase of ["input", "clock", "denial", "remaining", "executor", "result"] as const) {
+      for (const wrong of [false, true]) {
+        const f = fixture();
+        let validator: LocalDnssecValidator;
+        let nested = false,
+          offers = 0;
+        const reenter = () => {
+          if (nested) return;
+          nested = true;
+          void validator
+            .validate(wrong ? { ...target, target: "production" } : target, sshfp)
+            .catch(() => {});
+        };
+        const run: ValidatorExecutor = () => {
+          offers++;
+          if (phase === "executor") reenter();
+          const value = {
+            exitCode: 0,
+            signalCode: null,
+            stdout: Buffer.from(JSON.stringify(result())),
+            stderr: new Uint8Array(),
+          };
+          return phase === "result"
+            ? new Proxy(value, {
+                ownKeys(input) {
+                  reenter();
+                  return Reflect.ownKeys(input);
+                },
+              })
+            : value;
+        };
+        validator = f.validator(run, undefined, () => {
+          if (phase === "clock") reenter();
+          return now;
+        });
+        const input =
+          phase === "input"
+            ? new Proxy(target, {
+                ownKeys(value) {
+                  reenter();
+                  return Reflect.ownKeys(value);
+                },
+              })
+            : target;
+        await refusal(
+          validator.validate(
+            input,
+            sshfp,
+            () => {
+              if (phase === "denial") reenter();
+            },
+            () => {
+              if (phase === "remaining") reenter();
+              return 30_000;
+            },
+          ),
+        );
+        expect(offers).toBe(phase === "executor" || phase === "result" ? 1 : 0);
+        // Independent later validations receive a fresh observation, never the fenced attempt.
+        expect((await validator.validate(target, sshfp)).records).toEqual([sshfp]);
+      }
+    }
+  });
+  test("strict clock/refusal/remaining returns drain rejected cross-realm promises without then getters", async () => {
+    isolatedValidation(
+      `
+      import vm from "node:vm";
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      let unhandled=0,thenReads=0,offers=0;
+      process.on("unhandledRejection",()=>unhandled++);
+      for(const phase of ["clock","denial","remaining","executor"]){
+        const value=vm.runInNewContext("Promise.reject(Error('invented-private-rejection'))");
+        Object.defineProperty(value,"then",{get(){thenReads++;throw Error("private then");}});
+        options.now=()=>phase==="clock"?value:wall;
+        const validator=new LocalDnssecValidator(options,()=>{offers++;return phase==="executor"?value:response;});
+        let failed=false;try{await validator.validate(target,sshfp,()=>phase==="denial"?value:undefined,()=>phase==="remaining"?value:30_000);}catch(error){failed=error.message==="invalid-local-dnssec";}
+        if(!failed)throw Error("promise approved DNS");
+      }
+      await Bun.sleep(20);
+      if(unhandled!==0||thenReads!==0||offers!==1)throw Error("private promise escaped");
+    `,
+      fixture(),
+    );
+    for (const value of [false, true, 0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN]) {
+      const f = fixture();
+      await refusal(f.validator().validate(target, sshfp, undefined, () => value as number));
+      expect(f.calls).toHaveLength(0);
+    }
+    for (const value of [false, true, 1]) {
+      const f = fixture();
+      await refusal(f.validator().validate(target, sshfp, () => value));
+    }
+    for (const value of [false, true, Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5]) {
+      const f = fixture();
+      await refusal(
+        f.validator(undefined, undefined, () => value as number).validate(target, sshfp),
+      );
+      expect(f.calls).toHaveLength(0);
+    }
+  });
+  test("remaining values only shrink timeout and late synchronous results cannot yield evidence", () => {
+    isolatedValidation(
+      `
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      for(const cap of [5,50_000]){
+        elapsed=0;let timeout=0;
+        const validator=new LocalDnssecValidator(options,(request,guard)=>{guard();timeout=request.timeout;return response;});
+        await validator.validate(target,sshfp,undefined,()=>cap);
+        if(timeout<=0||timeout>Math.min(22_000,cap))throw Error("remaining extended native timeout");
+      }
+      elapsed=0;let offers=0;
+      const validator=new LocalDnssecValidator(options,()=>{offers++;elapsed=50;return response;});
+      let failed=false;try{await validator.validate(target,sshfp,undefined,()=>50);}catch(error){failed=error.message==="invalid-local-dnssec";}
+      if(!failed||offers!==1)throw Error("late result delivered");
+    `,
+      fixture(),
+    );
+  });
+  test("captured bytes ignore iterators/shadowed lengths and invalid UTF8 cannot become wire JSON", async () => {
+    for (const mode of ["valid", "overflow", "utf8"] as const) {
+      const f = fixture();
+      let iterations = 0;
+      const stdout =
+        mode === "valid"
+          ? Buffer.from(JSON.stringify(result()))
+          : mode === "overflow"
+            ? new Uint8Array(32769)
+            : new Uint8Array([255]);
+      Object.defineProperty(stdout, "byteLength", { value: 1 });
+      Object.defineProperty(stdout, Symbol.iterator, {
+        value: function* () {
+          iterations++;
+          yield* Buffer.from(JSON.stringify(result()));
+        },
+      });
+      const validator = f.validator(() => ({
+        exitCode: 0,
+        signalCode: null,
+        stdout,
+        stderr: new Uint8Array(),
+      }));
+      if (mode === "valid")
+        expect((await validator.validate(target, sshfp)).records).toEqual([sshfp]);
+      else await refusal(validator.validate(target, sshfp));
+      expect(iterations).toBe(0);
+    }
+  });
+  test("caller mutation during measurement cannot replace the captured descriptor or expected key", async () => {
+    const f = fixture();
+    const descriptor = structuredClone(target),
+      expected = structuredClone(sshfp);
+    const validator = f.validator((request) => {
+      descriptor.fqdn = "changed.example.org";
+      expected.fingerprint = "0".repeat(64);
+      expect(request.argv.at(-1)).toBe(target.fqdn);
+      return {
+        exitCode: 0,
+        signalCode: null,
+        stdout: Buffer.from(JSON.stringify(result())),
+        stderr: new Uint8Array(),
+      };
+    });
+    expect((await validator.validate(descriptor, expected)).records).toEqual([sshfp]);
+  });
+  test("cleanup clock rollback or caught nested validation cannot produce successful delivery", () => {
+    isolatedValidation(
+      `
+      import * as fs from "node:fs";import {spyOn} from "bun:test";
+      const remove=fs.rmSync;let validator,mode,nested=false;
+      const patched=spyOn(fs,"rmSync").mockImplementation((...args)=>{const result=remove(...args);if(mode==="rollback")wall--;else if(!nested){nested=true;void validator.validate({...target,target:"production"},sshfp).catch(()=>{});}return result;});
+      const captured=await import("node:fs");if(captured.rmSync!==patched)throw Error("fake cleanup not installed");
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      for(mode of ["rollback","nested"]){
+        wall=${now};nested=false;validator=new LocalDnssecValidator(options,()=>response);
+        let failed=false;try{await validator.validate(target,sshfp);}catch(error){failed=error.message==="invalid-local-dnssec";}
+        if(!failed)throw Error("cleanup bypass delivered DNS");
+      }
+    `,
+      fixture(),
+    );
+  });
+  test("native method/argv capture precedes the last refusal and original remaining timeout", () => {
+    isolatedValidation(
+      `
+      import {spyOn} from "bun:test";
+      let phase,offers=0,lastTimeout=0;
+      const fake=spyOn(Bun,"spawnSync").mockImplementation((argv,execution)=>{offers++;lastTimeout=execution.timeout;if(argv.at(-1)!==target.fqdn||Object.keys(execution.env).sort().join(",")!=="HOME,LANG,LC_ALL,OPENSSL_CONF,OPENSSL_MODULES,PATH,TMPDIR")throw Error("native capture changed");return response;});
+      Object.defineProperty(fake,"bind",{get(){if(phase==="method")elapsed=50;return Function.prototype.bind;}});
+      if(Bun.spawnSync!==fake)throw Error("fake native resolver not installed");
+      const originalIterator=Array.prototype[Symbol.iterator];
+      Array.prototype[Symbol.iterator]=function(){if(phase==="argv"&&this.length===9&&this[8]===target.fqdn)elapsed=50;return originalIterator.call(this);};
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      for(phase of ["method","argv","valid"]){
+        elapsed=0;offers=0;const validator=new LocalDnssecValidator(options);
+        let failed=false;try{await validator.validate(target,sshfp,undefined,()=>phase==="valid"?5:50);}catch(error){failed=error.message==="invalid-local-dnssec";}
+        if(phase==="valid"){if(failed||offers!==1||lastTimeout<=0||lastTimeout>5)throw Error("native original timeout");}
+        else if(!failed||offers!==0)throw Error("native capture offered expired resolver");
+      }
+    `,
+      fixture(),
+    );
+  });
+  test("the original executor guard is permanently retired after successful delivery", async () => {
+    const f = fixture();
+    let retained: (() => void) | undefined;
+    const validator = f.validator((request, beforeExecute) => {
+      retained = beforeExecute;
+      beforeExecute?.();
+      return f.executor(request);
+    });
+    expect((await validator.validate(target, sshfp)).records).toEqual([sshfp]);
+    expect(retained).toBeFunction();
+    expect(() => retained?.()).toThrow("invalid-local-dnssec");
+    expect(f.calls).toHaveLength(1);
+  });
+  test("the native remaining timeout bounds a harmless local child with no resolver execution", () => {
+    isolatedValidation(
+      `
+      import {spyOn} from "bun:test";
+      const actual=Bun.spawnSync.bind(Bun);let offers=0,timeout=0;
+      const fake=spyOn(Bun,"spawnSync").mockImplementation((_argv,execution)=>{
+        offers++;timeout=execution.timeout;
+        // This replaces the reviewed resolver command completely; it cannot perform DNS.
+        return actual([process.execPath,"--no-env-file","-e","await Bun.sleep(500);"],execution);
+      });
+      if(Bun.spawnSync!==fake)throw Error("fake native resolver not installed");
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      const validator=new LocalDnssecValidator(options);
+      let failed=false;try{await validator.validate(target,sshfp,undefined,()=>30);}catch(error){failed=error.message==="invalid-local-dnssec";}
+      if(!failed||offers!==1||timeout<=0||timeout>30)throw Error("actual child exceeded native budget");
+    `,
+      fixture(),
+    );
   });
 });

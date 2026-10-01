@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.31 SSH preparation refusal",
-  "objective": "Verify original SSH preparation deadlines, refusal at actual native offers, conflicting stream fencing and separate accepted-command timers. Native host integration and release activation remain pending; the disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.32 local DNS preparation refusal",
+  "objective": "Verify original DNS measurement and resolver deadlines, per-call refusal, native offer timing, bounded responses and cleanup with invented evidence. Native host composition and release activation remain pending; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Verify credential-free SSH process/stream fixtures, early capture costs, late readers, native offers and bounded command exchange from an isolated candidate; contact no real host.",
+    "Verify original wall/physical time across runtime capture and resolver launch, nested refusal and cleanup, including a harmless local-child timeout fixture; make no DNS or real-host request.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

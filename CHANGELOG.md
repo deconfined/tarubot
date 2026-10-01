@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.31**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.32**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.32 — Count local DNS preparation time
+
+- Count input, clock, runtime measurement and private copying in one original DNS preparation window. Per-call refusal and remaining-time callbacks can only deny or shorten that window.
+- Capture native arguments, environment and process binding before the final check; cap resolver execution by both its 22-second limit and the original remaining time. Late responses, invalid bytes, nested entry and cleanup failure refuse delivery.
+- Verify native timeout behavior with a harmless local child and invented resolver responses. Measured DNS evidence remains data; protected native host composition and release activation remain pending.
 
 ## 2.36.31 — Retain SSH preparation refusal
 
