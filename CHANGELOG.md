@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.36.23**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.24**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.24 — Private pending target projection
+
+- Derive minimized pending target candidates inside the infrastructure journal from exact linked records and matching plan, show and both raw-state readbacks. No-change projection retains the original successful writer proof; Apply projection uses its native current ticket and grants no ordinary baseline authority.
+- Encrypt candidates with dedicated per-target keys into exclusive private local files under one original preparation deadline and immutable expiry. Copied tickets and declarations cannot recreate the native projection capability.
+- Carry preparation refusal into each native writer-verification read so delayed responses cannot start more reads after the original deadline.
+- Preserve the automatic path's existing state-pull/show ordering. Candidate files still need protected producer transport, final source and writer evidence, token minting and workflow integration; activation remains fenced.
 
 ## 2.36.23 — Private v2 applied-target transport
 

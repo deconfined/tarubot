@@ -9,7 +9,7 @@ import { Agent, request as httpsRequest } from "node:https";
 import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { appliedTargetJobPaths } from "./target-producer-run.js";
-import type { GitHubReader, GitHubReadResponse } from "./trust-run.js";
+import type { GitHubReader, GitHubReadRequest, GitHubReadResponse } from "./trust-run.js";
 
 type Value = Record<string, unknown>;
 const repository = "deconfined/tarubot";
@@ -170,6 +170,7 @@ declare const proofBrand: unique symbol;
 export type InfrastructureBaselineRunProof = Readonly<{ [proofBrand]: true }>;
 export type VerifyInfrastructureBaselineRun = (
   request: InfrastructureBaselineRunRequest,
+  denial?: () => void,
 ) => Promise<InfrastructureBaselineRunProof>;
 interface ProofState {
   request: InfrastructureBaselineRunRequest;
@@ -177,6 +178,8 @@ interface ProofState {
   last: number;
   expires: number;
   physicalExpires: number;
+  fenced: boolean;
+  checking: boolean;
 }
 // Identity, not shape, authorizes use: an echo, spread or serialized proof has no entry here.
 const proofs = new WeakMap<InfrastructureBaselineRunProof, ProofState>();
@@ -184,16 +187,33 @@ export function assertInfrastructureBaselineRunProof(
   value: unknown,
   expected: InfrastructureBaselineRunRequest,
 ): void {
+  let saved: ProofState | undefined,
+    reserved = false;
   try {
     requireRun(value !== null && typeof value === "object");
-    const saved = proofs.get(value as InfrastructureBaselineRunProof);
-    requireRun(saved && isDeepStrictEqual(saved.request, request(expected)));
+    saved = proofs.get(value as InfrastructureBaselineRunProof);
+    requireRun(saved && !saved.fenced && !saved.checking);
+    // Reserve before caller snapshots and the original denial clock can reenter. A nested
+    // refusal permanently fences the outer assertion, and cannot release its reservation.
+    saved.checking = true;
+    reserved = true;
+    const captured = request(expected);
+    requireRun(!saved.fenced && saved.checking && isDeepStrictEqual(saved.request, captured));
     const at = saved.clock();
     integer(at);
-    requireRun(at >= saved.last && at < saved.expires && performance.now() < saved.physicalExpires);
+    requireRun(
+      !saved.fenced &&
+        saved.checking &&
+        at >= saved.last &&
+        at < saved.expires &&
+        performance.now() < saved.physicalExpires,
+    );
     saved.last = at;
   } catch {
+    if (saved) saved.fenced = true;
     throw new Error("invalid-infrastructure-baseline-run");
+  } finally {
+    if (saved && reserved) saved.checking = false;
   }
 }
 /** Bound post-proof private reads to the ORIGINAL wall/physical expiry; late results grant nothing. */
@@ -213,7 +233,10 @@ export async function withinInfrastructureBaselineRunProof<T>(
     );
     requireRun(remaining > 0);
     const result = await Promise.race([
-      Promise.resolve().then(work),
+      Promise.resolve().then(() => {
+        assertInfrastructureBaselineRunProof(value, expected);
+        return work();
+      }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error("invalid-infrastructure-baseline-run")),
@@ -223,13 +246,21 @@ export async function withinInfrastructureBaselineRunProof<T>(
     ]);
     assertInfrastructureBaselineRunProof(value, expected);
     return result;
+  } catch (error) {
+    saved.fenced = true;
+    // Preserve the existing trusted adapter's effect diagnostic while denying every future
+    // use of this proof. New candidate transport folds it at its own private boundary.
+    throw error;
   } finally {
     clearTimeout(timer);
   }
 }
 
 /** Fixed direct HTTPS; no ambient proxy/token/CLI configuration, redirects or retries. */
-const directGet: GitHubReader = (input) =>
+const directGet = (
+  input: GitHubReadRequest,
+  beforeRead?: () => void,
+): Promise<GitHubReadResponse> =>
   new Promise((accept, reject) => {
     const url = new URL(input.url);
     if (
@@ -256,6 +287,15 @@ const directGet: GitHubReader = (input) =>
       if (value) accept(value);
       else reject(new Error("invalid-infrastructure-baseline-run"));
     };
+    // Route/header construction is not authorization. The per-invocation refusal clock is
+    // checked again immediately before offering this fixed-origin native HTTPS request.
+    try {
+      beforeRead?.();
+    } catch {
+      agent.destroy();
+      reject(new Error("invalid-infrastructure-baseline-run"));
+      return;
+    }
     const req = httpsRequest(
       {
         protocol: "https:",
@@ -326,48 +366,80 @@ class BaselineReader {
   readonly #config: Configuration;
   readonly #get: GitHubReader;
   readonly #clock: () => number;
+  readonly #native: boolean;
   constructor(value: Configuration, dependencies: Dependencies) {
     const config = exact(snapshot(value), ["owner_id", "repository_id", "token"]);
     integer(config.owner_id);
     integer(config.repository_id);
     requireRun(typeof config.token === "string" && /^[A-Za-z0-9._-]{20,2048}$/u.test(config.token));
     this.#config = config as unknown as Configuration;
-    this.#get = dependencies.get ?? directGet;
-    this.#clock = dependencies.now ?? Date.now;
+    // Capture once: a changing accessor cannot select the native path after supplying a mock.
+    const get = dependencies.get,
+      clock = dependencies.now ?? Date.now;
+    this.#get = get ?? directGet;
+    this.#native = get === undefined;
+    this.#clock = clock;
     requireRun(typeof this.#get === "function" && typeof this.#clock === "function");
     Object.freeze(this);
   }
-  async verify(input: InfrastructureBaselineRunRequest): Promise<InfrastructureBaselineRunProof> {
-    try {
-      const expected = request(input),
-        started = this.#clock(),
-        physicalStarted = performance.now();
-      integer(started);
-      let last = started;
-      const tick = () => {
+  async verify(
+    input: InfrastructureBaselineRunRequest,
+    denial?: () => void,
+  ): Promise<InfrastructureBaselineRunProof> {
+    // This instant precedes input snapshots, the refusal callback and the FIRST wall clock.
+    const physicalStarted = performance.now();
+    let fenced = false,
+      checking = false,
+      started: number | undefined,
+      last: number | undefined;
+    const tick = () => {
+      try {
+        requireRun(!fenced && !checking);
+        checking = true;
+        // The optional callback only refuses. No truthy value, promise or caller receipt can
+        // substitute for the native verifier's fixed execution checks or grant more time.
+        requireRun(denial === undefined || typeof denial === "function");
+        const result = denial?.();
+        requireRun(result === undefined);
         const at = this.#clock();
         integer(at);
+        // The clock itself can consume a shorter enclosing budget. Reopen the same refusal
+        // after that callback before any actual read offer or proof use may proceed.
+        const afterClock = denial?.();
+        requireRun(afterClock === undefined);
+        if (started === undefined) started = at;
         requireRun(
-          at >= last &&
+          !fenced &&
+            at >= (last ?? started) &&
             at - started < maxOperation &&
             performance.now() - physicalStarted < maxOperation,
         );
         last = at;
         return at;
-      };
+      } catch {
+        fenced = true;
+        throw new Error("invalid-infrastructure-baseline-run");
+      } finally {
+        checking = false;
+      }
+    };
+    try {
+      const origin = tick(),
+        expected = request(input);
+      tick();
       const read = async (path: string): Promise<unknown> => {
         const url = `${api}${prefix}${path}`;
         const remaining = Math.min(
           10_000,
-          maxOperation - (tick() - started),
+          maxOperation - (tick() - origin),
           maxOperation - (performance.now() - physicalStarted),
         );
         requireRun(remaining > 0);
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const response = await Promise.race([
-            Promise.resolve().then(() =>
-              this.#get({
+            Promise.resolve().then(() => {
+              const input: GitHubReadRequest = {
                 url,
                 method: "GET",
                 headers: {
@@ -381,8 +453,12 @@ class BaselineReader {
                 timeout_ms: remaining,
                 body_limit: maxBody,
                 redirect: "error",
-              }),
-            ),
+              };
+              // Scheduling is not authority: retain the original refusal clock at the
+              // actual mock/native offer, including abandoned operations and queued reads.
+              tick();
+              return this.#native ? directGet(input, tick) : this.#get(input);
+            }),
             new Promise<never>((_, reject) => {
               timer = setTimeout(
                 () => reject(new Error("invalid-infrastructure-baseline-run")),
@@ -423,6 +499,9 @@ class BaselineReader {
           const data = json(Uint8Array.from(response.body));
           tick();
           return data;
+        } catch {
+          fenced = true;
+          throw new Error("invalid-infrastructure-baseline-run");
         } finally {
           clearTimeout(timer);
         }
@@ -677,18 +756,21 @@ class BaselineReader {
       requireRun(isDeepStrictEqual(verifyRepository(await read("")), currentRepository));
       const at = tick(),
         elapsed = performance.now() - physicalStarted;
-      requireRun(at - started < maxAge && elapsed < maxAge);
+      requireRun(at - origin < maxAge && elapsed < maxAge);
       const proof = Object.freeze({}) as InfrastructureBaselineRunProof;
       proofs.set(proof, {
         request: expected,
-        clock: this.#clock,
+        clock: tick,
         last: at,
-        expires: started + maxAge,
+        expires: origin + maxAge,
         physicalExpires: physicalStarted + maxAge,
+        fenced: false,
+        checking: false,
       });
       assertInfrastructureBaselineRunProof(proof, expected);
       return proof;
     } catch {
+      fenced = true;
       throw new Error("invalid-infrastructure-baseline-run");
     }
   }

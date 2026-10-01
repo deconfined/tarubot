@@ -15,10 +15,39 @@ import {
   type InfrastructureBaselineRunProof,
   type VerifyInfrastructureBaselineRun,
 } from "./infra-baseline-run.js";
+import { deriveAppliedTarget, type AppliedTargetProducer } from "./target-descriptor.js";
+import type { ReleaseIdentity } from "./release-policy.js";
+import type { TargetRole } from "./ssh-trust.js";
+import {
+  assertTargetCandidatePreparation,
+  fenceTargetCandidatePreparation,
+  prepareTargetCandidates,
+  reserveTargetCandidatePreparation,
+  targetCandidateDeclaration,
+  withinTargetCandidatePreparation,
+  type TargetCandidateDeclaration,
+  type TargetCandidatePreparation,
+  type TargetCandidatePreparationData,
+} from "./target-candidate.js";
+import { targetIssuancePins } from "./target-issuance.js";
 
 type ObjectValue = Record<string, unknown>;
 const domain = "tarubot-infra-control-v1";
 const limit = 2 * 1024 * 1024;
+const byteLength = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "byteLength",
+)?.get;
+const nativeSet = Uint8Array.prototype.set;
+/** Bound native ciphertext copies without invoking transport-owned iterators or named getters. */
+function encryptedBytes(value: unknown): Uint8Array {
+  requireRecord(value instanceof Uint8Array && byteLength !== undefined);
+  const length = byteLength.call(value) as number;
+  requireRecord(length >= 32 && length <= limit + 32);
+  const result = new Uint8Array(length);
+  nativeSet.call(result, value);
+  return result;
+}
 
 /** Caller-owned private data is captured before awaits, without getters or shared references. */
 function capturePrivate(value: unknown): unknown {
@@ -209,6 +238,118 @@ export interface Ticket {
   binding: string;
 }
 
+interface CompletedProjectionLinks {
+  current: unknown;
+  intent: Intent;
+  baseline: unknown;
+  completion: unknown;
+}
+interface StructuralProjection {
+  records: Map<string, Uint8Array>;
+  snapshot: Snapshot;
+  request: InfrastructureBaselineRunRequest | null;
+  links: CompletedProjectionLinks | null;
+}
+interface CurrentWriter {
+  original: Ticket;
+  intent: Intent;
+  predecessor: CompletedProjectionLinks | null;
+  predecessorBytes: Map<string, Uint8Array>;
+  phase: "writing" | "projecting" | "projected" | "fenced";
+}
+export interface TargetProjectionEvidence {
+  plan: unknown;
+  applied_show: unknown;
+  state_readback: unknown;
+  state_reopened: unknown;
+}
+declare const pendingTargetBrand: unique symbol;
+/** Native pending data only; it cannot authorize an ordinary baseline or any host action. */
+export type PendingTargetCandidate = Readonly<{ [pendingTargetBrand]: true }>;
+interface PendingState {
+  declaration: TargetCandidateDeclaration;
+  preparation: TargetCandidatePreparation;
+  boundary: ExecutionBoundary | null;
+  checkWriter: () => void;
+  stopWriter: () => void;
+  beforeSeal: () => Promise<void>;
+  phase: "pending" | "sealing" | "sealed" | "fenced";
+}
+const pendingTargets = new WeakMap<PendingTargetCandidate, PendingState>();
+/** Internal module bridge consumes an actual native cap, never a caller JSON/AEAD declaration. */
+export function consumePendingTargetCandidateForSeal(value: PendingTargetCandidate) {
+  const state = pendingTargets.get(value);
+  requireRecord(state);
+  const fence = () => {
+    state.phase = "fenced";
+    fenceTargetCandidatePreparation(state.preparation);
+    state.stopWriter();
+  };
+  // A nested/repeated denial fences the saved capability even when that call never owned
+  // a reservation. A caller catching its error cannot restore the outer operation.
+  const phase = state.phase;
+  if (phase !== "pending") {
+    fence();
+    throw new Error("invalid-target-candidate");
+  }
+  state.phase = "sealing";
+  const check = () => {
+    try {
+      requireRecord(state.phase === "sealing");
+      assertTargetCandidatePreparation(state.preparation);
+      requireRecord(state.phase === "sealing");
+      state.checkWriter();
+      if (state.boundary)
+        assertInfrastructureBaselineRunProof(state.boundary.proof, state.boundary.request);
+      requireRecord(state.phase === "sealing");
+      state.checkWriter();
+    } catch {
+      fence();
+      throw new Error("invalid-target-candidate");
+    }
+  };
+  return Object.freeze({
+    declaration: state.declaration,
+    check,
+    fence,
+    beforeSeal: async () => {
+      check();
+      await state.beforeSeal();
+      check();
+    },
+    within: async <T>(work: () => Promise<T>): Promise<T> => {
+      try {
+        return await withinTargetCandidatePreparation(state.preparation, () =>
+          state.boundary
+            ? withinInfrastructureBaselineRunProof(
+                state.boundary.proof,
+                state.boundary.request,
+                async () => {
+                  check();
+                  const value = await work();
+                  check();
+                  return value;
+                },
+              )
+            : Promise.resolve().then(async () => {
+                check();
+                const value = await work();
+                check();
+                return value;
+              }),
+        );
+      } catch {
+        fence();
+        throw new Error("invalid-target-candidate");
+      }
+    },
+    complete: () => {
+      check();
+      state.phase = "sealed";
+    },
+  });
+}
+
 /** GET null means a definite absent key only, never permission denial or an ambiguous failure. */
 export interface ControlStore {
   read(key: string): Promise<Uint8Array | null>;
@@ -271,20 +412,28 @@ export class InfrastructureJournal {
   readonly #store: ControlStore;
   readonly #codec: RecordCodec;
   readonly #verify: VerifyInfrastructureBaselineRun | undefined;
+  readonly #clock: () => number;
+  readonly #writers = new WeakMap<Ticket, CurrentWriter>();
+  readonly #generations = new Map<string, CurrentWriter>();
   constructor(
     store: ControlStore,
     codec: RecordCodec,
-    dependencies: { verifyBaselineRun?: VerifyInfrastructureBaselineRun } = {},
+    dependencies: { verifyBaselineRun?: VerifyInfrastructureBaselineRun; now?: () => number } = {},
   ) {
     this.#store = store;
     this.#codec = codec;
     const verify = dependencies.verifyBaselineRun;
     requireRecord(verify === undefined || typeof verify === "function");
     this.#verify = verify;
+    const clock = dependencies.now ?? Date.now;
+    requireRecord(typeof clock === "function");
+    this.#clock = clock;
   }
-  async #read(path: string): Promise<unknown | null> {
+  async #read(path: string, denial?: () => void): Promise<unknown | null> {
+    denial?.();
     const bytes = await this.#store.read(path);
-    return bytes === null ? null : this.#codec.open(path, bytes);
+    denial?.();
+    return bytes === null ? null : this.#codec.open(path, encryptedBytes(bytes));
   }
   async #within<T>(boundary: ExecutionBoundary | null, work: () => Promise<T>): Promise<T> {
     if (boundary === null) return work();
@@ -299,21 +448,33 @@ export class InfrastructureJournal {
     value: unknown,
     historical = false,
     boundary: ExecutionBoundary | null = null,
+    denial?: () => void,
   ): Promise<void> {
     // Refusing an existing history key is a safety check, NOT atomic conditional creation.
+    denial?.();
     if (historical)
       requireRecord((await this.#within(boundary, () => this.#store.read(path))) === null);
+    denial?.();
     const bytes = this.#codec.seal(path, value);
+    denial?.();
     const beforeWrite =
-      boundary === null
+      boundary === null && denial === undefined
         ? undefined
-        : () => assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+        : () => {
+            denial?.();
+            if (boundary) assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+          };
     await this.#within(boundary, () => this.#store.write(path, bytes, beforeWrite));
+    denial?.();
     const readback = await this.#within(boundary, () => this.#store.read(path));
-    requireRecord(readback !== null && Buffer.from(bytes).equals(Buffer.from(readback)));
+    denial?.();
+    requireRecord(
+      readback !== null && Buffer.from(bytes).equals(Buffer.from(encryptedBytes(readback))),
+    );
+    denial?.();
   }
-  async #head(): Promise<Head | null> {
-    const value = await this.#read("current");
+  async #head(denial?: () => void): Promise<Head | null> {
+    const value = await this.#read("current", denial);
     if (value === null) return null;
     const h = exact(value, ["baseline", "pending"]);
     if (h.baseline !== null) generation(h.baseline);
@@ -324,13 +485,19 @@ export class InfrastructureJournal {
   #validateIntent(value: unknown): asserts value is Intent {
     validateIntent(value);
   }
-  async #structural(state: StateEvidence, boundary: ExecutionBoundary | null = null) {
+  async #structural(
+    state: StateEvidence,
+    boundary: ExecutionBoundary | null = null,
+    denial?: () => void,
+  ): Promise<StructuralProjection> {
     const records = new Map<string, Uint8Array>();
     const read = async (path: string) => {
+      denial?.();
       const value = await this.#within(boundary, () => this.#store.read(path));
+      denial?.();
       if (value === null) return null;
-      requireRecord(value instanceof Uint8Array && value.length > 0 && value.length <= limit + 32);
-      const bytes = Uint8Array.from(value);
+      const bytes = encryptedBytes(value);
+      denial?.();
       records.set(path, bytes);
       return this.#codec.open(path, bytes);
     };
@@ -340,6 +507,7 @@ export class InfrastructureJournal {
         records,
         snapshot: { generation: null, state, inputs: null } as Snapshot,
         request: null,
+        links: null,
       };
     const head = exact(current, ["baseline", "pending"]);
     generation(head.baseline);
@@ -363,12 +531,14 @@ export class InfrastructureJournal {
         kind: linked.intent.kind,
         run: linked.intent.run,
       } as InfrastructureBaselineRunRequest,
+      links: { current, intent: linked.intent, baseline, completion } as CompletedProjectionLinks,
     };
   }
   /** Missing baseline is review-required; missing referenced history or any pending intent stops. */
-  async #inspection(state: StateEvidence) {
-    const first = await this.#structural(state);
-    if (first.request === null) return { snapshot: first.snapshot, boundary: null };
+  async #inspection(state: StateEvidence, denial?: () => void) {
+    const first = await this.#structural(state, null, denial);
+    if (first.request === null)
+      return { snapshot: first.snapshot, boundary: null, links: null, records: first.records };
     const verify = this.#verify;
     requireRecord(verify);
     // GET evidence proves ORIGINAL execution only; these exact private records remain locally
@@ -377,9 +547,10 @@ export class InfrastructureJournal {
     let proof: InfrastructureBaselineRunProof;
     try {
       proof = await Promise.race([
-        Promise.resolve().then(() =>
-          verify(capturePrivate(first.request) as InfrastructureBaselineRunRequest),
-        ),
+        Promise.resolve().then(() => {
+          denial?.();
+          return verify(capturePrivate(first.request) as InfrastructureBaselineRunRequest, denial);
+        }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("invalid-control-record")), 60_000);
         }),
@@ -387,15 +558,22 @@ export class InfrastructureJournal {
     } finally {
       clearTimeout(timer);
     }
+    denial?.();
     assertInfrastructureBaselineRunProof(proof, first.request);
     const boundary = { proof, request: first.request };
-    const final = await this.#structural(state, boundary);
+    const final = await this.#structural(state, boundary, denial);
     requireRecord(
       isDeepStrictEqual(first.snapshot, final.snapshot) &&
         isDeepStrictEqual(first.records, final.records),
     );
     assertInfrastructureBaselineRunProof(proof, first.request);
-    return { snapshot: capturePrivate(first.snapshot) as Snapshot, boundary };
+    denial?.();
+    return {
+      snapshot: capturePrivate(first.snapshot) as Snapshot,
+      boundary,
+      links: final.links,
+      records: final.records,
+    };
   }
   async inspect(state: StateEvidence): Promise<Snapshot> {
     state = capturePrivate(state) as StateEvidence;
@@ -446,19 +624,58 @@ export class InfrastructureJournal {
     );
     if (inspected.boundary)
       assertInfrastructureBaselineRunProof(inspected.boundary.proof, inspected.boundary.request);
-    return { generation: intent.generation, binding };
+    const ticket = { generation: intent.generation, binding };
+    const writer: CurrentWriter = {
+      original: { ...ticket },
+      intent: capturePrivate(intent) as Intent,
+      predecessor:
+        inspected.links === null
+          ? null
+          : (capturePrivate(inspected.links) as CompletedProjectionLinks),
+      predecessorBytes: new Map(
+        [...inspected.records]
+          .filter(([path]) => path !== "current")
+          .map(([path, bytes]) => [path, Uint8Array.from(bytes)]),
+      ),
+      phase: "writing",
+    };
+    this.#writers.set(ticket, writer);
+    this.#generations.set(ticket.generation, writer);
+    return ticket;
   }
   async finish(ticket: Ticket, state: StateEvidence): Promise<void> {
+    // A compatible serialized/manual finish grants no current-ticket projection. Matching
+    // legacy attempts also fence pending data already prepared by this journal instance.
+    const native = this.#writers.get(ticket);
+    const nativePhase = native?.phase;
+    if (native) native.phase = "fenced";
+    requireRecord(nativePhase !== "projecting");
     const captured = capturePrivate({ ticket, state }) as { ticket: Ticket; state: StateEvidence };
     ({ ticket, state } = captured);
+    const writer = this.#generations.get(ticket.generation);
+    if (writer) {
+      const phase = writer.phase;
+      writer.phase = "fenced";
+      requireRecord(phase !== "projecting");
+    }
+    await this.#finish(ticket, state);
+  }
+  async #finish(
+    ticket: Ticket,
+    state: StateEvidence,
+    denial?: () => void,
+    expectedIntent?: Intent,
+  ) {
+    denial?.();
     generation(ticket.generation);
     digest(ticket.binding);
     validateState(state);
-    const intent = await this.#read(`intents/${ticket.generation}`);
+    const intent = await this.#read(`intents/${ticket.generation}`, denial);
     this.#validateIntent(intent);
     requireRecord(intent.binding === ticket.binding);
+    if (expectedIntent) requireRecord(isDeepStrictEqual(intent, expectedIntent));
     requireRecord(
-      isDeepStrictEqual(await this.#head(), {
+      isDeepStrictEqual(await this.#head(denial), {
         baseline: intent.previous,
         pending: intent.generation,
       }),
@@ -471,19 +688,309 @@ export class InfrastructureJournal {
         : state.serial > intent.before.serial,
     );
     const baseline: Baseline = { intent, state };
-    await this.#persist(`baselines/${intent.generation}`, baseline, true);
-    await this.#persist("current", { baseline: intent.generation, pending: intent.generation });
+    await this.#persist(`baselines/${intent.generation}`, baseline, true, null, denial);
+    await this.#persist(
+      "current",
+      { baseline: intent.generation, pending: intent.generation },
+      false,
+      null,
+      denial,
+    );
     await this.#persist(
       `completed/${intent.generation}`,
       { generation: intent.generation, baseline: privateDigest(baseline) },
       true,
+      null,
+      denial,
     );
-    await this.#persist("current", { baseline: intent.generation, pending: null });
+    await this.#persist(
+      "current",
+      { baseline: intent.generation, pending: null },
+      false,
+      null,
+      denial,
+    );
     // Reopen all links, not merely the last write, before downstream use is permitted.
     // This current writer JOB has not finished yet. Structural reopen supplies no downstream
     // authority; subsequent ordinary inspect/begin independently require its final success.
-    const reopened = await this.#structural(state);
+    const reopened = await this.#structural(state, null, denial);
     requireRecord(reopened.snapshot.generation === ticket.generation);
+    denial?.();
+    return reopened;
+  }
+  /** The factory-captured clock starts a denial-only preparation, never a job/approval proof. */
+  prepareTargetCandidates(input: {
+    targets: readonly TargetRole[];
+    release: ReleaseIdentity;
+    producer: AppliedTargetProducer;
+    expires_at?: number;
+  }): TargetCandidatePreparation {
+    return prepareTargetCandidates(input, { now: this.#clock });
+  }
+  async #reopenPredecessor(writer: CurrentWriter, denial: () => void): Promise<void> {
+    for (const [path, expected] of writer.predecessorBytes) {
+      denial();
+      const value = await this.#store.read(path);
+      denial();
+      requireRecord(Buffer.from(encryptedBytes(value)).equals(Buffer.from(expected)));
+      denial();
+    }
+    denial();
+  }
+  async #reopenProjection(
+    state: StateEvidence,
+    records: Map<string, Uint8Array>,
+    boundary: ExecutionBoundary | null,
+    denial: () => void,
+  ): Promise<void> {
+    const reopened = await this.#structural(state, boundary, denial);
+    requireRecord(isDeepStrictEqual(reopened.records, records));
+    denial();
+  }
+  #targetCandidates(
+    preparation: TargetCandidatePreparation,
+    data: TargetCandidatePreparationData,
+    evidence: TargetProjectionEvidence,
+    reopened: StructuralProjection,
+    prior: CompletedProjectionLinks | null,
+    boundary: ExecutionBoundary | null,
+    mode: "apply" | "no-changes",
+    checkWriter: () => void,
+    stopWriter: () => void,
+    beforeSeal: () => Promise<void>,
+  ): readonly PendingTargetCandidate[] {
+    const links = reopened.links;
+    requireRecord(links && reopened.snapshot.generation);
+    const declarations = data.targets.map((target) => {
+      assertTargetCandidatePreparation(preparation);
+      checkWriter();
+      const envelope = deriveAppliedTarget({
+        target,
+        release: data.release,
+        producer: data.producer,
+        mode,
+        ...evidence,
+        snapshot: reopened.snapshot,
+        completed: links,
+        prior_completed:
+          prior === null
+            ? null
+            : {
+                generation: prior.intent.generation,
+                intent: prior.intent,
+                baseline: prior.baseline,
+                completion: prior.completion,
+              },
+      });
+      assertTargetCandidatePreparation(preparation);
+      checkWriter();
+      return targetCandidateDeclaration(
+        {
+          schema: 2,
+          purpose: "tarubot-applied-target-candidate-v2",
+          target,
+          release: data.release,
+          producer: data.producer,
+          mode,
+          source_job_path: mode === "apply" ? targetIssuancePins.apply : targetIssuancePins.plan,
+          baseline_writer: { kind: links.intent.kind, run: links.intent.run },
+          envelope,
+          issued_at: data.issued_at,
+          expires_at: data.expires_at,
+        },
+        { target, release: data.release, producer: data.producer, mode },
+      );
+    });
+    assertTargetCandidatePreparation(preparation);
+    checkWriter();
+    if (boundary) assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+    return Object.freeze(
+      declarations.map((declaration) => {
+        const value = Object.freeze({}) as PendingTargetCandidate;
+        pendingTargets.set(value, {
+          declaration,
+          preparation,
+          boundary,
+          checkWriter,
+          stopWriter,
+          beforeSeal,
+          phase: "pending",
+        });
+        return value;
+      }),
+    );
+  }
+  /** No-change projection retains the same real original-writer proof and exact reopened bytes. */
+  async inspectTargetCandidates(
+    preparation: TargetCandidatePreparation,
+    value: TargetProjectionEvidence & { expected_snapshot: Snapshot },
+  ): Promise<readonly PendingTargetCandidate[]> {
+    let stopped = false;
+    try {
+      const data = reserveTargetCandidatePreparation(preparation);
+      const checkWriter = () => requireRecord(!stopped);
+      const denial = () => {
+        assertTargetCandidatePreparation(preparation);
+        checkWriter();
+      };
+      const captured = exact(capturePrivate(value), [
+        "expected_snapshot",
+        "plan",
+        "applied_show",
+        "state_readback",
+        "state_reopened",
+      ]);
+      denial();
+      const evidence = {
+        plan: captured.plan,
+        applied_show: captured.applied_show,
+        state_readback: captured.state_readback,
+        state_reopened: captured.state_reopened,
+      };
+      const observed = stateEvidence(evidence.state_readback);
+      requireRecord(isDeepStrictEqual(stateEvidence(evidence.state_reopened), observed));
+      const inspected = await withinTargetCandidatePreparation(preparation, () =>
+        this.#inspection(observed, denial),
+      );
+      denial();
+      requireRecord(
+        inspected.boundary &&
+          inspected.links &&
+          isDeepStrictEqual(inspected.snapshot, captured.expected_snapshot),
+      );
+      const { boundary } = inspected;
+      const reopened = {
+        snapshot: inspected.snapshot,
+        records: inspected.records,
+        request: boundary.request,
+        links: inspected.links,
+      };
+      const stopWriter = () => {
+        stopped = true;
+      };
+      const beforeSeal = () =>
+        this.#reopenProjection(observed, inspected.records, boundary, denial);
+      return this.#targetCandidates(
+        preparation,
+        data,
+        evidence,
+        reopened,
+        null,
+        boundary,
+        "no-changes",
+        checkWriter,
+        stopWriter,
+        beforeSeal,
+      );
+    } catch {
+      stopped = true;
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
+  }
+  /**
+   * Current-ticket projection is pending data, not ordinary baseline reuse. Reserve the exact
+   * in-process begin object before caller hooks; copied/manual tickets cannot enter this path.
+   */
+  async finishTargetCandidates(
+    ticket: Ticket,
+    preparation: TargetCandidatePreparation,
+    value: TargetProjectionEvidence,
+  ): Promise<readonly PendingTargetCandidate[]> {
+    const writer = this.#writers.get(ticket);
+    if (!writer) {
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
+    const phase = writer.phase;
+    writer.phase = "fenced";
+    if (phase !== "writing") {
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
+    writer.phase = "projecting";
+    try {
+      const data = reserveTargetCandidatePreparation(preparation);
+      const originalTicket = () => {
+        requireRecord(isDeepStrictEqual(capturePrivate(ticket), writer.original));
+      };
+      const checkWriter = () => {
+        requireRecord(writer.phase === "projecting");
+        originalTicket();
+        requireRecord(writer.phase === "projecting");
+      };
+      const denial = () => {
+        assertTargetCandidatePreparation(preparation);
+        checkWriter();
+      };
+      const capturedTicket = capturePrivate(ticket) as Ticket;
+      requireRecord(
+        isDeepStrictEqual(capturedTicket, writer.original) &&
+          writer.intent.kind === "apply" &&
+          isDeepStrictEqual(writer.intent.run, {
+            commit: data.release.commit,
+            run: data.release.publication_run,
+          }) &&
+          writer.predecessor,
+      );
+      const evidence = exact(capturePrivate(value), [
+        "plan",
+        "applied_show",
+        "state_readback",
+        "state_reopened",
+      ]) as unknown as TargetProjectionEvidence;
+      denial();
+      const observed = stateEvidence(evidence.state_readback);
+      requireRecord(isDeepStrictEqual(stateEvidence(evidence.state_reopened), observed));
+      const reopened = await withinTargetCandidatePreparation(preparation, async () => {
+        await this.#reopenPredecessor(writer, denial);
+        const result = await this.#finish(capturedTicket, observed, denial, writer.intent);
+        await this.#reopenPredecessor(writer, denial);
+        denial();
+        return result;
+      });
+      denial();
+      // Prepare every role atomically as local data; no partial candidate escapes if one fails.
+      const candidates = this.#targetCandidates(
+        preparation,
+        data,
+        evidence,
+        reopened,
+        writer.predecessor,
+        null,
+        "apply",
+        checkWriter,
+        () => {
+          writer.phase = "fenced";
+        },
+        async () => {
+          const pendingDenial = () => {
+            assertTargetCandidatePreparation(preparation);
+            requireRecord(writer.phase === "projected");
+            originalTicket();
+            requireRecord(writer.phase === "projected");
+          };
+          await this.#reopenPredecessor(writer, pendingDenial);
+          await this.#reopenProjection(observed, reopened.records, null, pendingDenial);
+        },
+      );
+      writer.phase = "projected";
+      // Pending guards require the final local phase and fence if legacy finish intervenes.
+      for (const candidate of candidates) {
+        const pending = pendingTargets.get(candidate);
+        requireRecord(pending);
+        pending.checkWriter = () => {
+          requireRecord(writer.phase === "projected");
+          originalTicket();
+          requireRecord(writer.phase === "projected");
+        };
+      }
+      return candidates;
+    } catch {
+      writer.phase = "fenced";
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
   }
 }
 

@@ -27,6 +27,8 @@ import {
   type TargetDescriptor,
 } from "../../scripts/ssh-trust.js";
 import type { GitHubReader, GitHubReadRequest } from "../../scripts/trust-run.js";
+import { targetCandidatePreparation } from "../../scripts/target-candidate.js";
+import { candidateRelease, candidateProducer } from "../fixtures/infra/applied-target.js";
 
 const instant = 1_800_000_000_000;
 const api = "https://api.github.com/repos/deconfined/tarubot";
@@ -562,6 +564,21 @@ function nativeFixture(target: ControlConsumerScope["target"] = "infra") {
   };
 }
 type NativeFixture = ReturnType<typeof nativeFixture>;
+test("infrastructure factory keeps its captured native clock for denial-only candidate preparation", () => {
+  const f = nativeFixture(),
+    journal = f.make() as InfrastructureJournal;
+  const calls = structuredClone(f.calls);
+  const preparation = journal.prepareTargetCandidates({
+    targets: ["staging"],
+    release: candidateRelease,
+    producer: candidateProducer,
+  });
+  expect(targetCandidatePreparation(preparation).issued_at).toBe(instant);
+  expect(f.seen).toHaveLength(0);
+  expect(f.calls).toEqual(calls);
+  f.clock.now += 60_000;
+  expect(() => targetCandidatePreparation(preparation)).toThrow("invalid-target-candidate");
+});
 function ordinaryCalls(f: NativeFixture) {
   return f.calls.filter((call) => call.method !== "presign" && !call.key.includes("/recovery/"));
 }

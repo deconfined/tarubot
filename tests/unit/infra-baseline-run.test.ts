@@ -13,6 +13,11 @@ import {
   type ControlStore,
 } from "../../scripts/infra-control.js";
 import { baselineRunFixture, baselineFixtureInstant } from "../fixtures/infra/baseline-run.js";
+import {
+  assertTargetCandidatePreparation,
+  prepareTargetCandidates,
+  withinTargetCandidatePreparation,
+} from "../../scripts/target-candidate.js";
 
 const request: InfrastructureBaselineRunRequest = {
   kind: "baseline",
@@ -279,6 +284,231 @@ describe("original infrastructure JOB execution barrier", () => {
     expect(child.exitCode).toBe(0);
     expect(child.stdout.byteLength).toBe(0);
     expect(child.stderr.byteLength).toBe(0);
+  });
+  test("optional callback only refuses and the original proof retains that exact refusal", async () => {
+    for (const returned of [true, false, {}, Promise.resolve()]) {
+      const f = baselineRunFixture(request);
+      const verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+        get: f.get,
+        now: () => f.clock.now,
+      });
+      await expect(verify(request, (() => returned) as () => void)).rejects.toThrow(failure);
+      expect(f.seen).toHaveLength(0);
+    }
+    const f = baselineRunFixture(request),
+      verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+        get: f.get,
+        now: () => f.clock.now,
+      });
+    let denied = false;
+    const proof = await verify(request, () => {
+      if (denied) throw new Error("invented-private-preparation-denial");
+    });
+    expect(() => assertInfrastructureBaselineRunProof(proof, request)).not.toThrow();
+    denied = true;
+    expect(() => assertInfrastructureBaselineRunProof(proof, request)).toThrow(failure);
+    denied = false;
+    // A fresh one-argument invocation remains compatible, but never rebinds the old proof.
+    const fresh = await verify(request);
+    expect(() => assertInfrastructureBaselineRunProof(fresh, request)).not.toThrow();
+    expect(() => assertInfrastructureBaselineRunProof(proof, request)).toThrow(failure);
+  });
+  test("scheduled mock GET cannot offer after its original refusal changes", async () => {
+    const f = baselineRunFixture(request);
+    let denied = false,
+      samples = 0,
+      offers = 0;
+    const verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+      now: () => f.clock.now,
+      get: async (input) => {
+        offers++;
+        return f.get(input);
+      },
+    });
+    await expect(
+      verify(request, () => {
+        if (++samples === 1)
+          queueMicrotask(() => {
+            denied = true;
+          });
+        if (denied) throw new Error("invented-original-budget-expired");
+      }),
+    ).rejects.toThrow(failure);
+    expect(offers).toBe(0);
+  });
+  test("the actual-offer clock cannot consume its enclosing deadline before the last refusal", async () => {
+    const f = baselineRunFixture(request);
+    let denied = false,
+      samples = 0,
+      offers = 0;
+    const verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+      now: () => {
+        // Initial, post-snapshot, scheduling and then actual-offer clock samples.
+        if (++samples === 4) denied = true;
+        return f.clock.now;
+      },
+      get: async (input) => {
+        offers++;
+        return f.get(input);
+      },
+    });
+    await expect(
+      verify(request, () => {
+        if (denied) throw new Error("invented-shorter-original-deadline");
+      }),
+    ).rejects.toThrow(failure);
+    expect(samples).toBe(4);
+    expect(offers).toBe(0);
+  });
+  test("expired original preparation fences a held response without any NEXT mock GET or rebind", async () => {
+    const f = baselineRunFixture(request);
+    const release = {
+      version: "2.36.24",
+      commit: "a".repeat(40),
+      config_commit: "a".repeat(40),
+      digest: `sha256:${"e".repeat(64)}`,
+      publication_run: "34567",
+      schema_head: "010_invented.sql",
+    };
+    const preparation = prepareTargetCandidates(
+      {
+        targets: ["staging"],
+        release,
+        producer: {
+          repository: "deconfined/tarubot",
+          workflow_ref: "deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main",
+          ref: "refs/heads/main",
+          event: "push",
+          attempt: 1,
+          commit: release.commit,
+          run: release.publication_run,
+        },
+        expires_at: baselineFixtureInstant + 2000,
+      },
+      { now: () => f.clock.now },
+    );
+    let held = false,
+      announce!: () => void,
+      resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+        announce = resolve;
+      }),
+      waiting = new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+      offers: string[] = [];
+    const verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+      now: () => f.clock.now,
+      get: async (input) => {
+        offers.push(input.url);
+        if (!held) {
+          held = true;
+          announce();
+          await waiting;
+        }
+        return f.get(input);
+      },
+    });
+    const old = withinTargetCandidatePreparation(preparation, () =>
+      verify(request, () => assertTargetCandidatePreparation(preparation)),
+    ).then(
+      () => "unexpected-proof",
+      (error: Error) => error.message,
+    );
+    await entered;
+    expect(await old).toBe("invalid-target-candidate");
+    const fresh = await verify(request);
+    expect(() => assertInfrastructureBaselineRunProof(fresh, request)).not.toThrow();
+    const count = offers.length;
+    resume();
+    await Bun.sleep(0);
+    expect(offers).toHaveLength(count);
+  });
+  test("physical origin precedes the first clock and hostile request snapshot", () => {
+    const source = `
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {baselineRunFixture}=await import(${JSON.stringify(new URL("../fixtures/infra/baseline-run.ts", import.meta.url).href)});
+      const {createInfrastructureBaselineRunVerifier}=await import(${JSON.stringify(new URL("../../scripts/infra-baseline-run.ts", import.meta.url).href)});
+      const request=${JSON.stringify(request)};
+      for(const phase of ["clock","input"]){
+        elapsed=0;const f=baselineRunFixture(request);let first=true,offers=0;
+        const verify=createInfrastructureBaselineRunVerifier(f.configuration,{now:()=>{if(phase==="clock"&&first){first=false;elapsed=60000;}return f.clock.now;},get:async input=>{offers++;return f.get(input);}});
+        const input=phase==="input"?new Proxy(request,{ownKeys(target){elapsed=60000;return Reflect.ownKeys(target);}}):request;
+        try{await verify(input);process.exit(1);}catch(error){if(error.message!==${JSON.stringify(failure)})process.exit(2);}
+        if(offers!==0)process.exit(3);
+      }
+    `;
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+      env: { TZ: "UTC" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(child.stdout.byteLength).toBe(0);
+    expect(child.stderr.byteLength).toBe(0);
+  });
+  test("constructor captures the mock reader exactly once", async () => {
+    const f = baselineRunFixture(request);
+    let captures = 0;
+    const dependencies = {
+      now: () => f.clock.now,
+      get get() {
+        captures++;
+        return captures === 1 ? f.get : undefined;
+      },
+    };
+    const verify = createInfrastructureBaselineRunVerifier(
+      f.configuration,
+      dependencies as Parameters<typeof createInfrastructureBaselineRunVerifier>[1],
+    );
+    const proof = await verify(request);
+    expect(captures).toBe(1);
+    expect(f.seen.length).toBeGreaterThan(0);
+    expect(() => assertInfrastructureBaselineRunProof(proof, request)).not.toThrow();
+  });
+  test("swallowed snapshot, clock and refusal reentry cannot restore an original proof", async () => {
+    for (const phase of ["snapshot", "clock", "denial"]) {
+      for (const matching of [false, true]) {
+        const f = baselineRunFixture(request);
+        let proof: unknown,
+          enabled = false,
+          refusals = 0;
+        const reenter = () => {
+          if (!enabled) return;
+          enabled = false;
+          const nested = matching ? request : { ...request, run: { ...request.run, run: "23457" } };
+          try {
+            assertInfrastructureBaselineRunProof(proof, nested);
+          } catch {
+            refusals++;
+          }
+        };
+        const verify = createInfrastructureBaselineRunVerifier(f.configuration, {
+          get: f.get,
+          now: () => {
+            if (phase === "clock") reenter();
+            return f.clock.now;
+          },
+        });
+        proof = await verify(request, () => {
+          if (phase === "denial") reenter();
+        });
+        enabled = true;
+        const expected =
+          phase === "snapshot"
+            ? new Proxy(request, {
+                ownKeys(target) {
+                  reenter();
+                  return Reflect.ownKeys(target);
+                },
+              })
+            : request;
+        expect(() => assertInfrastructureBaselineRunProof(proof, expected)).toThrow(failure);
+        expect(refusals).toBe(1);
+        expect(() => assertInfrastructureBaselineRunProof(proof, request)).toThrow(failure);
+      }
+    }
   });
 });
 

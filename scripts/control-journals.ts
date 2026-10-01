@@ -198,6 +198,7 @@ export function createControlJournal(
     const journal =
       c.target === "infra"
         ? new InfrastructureJournal(store, new RecordCodec(c.passphrase, c.backend), {
+            ...(now === undefined ? {} : { now }),
             // Capture actual native evidence, never a caller-selected approval/receipt callback.
             verifyBaselineRun: createInfrastructureBaselineRunVerifier(
               {
