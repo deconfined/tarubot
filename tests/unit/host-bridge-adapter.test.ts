@@ -96,6 +96,200 @@ async function run(
   return frames;
 }
 describe("private host framing coordinator", () => {
+  test("invalid native Promise clocks are drained without a then getter or handler offer", () => {
+    const modulePath = new URL("../../scripts/host-bridge-adapter.ts", import.meta.url).pathname;
+    const program = `
+      import {runInNewContext} from "node:vm";
+      const {createHostBridgeCoordinator}=await import(${JSON.stringify(modulePath)});
+      let unhandled=0,thenReads=0,offers=0;
+      process.on("unhandledRejection",()=>unhandled++);
+      const codes=[];
+      for(const mode of ["first","later"])for(const foreign of [false,true]){
+        let armed=mode==="first";
+        const now=()=>{
+          if(!armed)return 1_800_000_000_000;
+          const value=foreign?runInNewContext('Promise.reject(Error("invented"))'):Promise.reject(Error("invented"));
+          Object.defineProperty(value,"then",{get(){thenReads++;throw Error("invented then");}});
+          return value;
+        };
+        const handle=async()=>{offers++;return 0;};
+        const c=createHostBridgeCoordinator({exec:handle,put:handle,fetch:handle},{operation_timeout_ms:30_000,now});
+        try{const a=c.allocate("exec");armed=true;c.remaining(a);codes.push("accepted");}
+        catch(e){codes.push(e.message);}
+        c.fence();
+      }
+      await Bun.sleep(20);console.log(JSON.stringify({unhandled,thenReads,offers,codes}));
+    `;
+    // A separate runtime observes genuine unhandled events; only invented callbacks exist.
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(Buffer.from(child.stderr).toString()).toBe("");
+    expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+      unhandled: 0,
+      thenReads: 0,
+      offers: 0,
+      codes: Array(4).fill("host-bridge-adapter-failed"),
+    });
+  });
+  test("an observed shortened allocation expires before another clock or handler offer", () => {
+    let wall = 1_800_000_000_000,
+      clocks = 0;
+    const coordinator = createHostBridgeCoordinator(handlers(), {
+      operation_timeout_ms: 30_000,
+      now: () => {
+        clocks++;
+        return wall;
+      },
+    });
+    const allocation = coordinator.allocate("exec");
+    wall += 29_980;
+    expect(coordinator.remaining(allocation)).toBeLessThanOrEqual(20);
+    const before = clocks,
+      end = performance.now() + 60;
+    while (performance.now() < end) {
+      /* Consume the original short cap while its wall clock stays frozen. */
+    }
+    expect(() => coordinator.remaining(allocation)).toThrow("host-bridge-adapter-failed");
+    expect(clocks).toBe(before);
+    expect(coordinator.fenced).toBe(true);
+    expect(() => coordinator.allocate("exec")).toThrow("host-bridge-adapter-failed");
+  });
+  test("channel capture that shortens time and consumes it cannot offer the next getter or lock", async () => {
+    let wall = 1_800_000_000_000,
+      outputGets = 0,
+      calls = 0;
+    const coordinator = createHostBridgeCoordinator(
+      handlers({
+        exec: async () => {
+          calls++;
+          return 0;
+        },
+      }),
+      { operation_timeout_ms: 30_000, now: () => wall },
+    );
+    const allocation = coordinator.allocate("exec");
+    const source = new ReadableStream<Uint8Array>();
+    const output = new WritableStream<Uint8Array>();
+    await refused(
+      coordinator.serve(allocation, {
+        get input() {
+          wall += 29_980;
+          const end = performance.now() + 60;
+          while (performance.now() < end) {
+            /* One owned getter consumes its own shortened allowance. */
+          }
+          return source;
+        },
+        get output() {
+          outputGets++;
+          return output;
+        },
+      }),
+    );
+    expect(outputGets).toBe(0);
+    expect(calls).toBe(0);
+    expect(source.locked).toBe(false);
+    expect(output.locked).toBe(false);
+    expect(coordinator.fenced).toBe(true);
+  });
+  test("returned native stream locks remain owned for cleanup when post-method capture expires", async () => {
+    for (const mode of ["reader", "writer"] as const) {
+      let wall = 1_800_000_000_000,
+        cancels = 0,
+        aborts = 0,
+        offers = 0;
+      const handle = async () => {
+        offers++;
+        return 0;
+      };
+      const coordinator = createHostBridgeCoordinator(
+        { exec: handle, put: handle, fetch: handle },
+        { operation_timeout_ms: 30_000, now: () => wall },
+      );
+      const allocation = coordinator.allocate("exec");
+      const source = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancels++;
+        },
+      });
+      const output = new WritableStream<Uint8Array>({
+        abort() {
+          aborts++;
+        },
+      });
+      const shorten = () => {
+        wall += 29_980;
+        const end = performance.now() + 60;
+        while (performance.now() < end) {
+          /* Cleanup owns the accepted handle before the post-method observation refuses. */
+        }
+      };
+      const read = source.getReader.bind(source),
+        write = output.getWriter.bind(output);
+      if (mode === "reader")
+        Object.defineProperty(source, "getReader", {
+          value: () => {
+            const reader = read();
+            shorten();
+            return reader;
+          },
+        });
+      else
+        Object.defineProperty(output, "getWriter", {
+          value: () => {
+            const writer = write();
+            shorten();
+            return writer;
+          },
+        });
+      await refused(coordinator.serve(allocation, { input: source, output }));
+      await Bun.sleep(0);
+      expect(offers).toBe(0);
+      expect(cancels).toBe(1);
+      expect(aborts).toBe(mode === "writer" ? 1 : 0);
+      expect(source.locked).toBe(false);
+      expect(output.locked).toBe(false);
+      expect(coordinator.fenced).toBe(true);
+    }
+  });
+  test("later allocation observations shorten an already held handler wait", async () => {
+    const held = deferred<number>(),
+      ready = deferred<void>();
+    let wall = 1_800_000_000_000,
+      settled = false;
+    const e = exchange(
+      handlers({
+        exec: async (io) => {
+          await input(io);
+          ready.resolve();
+          return held.promise;
+        },
+      }),
+      "exec",
+      { operation_timeout_ms: 30_000, now: () => wall },
+    );
+    const running = run(e.client, { kind: "exec", command: ["invented"] });
+    void running.catch(() => {});
+    void e.serving.catch(() => {
+      settled = true;
+    });
+    await ready.promise;
+    wall += 29_980;
+    expect(e.coordinator.remaining(e.allocation)).toBeLessThanOrEqual(20);
+    await Bun.sleep(80);
+    expect(settled).toBe(true);
+    await refused(e.serving);
+    held.resolve(0);
+    await running.catch(() => {});
+    e.client.abort();
+    expect(e.coordinator.fenced).toBe(true);
+    expect(() => e.coordinator.allocate("exec")).toThrow("host-bridge-adapter-failed");
+  });
   test("duplex exec preserves ordinary remote code and private binary stdout/stderr", async () => {
     const bytes = Uint8Array.from({ length: 256 }, (_, index) => index);
     const e = exchange(

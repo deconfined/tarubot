@@ -22,6 +22,7 @@ const byteLength = Object.getOwnPropertyDescriptor(
   "byteLength",
 )?.get;
 const setBytes = Uint8Array.prototype.set;
+const nativeThen = Promise.prototype.then;
 
 export type HostBridgeOperation = "exec" | "put" | "fetch";
 export type HostBridgeFrame =
@@ -63,11 +64,12 @@ function copyBytes(value: unknown, limit: number): Uint8Array {
   return output;
 }
 /** Bounded plain data only: no getters, symbols, prototypes, sparse arrays or toJSON calls. */
-function snapshot(value: unknown): unknown {
+function snapshot(value: unknown, check: () => void = () => {}): unknown {
   let nodes = 0;
   let bytes = 0;
   const ancestors = new Set<object>();
   const copy = (input: unknown, depth: number): unknown => {
+    check();
     valid(++nodes <= 256 && depth <= 8);
     if (input === null || typeof input === "boolean") return input;
     if (typeof input === "number") {
@@ -80,21 +82,26 @@ function snapshot(value: unknown): unknown {
       return input;
     }
     valid(input !== null && typeof input === "object" && !ancestors.has(input));
-    valid(Object.getOwnPropertySymbols(input).length === 0);
+    const symbols = Object.getOwnPropertySymbols(input);
+    check();
+    valid(symbols.length === 0);
     ancestors.add(input);
     const fields = Object.getOwnPropertyDescriptors(input);
+    check();
     let output: unknown;
     if (Array.isArray(input)) {
-      valid(input.length <= 32 && Object.keys(fields).length === input.length + 1);
-      output = Array.from({ length: input.length }, (_, index) => {
+      const length: unknown = fields.length?.value;
+      valid(typeof length === "number" && Number.isSafeInteger(length) && length <= 32);
+      valid(Object.keys(fields).length === length + 1);
+      output = Array.from({ length }, (_, index) => {
         const field = fields[String(index)];
         valid(field?.enumerable && Object.hasOwn(field, "value"));
         return copy(field.value, depth + 1);
       });
     } else {
-      valid(
-        Object.getPrototypeOf(input) === Object.prototype || Object.getPrototypeOf(input) === null,
-      );
+      const prototype = Object.getPrototypeOf(input);
+      check();
+      valid(prototype === Object.prototype || prototype === null);
       valid(Object.keys(fields).length <= 32);
       const result: Plain = {};
       for (const [key, field] of Object.entries(fields)) {
@@ -206,11 +213,16 @@ function frame(value: unknown): HostBridgeFrame {
   return input as unknown as HostBridgeFrame;
 }
 /** Copy data without reading getters; metadata is copied separately before the first await. */
-function offeredFrame(value: unknown): HostBridgeFrame {
+function offeredFrame(value: unknown, check: () => void): HostBridgeFrame {
   valid(value !== null && typeof value === "object" && !Array.isArray(value));
-  valid(Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-  valid(Object.getOwnPropertySymbols(value).length === 0);
+  const prototype = Object.getPrototypeOf(value);
+  check();
+  valid(prototype === Object.prototype || prototype === null);
+  const symbols = Object.getOwnPropertySymbols(value);
+  check();
+  valid(symbols.length === 0);
   const fields = Object.getOwnPropertyDescriptors(value);
+  check();
   valid(Object.keys(fields).length <= 3);
   for (const field of Object.values(fields))
     valid(field.enumerable && Object.hasOwn(field, "value"));
@@ -219,7 +231,7 @@ function offeredFrame(value: unknown): HostBridgeFrame {
     valid(Object.keys(fields).sort().join("\0") === "bytes\0kind");
     return frame({ kind, bytes: fields.bytes?.value });
   }
-  return frame(snapshot(value));
+  return frame(snapshot(value, check));
 }
 /** Duplicate decoded keys and bounded JSON syntax are checked before JSON.parse builds data. */
 function metadata(bytes: Uint8Array): HostBridgeFrame {
@@ -301,11 +313,15 @@ function direction(): Direction {
 class Session implements HostBridgeFrames {
   readonly #configuration: HostBridgeFrameConfiguration;
   readonly #nonce: Uint8Array;
-  readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
-  readonly #writer: WritableStreamDefaultWriter<Uint8Array>;
+  #reader!: ReadableStreamDefaultReader<Uint8Array>;
+  #writer!: WritableStreamDefaultWriter<Uint8Array>;
   readonly #now: () => number;
   readonly #started: number;
   readonly #physicalStarted: number;
+  #physicalEnd: number;
+  #checking = false;
+  #capturing = false;
+  #captureAnchor: number | undefined;
   #last: number;
   #failed = false;
   #uncertain = false;
@@ -320,7 +336,8 @@ class Session implements HostBridgeFrames {
   #wireWritten = 0;
   #chunk: Uint8Array = new Uint8Array(0);
   #offset = 0;
-  #timer: ReturnType<typeof setTimeout>;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #timerEnd: number | undefined;
   readonly #rejection: Promise<never>;
   #reject!: (error: Error) => void;
   readonly #ordinaryRejection: Promise<never>;
@@ -349,27 +366,24 @@ class Session implements HostBridgeFrames {
         input.timeout_ms <= 3_600_000,
     );
     this.#configuration = Object.freeze(input) as unknown as HostBridgeFrameConfiguration;
+    this.#physicalEnd = this.#physicalStarted + this.#configuration.timeout_ms;
     this.#nonce = Buffer.from(this.#configuration.nonce, "hex");
     this.#now = channels.now ?? Date.now;
     valid(typeof this.#now === "function");
-    this.#started = this.#now();
+    const first: unknown = this.#now();
+    if (typeof first !== "number") {
+      try {
+        void Reflect.apply(nativeThen, first, [undefined, () => {}]);
+      } catch {}
+    }
+    valid(typeof first === "number");
+    this.#started = first;
     this.#last = this.#started;
     valid(
       Number.isSafeInteger(this.#started) &&
         this.#started > 0 &&
         performance.now() - this.#physicalStarted < this.#configuration.timeout_ms,
     );
-    valid(source instanceof ReadableStream && output instanceof WritableStream);
-    valid(!usedStreams.has(source) && !usedStreams.has(output) && !source.locked && !output.locked);
-    usedStreams.add(source);
-    usedStreams.add(output);
-    this.#reader = source.getReader();
-    try {
-      this.#writer = output.getWriter();
-    } catch {
-      this.#reader.releaseLock();
-      throw new Error(failure);
-    }
     this.#rejection = new Promise<never>((_, reject) => {
       this.#reject = reject;
     });
@@ -378,28 +392,102 @@ class Session implements HostBridgeFrames {
       this.#rejectOrdinary = reject;
     });
     void this.#ordinaryRejection.catch(() => {});
-    this.#timer = setTimeout(
-      () => this.#stop(),
-      this.#configuration.timeout_ms - (performance.now() - this.#physicalStarted),
-    );
+    try {
+      valid(source instanceof ReadableStream && output instanceof WritableStream);
+      valid(!usedStreams.has(source) && !usedStreams.has(output));
+      valid(!this.#capture(() => source.locked));
+      valid(!this.#capture(() => output.locked));
+      usedStreams.add(source);
+      usedStreams.add(output);
+      // Bind methods under the FIRST clock's original window, before either native lock.
+      const getReader = this.#capture(
+        () => source.getReader.bind(source) as () => ReadableStreamDefaultReader<Uint8Array>,
+      );
+      // Retain each returned native handle before post-hook refusal. Teardown must still own
+      // an accepted lock when the method's synchronous cost consumed the original deadline.
+      this.#capture(() => {
+        this.#reader = getReader();
+      });
+      const getWriter = this.#capture(() => output.getWriter.bind(output));
+      this.#capture(() => {
+        this.#writer = getWriter();
+      });
+    } catch {
+      this.#stop();
+      throw new Error(failure);
+    }
+    this.#rearm();
   }
   #check(terminalFlush = false): void {
     valid(!this.#failed && !this.#finished && (!this.#uncertain || terminalFlush));
     this.#checkTime();
   }
   #checkTime(): void {
-    const at = this.#now();
-    valid(
-      Number.isSafeInteger(at) &&
-        at >= this.#last &&
-        at - this.#started < this.#configuration.timeout_ms &&
-        performance.now() - this.#physicalStarted < this.#configuration.timeout_ms,
-    );
-    this.#last = at;
+    const before = Math.min(performance.now(), this.#captureAnchor ?? Infinity);
+    valid(!this.#checking && performance.now() < this.#physicalEnd);
+    const alreadyFailed = this.#failed;
+    this.#checking = true;
+    try {
+      const at: unknown = this.#now();
+      if (typeof at !== "number") {
+        try {
+          void Reflect.apply(nativeThen, at, [undefined, () => {}]);
+        } catch {}
+      }
+      valid(
+        typeof at === "number" &&
+          this.#failed === alreadyFailed &&
+          Number.isSafeInteger(at) &&
+          at >= this.#last &&
+          at - this.#started < this.#configuration.timeout_ms,
+      );
+      this.#last = at;
+      // Retain every observed shorter wall allowance from BEFORE the current owned hook.
+      // This end only shrinks, including while a sink or source acknowledgement is held.
+      this.#physicalEnd = Math.min(
+        this.#physicalEnd,
+        before + this.#configuration.timeout_ms - (at - this.#started),
+      );
+      valid(performance.now() < this.#physicalEnd);
+      this.#rearm();
+    } finally {
+      this.#checking = false;
+    }
+  }
+  #rearm(): void {
+    if (this.#failed || this.#finished) return;
+    valid(performance.now() < this.#physicalEnd);
+    if (this.#timer !== undefined && this.#timerEnd === this.#physicalEnd) return;
+    clearTimeout(this.#timer);
+    this.#timerEnd = this.#physicalEnd;
+    this.#timer = setTimeout(() => this.#stop(), this.#physicalEnd - performance.now());
+  }
+  #capture<T>(work: () => T, terminalFlush = false): T {
+    valid(!this.#capturing);
+    this.#check(terminalFlush);
+    this.#capturing = true;
+    this.#captureAnchor = performance.now();
+    let value: unknown;
+    try {
+      value = work();
+      this.#check(terminalFlush);
+      return value as T;
+    } catch {
+      this.#stop();
+      try {
+        void Reflect.apply(nativeThen, value, [undefined, () => {}]);
+      } catch {}
+      throw new Error(failure);
+    } finally {
+      // A returned native Promise may remain held; the original end survives, its sync
+      // callback anchor does not. A resumed callback owns its own preparation cost.
+      this.#captureAnchor = undefined;
+      this.#capturing = false;
+    }
   }
   #release(): void {
     let refused = false;
-    for (const release of [() => this.#reader.releaseLock(), () => this.#writer.releaseLock()]) {
+    for (const release of [() => this.#reader?.releaseLock(), () => this.#writer?.releaseLock()]) {
       try {
         release();
       } catch {
@@ -417,7 +505,7 @@ class Session implements HostBridgeFrames {
     // A sink may already have accepted bytes; cancellation cannot undo such side effects.
     // The future bridge owns private per-exchange sinks. Single-use channels and the fence
     // prevent any late acknowledgement/callback from being used by a subsequent exchange.
-    for (const stop of [() => this.#reader.cancel(), () => this.#writer.abort()]) {
+    for (const stop of [() => this.#reader?.cancel(), () => this.#writer?.abort()]) {
       try {
         void Promise.resolve(stop()).catch(() => {});
       } catch {
@@ -494,8 +582,9 @@ class Session implements HostBridgeFrames {
   }
   send(value: HostBridgeFrame): Promise<void> {
     try {
+      valid(!this.#capturing);
       this.#check();
-      const offered = offeredFrame(value);
+      const offered = this.#capture(() => offeredFrame(value, () => this.#check()));
       const payload =
         "bytes" in offered
           ? offered.bytes
@@ -528,9 +617,14 @@ class Session implements HostBridgeFrames {
           // Fenced queued ordinary frames are skipped. Only frames actually offered to the
           // private sink consume sequence numbers, allowing a terminal flush without gaps.
           view.setUint32(8, this.#outgoing.sequence++);
-          await this.#within(this.#writer.write(wire), terminalFlush);
+          const write = this.#capture(() => this.#writer.write.bind(this.#writer), terminalFlush);
+          await this.#within(
+            this.#capture(() => write(wire), terminalFlush),
+            terminalFlush,
+          );
           if (offered.kind === "end" || offered.kind === "result" || offered.kind === "uncertain") {
-            await this.#within(this.#writer.close(), terminalFlush);
+            const close = this.#capture(() => this.#writer.close.bind(this.#writer), terminalFlush);
+            await this.#within(this.#capture(close, terminalFlush), terminalFlush);
             this.#outgoing.done = true;
             if (offered.kind === "uncertain") this.#stop();
           }
@@ -554,12 +648,13 @@ class Session implements HostBridgeFrames {
     while (offset < length) {
       this.#check();
       if (this.#offset === this.#chunk.length) {
-        const input = await this.#within(this.#reader.read());
-        if (input.done) {
+        const read = this.#capture(() => this.#reader.read.bind(this.#reader));
+        const input = await this.#within(this.#capture(read));
+        if (this.#capture(() => input.done)) {
           valid(eof && offset === 0);
           return null;
         }
-        const chunk = copyBytes(input.value, wireLimit - this.#wireRead);
+        const chunk = this.#capture(() => copyBytes(input.value, wireLimit - this.#wireRead));
         valid(chunk.length > 0);
         this.#wireRead += chunk.length;
         this.#chunk = chunk;
@@ -574,6 +669,7 @@ class Session implements HostBridgeFrames {
   }
   async receive(): Promise<HostBridgeFrame> {
     try {
+      valid(!this.#capturing);
       this.#check();
       valid(!this.#reading && !this.#incoming.done);
       this.#reading = true;
@@ -633,6 +729,7 @@ class Session implements HostBridgeFrames {
   }
   finish(): void {
     try {
+      valid(!this.#capturing);
       this.#check();
       valid(this.#incoming.done && this.#outgoing.done && !this.#reading && this.#pending === 0);
       this.#release();

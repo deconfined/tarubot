@@ -494,14 +494,15 @@ describe("original phase proof and callback fences", () => {
     const verifier = createCurrentHostPhaseVerifier(f.configuration, {
       get: f.get,
       now: () => {
-        if (active && ++calls === 2) f.clock.now += 10_000;
+        if (active && ++calls === 6) f.clock.now += 10_000;
         return f.clock.now;
       },
     });
     const proof = await verifier.verify(f.request);
     active = true;
     const left = verifier.remaining(proof, f.request);
-    expect(calls).toBe(4);
+    // Owned expected-input capture adds its checkpoint before assert and remaining sample.
+    expect(calls).toBe(6);
     expect(Number.isSafeInteger(left) && left > 0 && left <= 20_000).toBe(true);
   });
   test("snapshot hooks and first clock are counted from the original physical origin", () => {
@@ -640,6 +641,39 @@ describe("original phase proof and callback fences", () => {
     ).rejects.toThrow(failure);
     expect(() => timed.verifier.assert(cap, timed.request)).toThrow(failure);
   });
+  test("synchronous public work allows only its own pure assertions under the same original anchor", async () => {
+    const f = fixture(),
+      proof = await f.verifier.verify(f.request);
+    expect(
+      await f.verifier.within(proof, f.request, async () => {
+        f.verifier.assert(proof, f.request);
+        expect(f.verifier.remaining(proof, f.request)).toBeGreaterThan(0);
+        return "invented";
+      }),
+    ).toBe("invented");
+    expect(f.seen).toHaveLength(16);
+    for (const mode of ["short", "copy", "verify"] as const) {
+      const g = fixture(),
+        original = await g.verifier.verify(g.request);
+      await expect(
+        g.verifier.within(original, g.request, async () => {
+          if (mode === "short") {
+            g.clock.now += 29_980;
+            spin(60);
+          }
+          try {
+            if (mode === "verify") await g.verifier.verify(g.request);
+            else g.verifier.assert(mode === "copy" ? { ...original } : original, g.request);
+          } catch {
+            /* Catching a denied nested entry cannot restore the original public work. */
+          }
+          return "withheld";
+        }),
+      ).rejects.toThrow(failure);
+      expect(g.seen).toHaveLength(16);
+      expect(() => g.verifier.assert(original, g.request)).toThrow(failure);
+    }
+  });
   test("starved timers cannot deliver a queued native fulfillment after the saved original deadline", async () => {
     const f = fixture(),
       proof = await f.verifier.verify(f.request);
@@ -655,6 +689,51 @@ describe("original phase proof and callback fences", () => {
       }),
     ).rejects.toThrow(failure);
     expect(() => f.verifier.assert(proof, f.request)).toThrow(failure);
+  });
+  test("owned synchronous work and result copying retain their pre-hook physical anchor", async () => {
+    for (const mode of ["work", "copy"] as const) {
+      const f = fixture(),
+        proof = await f.verifier.verify(f.request);
+      const shorten = () => {
+        f.clock.now += 29_980;
+        spin(60);
+      };
+      // Reflection belongs to the owned copy, even when its first trap moves the wall clock.
+      const value = new Proxy(
+        { invented: true },
+        {
+          ownKeys(target) {
+            if (mode === "copy") shorten();
+            return Reflect.ownKeys(target);
+          },
+        },
+      );
+      await expect(
+        f.verifier.within(proof, f.request, () => {
+          if (mode === "work") shorten();
+          return Promise.resolve(value);
+        }),
+      ).rejects.toThrow(failure);
+      expect(f.seen).toHaveLength(16);
+      expect(() => f.verifier.assert(proof, f.request)).toThrow(failure);
+    }
+  });
+  test("an asynchronous resume starts its own callback anchor without charging the idle gap twice", async () => {
+    const f = fixture(),
+      proof = await f.verifier.verify(f.request);
+    const result = await f.verifier.within(
+      proof,
+      f.request,
+      () =>
+        new Promise<string>((accept) => {
+          setTimeout(() => {
+            f.clock.now += 29_900;
+            accept("invented");
+          }, 180);
+        }),
+    );
+    expect(result).toBe("invented");
+    expect(f.seen).toHaveLength(16);
   });
   test("native fulfillment is copied before then-getter assimilation or nested result callbacks", async () => {
     const f = fixture(),
@@ -875,6 +954,7 @@ describe("bounded response bytes and native offer barriers", () => {
       "nested-end",
       "final-denial",
       "short-cap",
+      "same-hook-short-cap",
     ])
       isolated(`
       import {spyOn} from "bun:test";
@@ -892,6 +972,7 @@ describe("bounded response bytes and native offer barriers", () => {
         Object.defineProperty(handle,"end",{get(){
           if(mode==="end-getter")live=false;
           if(mode==="short-cap")physical+=60;
+          if(mode==="same-hook-short-cap"){wall+=29980;physical+=60;}
           if(mode==="nested-end")void verifier.verify({...expected,phase:"preparation"}).catch(()=>{});
           return()=>{ends++;queueMicrotask(()=>{
             const response=new EventEmitter();response.destroy=()=>{};
@@ -913,7 +994,7 @@ describe("bounded response bytes and native offer barriers", () => {
       let code;try{await verifier.verify(expected,()=>{if(mode==="final-denial"&&++denials===16)wall+=30000;if(!live)throw Error("invented private refusal");});code="accepted";}catch(e){code=e.message;}
       if(code!==(mode==="valid"?"accepted":${JSON.stringify(failure)}))throw Error("wrong diagnostic "+mode+":"+code);
       if(offers!==(mode==="valid"?16:mode==="final-denial"?0:1))throw Error("late offer "+mode+":"+offers);
-      if(ends!==(mode==="valid"?16:["end-getter","on-getter","nested-end","final-denial","short-cap"].includes(mode)?0:1))throw Error("late end "+mode+":"+ends);
+      if(ends!==(mode==="valid"?16:["end-getter","on-getter","nested-end","final-denial","short-cap","same-hook-short-cap"].includes(mode)?0:1))throw Error("late end "+mode+":"+ends);
       const expectedHeaders=mode==="valid"?16:["headers","status"].includes(mode)?1:0;
       if(headerReads!==expectedHeaders)throw Error("late header read "+mode+":"+headerReads);
     `);
@@ -952,10 +1033,10 @@ describe("capture and remaining regressions", () => {
       const {createCurrentHostPhaseVerifier}=await import(${JSON.stringify(moduleUrl)});
       const cfg=${JSON.stringify(f.configuration)}, expected=${JSON.stringify(f.request)}, data=${JSON.stringify(f.data)};
       let active=false,calls=0;
-      const verifier=createCurrentHostPhaseVerifier(cfg,{now:()=>{if(active&&++calls===2)physical+=10000;return ${instant};},get:async(input)=>({status:200,url:input.url,headers:{"content-type":"application/json"},body:Buffer.from(JSON.stringify(data[input.url]))})});
+      const verifier=createCurrentHostPhaseVerifier(cfg,{now:()=>{if(active&&++calls===6)physical+=10000;return ${instant};},get:async(input)=>({status:200,url:input.url,headers:{"content-type":"application/json"},body:Buffer.from(JSON.stringify(data[input.url]))})});
       const proof=await verifier.verify(expected);active=true;
       const left=verifier.remaining(proof,expected);
-      if(calls!==4||left!==20000)throw Error("remaining renewed or stale:"+left+":"+calls);
+      if(calls!==6||left!==20000)throw Error("remaining renewed or stale:"+left+":"+calls);
     `);
   });
   test("caught malformed production-shaped nested request fences original before any GET", async () => {
@@ -986,11 +1067,11 @@ describe("final refusal cost cannot outlive an old clock sample", () => {
     let active = false,
       refusals = 0;
     const proof = await f.verifier.verify(f.request, () => {
-      if (active && ++refusals === 4) f.clock.now += 10_000;
+      if (active && ++refusals === 6) f.clock.now += 10_000;
     });
     active = true;
     const left = f.verifier.remaining(proof, f.request);
-    expect(refusals).toBe(4);
+    expect(refusals).toBe(6);
     expect(left > 0 && left <= 20_000).toBe(true);
   });
   test("last pre-offer refusal advancing the full original age yields zero GET offers", async () => {

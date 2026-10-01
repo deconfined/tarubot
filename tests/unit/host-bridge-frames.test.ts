@@ -119,6 +119,226 @@ function concat(values: Uint8Array[]): Uint8Array {
 }
 
 describe("single-exchange private host bridge framing", () => {
+  test("invalid initial and later Promise clocks drain without then getters or private bytes", () => {
+    const modulePath = new URL("../../scripts/host-bridge-frames.ts", import.meta.url).pathname;
+    const program = `
+      import {runInNewContext} from "node:vm";
+      const {createHostFrameSession}=await import(${JSON.stringify(modulePath)});
+      let unhandled=0,thenReads=0,writes=0;
+      process.on("unhandledRejection",()=>unhandled++);
+      const codes=[];
+      for(const mode of ["first","later"])for(const foreign of [false,true]){
+        let armed=mode==="first",session;
+        const now=()=>{
+          if(!armed)return 1_800_000_000_000;
+          const value=foreign?runInNewContext('Promise.reject(Error("invented"))'):Promise.reject(Error("invented"));
+          Object.defineProperty(value,"then",{get(){thenReads++;throw Error("invented then");}});
+          return value;
+        };
+        try{
+          session=createHostFrameSession({role:"client",nonce:"ab".repeat(16),operation:"exec",timeout_ms:30_000},
+            {input:new ReadableStream(),output:new WritableStream({write(){writes++;}}),now});
+          armed=true;await session.send({kind:"exec",command:["/bin/true"]});codes.push("accepted");
+        }catch(e){codes.push(e.message);}finally{session?.abort();}
+      }
+      await Bun.sleep(20);console.log(JSON.stringify({unhandled,thenReads,writes,codes}));
+    `;
+    // No external IPC exists; the child checks the runtime's actual rejected-Promise events.
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(Buffer.from(child.stderr).toString()).toBe("");
+    expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+      unhandled: 0,
+      thenReads: 0,
+      writes: 0,
+      codes: Array(4).fill(fixed),
+    });
+  });
+  test("an observed short wall remainder cannot offer another private byte after synchronous cost", async () => {
+    const output = sink();
+    let wall = instant,
+      clocks = 0;
+    const session = create(
+      configuration("client", undefined, "exec", 30_000),
+      bytes([], true),
+      output.output,
+      () => {
+        clocks++;
+        return wall;
+      },
+    );
+    await session.send(first("exec"));
+    wall += 29_980;
+    await session.send({ kind: "stdin", bytes: Uint8Array.of(1) });
+    const writes = output.values.length,
+      before = clocks,
+      end = performance.now() + 60;
+    while (performance.now() < end) {
+      /* A queued timer cannot grant another copy of the frozen wall remainder. */
+    }
+    await refused(session.send({ kind: "stdin", bytes: Uint8Array.of(2) }));
+    expect(output.values).toHaveLength(writes);
+    expect(clocks).toBe(before);
+  });
+  test("owned metadata reflection cannot shorten time and consume it before the next sink offer", async () => {
+    const output = sink();
+    let wall = instant,
+      traps = 0;
+    const session = create(
+      configuration("client", undefined, "exec", 30_000),
+      bytes([], true),
+      output.output,
+      () => wall,
+    );
+    const offered = new Proxy(first("exec"), {
+      ownKeys(target) {
+        if (++traps === 1) {
+          wall += 29_980;
+          const end = performance.now() + 60;
+          while (performance.now() < end) {
+            /* The immediate post-hook observation uses this capture's original anchor. */
+          }
+        }
+        return Reflect.ownKeys(target);
+      },
+    });
+    await refused(session.send(offered));
+    expect(output.values).toHaveLength(0);
+    expect(traps).toBe(1);
+  });
+  test("construction counts locked and method getter cost after its FIRST wall observation", () => {
+    for (const mode of ["locked", "getReader", "getWriter"] as const) {
+      const source = bytes([], true),
+        output = sink();
+      let wall = instant;
+      const target = mode === "getWriter" ? output.output : source;
+      const native =
+        mode === "getWriter"
+          ? output.output.getWriter.bind(output.output)
+          : source.getReader.bind(source);
+      Object.defineProperty(target, mode, {
+        configurable: true,
+        get() {
+          wall += 29_980;
+          const end = performance.now() + 60;
+          while (performance.now() < end) {
+            /* The original constructor cap includes binding before the actual native lock. */
+          }
+          return mode === "locked" ? false : native;
+        },
+      });
+      expect(() =>
+        create(
+          configuration("client", undefined, "exec", 30_000),
+          source,
+          output.output,
+          () => wall,
+        ),
+      ).toThrow(fixed);
+      Reflect.deleteProperty(target, mode);
+      expect(source.locked).toBe(false);
+      expect(output.output.locked).toBe(false);
+      expect(output.values).toHaveLength(0);
+    }
+  });
+  test("a native lock returned at expiry is retained for independent cancellation and release", async () => {
+    for (const mode of ["reader", "writer"] as const) {
+      let wall = instant,
+        cancels = 0,
+        aborts = 0,
+        locks = 0;
+      const source = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancels++;
+        },
+      });
+      const output = new WritableStream<Uint8Array>({
+        abort() {
+          aborts++;
+        },
+      });
+      const shorten = () => {
+        wall += 29_980;
+        const end = performance.now() + 60;
+        while (performance.now() < end) {
+          /* The real returned lock must survive the capture's subsequent refusal. */
+        }
+        locks++;
+      };
+      const read = source.getReader.bind(source),
+        write = output.getWriter.bind(output);
+      if (mode === "reader")
+        Object.defineProperty(source, "getReader", {
+          value: () => {
+            const handle = read();
+            shorten();
+            return handle;
+          },
+        });
+      else
+        Object.defineProperty(output, "getWriter", {
+          value: () => {
+            const handle = write();
+            shorten();
+            return handle;
+          },
+        });
+      expect(() =>
+        create(configuration("client", undefined, "exec", 30_000), source, output, () => wall),
+      ).toThrow(fixed);
+      await Bun.sleep(0);
+      expect(locks).toBe(1);
+      expect(cancels).toBe(1);
+      expect(aborts).toBe(mode === "writer" ? 1 : 0);
+      expect(source.locked).toBe(false);
+      expect(output.locked).toBe(false);
+    }
+  });
+  test("later observations shorten held native sink acknowledgements without a late queued write", async () => {
+    let release!: () => void,
+      entered!: () => void,
+      settled = false,
+      writes = 0,
+      wall = instant;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const output = new WritableStream<Uint8Array>({
+      write() {
+        writes++;
+        entered();
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    const session = create(
+      configuration("client", undefined, "exec", 30_000),
+      bytes([], true),
+      output,
+      () => wall,
+    );
+    const firstSend = session.send(first("exec"));
+    void firstSend.catch(() => {
+      settled = true;
+    });
+    await ready;
+    wall += 29_980;
+    const queued = session.send({ kind: "stdin", bytes: Uint8Array.of(1) });
+    void queued.catch(() => {});
+    await Bun.sleep(80);
+    expect(settled).toBe(true);
+    await refused(firstSend);
+    await refused(queued);
+    release();
+    await Bun.sleep(10);
+    expect(writes).toBe(1);
+  });
   test("exec pipelines a become marker before binary stdin and preserves interleaved stdout/stderr and nonzero remote status", async () => {
     const { client, bridge } = pair();
     expect(await exchange(client, bridge, first("exec"))).toEqual(first("exec"));

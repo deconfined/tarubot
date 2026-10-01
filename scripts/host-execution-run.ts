@@ -356,6 +356,7 @@ class Operation {
   #fenced = false;
   #physicalEnd: number;
   #bounds = new Set<{ end: number; rearm?: () => void; reject?: () => void }>();
+  #captureAnchors: number[] = [];
   constructor(
     readonly physical: number,
     readonly now: () => number,
@@ -374,7 +375,32 @@ class Operation {
     valid(!this.#fenced && physical < this.#physicalEnd);
     for (const bound of this.#bounds) valid(physical < bound.end);
   }
+  /** Only synchronous owned work retains an anchor; it is removed before any await. */
+  captured<T>(work: () => T): T {
+    this.alive();
+    // TIME/refusal capture is already inside tick's reserved observation cluster. Starting
+    // another tick here would recurse into that same clock rather than bound caller work.
+    if (this.#checking) return work();
+    const anchor = performance.now();
+    this.#captureAnchors.push(anchor);
+    let value: unknown;
+    try {
+      value = work();
+      if (this.#started !== 0) this.tick();
+      this.alive();
+      return value as T;
+    } catch {
+      this.fence();
+      // A rejected native Promise may have been returned before the post-hook clock refused.
+      // Drain through the captured intrinsic; caller .then access can never resume this work.
+      drain(value);
+      throw new Error("invalid-current-host-phase");
+    } finally {
+      this.#captureAnchors.pop();
+    }
+  }
   tick(): number {
+    const beforeHooks = Math.min(performance.now(), ...this.#captureAnchors);
     let owns = false;
     try {
       this.alive();
@@ -394,7 +420,6 @@ class Operation {
       };
       refuse();
       const observe = () => {
-        const beforeClock = performance.now();
         const value: unknown = this.capture(this.now);
         if (typeof value !== "number") {
           this.fence();
@@ -411,7 +436,7 @@ class Operation {
         // every later frozen-wall capture. A later sample can only shorten this same end.
         this.#physicalEnd = Math.min(
           this.#physicalEnd,
-          beforeClock + 30_000 - (value - this.#started),
+          beforeHooks + 30_000 - (value - this.#started),
         );
         this.alive();
         // Response/body callbacks can discover a shorter original end after work returned.
@@ -453,6 +478,7 @@ class Operation {
     work: () => Promise<unknown>,
     own: (value: unknown) => T,
     limit = 30_000,
+    offerWork: <U>(work: () => U) => U = this.capture,
   ): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound: { end: number; rearm?: () => void; reject?: () => void } = { end: Infinity };
@@ -490,7 +516,7 @@ class Operation {
           let offered: unknown;
           try {
             this.tick();
-            offered = this.capture(work);
+            offered = offerWork(work);
             this.tick();
             schedule();
             this.capture(() =>
@@ -633,10 +659,18 @@ export function createCurrentHostPhaseVerifier(
 ): CurrentHostPhaseVerifier {
   const owner = Object.freeze(Object.create(null) as object);
   let currentHook: { operation: Operation; state: State | undefined } | undefined;
-  const entry = () => {
+  let currentWork: { operation: Operation; state: State } | undefined;
+  const entry = (asserted?: State) => {
     if (currentHook) {
       currentHook.operation.fence();
       fence(currentHook.state);
+      throw new Error("invalid-current-host-phase");
+    }
+    // Only the same proof's pure assertions may enter public synchronous work. Factory
+    // observations and another within/verify remain reserved and fence the original lease.
+    if (currentWork && asserted !== currentWork.state) {
+      currentWork.operation.fence();
+      fence(currentWork.state);
       throw new Error("invalid-current-host-phase");
     }
   };
@@ -647,7 +681,7 @@ export function createCurrentHostPhaseVerifier(
       valid(previous === undefined || previous.operation === operation);
       currentHook = { operation, state: state ?? previous?.state };
       operation.alive();
-      returned = work();
+      returned = operation.captured(work);
       operation.alive();
       return returned as T;
     } catch {
@@ -663,7 +697,7 @@ export function createCurrentHostPhaseVerifier(
       owns = false;
     try {
       saved = proofs.get(proof);
-      entry();
+      entry(saved);
       valid(saved && saved.owner === owner && !saved.fenced && !saved.checking);
       saved.checking = true;
       owns = true;
@@ -1083,9 +1117,22 @@ export function createCurrentHostPhaseVerifier(
         assertion(proof, expected);
         const retained = saved;
         valid(typeof work === "function");
+        const offerWork = <U>(callback: () => U): U => {
+          valid(currentWork === undefined && currentHook === undefined);
+          currentWork = { operation: retained.operation, state: retained };
+          try {
+            // The original synchronous anchor also bounds assertions inside this callback.
+            // Remove the public work lease immediately at return, before Promise waiting.
+            return retained.operation.captured(callback);
+          } finally {
+            currentWork = undefined;
+          }
+        };
         const result = await saved.operation.within(
           work,
           (value) => ownResult(value, () => retained.operation.alive()) as T,
+          30_000,
+          offerWork,
         );
         assertion(proof, expected);
         valid(!saved.fenced && saved.working);
