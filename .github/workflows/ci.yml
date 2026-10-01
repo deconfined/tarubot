@@ -10,6 +10,9 @@ on:
       version:
         description: Validated application SemVer
         value: ${{ jobs.checks.outputs.version }}
+      release:
+        description: Version strictly increased from the known PR or push base
+        value: ${{ jobs.checks.outputs.release }}
 
 permissions:
   contents: read
@@ -26,6 +29,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     services:
       postgres:
         image: postgres:18.4-alpine
@@ -125,10 +129,9 @@ jobs:
           TARUBOT_IMAGE_TAG=0.0.0 DATABASE_URL=postgresql://tarubot:x@db.example:27520/tarubot \
             DATABASE_CA_CERT=x DISCORD_TOKEN=x \
             docker compose --env-file /dev/null -f docker-compose.production.yml config --quiet
-      # Last, so dependency-update pull requests report every other step of this job before a
-      # maintainer adds the required version increment; the job, the container builds that depend
-      # on it, and CI result still fail without it.
-      - name: Validate version and changelog
+      # Maintenance passes all checks without a release bump. Only a known version increase
+      # declares a release; manual verification has no predecessor and never infers one.
+      - name: Validate version and release metadata
         id: version
         env:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}

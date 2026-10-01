@@ -25,8 +25,8 @@ Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates
 1. Start a feature branch from an up-to-date `main`. Keep unrelated work separate.
 2. Follow the existing module boundaries and add tests for changed behavior. Explain consequential invariants in comments, not a running session diary.
 3. Update the affected documentation. User-facing behavior belongs in `site/src/content/docs/`; contributor detail belongs in the [internal references](docs/README.md).
-4. Increment SemVer in `package.json` and add an entry to `CHANGELOG.md`, including its current-version sentence. Use a patch for compatible fixes/maintenance, a minor for compatible features, and a major for incompatible changes. Regenerate the relevant lockfile when dependencies change.
-5. Update `test-plans/current.json` for the new version, with separate human, assistant and bot actions. Add a member-facing note in `src/domain/release-notes.ts` only when members will notice the change. Do not copy the application version into engineering references.
+4. Keep the application version for ordinary commits, including documentation, tests, CI and pipeline maintenance. Regenerate the relevant lockfile whenever dependencies change. Application changes can accumulate until a release is ready.
+5. To release the bot, increment SemVer in `package.json`, add its `CHANGELOG.md` entry and update the current-version sentence. Use a patch for compatible fixes, a minor for compatible features and a major for incompatible changes. Synchronize `test-plans/current.json` with the release, keeping separate human, assistant and bot actions. Update it separately before an authorized development session. Add a member-facing note in `src/domain/release-notes.ts` only when members will notice the release. Do not copy the version into engineering references.
 6. Run the applicable checks. Check the version gate with `CI_BASE_SHA=$(git rev-parse origin/main) bun run ci:version`.
 7. Inspect status and staged/unstaged diffs; stage only intended files. Make a signed local commit for each coherent, verified milestone. If signing fails, stop rather than create an unsigned commit.
 8. Open a PR when authorized. Merge with a merge commit only, after the owner's code-owner review, an up-to-date `CI result`, and the required security checks. A push dismisses stale approvals.
@@ -47,7 +47,7 @@ The build validates site links; `tests/unit/docs-site.test.ts` checks public con
 ## Live testing and delivery
 
 - [DevBot](docs/DEV_GUILD.md): isolated local development and owner-run acceptance.
-- [CI/CD](docs/CI_CD.md): publication, required checks and dependency updates.
+- [CI/CD](docs/CI_CD.md): explicit releases, required checks and dependency updates.
 - [Deployment](docs/DEPLOYMENT.md): the implemented delivery path, not future pipeline proposals.
 - [Threat model](docs/THREAT_MODEL.md): agreed scope and the requirement to prefer simple, standard components.
 - [Pipeline specification](docs/PIPELINE.md): intended flow, safety policy and outstanding acceptance.

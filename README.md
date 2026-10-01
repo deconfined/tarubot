@@ -4,7 +4,7 @@ A Bun/TypeScript Discord bot for Final Fantasy XIV Free Companies. It verifies c
 
 ## Documentation
 
-**[The documentation site](https://deconfined.github.io/tarubot/)** describes the latest release on `main`:
+**[The documentation site](https://deconfined.github.io/tarubot/)** explains the bot and its operation:
 
 - [Use TaruBot](https://deconfined.github.io/tarubot/use/getting-started/): members and visitors.
 - [Run a server](https://deconfined.github.io/tarubot/admin/add-to-server/): officers and server managers.
@@ -23,7 +23,7 @@ For development, start with **[CONTRIBUTING.md](CONTRIBUTING.md)**. Focused engi
 | Drizzle ORM / node-postgres | 0.45.3 / 8.23.0 |
 | PostgreSQL | 18.4 |
 
-Normal Compose deployments pull `ghcr.io/deconfined/tarubot`; merges to `main` publish tested AMD64/ARM64 images. The bot parses Lodestone in process with its own workers and follows [`xivapi/lodestone-css-selectors`](https://github.com/xivapi/lodestone-css-selectors) HEAD live. See [CI/CD](docs/CI_CD.md) and [the Lodestone adapter](docs/LODESTONE.md).
+Normal Compose deployments pull `ghcr.io/deconfined/tarubot`; an explicit version increase on `main` publishes tested AMD64/ARM64 images. Maintenance merges keep the bot version and existing images. The bot parses Lodestone in process with its own workers and follows [`xivapi/lodestone-css-selectors`](https://github.com/xivapi/lodestone-css-selectors) HEAD live. See [CI/CD](docs/CI_CD.md) and [the Lodestone adapter](docs/LODESTONE.md).
 
 ## License
 

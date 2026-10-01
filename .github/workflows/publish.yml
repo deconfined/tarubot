@@ -1,4 +1,4 @@
-# Merged main commits publish deployable images; pull requests never receive registry write access.
+# Version increases on main publish releases; maintenance and manual dispatches only verify.
 name: Publish containers
 
 on:
@@ -22,11 +22,17 @@ jobs:
   publish:
     name: Publish ${{ matrix.target }}
     needs: verify
-    # Only main publishes (2.30.0 dropped the v* tag trigger): the deploy workflow trusts that
-    # every published version and sha- tag was built from a commit on main.
-    if: github.ref == 'refs/heads/main'
+    # A version bump is release intent. Dispatches and reruns verify without rebuilding tags;
+    # an unsuccessful publication is repaired with a new version, not by replacing its image.
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+      && github.run_attempt == '1' && needs.verify.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    concurrency:
+      # Keep the absence check and publication of a version in the same serialized job.
+      group: publish-${{ github.repository }}-${{ needs.verify.outputs.version }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write # push the versioned and SHA image tags to GHCR
@@ -71,6 +77,43 @@ jobs:
             org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Require an unpublished version
+        # Registry failures are not evidence of absence. Only the standard manifest 404 permits
+        # publication; an existing tag is never overwritten, including after a partial failure.
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repository="${GITHUB_REPOSITORY,,}"
+          # Keep credentials out of process arguments; these platform-issued credentials are
+          # supplied through curl's standard stdin configuration instead.
+          if ! token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+            | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
+            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))'); then
+            echo "::error::Could not verify that the release version is unpublished."
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          if ! status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+            --head --output /dev/null --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${VERSION}"); then
+            echo "::error::Could not verify that the release version is unpublished."
+            exit 1
+          fi
+          case "$status" in
+            404) ;;
+            200)
+              echo "::error::This release version already exists; publish a new version instead."
+              exit 1 ;;
+            *)
+              echo "::error::Could not verify that the release version is unpublished."
+              exit 1 ;;
+          esac
       - name: Build and publish both supported platforms
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -98,7 +141,10 @@ jobs:
   attest:
     name: Sign build provenance
     needs: [publish, scan]
-    if: github.ref == 'refs/heads/main'
+    # Failed-job reruns can retain publish's earlier success, so every write job checks its attempt.
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+      && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Since 2.32.0 (#50) GitHub signs SLSA build provenance for the index digest the build pushed,
@@ -155,7 +201,9 @@ jobs:
     name: Replacement release orchestration
     needs: [verify, publish, attest]
     # Owner activation remains separate. This flag is never set/changed by repository code.
-    if: github.ref == 'refs/heads/main' && vars.RELEASE_PIPELINE_ENABLED == 'true'
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+      && github.run_attempt == '1' && vars.RELEASE_PIPELINE_ENABLED == 'true'
     uses: ./.github/workflows/release.yml
     permissions:
       contents: read
@@ -174,6 +222,7 @@ jobs:
     needs: [publish, attest, release]
     if: >-
       always() && github.ref == 'refs/heads/main'
+      && github.event_name == 'push' && github.run_attempt == '1'
       && needs.publish.result == 'success' && needs.attest.result == 'success'
       && (vars.RELEASE_PIPELINE_ENABLED != 'true'
           || (needs.release.result == 'success' && needs.release.outputs.accepted == 'true'))

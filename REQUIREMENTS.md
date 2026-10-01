@@ -17,7 +17,7 @@ This is a current constraint summary, not a second command reference or release 
 ## Engineering and documentation
 
 - Bun/TypeScript, discoverable feature modules and Drizzle persistence remain the implementation boundaries. Numbered SQL migrations are authoritative and applied migrations are immutable.
-- Every coherent change increments SemVer and updates the changelog. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and signed-commit/PR workflow.
+- SemVer identifies bot releases. Maintenance commits need no application version or changelog change; an explicit release increments the version and updates the changelog and startup plan. Versions never decrease. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for checks and the signed-commit/PR workflow.
 - Reader documentation stays in the existing pnpm/Node Starlight site. Public pages use placeholders; the Thank you page is the sole approved tester-name/contact exception.
 
 ## Deployment authority

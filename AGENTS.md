@@ -36,8 +36,8 @@ Agents hold no host-access key, state, saved plan or state passphrase. Never ena
 
 ## Versioning and Git
 
-- Every coherent change, including docs/tests/maintenance, increments SemVer in `package.json` and updates `CHANGELOG.md` and the current startup plan. Regenerate affected lockfiles. Group related edits under one increment; build/deploy only when authorized to update a running bot.
-- Use feature branches and PRs, never commit directly to `main`. Merges require an up-to-date CI/security gate and the owner's code-owner approval; merge commits only. A later push dismisses that approval. Runtime merges can immediately configure staging as root.
+- Version bot releases, not repository commits. Documentation, tests, CI, pipeline and other maintenance need no application version, changelog or startup-plan change. Application changes may accumulate before an explicit release: increment SemVer, update `CHANGELOG.md` and synchronize the startup plan when releasing. Versions never decrease. Regenerate affected lockfiles whenever dependencies change; update session plans before authorized development sessions. Build/deploy a running bot only when authorized.
+- Use feature branches and PRs, never commit directly to `main`. Merges require an up-to-date CI/security gate and the owner's code-owner approval; merge commits only. A later push dismisses that approval. A published release can immediately configure staging as root.
 - Make frequent local commits for coherent, verified milestones. Inspect status, staged/unstaged diffs and recent history; explicitly stage intended files. Preserve chronology. Sign with configured SSH key `~/.ssh/id_git` (`gpg.format=ssh`); signing failure means stop and ask, never silently commit unsigned.
 - Keep credentials, `.env`, dumps, backups, generated output and local tool state out of Git. Tracked env examples are safe templates.
 - Do not push, rewrite history, discard others' changes, skip hooks or change Git configuration without explicit authorization.

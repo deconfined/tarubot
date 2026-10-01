@@ -7,7 +7,7 @@ Use [CONTRIBUTING.md](../CONTRIBUTING.md) for local checks and [the threat model
 | Workflow | Purpose and gate |
 | --- | --- |
 | `ci.yml` | Version/changelog, types, lint/format, build, unit/contract/PostgreSQL tests and AMD64/ARM64 image builds; required `CI result` |
-| `publish.yml`, `scan.yml` | Revalidate merged `main`, publish candidates, scan both exact platform digests, sign provenance, then promote `latest` |
+| `publish.yml`, `scan.yml` | Verify merged `main`; a new version publishes candidates, scans both exact platform digests, signs provenance and promotes `latest` |
 | `deploy.yml`, `host.yml` | Verify the published release and deploy the requested target; see [DEPLOYMENT](DEPLOYMENT.md) |
 | `infra.yml` | Dispatch-only infrastructure plan and owner-approved Apply; see [OpenTofu](../ops/tofu/README.md) |
 | `release.yml`, `release-infra.yml` | Inactive replacement pipeline; see [current status](PIPELINE.md#current-status) |
@@ -18,7 +18,13 @@ CodeQL uses GitHub default setup for JavaScript/TypeScript and Actions. The owne
 
 Actions use full-SHA pins and checkouts do not persist credentials. PR checks use invented data and need no live Discord, database or provider credentials. CI also checks migration immutability, ShellCheck, Quadlet rendering, builtin-only Ansible syntax/lint and renderer equivalence, and mock OpenTofu/cloud-init behavior. The version gate runs last so dependency PRs still receive other results.
 
-Merge with a merge commit after current CI/security checks and the owner's code-owner review. Further pushes dismiss that approval. A runtime merge can configure staging as root, so review is a security boundary.
+Merge with a merge commit after current CI/security checks and the owner's code-owner review. Further pushes dismiss that approval. A published release can configure staging as root, so review is a security boundary.
+
+## Release intent
+
+An unchanged application version passes CI without a new changelog or startup plan. Documentation, tests and pipeline revisions use their Git commit identity. Application changes may accumulate on `main`; increasing `package.json` declares a bot release and requires its changelog entry and matching startup plan. Versions cannot decrease.
+
+Only the first automatic push run with a new version publishes images. Maintenance merges, manual Publish dispatches and reruns verify without publishing, signing, moving `latest` or requesting deployment. The workflow refuses an existing version tag and serializes publication for each version. If a failed run already created that tag, fix the failure and release a new version rather than overwrite it.
 
 ## Signed build provenance
 
@@ -51,7 +57,7 @@ Keep the exact `--cert-identity`; `--signer-workflow` accepts a broader pattern.
 | Ansible | Regenerate hash-pinned requirements as their headers describe; run offline checks |
 | OpenTofu/providers | Follow [Checks and upgrades](../ops/tofu/README.md#checks-and-upgrades) |
 
-Dependency PRs need the normal version/changelog/test-plan update. Do not add `[dependabot skip]`: it permits force-pushing over maintainer edits. After a maintainer push, merge newer `main` if necessary; `@dependabot recreate` discards those commits. Security alerts are enabled; automated security-update PRs are off.
+Dependency PRs use normal CI without a mandatory version/changelog/test-plan update; publish runtime dependency changes in the next explicit bot release. Do not add `[dependabot skip]`: it permits force-pushing over maintainer edits. After a maintainer push, merge newer `main` if necessary; `@dependabot recreate` discards those commits. Security alerts are enabled; automated security-update PRs are off.
 
 ## Assistant workflow boundaries
 

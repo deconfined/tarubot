@@ -1,6 +1,7 @@
-/** Enforce version/changelog discipline for PRs, merged commits, and release-tag publication. */
+/** Separate ordinary validated changes from explicit versioned releases. */
 import { appendFile } from "node:fs/promises";
 import { z } from "zod";
+import { testSessionSchema } from "../src/application/test-session.js";
 
 /** SemVer syntax includes prereleases/build metadata and rejects numeric leading zeroes. */
 export function validateVersion(value: string): string {
@@ -13,7 +14,7 @@ export function validateVersion(value: string): string {
   return value;
 }
 
-/** Compare against the PR base/push predecessor and keep release tags tied to their image version. */
+/** Equal versions are maintenance; only an increase requires a matching release note. */
 export function checkRelease(
   version: string,
   previous: string | null,
@@ -26,17 +27,25 @@ export function checkRelease(
     throw new Error(
       "Published versions must omit build metadata and fit Docker's 128-character tag limit.",
     );
-  if (previous !== null && Bun.semver.order(version, validateVersion(previous)) <= 0)
-    throw new Error("Every change set must increment package.json above its base version.");
+  const order = previous === null ? 0 : Bun.semver.order(version, validateVersion(previous));
+  if (order < 0) throw new Error("package.json must not decrease below its base version.");
   if (ref.startsWith("refs/tags/") && ref !== `refs/tags/v${version}`)
     throw new Error("Release tag must match package.json as vMAJOR.MINOR.PATCH.");
   if (
+    order > 0 &&
     !changelog
       .split(/\r?\n/)
       .some((line) => line === `## ${version}` || line.startsWith(`## ${version} `))
   )
     throw new Error("CHANGELOG.md needs an entry for the current version.");
   return version;
+}
+
+/** Release metadata uses the same bounded startup-plan schema as the bot. */
+export function checkStartupPlan(version: string, value: unknown): void {
+  const plan = testSessionSchema.parse(value);
+  if (!plan.title.split(/\s+/).includes(version))
+    throw new Error("test-plans/current.json title must name the release version.");
 }
 
 if (import.meta.main) {
@@ -60,7 +69,10 @@ if (import.meta.main) {
     process.env.GITHUB_REF ?? "",
     await Bun.file("CHANGELOG.md").text(),
   );
+  // No base (including an initial push or manual dispatch) cannot establish a release.
+  const release = previous !== null && Bun.semver.order(version, previous) > 0;
+  if (release) checkStartupPlan(version, await Bun.file("test-plans/current.json").json());
   if (process.env.GITHUB_OUTPUT)
-    await appendFile(process.env.GITHUB_OUTPUT, `version=${version}\n`);
-  console.log(`Validated release version ${version}${previous ? ` above ${previous}` : ""}.`);
+    await appendFile(process.env.GITHUB_OUTPUT, `version=${version}\nrelease=${release}\n`);
+  console.log(`Validated version ${version}: ${release ? "release" : "no release"}.`);
 }
