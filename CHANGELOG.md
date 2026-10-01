@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.32**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.33**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.33 — Retain terminal journal read scope
+
+- Add a separate opaque preparation that retains the original native owner and repair proof while withholding bounded journal data. Its read facade retires at preparation completion.
+- Seal once through a fresh full comparison of the same original evidence; retain pure refusal and remaining-time checks without new reads or expiry renewal. Copied, nested, expired and abandoned preparations permanently refuse.
+- Preserve ordinary journal methods and their closing behavior. This primitive grants no host-command or write authority; protected current-job and private execution-grant integration remain pending.
 
 ## 2.36.32 — Count local DNS preparation time
 

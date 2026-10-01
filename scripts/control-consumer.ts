@@ -194,6 +194,8 @@ interface CapturedStore {
   allowed: RegExp;
   within<T>(ticket: ControlConsumerTicket, operation: () => Promise<T>): Promise<T>;
   assert(ticket: ControlConsumerTicket): void;
+  remaining(ticket: ControlConsumerTicket): number;
+  remainingSnapshot(ticket: ControlConsumerTicket, observedWall: number): number;
 }
 // Module-private capabilities prevent a guard for one backend from wrapping another backend.
 const capturedStores = new WeakMap<ControlConsumerGuard, CapturedStore>();
@@ -253,6 +255,18 @@ export class ControlConsumerGuard {
         within: (ticket, operation) => this.#within(ticket, operation),
         assert: (ticket) => {
           this.#ticket(ticket);
+        },
+        remaining: (ticket) => {
+          const saved = this.#ticket(ticket);
+          return Math.min(saved.deadline - saved.last, saved.physicalDeadline - performance.now());
+        },
+        remainingSnapshot: (ticket, observedWall) => {
+          const saved = this.#tickets.get(ticket);
+          requireConsumer(saved && !saved.fenced && !saved.checking);
+          return Math.min(
+            saved.deadline - Math.max(saved.last, observedWall),
+            saved.physicalDeadline - performance.now(),
+          );
         },
       });
       Object.freeze(this);
@@ -608,6 +622,17 @@ export interface ControlJournalOperation {
   onFailure(stop: () => void): void;
   retain<T extends object>(nativeResult: T): T;
 }
+/** Only reads during preparation; the original pure refusal/remaining survives its retirement. */
+export interface ControlJournalReadOperation {
+  readonly store: Pick<ControlStore, "read">;
+  assert(): void;
+  remaining(): number;
+  capture<T>(work: () => T): T;
+  wait<T>(work: () => Promise<T>): Promise<T>;
+}
+declare const journalDeliveryBrand: unique symbol;
+/** Owner/read evidence only. This capability grants no command, host, write or process authority. */
+export type ControlJournalDelivery<T> = Readonly<{ [journalDeliveryBrand]: T }>;
 interface JournalOrigin {
   legacy: ControlStore;
   owner: object;
@@ -621,6 +646,15 @@ const journalOrigins = new WeakMap<ControlJournalOperationController, JournalOri
 const journalStoreOrigins = new WeakMap<ControlStore, JournalOrigin>();
 // Only synchronous denial is shared across aliases. Tickets/evidence remain lexical per call.
 const journalOwnerAuthorities = new WeakMap<object, JournalAuthority>();
+interface JournalDeliveryState<T> {
+  controller: ControlJournalOperationController;
+  origin: JournalOrigin;
+  seal(): Promise<Readonly<T>>;
+  assert(): void;
+  remaining(): number;
+  stop(): void;
+}
+const journalDeliveries = new WeakMap<object, JournalDeliveryState<unknown>>();
 function refuseJournalHooks(...authorities: (JournalAuthority | undefined)[]): void {
   const hooks = new Set(
     authorities.flatMap((authority) => (authority?.hook ? [authority.hook] : [])),
@@ -635,6 +669,17 @@ function storeJournalAuthority(legacy: ControlStore): JournalAuthority | undefin
   const guard = guardedOrigins.get(legacy);
   const captured = guard === undefined ? undefined : capturedStores.get(guard);
   return captured === undefined ? undefined : journalOwnerAuthorities.get(captured.owner);
+}
+function storeJournalOwner(legacy: ControlStore): object | undefined {
+  const known = journalStoreOrigins.get(legacy);
+  if (known) return known.owner;
+  const guard = guardedOrigins.get(legacy);
+  return guard === undefined ? undefined : capturedStores.get(guard)?.owner;
+}
+function refuseNativeOwnerEntries(...owners: (object | undefined)[]): void {
+  for (const owner of new Set(owners))
+    if (owner !== undefined && isNativeControlOwnerBoundary(owner))
+      assertNativeControlOwnerPublicEntry(owner);
 }
 /** Only the real native owner and this guard's exact raw/guarded store pair are accepted. */
 export function createControlJournalOperationController(
@@ -651,6 +696,7 @@ export function createControlJournalOperationController(
     storeJournalAuthority(legacy),
     captured === undefined ? undefined : journalOwnerAuthorities.get(captured.owner),
   );
+  refuseNativeOwnerEntries(owner, storeJournalOwner(legacy), captured?.owner);
   requireConsumer(
     guardedOrigins.get(legacy) === guard &&
       captured?.source === raw &&
@@ -676,6 +722,7 @@ export function assertControlJournalOperationController(
 ): void {
   const origin = journalOrigins.get(controller);
   refuseJournalHooks(origin?.authority, storeJournalAuthority(legacy));
+  refuseNativeOwnerEntries(origin?.owner, storeJournalOwner(legacy));
   if (origin?.legacy !== legacy) {
     throw new Error("invalid-control-consumer");
   }
@@ -688,9 +735,9 @@ export function assertControlJournalPublicEntry(
   const origin = controller === undefined ? undefined : journalOrigins.get(controller);
   // Even a wrong passed legacy must fence the known controller's original synchronous call.
   refuseJournalHooks(origin?.authority, storeJournalAuthority(legacy));
+  refuseNativeOwnerEntries(origin?.owner, storeJournalOwner(legacy));
   if (controller !== undefined) {
     requireConsumer(origin?.legacy === legacy);
-    assertNativeControlOwnerPublicEntry(origin.owner);
   }
 }
 
@@ -704,8 +751,91 @@ export async function withinControlJournalOperation<T>(
   legacy: ControlStore,
   work: (operation: ControlJournalOperation | undefined) => Promise<T>,
 ): Promise<T> {
+  return runControlJournalOperation(controller, legacy, work, false) as Promise<T>;
+}
+/** Native-only read preparation; inspection is withheld until the one final seal checkpoint. */
+export async function prepareControlJournalDelivery<T>(
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+  work: (operation: ControlJournalReadOperation) => Promise<T>,
+): Promise<ControlJournalDelivery<T>> {
+  try {
+    return (await runControlJournalOperation(
+      controller,
+      legacy,
+      work,
+      true,
+    )) as ControlJournalDelivery<T>;
+  } catch {
+    throw new Error("control-journal-delivery-failed");
+  }
+}
+function deliveryState<T>(
+  value: ControlJournalDelivery<T>,
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+): JournalDeliveryState<T> {
+  const state = journalDeliveries.get(value) as JournalDeliveryState<T> | undefined;
+  try {
+    // Wrong known contexts cannot bypass the original hook simply by failing identity first.
+    refuseJournalHooks(
+      state?.origin.authority,
+      journalOrigins.get(controller)?.authority,
+      storeJournalAuthority(legacy),
+    );
+    refuseNativeOwnerEntries(
+      state?.origin.owner,
+      journalOrigins.get(controller)?.owner,
+      storeJournalOwner(legacy),
+    );
+    requireConsumer(state && state.controller === controller && state.origin.legacy === legacy);
+    return state;
+  } catch {
+    state?.stop();
+    throw new Error("control-journal-delivery-failed");
+  }
+}
+/** Exactly one fresh denial checkpoint; its receipt remains plain inspection, never host authority. */
+export async function sealControlJournalDelivery<T>(
+  value: ControlJournalDelivery<T>,
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+): Promise<Readonly<T>> {
+  return deliveryState(value, controller, legacy).seal();
+}
+export function assertControlJournalDelivery<T>(
+  value: ControlJournalDelivery<T>,
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+): void {
+  deliveryState(value, controller, legacy).assert();
+}
+export function remainingControlJournalDelivery<T>(
+  value: ControlJournalDelivery<T>,
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+): number {
+  return deliveryState(value, controller, legacy).remaining();
+}
+/** Stop only denies; no accepted-offer, process or host-grant callback exists here. */
+export function stopControlJournalDelivery<T>(value: ControlJournalDelivery<T>): void {
+  const state = journalDeliveries.get(value);
+  if (state === undefined) throw new Error("control-journal-delivery-failed");
+  state.stop();
+}
+async function runControlJournalOperation<T>(
+  controller: ControlJournalOperationController | undefined,
+  legacy: ControlStore,
+  work:
+    | ((operation: ControlJournalOperation | undefined) => Promise<T>)
+    | ((operation: ControlJournalReadOperation) => Promise<T>),
+  terminal: boolean,
+): Promise<T | ControlJournalDelivery<T>> {
   assertControlJournalPublicEntry(controller, legacy);
-  if (controller === undefined) return work(undefined);
+  if (controller === undefined) {
+    requireConsumer(!terminal);
+    return (work as (operation: undefined) => Promise<T>)(undefined);
+  }
   const origin = journalOrigins.get(controller);
   requireConsumer(origin?.legacy === legacy);
   const authority = origin.authority;
@@ -714,17 +844,20 @@ export async function withinControlJournalOperation<T>(
     throw new Error("control-journal-operation-failed");
   }
   const native = beginNativeOwnerJournalOperation(origin.owner);
-  let phase: "active" | "closing" | "closed" = "active";
+  let phase: "active" | "closing" | "prepared" | "sealing" | "offering" | "closed" = "active";
   let busy = false;
   let original: ControlConsumerTicket | undefined;
   let checkingRefusal: (() => void) | undefined;
   const failures: (() => void)[] = [];
   const retained = new WeakSet<object>();
   let stopped = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleEnd = Number.POSITIVE_INFINITY;
   const stop = () => {
     if (stopped) return;
     stopped = true;
     phase = "closed";
+    clearTimeout(idleTimer);
     native.stop();
     const cleanup = { stop };
     const owns = authority.hook === undefined;
@@ -761,7 +894,9 @@ export async function withinControlJournalOperation<T>(
   const deny = (callback: (() => void) | undefined) => hooked(() => synchronousRefusal(callback));
   const pure = () => {
     requireConsumer(phase !== "closed");
+    requireConsumer(performance.now() < idleEnd);
     native.now();
+    requireConsumer(performance.now() < idleEnd);
   };
   const raw = origin.captured;
   const metadata: ControlStore = {
@@ -799,6 +934,49 @@ export async function withinControlJournalOperation<T>(
     pure();
     if (original) access.assert(original);
     pure();
+  };
+  let windowChecking = false;
+  const windowRemaining = () => {
+    let owns = false;
+    try {
+      requireConsumer(!windowChecking && phase !== "closed");
+      windowChecking = true;
+      owns = true;
+      return hooked(() => {
+        const physical = performance.now();
+        assert();
+        native.remaining();
+        if (original !== undefined) access.remaining(original);
+        assert(); // LAST caller clock/refusal hook precedes every returned bound.
+        requireConsumer(!stopped && windowChecking);
+        const snapshot = native.remainingSnapshot();
+        const remaining = Math.min(
+          snapshot.remaining,
+          original === undefined
+            ? Number.POSITIVE_INFINITY
+            : access.remainingSnapshot(original, snapshot.wall),
+        );
+        requireConsumer(remaining > 0);
+        if (terminal && phase !== "active") {
+          idleEnd = Math.min(idleEnd, physical + remaining);
+          requireConsumer(performance.now() < idleEnd);
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(stop, Math.max(0, idleEnd - performance.now()));
+        }
+        // Native resolver timeouts require integers; flooring can only shorten authority.
+        const available = Math.floor(Math.min(remaining, idleEnd - performance.now()));
+        requireConsumer(Number.isSafeInteger(available) && available > 0);
+        return available;
+      });
+    } catch {
+      stop();
+      throw new Error("control-journal-delivery-failed");
+    } finally {
+      if (owns) windowChecking = false;
+    }
+  };
+  const windowAssert = () => {
+    windowRemaining();
   };
   const checkpoint = async (refusal?: () => void) => {
     assert();
@@ -872,6 +1050,10 @@ export async function withinControlJournalOperation<T>(
         deny(beforeRead);
         await ensure(beforeRead);
         const fence = () => {
+          if (terminal && phase !== "active") {
+            stop();
+            throw new Error("control-consumer-read-failed");
+          }
           assert();
           deny(beforeRead);
           assert();
@@ -926,14 +1108,22 @@ export async function withinControlJournalOperation<T>(
         throw new Error("control-journal-operation-failed");
       }
     },
-    wait: <V>(callback: () => Promise<V>) =>
-      native.within(async () => {
-        requireConsumer(phase === "active");
-        assert();
-        const result = await settle(callback, new WeakSet());
-        assert();
-        return result.value;
-      }),
+    wait: async <V>(callback: () => Promise<V>) => {
+      try {
+        return await native.within(async () => {
+          requireConsumer(phase === "active");
+          assert();
+          const result = await settle(callback, new WeakSet());
+          assert();
+          return result.value;
+        });
+      } catch {
+        stop();
+        throw new Error(
+          terminal ? "control-journal-delivery-failed" : "control-journal-operation-failed",
+        );
+      }
+    },
     onFailure: (deny: () => void) => {
       requireConsumer(phase === "active" && typeof deny === "function");
       failures.push(deny);
@@ -944,10 +1134,70 @@ export async function withinControlJournalOperation<T>(
       return value;
     },
   });
+  const readOperation: ControlJournalReadOperation = Object.freeze({
+    store: Object.freeze({ read: scoped.read }),
+    assert: windowAssert,
+    remaining: windowRemaining,
+    capture: operation.capture,
+    wait: operation.wait,
+  });
   try {
-    const box = await native.within(() => settle(() => work(operation), retained));
+    if (terminal) await ensure();
+    const invoke = () =>
+      terminal
+        ? (work as (operation: ControlJournalReadOperation) => Promise<T>)(readOperation)
+        : (work as (operation: ControlJournalOperation) => Promise<T>)(operation);
+    const box = await native.within(() => settle(invoke, retained));
     const result = box.value;
     requireConsumer(phase === "active" && !busy);
+    if (terminal) {
+      phase = "prepared"; // Retire all data work before any capability/result can escape.
+      windowAssert();
+      const delivery = Object.freeze({}) as ControlJournalDelivery<T>;
+      const state: JournalDeliveryState<T> = {
+        controller,
+        origin,
+        assert: () => {
+          try {
+            requireConsumer(phase === "prepared" || phase === "offering");
+            windowAssert();
+          } catch {
+            stop();
+            throw new Error("control-journal-delivery-failed");
+          }
+        },
+        remaining: () => {
+          try {
+            requireConsumer(phase === "prepared" || phase === "offering");
+            return windowRemaining();
+          } catch {
+            stop();
+            throw new Error("control-journal-delivery-failed");
+          }
+        },
+        stop,
+        seal: async () => {
+          try {
+            requireConsumer(phase === "prepared");
+            phase = "sealing"; // Reserve before clocks, fresh observations or copying.
+            windowAssert();
+            await checkpoint();
+            const sealed = hooked(() =>
+              native.capture(() => snapshotJournalResult(result, new WeakSet())),
+            );
+            windowAssert();
+            phase = "offering";
+            windowAssert();
+            return sealed;
+          } catch {
+            stop();
+            throw new Error("control-journal-delivery-failed");
+          }
+        },
+      };
+      journalDeliveries.set(delivery, state as JournalDeliveryState<unknown>);
+      return delivery;
+    }
     phase = "closing"; // Reserve closure before fresh reads, clocks or final copy hooks.
     await ensure();
     await checkpoint();
@@ -958,6 +1208,7 @@ export async function withinControlJournalOperation<T>(
     return sealed;
   } catch (error) {
     stop();
+    if (terminal) throw new Error("control-journal-delivery-failed");
     // Keep existing trusted journal refusal names, while arbitrary callback diagnostics stay fixed.
     let diagnostic: string | undefined;
     try {

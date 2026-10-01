@@ -240,6 +240,7 @@ interface Budget {
   capture<T>(work: () => T): T;
   wait<T>(work: () => Promise<T>, whole?: boolean, preserveError?: boolean): Promise<T>;
   remaining(whole?: boolean): number;
+  remainingSnapshot(whole?: boolean): Readonly<{ wall: number; remaining: number }>;
 }
 /** Native journal bridge is factory-private. A copied object or an owner callback cannot mint it. */
 export interface NativeOwnerJournalAccess {
@@ -248,6 +249,10 @@ export interface NativeOwnerJournalAccess {
   now(): number;
   capture<T>(work: () => T): T;
   within<T>(work: () => Promise<T>): Promise<T>;
+  /** Denial-only minimum of the SAME original wall/physical window. */
+  remaining(): number;
+  /** Cached ORIGINAL clock/limits after the last hook; invokes no caller clock or refusal. */
+  remainingSnapshot(): Readonly<{ wall: number; remaining: number }>;
   stop(): void;
   beginCheck(refusal?: () => void): () => void;
   finishCheck(): void;
@@ -328,16 +333,30 @@ function budget(
     }
   };
   const origin = now();
-  const remaining = (whole = false) =>
-    Math.min(
-      whole ? maximum : 10_000,
-      maximum - (now() - origin),
-      maximum - (performance.now() - physicalStarted),
-    );
+  const remainingSnapshot = (whole = false) => {
+    try {
+      requireOwner(!fenced && !checking && last !== undefined);
+      const remaining = Math.min(
+        whole ? maximum : 10_000,
+        maximum - (last - origin),
+        maximum - (performance.now() - physicalStarted),
+      );
+      requireOwner(remaining > 0);
+      return Object.freeze({ wall: last, remaining });
+    } catch {
+      fence();
+      throw new Error("invalid-control-owner-boundary");
+    }
+  };
+  const remaining = (whole = false) => {
+    now();
+    return remainingSnapshot(whole).remaining;
+  };
   return {
     stop: fence,
     now,
     remaining,
+    remainingSnapshot,
     capture<T>(work: () => T): T {
       now();
       let owns = false;
@@ -365,6 +384,7 @@ function budget(
         let rejectDeadline: (reason: Error) => void = () => {};
         const schedule = () => {
           end = Math.min(end, performance.now() + remaining(whole));
+          requireOwner(performance.now() < end);
           clearTimeout(timer);
           timer = setTimeout(
             () => {
@@ -380,7 +400,9 @@ function budget(
         schedule();
         const result = await Promise.race([
           Promise.resolve().then(() => {
+            requireOwner(performance.now() < end);
             now();
+            requireOwner(performance.now() < end);
             const pending = work();
             try {
               now();
@@ -395,7 +417,11 @@ function budget(
           }),
           timeout,
         ]);
+        // A synchronous fulfillment/copy hook can starve the timer's callback. Its saved
+        // deadline still bounds this result and cannot be renewed by another queued wait.
+        requireOwner(performance.now() < end);
         now();
+        requireOwner(performance.now() < end);
         return result;
       } catch (error) {
         fence();
@@ -757,6 +783,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
             check();
             return operation.remaining(whole);
           },
+          remainingSnapshot: operation.remainingSnapshot,
           capture: <T>(work: () => T) => {
             check();
             const value = operation.capture(work);
@@ -806,6 +833,8 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       now: operation.now,
       capture: operation.capture,
       within: <T>(work: () => Promise<T>) => operation.wait(work, true, true),
+      remaining: () => operation.remaining(true),
+      remainingSnapshot: () => operation.remainingSnapshot(true),
       stop: fail,
       beginCheck,
       finishCheck,

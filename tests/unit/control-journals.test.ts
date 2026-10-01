@@ -722,7 +722,8 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
       // Local absence no longer creates a younger object check. Hold the final anchor
       // round of the SAME operation's mandatory pre-PUT checkpoint near its original deadline.
       if (oldPath && request.url.endsWith("/variables/CONTROL_OWNER_ANCHOR")) {
-        if (++variableReads === 2) f.clock.now = instant + 29_990;
+        // Leave room for local copying to reach the held GET; expiry is explicit below.
+        if (++variableReads === 2) f.clock.now = instant + 29_000;
       }
       if (oldPath && variableReads === 2 && request.url === api && !held) {
         held = true;
@@ -740,6 +741,9 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
       "d".repeat(64),
       "apply",
     );
+    // Its original deadline may reject while the independent new operation is running.
+    // Drain that rejection immediately; the exact old Promise is still asserted below.
+    void old.catch(() => {});
     await entered;
     f.clock.now = instant + 30_001;
     expect(ordinaryCalls(f).filter((call) => call.method === "write")).toHaveLength(0);

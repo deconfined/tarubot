@@ -8,6 +8,12 @@ import {
   assertControlJournalPublicEntry,
   withinControlJournalOperation,
   type ControlJournalOperation,
+  type ControlJournalReadOperation,
+  prepareControlJournalDelivery,
+  sealControlJournalDelivery,
+  assertControlJournalDelivery,
+  remainingControlJournalDelivery,
+  stopControlJournalDelivery,
   type ControlConsumerBoundary,
   type ControlConsumerScope,
   type ControlConsumerTicket,
@@ -15,6 +21,7 @@ import {
 } from "../../scripts/control-consumer.js";
 import { GitHubControlOwnerBoundary } from "../../scripts/control-owner-boundary.js";
 import type { ControlStore } from "../../scripts/infra-control.js";
+import { LocalDnssecValidator } from "../../scripts/dnssec-validator.js";
 
 const revision = "00000000-0000-4000-8000-000000000001";
 const generation = "00000000-0000-4000-8000-000000000002";
@@ -1070,5 +1077,303 @@ describe("lexical native whole journal authority", () => {
     ).rejects.toThrow("control-journal-operation-failed");
     expect(stopped).toBe(true);
     expect(g.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(1);
+  });
+});
+
+describe("native read-only terminal journal delivery", () => {
+  test("remaining subtracts time spent by the final clock hook in preparation and prepared phases", async () => {
+    for (const prepared of [false, true]) {
+      const f = nativeJournalFixture();
+      let wall = instant,
+        reads = 0,
+        advanceAt = Number.POSITIVE_INFINITY;
+      Object.defineProperty(f.clock, "now", {
+        get() {
+          if (++reads === advanceAt) wall += 10_000;
+          return wall;
+        },
+      });
+      let saved!: ControlJournalReadOperation;
+      const measure = (remaining: () => number) => {
+        reads = 0;
+        remaining();
+        const hooks = reads;
+        expect(hooks).toBeGreaterThan(0);
+        reads = 0;
+        advanceAt = hooks; // Consume wall time in the LAST caller-controlled hook.
+        expect(remaining()).toBeLessThanOrEqual(20_000);
+        expect(reads).toBe(hooks);
+        advanceAt = Number.POSITIVE_INFINITY;
+      };
+      const cap = await prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+        saved = operation;
+        if (!prepared) measure(operation.remaining);
+        return { received: true };
+      });
+      if (prepared) measure(() => remainingControlJournalDelivery(cap, f.controller, f.legacy));
+      expect(saved.remaining()).toBeLessThanOrEqual(20_000);
+      expect(await sealControlJournalDelivery(cap, f.controller, f.legacy)).toEqual({
+        received: true,
+      });
+      stopControlJournalDelivery(cap);
+      expect(f.calls).toHaveLength(24);
+    }
+  });
+  test("withholds inspection until one checkpoint and retains only the original pure window", async () => {
+    const f = nativeJournalFixture();
+    let saved!: ControlJournalReadOperation;
+    f.values.set("current", Uint8Array.from([7]));
+    // The read path must not inspect even a replacement raw write getter.
+    Object.defineProperty(f.raw, "write", {
+      get() {
+        throw new Error("invented write getter");
+      },
+    });
+    const cap = await prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+      saved = operation;
+      expect(Object.keys(operation.store)).toEqual(["read"]);
+      expect(Object.keys(operation)).toEqual(["store", "assert", "remaining", "capture", "wait"]);
+      expect(Number.isSafeInteger(operation.remaining())).toBe(true);
+      expect(await operation.store.read("current")).toEqual(Uint8Array.from([7]));
+      return { snapshot: { generation, values: [7] } };
+    });
+    expect(Object.keys(cap)).toEqual([]);
+    expect(Object.isFrozen(cap)).toBe(true);
+    expect(f.calls).toHaveLength(12);
+    f.clock.now += 100;
+    const remaining = saved.remaining();
+    expect(Number.isSafeInteger(remaining)).toBe(true);
+    expect(remaining).toBeLessThanOrEqual(29_900);
+    // Like native enrollment verification, a dependency retains this original refusal only.
+    const retainedDenial = saved.assert;
+    retainedDenial();
+    const inspection = await sealControlJournalDelivery(cap, f.controller, f.legacy);
+    expect(f.calls).toHaveLength(24);
+    expect(inspection).toEqual({ snapshot: { generation, values: [7] } });
+    expect(Object.isFrozen(inspection.snapshot.values)).toBe(true);
+    retainedDenial();
+    assertControlJournalDelivery(cap, f.controller, f.legacy);
+    expect(remainingControlJournalDelivery(cap, f.controller, f.legacy)).toBeLessThanOrEqual(
+      remaining,
+    );
+    stopControlJournalDelivery(cap);
+    expect(() => retainedDenial()).toThrow("control-journal-delivery-failed");
+    expect(() => remainingControlJournalDelivery(cap, f.controller, f.legacy)).toThrow(
+      "control-journal-delivery-failed",
+    );
+    expect(f.calls).toHaveLength(24);
+  });
+  test("prepared reads, captures, waits and their original SDK callbacks cannot escape", async () => {
+    for (const method of ["read", "capture", "wait", "sdk"] as const) {
+      const f = nativeJournalFixture();
+      let saved!: ControlJournalReadOperation;
+      const cap = await prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+        saved = operation;
+        await operation.store.read("current");
+        return { received: true };
+      });
+      const count = f.offers.length;
+      if (method === "read") await expect(saved.store.read("current")).rejects.toThrow();
+      else if (method === "capture") expect(() => saved.capture(() => 1)).toThrow();
+      else if (method === "wait") await expect(saved.wait(async () => 1)).rejects.toThrow();
+      else expect(() => f.fences.at(-1)?.()).toThrow();
+      await expect(sealControlJournalDelivery(cap, f.controller, f.legacy)).rejects.toThrow(
+        "control-journal-delivery-failed",
+      );
+      expect(f.offers).toHaveLength(count);
+      expect(f.calls).toHaveLength(12);
+    }
+  });
+  test("idle and held expiry permanently stop original callbacks before any later offer", async () => {
+    const idle = nativeJournalFixture();
+    let retained!: ControlJournalReadOperation;
+    const cap = await prepareControlJournalDelivery(
+      idle.controller,
+      idle.legacy,
+      async (operation) => {
+        retained = operation;
+        idle.clock.now += 29_980;
+        return { received: true };
+      },
+    );
+    await Bun.sleep(60);
+    await expect(sealControlJournalDelivery(cap, idle.controller, idle.legacy)).rejects.toThrow(
+      "control-journal-delivery-failed",
+    );
+    expect(() => retained.assert()).toThrow("control-journal-delivery-failed");
+    expect(idle.calls).toHaveLength(12);
+    const held = nativeJournalFixture();
+    let release!: () => void;
+    const pending = prepareControlJournalDelivery(
+      held.controller,
+      held.legacy,
+      async (operation) => {
+        held.clock.now += 29_980;
+        await operation.wait(
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        );
+        await operation.store.read("current");
+        return { late: true };
+      },
+    );
+    const settled = pending.catch(() => "refused");
+    await Bun.sleep(60);
+    expect(await settled).toBe("refused");
+    release();
+    await Bun.sleep(10);
+    expect(held.calls).toHaveLength(12);
+    expect(held.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(0);
+  });
+  test("a synchronous owned result copy cannot starve a shortened timer and trigger later checks", async () => {
+    const f = nativeJournalFixture();
+    await expect(
+      prepareControlJournalDelivery(f.controller, f.legacy, () => {
+        f.clock.now += 29_980;
+        let spent = false;
+        return Promise.resolve(
+          new Proxy(
+            { received: true },
+            {
+              ownKeys(value) {
+                if (!spent) {
+                  spent = true;
+                  const until = performance.now() + 60;
+                  while (performance.now() < until) {
+                    /* Invented synchronous copying cost. */
+                  }
+                }
+                return Reflect.ownKeys(value);
+              },
+            },
+          ),
+        );
+      }),
+    ).rejects.toThrow("control-journal-delivery-failed");
+    expect(f.calls).toHaveLength(12);
+    expect(f.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(0);
+  });
+  test("copied, cross-origin and repeated seal inputs fence the actual original capability", async () => {
+    for (const wrong of ["copy", "controller", "store", "alias", "repeat"] as const) {
+      const f = nativeJournalFixture(),
+        other = nativeJournalFixture();
+      const cap = await prepareControlJournalDelivery(f.controller, f.legacy, async () => ({
+        received: true,
+      }));
+      const alias = createControlJournalOperationController(f.legacy, f.raw, f.guard, f.owner);
+      if (wrong === "copy") {
+        await expect(
+          sealControlJournalDelivery({ ...cap }, f.controller, f.legacy),
+        ).rejects.toThrow("control-journal-delivery-failed");
+        // An unrecognized clone grants nothing and cannot identify a genuine unrelated cap.
+        stopControlJournalDelivery(cap);
+      } else {
+        if (wrong === "repeat") await sealControlJournalDelivery(cap, f.controller, f.legacy);
+        await expect(
+          sealControlJournalDelivery(
+            cap,
+            wrong === "controller" ? other.controller : wrong === "alias" ? alias : f.controller,
+            wrong === "store" ? other.legacy : f.legacy,
+          ),
+        ).rejects.toThrow("control-journal-delivery-failed");
+      }
+      expect(() => assertControlJournalDelivery(cap, f.controller, f.legacy)).toThrow(
+        "control-journal-delivery-failed",
+      );
+      expect(f.calls).toHaveLength(wrong === "repeat" ? 24 : 12);
+      expect(other.calls).toHaveLength(0);
+    }
+  });
+  test("nested seal and wrong-context first clocks cannot swallow the original denial", async () => {
+    for (const wrong of [false, true]) {
+      const f = nativeJournalFixture();
+      let nested = false;
+      Object.defineProperty(f.clock, "now", {
+        get() {
+          if (!nested) {
+            nested = true;
+            void prepareControlJournalDelivery(
+              wrong ? { ...f.controller } : f.controller,
+              f.legacy,
+              async () => 1,
+            ).catch(() => {});
+          }
+          return instant;
+        },
+      });
+      await expect(
+        prepareControlJournalDelivery(f.controller, f.legacy, async () => 1),
+      ).rejects.toThrow("control-journal-delivery-failed");
+      expect(f.calls).toHaveLength(0);
+      expect(f.offers).toHaveLength(0);
+    }
+    const f = nativeJournalFixture();
+    const cap = await prepareControlJournalDelivery(f.controller, f.legacy, async () => ({
+      received: true,
+    }));
+    f.beforeRead(() => {
+      void sealControlJournalDelivery(cap, f.controller, f.legacy).catch(() => {});
+    });
+    await expect(sealControlJournalDelivery(cap, f.controller, f.legacy)).rejects.toThrow(
+      "control-journal-delivery-failed",
+    );
+    expect(() => assertControlJournalDelivery(cap, f.controller, f.legacy)).toThrow(
+      "control-journal-delivery-failed",
+    );
+  });
+  test("native resolver timeout parsing accepts the retained integer minimum before any fixture effect", async () => {
+    const f = nativeJournalFixture();
+    let accepted = 0,
+      measured = 0,
+      executorOffers = 0;
+    await expect(
+      prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+        const validator = new LocalDnssecValidator(
+          {
+            helper: "/invented/validator",
+            anchors: "/invented/root.ds",
+            runtime: { directory: "/invented", manifest_sha256: "e".repeat(64) },
+            pin: {
+              name: "unbound",
+              version: "1.26.1",
+              mode: "local-validating",
+              binary_sha256: "c".repeat(64),
+              anchor_sha256: "d".repeat(64),
+              runtime_manifest_sha256: "e".repeat(64),
+            },
+            now: () => f.clock.now,
+          },
+          () => {
+            executorOffers++;
+            throw new Error("invented executor must not run");
+          },
+        );
+        await validator.validate(
+          {} as never,
+          {} as never,
+          () => {
+            operation.assert();
+            if (measured) {
+              accepted++;
+              throw new Error("invented stop before filesystem offer");
+            }
+          },
+          () => {
+            measured = operation.remaining();
+            return measured;
+          },
+        );
+        return {};
+      }),
+    ).rejects.toThrow("control-journal-delivery-failed");
+    // The real32 integer check accepted the closure, reached its next refusal, and stopped
+    // before paths, loader-preload inspection, DNS, native executor or any host read.
+    expect(accepted).toBeGreaterThan(0);
+    expect(Number.isSafeInteger(measured)).toBe(true);
+    expect(measured).toBeGreaterThan(0);
+    expect(executorOffers).toBe(0);
+    expect(f.calls).toHaveLength(12);
   });
 });

@@ -5,6 +5,11 @@ import { readFileSync } from "node:fs";
 import {
   ControlConsumerGuard,
   guardedControlStore,
+  createControlJournalOperationController,
+  prepareControlJournalDelivery,
+  sealControlJournalDelivery,
+  assertControlJournalDelivery,
+  stopControlJournalDelivery,
   type ControlConsumerScope,
 } from "../../scripts/control-consumer.js";
 import {
@@ -1163,6 +1168,45 @@ describe("independently current owner control configuration", () => {
 });
 
 describe("native original whole-journal owner evidence", () => {
+  test("terminal delivery retains actual completed repair evidence for exactly two checks and zero PUTs", async () => {
+    for (const changed of [false, true]) {
+      const f = fixture();
+      await completed(f);
+      const owner = f.make();
+      const guard = new ControlConsumerGuard(f.scope, {
+        store: f.store,
+        owner,
+        now: () => f.clock.now,
+      });
+      const legacy = guardedControlStore(f.store, guard);
+      const controller = createControlJournalOperationController(legacy, f.store, guard, owner);
+      const writes = f.store.writes.length;
+      const cap = await prepareControlJournalDelivery(controller, legacy, async (operation) => {
+        await operation.store.read("current");
+        return { generation: repairGeneration };
+      });
+      expect(f.seen).toHaveLength(34);
+      f.clock.now += 100;
+      if (changed) present(f.job.steps[0]).number = 2;
+      if (changed) {
+        await expect(sealControlJournalDelivery(cap, controller, legacy)).rejects.toThrow(
+          "control-journal-delivery-failed",
+        );
+        expect(() => assertControlJournalDelivery(cap, controller, legacy)).toThrow(
+          "control-journal-delivery-failed",
+        );
+      } else {
+        expect(await sealControlJournalDelivery(cap, controller, legacy)).toEqual({
+          generation: repairGeneration,
+        });
+        assertControlJournalDelivery(cap, controller, legacy);
+        stopControlJournalDelivery(cap);
+      }
+      expect(f.seen).toHaveLength(68); // Both use actual parsers/history; fresh denial never replaces proof.
+      expect(f.store.writes).toHaveLength(writes);
+      expect(f.store.versions).toBe(0);
+    }
+  });
   test("only actual native owners create the original30 window and callback reentry permanently denies", async () => {
     expect(() => beginNativeOwnerJournalOperation({ readOwnerAnchor: async () => ({}) })).toThrow(
       "invalid-control-owner-boundary",
@@ -1244,6 +1288,61 @@ describe("native original whole-journal owner evidence", () => {
     release();
     await expect(pending).rejects.toThrow("invalid-control-owner-boundary");
     expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    expect(f.seen).toHaveLength(0);
+  });
+  test("remaining retains the original clock and never replaces an older limit", () => {
+    const f = fixture(),
+      window = beginNativeOwnerJournalOperation(f.make());
+    const original = window.remaining();
+    f.clock.now += 1000;
+    expect(window.remaining()).toBeLessThanOrEqual(original - 999);
+    f.clock.now += 29_000;
+    expect(() => window.remaining()).toThrow("invalid-control-owner-boundary");
+    expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    expect(f.seen).toHaveLength(0);
+  });
+  test("cached remaining uses the last original observation without any later clock hook", () => {
+    const f = fixture();
+    let wall = instant,
+      reads = 0;
+    Object.defineProperty(f.clock, "now", {
+      get() {
+        reads++;
+        return wall;
+      },
+    });
+    const window = beginNativeOwnerJournalOperation(f.make());
+    wall += 10_000;
+    window.now();
+    const observed = reads;
+    const snapshot = window.remainingSnapshot();
+    expect(snapshot.wall).toBe(instant + 10_000);
+    expect(snapshot.remaining).toBeLessThanOrEqual(20_000);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(reads).toBe(observed);
+    window.stop();
+    expect(() => window.remainingSnapshot()).toThrow("invalid-control-owner-boundary");
+    expect(reads).toBe(observed);
+    expect(f.seen).toHaveLength(0);
+  });
+  test("queued synchronous fulfillment cannot outrun a shortened timer callback", async () => {
+    const f = fixture(),
+      window = beginNativeOwnerJournalOperation(f.make());
+    await expect(
+      window.within(() => {
+        f.clock.now += 29_980;
+        return new Promise<string>((resolve) =>
+          queueMicrotask(() => {
+            const until = performance.now() + 60;
+            while (performance.now() < until) {
+              /* Invented callback cost starves the queued timer. */
+            }
+            resolve("invented late queued result");
+          }),
+        );
+      }),
+    ).rejects.toThrow("invalid-control-owner-boundary");
+    expect(() => window.remaining()).toThrow("invalid-control-owner-boundary");
     expect(f.seen).toHaveLength(0);
   });
   test("cross-realm rejected first clocks are drained without callback getters or native offers", () => {
