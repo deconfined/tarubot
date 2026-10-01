@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.20**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.21**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.21 — Guarded Ansible connection fixtures
+
+- Add a first-party connection plugin and a private parent-owned framing coordinator for local controller fixtures, with one-use operation allocation and uncertainty fencing across worker resets.
+- Gate pipelined input on the exact passwordless sudo success marker and carry command/file channels through bounded framing. Keep controller output private and file-fetch completion conditional on a complete known result.
+- Exercise the pinned controller with invented handlers and a target-only fixture launcher. Actual descriptor, journal, SSH and durable reboot integration remain pending; no operational transport or host authority is created by these fixtures.
 
 ## 2.36.20 — Original baseline execution evidence
 
