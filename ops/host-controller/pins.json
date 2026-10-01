@@ -108,7 +108,7 @@
   "sources": {
     "Containerfile": "85ca9c3fc438c09920a7e80f4f17a43554003f1337d3b972c95605e246a1b1bc",
     "assemble.py": "d74ea291a7c6ffc97f9de684b0a5ed40e78fc4b97d7dfe66a53629f77c7a682a",
-    "launcher.py": "517fd49dbaf9e3e4defb4c9f15ae9f555a697d8a2caad64f76981a08917edae9",
+    "launcher.py": "27974f8000a79a2edbca03c23c50b7cd5108b1f39918f349941959cfa8bbe018",
     "tarubot_guarded.py": "db8df60c76a4c632590710da2e5a21ad34254b50b8f1d42ab71392f87b4817a0",
     "_tarubot_frames.py": "07a8242e4bf5ffb0750cbe67f80662a923229fe21a1977ea217dfb546b441c54"
   },

@@ -34,7 +34,7 @@ function freezeCatalogue<T>(value: T): T {
 const pins = freezeCatalogue(JSON.parse(JSON.stringify(importedPins)) as typeof importedPins);
 // Updated only with reviewed static source pins; an earlier importer cannot mutate the
 // shared JSON module and make that mutated catalogue become our native expectation.
-const reviewedCatalogueSha256 = "f332d33f6a6cbf3bcd96fd608f26eee3ee73c15ed12fac684e0f777e76cc296c";
+const reviewedCatalogueSha256 = "ddb900226369f799a88bb52f6543d76b4aa95153939a620d460d81bb5cae3688";
 /** Immutable reviewed DATA only; this catalogue never creates an image or process capability. */
 export function reviewedControllerCatalogue(): typeof importedPins {
   requireValue(controllerDigest(Buffer.from(JSON.stringify(pins))) === reviewedCatalogueSha256);

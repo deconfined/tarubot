@@ -1,13 +1,14 @@
 """Measured PID1 broker: private native worker origins, then a paused driver.
 
-There is deliberately no release/dispatch command. The only host transport sink refuses.
-A later protected producer must bind a genuine execution grant before adding such a path.
+The owned parent alone may release a matching protected phase into the fixed DENY sink.
+Neither a phase declaration nor private framing supplies real host execution authority.
 pidfd proves process identity/liveness, not continued Python-code identity: the reviewed
 no-exec worker path and native kernel/engine integrity remain explicit prerequisites.
 """
 import array
 import ctypes
 import hashlib
+import base64
 import json
 import os
 import selectors
@@ -141,6 +142,7 @@ class Window:
         first = time.time()
         self.wall = first + seconds
         self.last = first
+        self.guard = None
 
     def check(self):
         before = time.monotonic()
@@ -149,6 +151,8 @@ class Window:
         require(now >= self.last and now < self.wall)
         self.last = now
         self.end = min(self.end, before + self.wall - now)
+        if self.guard is not None:
+            self.guard()
         require(time.monotonic() < self.end)
 
     def timeout(self):
@@ -218,20 +222,26 @@ def live_pidfd(fd):
     return pid
 
 
-def register_worker(channel, driver_pid, worker_number, window):
+def register_worker(channel, driver_pid, worker_number, window, role="probe"):
     window.check()
+    channel.settimeout(max(0.001, window.end - time.monotonic()))
     data, ancillary, flags, _ = channel.recvmsg(4096, socket.CMSG_SPACE(12) + socket.CMSG_SPACE(4),
                                                socket.MSG_CMSG_CLOEXEC)
     fds = []
     credentials = None
     try:
+        # recvmsg installs received descriptors even when ancillary space is truncated.
+        # Own every delivered right BEFORE any validation can throw.
+        for level, kind, value in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                received = array.array("i")
+                received.frombytes(value)
+                fds.extend(received)
         require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
         for level, kind, value in ancillary:
             require(level == socket.SOL_SOCKET)
             if kind == socket.SCM_RIGHTS:
-                received = array.array("i")
-                received.frombytes(value)
-                fds.extend(received)
+                pass
             elif kind == socket.SCM_CREDENTIALS:
                 require(credentials is None and len(value) == 12)
                 credentials = struct.unpack("3i", value)
@@ -240,7 +250,7 @@ def register_worker(channel, driver_pid, worker_number, window):
         require(credentials == (driver_pid, os.getuid(), os.getgid()) and len(fds) == 1)
         value = literal_json(data)
         exact(value, ("schema", "kind", "worker", "role"))
-        require(value == {"schema": 1, "kind": "register", "worker": worker_number, "role": "probe"})
+        require(value == {"schema": 1, "kind": "register", "worker": worker_number, "role": role})
         pid = live_pidfd(fds[0])
         require(pid not in (os.getpid(), driver_pid))
         window.check()
@@ -251,6 +261,34 @@ def register_worker(channel, driver_pid, worker_number, window):
     finally:
         for fd in fds:
             os.close(fd)
+
+
+def guarded_worker_connection(worker, phase_name):
+    require(worker._host.name in ("target", "localhost"))
+    require(not worker._task.delegate_to and not worker._task_vars.get("ansible_delegated_vars"))
+    play = worker._task.get_play()
+    require(play is not None)
+    connection = "local" if worker._host.name == "localhost" else "tarubot_guarded"
+    if connection == "local":
+        # Hostname alone is never local execution authority. Only the two fixed
+        # reviewed report plays and their bounded builtin tasks may use local.
+        reports = {
+            "bot": ("Write the result on the runner", {
+                "Check that the result goes to an absolute path on the runner": "ansible.builtin.assert",
+                "Assemble the result from public fields only": "ansible.builtin.set_fact",
+                "Write the result": "ansible.builtin.copy",
+                "Fail the run unless it deployed, was superseded, only configured or passed its preflight": "ansible.builtin.assert"}),
+            "accept": ("Write only the bound public acceptance evidence", {
+                "Require all target checks to have completed": "ansible.builtin.assert",
+                "Write the public release result": "ansible.builtin.copy"}),
+        }
+        require(phase_name in reports)
+        report_name, tasks = reports[phase_name]
+        # Pinned core declares Play.hosts as a list, including a literal YAML scalar.
+        require(play.name == report_name and play.hosts == ["localhost"] and play.connection == "local"
+                and worker._task.get_path().rsplit(":", 1)[0] == "/phase/release/ops/ansible/" + phase_name + ".yml"
+                and tasks.get(worker._task.name) == worker._task.action)
+    return connection
 
 
 def driver(channel, pause_read, control_path):
@@ -269,6 +307,9 @@ def driver(channel, pause_read, control_path):
     broker_pid = os.getppid()
     driver_pid = os.getpid()
     owned_pause_read = pause_read
+    worker_number = 0
+    role = "probe"
+    phase_name = None
 
     def after_fork():
         nonlocal owned_pause_read
@@ -281,7 +322,24 @@ def driver(channel, pause_read, control_path):
     os.register_at_fork(after_in_child=after_fork)
 
     def start(worker):
+        nonlocal worker_number
         require(type(worker) is WorkerProcess and not active)
+        require(worker_number < 64)
+        worker_number += 1
+        if role == "task":
+            # Source trees are separately authenticated by the protected parent. Fixed
+            # highest-precedence host variables prevent a task/inventory from selecting
+            # another transport; localhost report tasks stay explicitly local.
+            connection = guarded_worker_connection(worker, phase_name)
+            worker._task_vars["ansible_connection"] = connection
+            worker._play_context.connection = connection
+            if connection != "local":
+                worker._task_vars.update({"ansible_host": "tarubot_fixture_target",
+                                          "ansible_user": "root", "ansible_shell_executable": "/bin/sh",
+                                          "ansible_python_interpreter": "/usr/bin/python3"})
+                worker._play_context.remote_addr = "tarubot_fixture_target"
+                worker._play_context.remote_user = "root"
+                worker._play_context.executable = "/bin/sh"
         read_end, write_end = os.pipe2(os.O_CLOEXEC)
         active["read"] = read_end
         active["write"] = write_end
@@ -292,9 +350,9 @@ def driver(channel, pause_read, control_path):
             # Exact captured core start created this process; no public PID constructor.
             fd = os.pidfd_open(worker.pid, 0)
             rights = array.array("i", [fd])
-            channel.sendmsg([encode({"schema": 1, "kind": "register", "worker": 1, "role": "probe"})],
+            channel.sendmsg([encode({"schema": 1, "kind": "register", "worker": worker_number, "role": role})],
                             [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)])
-            require(literal_json(channel.recv(4096)) == {"schema": 1, "kind": "registered", "worker": 1})
+            require(literal_json(channel.recv(4096)) == {"schema": 1, "kind": "registered", "worker": worker_number})
             os.write(write_end, b"P")
         finally:
             if fd is not None:
@@ -308,7 +366,14 @@ def driver(channel, pause_read, control_path):
         os.close(active["write"])
         require(os.read(active["read"], 1) == b"P")
         os.close(active["read"])
+        active["read"] = None
+        active["write"] = None
         require(channel.fileno() == -1)
+        if role == "task":
+            # Only the captured measured core method runs tasks. The worker has no
+            # registration/parent channel and cannot construct another native origin.
+            original_run(worker)
+            os._exit(0)
 
         def inaccessible():
             for parent in (broker_pid, driver_pid):
@@ -358,12 +423,297 @@ def driver(channel, pause_read, control_path):
         require(not worker.is_alive() and worker.exitcode == 0)
         worker.close()
         channel.send(encode({"schema": 1, "kind": "paused"}))
-        # No byte can release this driver. EOF/anything terminates it; only a later reviewed
-        # native grant integration may add a private continuation, never a boolean callback.
-        os.read(pause_read, 1)
+        require(os.read(pause_read, 1) == b"R")
+        os.close(pause_read)
+        owned_pause_read = None
+        release = literal_json(channel.recv(32768))
+        exact(release, ("schema", "kind", "declaration"))
+        require(release["schema"] == 1 and release["kind"] == "release-denial")
+        role = "task"
+        phase_name = release["declaration"]["phase"]
+        run_phase(release["declaration"])
+        # A denied task is never a successful deployment or acceptance result.
         os._exit(1)
     finally:
         WorkerProcess.start, WorkerProcess.run = original_start, original_run
+
+
+def run_phase(declaration):
+    exact(declaration, ("schema", "purpose", "target", "action", "phase", "phase_number",
+                        "accept_release", "configuration", "release"))
+    require(declaration["schema"] == 1 and declaration["purpose"] == "tarubot-host-controller-phase-v1"
+            and declaration["target"] == "staging" and declaration["action"] == "deploy"
+            and declaration["accept_release"] is True
+            and (declaration["phase"], declaration["phase_number"]) in (("site", 0), ("bot", 1), ("accept", 2)))
+    release = declaration["release"]
+    exact(release, ("version", "commit", "digest", "config_commit", "publication_run", "schema_head"))
+    exact(declaration["configuration"], ("commit",))
+    require(declaration["configuration"]["commit"] == release["config_commit"] == release["commit"])
+    # The fixed first remote task is denied before application settings could be used.
+    # A future REAL-operation recipe needs a separate native grant/settings integration.
+    os.environ.update({"TARUBOT_FIXTURE_BOOTSTRAP": str(ROOT / "bootstrap.json"),
+                       "ANSIBLE_COLLECTIONS_PATH": "/dev/null", "ANSIBLE_COLLECTIONS_SCAN_SYS_PATH": "False",
+                       "ANSIBLE_ROLES_PATH": "/dev/null", "ANSIBLE_INVENTORY_ENABLED": "yaml",
+                       "ANSIBLE_RETRY_FILES_ENABLED": "False", "ANSIBLE_FORKS": "1",
+                       "ANSIBLE_CONNECTION_PLUGINS": "/opt/tarubot/connection_plugins"})
+    from ansible.cli.playbook import PlaybookCLI
+    from ansible.plugins.loader import connection_loader
+    connection_loader.add_directory("/opt/tarubot/connection_plugins")
+    inventory = ROOT / "inventory.yml"
+    content = b"all:\n  hosts:\n    target:\n      ansible_host: tarubot_fixture_target\n      ansible_connection: tarubot_guarded\n      ansible_user: root\n      ansible_shell_executable: /bin/sh\n"
+    with inventory.open("xb") as output:
+        output.write(content)
+    inventory.chmod(0o600)
+    selected = "/phase/config/ops/ansible/site.yml" if declaration["phase"] == "site" else "/phase/release/ops/ansible/" + declaration["phase"] + ".yml"
+    variables = {"tarubot_role": "staging", "tarubot_target": "staging", "tarubot_action": "deploy",
+                 "tarubot_version": release["version"], "tarubot_commit": release["commit"],
+                 "tarubot_digest": release["digest"], "tarubot_publication_run": release["publication_run"],
+                 "tarubot_schema_head": release["schema_head"], "tarubot_result": str(ROOT / "result.json"),
+                 "tarubot_acceptance": str(ROOT / "acceptance.json")}
+    cli = PlaybookCLI(["ansible-playbook", "--forks", "1", "--inventory", str(inventory),
+                       "--extra-vars", encode(variables).decode("ascii"), selected])
+    cli.parse()
+    cli.run()
+
+
+def peer_read(connection, count, worker_fd, worker_pid, window, eof=False):
+    """Per-message kernel credentials reject a fork descendant inheriting a connected FD."""
+    output = bytearray()
+    while len(output) < count:
+        window.check()
+        require(live_pidfd(worker_fd) == worker_pid)
+        connection.settimeout(max(0.001, window.end - time.monotonic()))
+        data, ancillary, flags, _ = connection.recvmsg(min(65536, count - len(output)), socket.CMSG_SPACE(12) + socket.CMSG_SPACE(4), socket.MSG_CMSG_CLOEXEC)
+        credentials = None
+        received = []
+        try:
+            for level, kind, value in ancillary:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                    rights = array.array("i")
+                    rights.frombytes(value)
+                    received.extend(rights)
+            require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+            for level, kind, value in ancillary:
+                require(level == socket.SOL_SOCKET)
+                if kind == socket.SCM_RIGHTS:
+                    pass
+                else:
+                    require(kind == socket.SCM_CREDENTIALS and credentials is None and len(value) == 12)
+                    credentials = struct.unpack("3i", value)
+            require(not received)
+            if not data:
+                require(eof and not output)
+                return b""
+            require(credentials == (worker_pid, os.getuid(), os.getgid()))
+            output.extend(data)
+        finally:
+            for descriptor in received:
+                os.close(descriptor)
+        window.check()
+    return bytes(output)
+
+
+def capture_request(connection, operation, nonce, worker_fd, worker_pid, window):
+    sequence = 0
+    header = None
+    body = bytearray()
+    wire = 0
+    while True:
+        raw = peer_read(connection, 32, worker_fd, worker_pid, window)
+        magic, code, observed, size, observed_nonce = struct.unpack("!4sB3xII16s", raw)
+        require(magic == b"TBH1" and raw[5:8] == b"\0\0\0" and observed == sequence
+                and observed_nonce == bytes.fromhex(nonce) and sequence < 4096)
+        sequence += 1
+        wire += 32 + size
+        require(wire <= 9 * 1024 * 1024)
+        if header is None:
+            require(code == {"exec": 1, "put": 2, "fetch": 3}[operation] and 0 < size <= 16384)
+            header = peer_read(connection, size, worker_fd, worker_pid, window)
+            request = literal_json(header)
+            exact(request, ("kind", "command") if operation == "exec" else ("kind", "path"))
+            require(request["kind"] == operation)
+            if operation == "exec":
+                command = request["command"]
+                require(type(command) is list and 1 <= len(command) <= 32 and command[0]
+                        and all(type(part) is str and 0 < len(part.encode()) <= 4096
+                                and all(ord(char) >= 32 and ord(char) != 127 for char in part) for part in command)
+                        and sum(len(part.encode()) for part in command) <= 16384)
+            else:
+                path = request["path"]
+                require(type(path) is str and path.startswith("/") and path != "/" and not path.endswith("/")
+                        and len(path.encode()) <= 4096 and os.path.normpath(path) == path
+                        and all(part and part not in (".", "..") and all(char.isascii() and (char.isalnum() or char in "_.-") for char in part) for part in path.split("/")[1:]))
+        elif code == 9:
+            require(size == 0 and peer_read(connection, 1, worker_fd, worker_pid, window, eof=True) == b"")
+            return header, bytes(body)
+        else:
+            require(operation != "fetch" and code == (5 if operation == "exec" else 6) and 0 < size <= 65536)
+            require(len(body) + size <= 8 * 1024 * 1024)
+            body.extend(peer_read(connection, size, worker_fd, worker_pid, window))
+
+
+def retained_request_origin(control, broker, driver_fd, worker_fd, worker_pid):
+    # These are privately retained native descriptors, never labels returned by inspection.
+    require(live_pidfd(worker_fd) == worker_pid)
+    live_pidfd(driver_fd)
+    ready = selectors.DefaultSelector()
+    try:
+        ready.register(broker, selectors.EVENT_READ)
+        ready.register(control, selectors.EVENT_READ)
+        require(not ready.select(0))
+    finally:
+        ready.close()
+
+
+def denial_phase(control, broker, driver_pid, driver_fd, request, bootstrap, window):
+    worker_fd = None
+    worker_pid = None
+    worker_number = 1
+    connection = None
+    allocation_socket = None
+    try:
+        while connection is None:
+            window.check()
+            live_pidfd(driver_fd)
+            ready = selectors.DefaultSelector()
+            try:
+                ready.register(broker, selectors.EVENT_READ, "register")
+                ready.register(control, selectors.EVENT_READ, "control")
+                if worker_fd is not None:
+                    ready.register(worker_fd, selectors.EVENT_READ, "retired")
+                events = ready.select(window.timeout())
+            finally:
+                ready.close()
+            # Core's fixed forks=1 may run several builtin preflight/report tasks before
+            # its first guarded request. Retire the old native worker before registering
+            # the next one, including when both notifications were already queued.
+            for key, _ in sorted(events, key=lambda item: {"retired": 0, "register": 1, "control": 2}[item[0].data]):
+                if key.data == "retired":
+                    os.close(worker_fd)
+                    worker_fd, worker_pid = None, None
+                elif key.data == "register":
+                    if worker_fd is not None:
+                        # A sequential core start may queue immediately after the previous
+                        # worker exits; use the native pidfd rather than another PID label.
+                        retired = selectors.DefaultSelector()
+                        try:
+                            retired.register(worker_fd, selectors.EVENT_READ)
+                            require(retired.select(0))
+                        finally:
+                            retired.close()
+                        os.close(worker_fd)
+                        worker_fd, worker_pid = None, None
+                    worker_number += 1
+                    require(worker_number <= 64)
+                    worker_fd, worker_pid = register_worker(broker, driver_pid, worker_number, window, "task")
+                else:
+                    require(worker_fd is not None and worker_pid is not None)
+                    caller, _ = control.accept()
+                    try:
+                        caller.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                        require(struct.unpack("3i", caller.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)) == (worker_pid, os.getuid(), os.getgid()))
+                        size = struct.unpack("!I", peer_read(caller, 4, worker_fd, worker_pid, window))[0]
+                        require(0 < size <= 512)
+                        allocation = literal_json(peer_read(caller, size, worker_fd, worker_pid, window))
+                        exact(allocation, ("schema", "session_id", "capability", "operation"))
+                        require(allocation["schema"] == 1 and allocation["session_id"] == bootstrap["session_id"]
+                                and allocation["capability"] == bootstrap["capability"] and allocation["operation"] in ("exec", "put", "fetch"))
+                        require(peer_read(caller, 1, worker_fd, worker_pid, window, eof=True) == b"")
+                        operation = allocation["operation"]
+                        nonce = os.urandom(16).hex()
+                        basename = os.urandom(16).hex() + ".sock"
+                        allocation_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+                        allocation_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                        allocation_socket.bind(str(ROOT / basename))
+                        os.chmod(ROOT / basename, 0o600)
+                        allocation_socket.listen(1)
+                        reply = encode({"schema": 1, "session_id": bootstrap["session_id"], "operation": operation,
+                                        "nonce": nonce, "socket": basename, "remaining_ms": max(1, int((window.end - time.monotonic()) * 1000))})
+                        window.check()
+                        caller.sendall(struct.pack("!I", len(reply)) + reply)
+                        window.check()
+                    finally:
+                        caller.close()
+                    allocation_socket.settimeout(max(0.001, window.end - time.monotonic()))
+                    connection, _ = allocation_socket.accept()
+                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                    require(struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)) == (worker_pid, os.getuid(), os.getgid()))
+                    break
+        header, body = capture_request(connection, operation, nonce, worker_fd, worker_pid, window)
+        def retained_origin():
+            retained_request_origin(control, broker, driver_fd, worker_fd, worker_pid)
+        # No second registration/control allocation may hide while the original request
+        # is withheld through parent crypto. Kernel liveness stays attached to this origin.
+        window.guard = retained_origin
+        request_sha = hashlib.sha256(header).hexdigest()
+        input_sha = hashlib.sha256(body).hexdigest()
+        write_all(1, frame({"schema": 1, "kind": "exchange", "nonce": request["nonce"], "worker": worker_number,
+                            "sequence": 0, "operation": operation, "request_b64": base64.b64encode(header).decode("ascii"),
+                            "request_sha256": request_sha, "input_size": len(body), "input_sha256": input_sha}), window)
+        sequence = 0
+        for offset in range(0, len(body), 12288):
+            write_all(1, frame({"schema": 1, "kind": "input", "nonce": request["nonce"], "sequence": sequence,
+                                "data": base64.b64encode(body[offset:offset + 12288]).decode("ascii")}), window)
+            sequence += 1
+        write_all(1, frame({"schema": 1, "kind": "exchange-end", "nonce": request["nonce"], "chunks": sequence}), window)
+        command = read_frame(0, window)
+        exact(command, ("schema", "kind", "nonce", "worker", "sequence", "request_sha256", "input_sha256"))
+        require(command == {"schema": 1, "kind": "deny", "nonce": request["nonce"], "worker": worker_number,
+                            "sequence": 0, "request_sha256": request_sha, "input_sha256": input_sha})
+        require(live_pidfd(worker_fd) == worker_pid)
+        # No success/marker/output is synthesized. This deliberately cannot reach a real
+        # host sink or feed stdin to SSH; the plugin sees only explicit uncertainty.
+        output = b""
+        for number, (code, value) in enumerate(((4, {"kind": "response", "operation": operation}),
+                                               (11, {"kind": "uncertain", "error": "host-bridge-uncertain"}))):
+            payload = encode(value)
+            output += struct.pack("!4sB3xII16s", b"TBH1", code, number, len(payload), bytes.fromhex(nonce)) + payload
+        window.check()
+        connection.sendall(output)
+        connection.close()
+        connection = None
+        window.guard = None
+        wait = selectors.DefaultSelector()
+        try:
+            wait.register(worker_fd, selectors.EVENT_READ)
+            wait.register(control, selectors.EVENT_READ)
+            retired = False
+            while not retired:
+                window.check()
+                for key, _ in wait.select(window.timeout()):
+                    if key.fileobj == worker_fd:
+                        retired = True
+                    else:
+                        caller, _ = control.accept()
+                        try:
+                            caller.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                            size = struct.unpack("!I", peer_read(caller, 4, worker_fd, worker_pid, window))[0]
+                            require(0 < size <= 512)
+                            value = literal_json(peer_read(caller, size, worker_fd, worker_pid, window))
+                            exact(value, ("schema", "session_id", "capability", "operation"))
+                            require(value == {"schema": 1, "session_id": bootstrap["session_id"], "capability": bootstrap["capability"], "operation": "fence"})
+                            require(peer_read(caller, 1, worker_fd, worker_pid, window, eof=True) == b"")
+                            reply = encode({"fenced": True})
+                            window.check()
+                            caller.sendall(struct.pack("!I", len(reply)) + reply)
+                            window.check()
+                        finally:
+                            caller.close()
+        finally:
+            wait.close()
+        window.check()
+        write_all(1, frame({"schema": 1, "kind": "denied", "nonce": request["nonce"], "worker": worker_number, "sequence": 0}), window)
+    finally:
+        if connection is not None:
+            connection.close()
+        if allocation_socket is not None:
+            allocation_socket.close()
+        if worker_fd is not None:
+            try:
+                signal.pidfd_send_signal(worker_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.close(worker_fd)
 
 
 def main():
@@ -382,13 +732,15 @@ def main():
     require(phase_commitment(Path("/phase/release"), RELEASE_FILES) == request["release_sha256"])
     # The existing plugin's fixture-named locator/target are local aliases, never host
     # identity. This real in-container broker owns the endpoint, but its only sink refuses.
-    control_path = str(ROOT / "control.sock")
+    control_name = os.urandom(16).hex() + ".sock"
+    control_path = str(ROOT / control_name)
     control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+    control.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
     control.bind(control_path)
     os.chmod(control_path, 0o600)
     control.listen(4)
     bootstrap = {"schema": 1, "session_id": request["nonce"][:32],
-                 "capability": os.urandom(32).hex(), "control": "control.sock", "local_root": str(ROOT)}
+                 "capability": os.urandom(32).hex(), "control": control_name, "local_root": str(ROOT)}
     descriptor = os.open(ROOT / "bootstrap.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
     try:
         write_all(descriptor, encode(bootstrap), window)
@@ -474,9 +826,24 @@ def main():
                             "worker_origin": "native-pidfd-scm-credentials", "descendant_isolation": True,
                             "paused": True}), window)
         command = read_frame(0, window)
-        exact(command, ("schema", "kind", "nonce"))
-        require(command == {"schema": 1, "kind": "stop", "nonce": request["nonce"]})
-        write_all(1, frame({"schema": 1, "kind": "stopped", "nonce": request["nonce"]}), window)
+        if command.get("kind") == "stop":
+            exact(command, ("schema", "kind", "nonce"))
+            require(command == {"schema": 1, "kind": "stop", "nonce": request["nonce"]})
+            write_all(1, frame({"schema": 1, "kind": "stopped", "nonce": request["nonce"]}), window)
+        else:
+            exact(command, ("schema", "kind", "nonce", "declaration", "data_valid_until", "remaining_ms"))
+            require(command["schema"] == 1 and command["kind"] == "release-denial" and command["nonce"] == request["nonce"]
+                    and type(command["data_valid_until"]) is int and 0 < command["data_valid_until"] / 1000 - time.time() <= 2400
+                    and type(command["remaining_ms"]) is int and 0 < command["remaining_ms"] <= 30000)
+            window.check()
+            # This only replaces local construction ownership with an absolute DATA
+            # lifecycle. The parent keeps its older grant epoch through every byte.
+            phase_window = Window(min(command["remaining_ms"] / 1000,
+                                      command["data_valid_until"] / 1000 - time.time()))
+            phase_window.wall = min(phase_window.wall, command["data_valid_until"] / 1000)
+            broker.send(encode({"schema": 1, "kind": "release-denial", "declaration": command["declaration"]}))
+            write_all(write_end, b"R", phase_window)
+            denial_phase(control, broker, pid, driver_fd, request, bootstrap, phase_window)
     finally:
         # This is accepted-resource cleanup, not a renewed operation or a future host offer.
         if worker_fd is not None:

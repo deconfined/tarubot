@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.38**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.39**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.39 — Bind a protected denial controller
+
+- Add closed native preparation and execution entrypoints that bind immutable runner event bytes, separately evaluated inputs and authenticated Git object closures. A distinct signed preparation record transports data across steps; its lifetime confers no command authority.
+- Bind each actual registered worker request to a fresh current execution proof and a one-use denial grant under the original short deadline. The fixed consumer sends a denial and cleans up its owned controller resources; this purpose cannot authorize a future SSH operation.
+- Require the owner-confirmed immutable OIDC subject format with numeric owner and repository IDs. Keep the unfinished workflow graph fenced before mint or driver release; actual destination authority, protected enrollment and durable reboot integration remain pending.
 
 ## 2.36.38 — Measure a local paused host controller
 

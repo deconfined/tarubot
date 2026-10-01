@@ -2,7 +2,9 @@
  * Native local controller ownership. Software declarations are data; only this fixed native
  * build/save/compare path mints an image capability, and only its captured engine launch
  * mints a paused-child capability. No callback, caller command, digest echo or phase tree
- * releases Ansible or authorizes exec/put/fetch. The local kernel/Docker daemon/runtime are
+ * releases Ansible or authorizes exec/put/fetch. The internal denial bridge requires native
+ * protected-context and grant-preparation identities and has only a fixed DENY sink.
+ * The local kernel/Docker daemon/runtime are
  * explicitly trusted prerequisites, not proved by their version text or child self-report.
  */
 import { ChildProcess, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -36,6 +38,24 @@ import {
   type ControllerRecipeBytes,
 } from "./host-controller-closure.js";
 import { releaseIdentity, type ReleaseIdentity } from "./release-policy.js";
+import {
+  assertProtectedHostExecutionContextData,
+  protectedHostExecutionBinding,
+  reserveProtectedHostControllerRelease,
+  completeProtectedHostControllerRelease,
+  remainingProtectedHostExecutionContext,
+  fenceProtectedHostExecutionContext,
+  type ProtectedHostExecutionContext,
+} from "./host-execution-runtime.js";
+import {
+  assertDeniedHostExecutionPreparation,
+  remainingDeniedHostExecutionPreparation,
+  fenceDeniedHostExecutionPreparation,
+  assertDeniedHostExecutionGrant,
+  consumeDeniedHostExecutionGrant,
+  type DeniedHostExecutionPreparation,
+  type DeniedHostExecutionGrant,
+} from "./host-execution-grant.js";
 
 const failure = "host-controller-failed";
 const nativeSpawn = spawn;
@@ -51,6 +71,10 @@ const executable = "/usr/bin/docker";
 const pins = reviewedControllerCatalogue();
 const images = new WeakMap<object, ImageState>();
 const children = new WeakMap<object, ChildState>();
+const exchanges = new WeakMap<object, ExchangeState>();
+let nativeExchangeAssertion:
+  | { value: OwnedControllerExchange; state: ExchangeState; used: boolean }
+  | undefined;
 let activeHook: Window | undefined;
 export interface BuiltHostController {
   readonly kind: "built-host-controller";
@@ -58,6 +82,9 @@ export interface BuiltHostController {
 export interface PausedHostController {
   readonly kind: "paused-host-controller";
 }
+declare const exchangeBrand: unique symbol;
+/** Internal origin only. Inspection, framing, JSON and copied objects cannot mint it. */
+export type OwnedControllerExchange = Readonly<{ [exchangeBrand]: true }>;
 export interface HostControllerPhaseDeclaration {
   schema: 1;
   purpose: "tarubot-host-controller-phase-v1";
@@ -303,6 +330,14 @@ class Window {
       if (wait.timer !== undefined) clearTimeout(wait.timer);
     };
   }
+  retire(): void {
+    // Only accepted private phase release calls this, after detaching the idle watcher.
+    // It retires local construction ownership without rejecting or renewing any authority.
+    this.check();
+    valid(this.#waits.size === 0);
+    this.#fenced = true;
+    this.#stoppers.clear();
+  }
   async wait<T>(task: Promise<T>): Promise<T> {
     this.check();
     let rejectOwned: (() => void) | undefined;
@@ -532,11 +567,13 @@ function method(
   key: string,
   args: unknown[],
   window: Window,
+  beforeOffer?: () => void,
 ): void {
   window.capture(() => {
     const object = surface === "child" ? child : child[surface];
     const fn: unknown = Reflect.get(object, key);
     valid(typeof fn === "function");
+    if (beforeOffer) beforeOffer();
     window.check();
     const returned: unknown = Reflect.apply(fn, object, args);
     drain(returned);
@@ -669,6 +706,9 @@ interface ImageState {
   tag: string;
   closure: ControllerClosure;
   inspection: HostControllerInspection;
+  disposed: boolean;
+  disposal: Promise<void> | undefined;
+  preparations: Map<Window, () => Promise<void>>;
 }
 interface ChildState {
   window: Window;
@@ -683,7 +723,45 @@ interface ChildState {
   stoppedPromise: Promise<void>;
   dispose: () => Promise<void>;
   stopOperation: Promise<void> | undefined;
-  phase: "preparing" | "validating" | "paused" | "stopping" | "stopped";
+  phase:
+    | "preparing"
+    | "validating"
+    | "paused"
+    | "releasing"
+    | "capturing"
+    | "withheld"
+    | "delivering"
+    | "denied"
+    | "stopping"
+    | "stopped";
+}
+interface ExchangeState {
+  child: ChildState;
+  context: ProtectedHostExecutionContext;
+  preparation: DeniedHostExecutionPreparation;
+  window: Window;
+  binding: Readonly<OwnedControllerExchangeBinding>;
+  request: Buffer;
+  input: Buffer;
+  phase: "withheld" | "delivering" | "denied" | "fenced";
+}
+export interface OwnedControllerExchangeBinding {
+  schema: 1;
+  purpose: "tarubot-owned-controller-denial-exchange-v1";
+  context_nonce: string;
+  controller_nonce: string;
+  worker_sequence: number;
+  request_sequence: 0;
+  operation: "exec" | "put" | "fetch";
+  request_sha256: string;
+  input_sha256: string;
+  input_size: number;
+  rootfs_sha256: string;
+  recipe_sha256: string;
+  /** Actual native ID from the independently verified saved OCI descriptor graph. */
+  verified_native_image_id: string;
+  configuration_sha256: string;
+  release_sha256: string;
 }
 function kill(child: ChildProcessWithoutNullStreams): void {
   try {
@@ -706,8 +784,12 @@ async function removeOwned(
   directory: string,
   kind: "container" | "image",
   name: string,
+  original?: Window,
 ): Promise<boolean> {
-  const cleanupWindow = new Window(10_000);
+  const cleanupWindow = new Window(
+    original ? Math.min(10_000, original.remaining()) : 10_000,
+    original ? () => original.check() : undefined,
+  );
   try {
     const outcome = await engine(
       directory,
@@ -932,7 +1014,15 @@ export async function buildOwnedHostController(
     baseOffered = false;
     window.capture(() => rmSync(allocatedDirectory, { recursive: true, force: true }));
     window.check();
-    images.set(cap, { image, tag, closure, inspection });
+    images.set(cap, {
+      image,
+      tag,
+      closure,
+      inspection,
+      disposed: false,
+      disposal: undefined,
+      preparations: new Map(),
+    });
     delivered = true;
     return cap;
   } catch {
@@ -1156,8 +1246,17 @@ export async function prepareOwnedHostController(
 ): Promise<PausedHostController> {
   entry(artifact);
   const image = images.get(artifact);
-  valid(image);
-  const window = new Window(60_000, refusal);
+  valid(image && !image.disposed);
+  const capturedRefusal = refusal;
+  const window = new Window(60_000, () => {
+    valid(!image.disposed);
+    if (capturedRefusal) {
+      const returned = capturedRefusal();
+      if (returned !== undefined) drain(returned);
+      valid(returned === undefined);
+    }
+    valid(!image.disposed);
+  });
   let directory: string | undefined;
   const nonce = randomBytes(32).toString("hex"),
     name = `tarubot-controller-${randomBytes(16).toString("hex")}`;
@@ -1168,7 +1267,17 @@ export async function prepareOwnedHostController(
   const ownership: OwnedDirectory[] = [];
   const dispose = (): Promise<void> => {
     if (disposal) return disposal;
-    disposal = (async () => {
+    // The accepted child can synchronously notify close during native kill. Reserve
+    // cleanup before that method so reentry joins this body instead of removing twice.
+    let resolveDisposal: (() => void) | undefined;
+    let rejectDisposal: ((reason: Error) => void) | undefined;
+    const reserved = new Promise<void>((resolve, reject) => {
+      resolveDisposal = resolve;
+      rejectDisposal = reject;
+    });
+    disposal = reserved;
+    drain(reserved);
+    const work = (async () => {
       if (state) {
         state.stopped = true;
         state.phase = "stopped";
@@ -1184,10 +1293,17 @@ export async function prepareOwnedHostController(
       } catch {
         /* Owned private tree only. */
       }
+      image.preparations.delete(window);
+      if (state) image.preparations.delete(state.window);
     })();
-    drain(disposal);
-    return disposal;
+    drain(work);
+    void Reflect.apply(nativeThen, work, [
+      () => resolveDisposal?.(),
+      () => rejectDisposal?.(new Error(failure)),
+    ]);
+    return reserved;
   };
+  image.preparations.set(window, dispose);
   window.onStop(dispose);
   try {
     window.capture(() =>
@@ -1278,7 +1394,7 @@ export async function prepareOwnedHostController(
       });
       const accepted = child;
       try {
-        ownedErrors(accepted, () => window.stop());
+        ownedErrors(accepted, () => (state?.window ?? window).stop());
       } finally {
         window.onStop(() => kill(accepted));
       }
@@ -1295,11 +1411,11 @@ export async function prepareOwnedHostController(
         "data",
         (raw: unknown) => {
           try {
-            window.check();
+            (state?.window ?? window).check();
             stderr += controllerBytes(raw, 65536).length;
             valid(stderr <= 65536);
           } catch {
-            window.stop();
+            (state?.window ?? window).stop();
             kill(process);
           }
         },
@@ -1307,8 +1423,8 @@ export async function prepareOwnedHostController(
       window,
     );
     for (const surface of ["stdin", "stdout", "stderr"] as const)
-      method(process, surface, "on", ["error", () => window.stop()], window);
-    method(process, "child", "on", ["error", () => window.stop()], window);
+      method(process, surface, "on", ["error", () => (state?.window ?? window).stop()], window);
+    method(process, "child", "on", ["error", () => (state?.window ?? window).stop()], window);
     const stoppedPromise = new Promise<void>((resolveStopped) =>
       method(
         process,
@@ -1318,7 +1434,8 @@ export async function prepareOwnedHostController(
           "close",
           () => {
             resolveStopped();
-            if (state?.phase !== "stopping") window.stop();
+            if (state?.phase !== "stopping" && state?.phase !== "denied")
+              (state?.window ?? window).stop();
           },
         ],
         window,
@@ -1356,7 +1473,8 @@ export async function prepareOwnedHostController(
       void dispose();
     });
     const unsolicited = () => {
-      if (state?.phase === "validating" || state?.phase === "paused") window.stop();
+      if (state?.phase === "validating" || state?.phase === "paused" || state?.phase === "withheld")
+        state.window.stop();
     };
     method(process, "stdout", "on", ["end", unsolicited], window);
     method(process, "stdout", "on", ["data", unsolicited], window);
@@ -1418,17 +1536,527 @@ async function cleanup(state: ChildState): Promise<void> {
   state.window.stop();
   await state.dispose();
 }
+function fenceExchange(state: ExchangeState): void {
+  if (state.phase === "fenced") return;
+  state.phase = "fenced";
+  state.window.stop();
+  for (const stop of [
+    () => fenceDeniedHostExecutionPreparation(state.preparation),
+    () => fenceProtectedHostExecutionContext(state.context),
+    () => state.child.window.stop(),
+  ]) {
+    try {
+      stop();
+    } catch {
+      /* Independent fixed denial/cleanup continues. */
+    }
+  }
+}
+function exchangeState(
+  value: OwnedControllerExchange,
+  context: ProtectedHostExecutionContext,
+): ExchangeState {
+  const saved = exchanges.get(value);
+  try {
+    entry(value);
+    valid(
+      saved && saved.context === context && saved.phase !== "fenced" && saved.phase !== "denied",
+    );
+    saved.window.check();
+    valid(!saved.child.stopped);
+    return saved;
+  } catch {
+    if (saved) fenceExchange(saved);
+    try {
+      fenceProtectedHostExecutionContext(context);
+    } catch {
+      /* Unknown cannot approve. */
+    }
+    throw new Error(failure);
+  }
+}
+/** Internal commitment only; command/input/channel bytes never escape the native owner. */
+export function ownedControllerExchangeBinding(
+  value: OwnedControllerExchange,
+  context: ProtectedHostExecutionContext,
+): Readonly<OwnedControllerExchangeBinding> {
+  return exchangeState(value, context).binding;
+}
+export function assertOwnedControllerExchange(
+  value: OwnedControllerExchange,
+  context: ProtectedHostExecutionContext,
+): void {
+  const permit = nativeExchangeAssertion;
+  if (permit && activeHook === permit.state.window) {
+    try {
+      // A fixed imported native grant assertion consumes exactly one private permit.
+      // Reserve BEFORE clock/denial hooks so swallowed nested assertions cannot borrow it.
+      valid(!permit.used);
+      permit.used = true;
+      valid(
+        value === permit.value &&
+          context === permit.state.context &&
+          exchanges.get(value) === permit.state &&
+          permit.state.phase === "delivering",
+      );
+      permit.state.window.check();
+      valid(!permit.state.child.stopped && nativeExchangeAssertion === permit);
+      return;
+    } catch {
+      fenceExchange(permit.state);
+      throw new Error(failure);
+    }
+  }
+  exchangeState(value, context);
+}
+function nativeGrantAssertion(
+  value: OwnedControllerExchange,
+  saved: ExchangeState,
+  grant: DeniedHostExecutionGrant,
+  consume: boolean,
+): void {
+  valid(nativeExchangeAssertion === undefined);
+  const permit = { value, state: saved, used: false };
+  nativeExchangeAssertion = permit;
+  try {
+    if (consume) consumeDeniedHostExecutionGrant(grant, value, saved.context);
+    else assertDeniedHostExecutionGrant(grant, value, saved.context);
+    valid(permit.used && nativeExchangeAssertion === permit);
+  } finally {
+    if (nativeExchangeAssertion === permit) nativeExchangeAssertion = undefined;
+  }
+}
+export function remainingOwnedControllerExchange(
+  value: OwnedControllerExchange,
+  context: ProtectedHostExecutionContext,
+): number {
+  return exchangeState(value, context).window.remaining();
+}
+export function fenceOwnedControllerExchange(value: OwnedControllerExchange): void {
+  // Denial itself grants nothing, but a swallowed wrong/copy invocation must still
+  // stop the original synchronous hook before validating the supplied capability.
+  activeHook?.stop();
+  const saved = exchanges.get(value);
+  if (saved) fenceExchange(saved);
+  else throw new Error(failure);
+}
+function base64(value: unknown, limit: number): Buffer {
+  valid(typeof value === "string" && value.length <= Math.ceil(limit / 3) * 4);
+  valid(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value));
+  const result = Buffer.from(value, "base64");
+  valid(result.length <= limit && result.toString("base64") === value);
+  return result;
+}
+/** Parse many coalesced native frames without ever returning a caller-supplied channel. */
+function receiveWithheldRequest(
+  child: ChildState,
+  window: Window,
+): Promise<{ value: { header: Record<string, unknown>; request: Buffer; input: Buffer } }> {
+  const task = new Promise<{
+    value: { header: Record<string, unknown>; request: Buffer; input: Buffer };
+  }>((resolveTask, reject) => {
+    let pending = Buffer.alloc(0),
+      wire = 0,
+      frames = 0,
+      chunks = 0,
+      size = 0,
+      settled = false;
+    let header: Record<string, unknown> | undefined, request: Buffer | undefined;
+    const parts: Buffer[] = [];
+    const refuse = () => {
+      if (settled) return;
+      settled = true;
+      window.stop();
+      reject(new Error(failure));
+    };
+    const handler = (raw: unknown) => {
+      try {
+        window.capture(() => {
+          valid(!settled && child.phase === "capturing");
+          // Native stdout callbacks may coalesce many complete frames. Bound the actual
+          // owned copy by the remaining whole-wire budget, then parse before applying the
+          // incomplete-frame bound; callback boundaries are not protocol boundaries.
+          const bytes = controllerBytes(raw, 12 * 1024 * 1024 - wire);
+          wire += bytes.length;
+          valid(wire <= 12 * 1024 * 1024);
+          pending = Buffer.concat([pending, bytes]);
+          while (pending.length >= 8) {
+            window.check();
+            valid(pending.subarray(0, 4).toString("ascii") === "HCP1");
+            const length = pending.readUInt32BE(4);
+            valid(length > 0 && length <= 32768);
+            if (pending.length < length + 8) break;
+            const value = controllerJson(pending.subarray(8, length + 8)) as Record<
+              string,
+              unknown
+            >;
+            pending = pending.subarray(length + 8);
+            valid(++frames <= 1024);
+            if (header === undefined) {
+              fields(value, [
+                "schema",
+                "kind",
+                "nonce",
+                "worker",
+                "sequence",
+                "operation",
+                "request_b64",
+                "request_sha256",
+                "input_size",
+                "input_sha256",
+              ]);
+              valid(
+                value.schema === 1 &&
+                  value.kind === "exchange" &&
+                  value.nonce === child.nonce &&
+                  Number.isSafeInteger(value.worker) &&
+                  (value.worker as number) >= 2 &&
+                  (value.worker as number) <= 64 &&
+                  value.sequence === 0 &&
+                  ["exec", "put", "fetch"].includes(value.operation as string),
+              );
+              valid(
+                typeof value.request_sha256 === "string" &&
+                  /^[0-9a-f]{64}$/u.test(value.request_sha256) &&
+                  typeof value.input_sha256 === "string" &&
+                  /^[0-9a-f]{64}$/u.test(value.input_sha256) &&
+                  Number.isSafeInteger(value.input_size) &&
+                  (value.input_size as number) >= 0 &&
+                  (value.input_size as number) <= 8 * 1024 * 1024,
+              );
+              request = base64(value.request_b64, 16384);
+              valid(request.length > 0 && controllerDigest(request) === value.request_sha256);
+              const content = controllerJson(request) as Record<string, unknown>;
+              fields(content, value.operation === "exec" ? ["kind", "command"] : ["kind", "path"]);
+              valid(content.kind === value.operation);
+              if (value.operation === "exec") {
+                valid(
+                  Array.isArray(content.command) &&
+                    content.command.length > 0 &&
+                    content.command.length <= 32 &&
+                    content.command.every(
+                      (part: unknown) =>
+                        typeof part === "string" &&
+                        Buffer.byteLength(part) > 0 &&
+                        Buffer.byteLength(part) <= 4096 &&
+                        Buffer.from(part).every((byte) => byte >= 32 && byte !== 127),
+                    ) &&
+                    Buffer.byteLength(content.command.join("")) <= 16384,
+                );
+              } else {
+                valid(
+                  typeof content.path === "string" &&
+                    Buffer.byteLength(content.path) <= 4096 &&
+                    /^\/[A-Za-z0-9_./-]+$/u.test(content.path) &&
+                    content.path !== "/" &&
+                    !content.path.endsWith("/") &&
+                    resolve(content.path) === content.path &&
+                    !content.path
+                      .split("/")
+                      .slice(1)
+                      .some((part) => part === "" || part === "." || part === ".."),
+                );
+              }
+              valid(value.operation !== "fetch" || value.input_size === 0);
+              header = value;
+            } else if (value.kind === "input") {
+              fields(value, ["schema", "kind", "nonce", "sequence", "data"]);
+              valid(
+                value.schema === 1 && value.nonce === child.nonce && value.sequence === chunks++,
+              );
+              const part = base64(value.data, 12288);
+              valid(part.length > 0);
+              size += part.length;
+              valid(size <= (header.input_size as number));
+              parts.push(part);
+            } else {
+              fields(value, ["schema", "kind", "nonce", "chunks"]);
+              valid(
+                value.schema === 1 &&
+                  value.kind === "exchange-end" &&
+                  value.nonce === child.nonce &&
+                  value.chunks === chunks &&
+                  size === header.input_size &&
+                  pending.length === 0 &&
+                  request,
+              );
+              const input = Buffer.concat(parts);
+              valid(controllerDigest(input) === header.input_sha256);
+              // Reserve withholding before resolving or later native stdout can appear.
+              child.phase = "withheld";
+              settled = true;
+              method(child.process, "stdout", "off", ["data", handler], window);
+              window.check();
+              resolveTask(boxed({ header, request, input }));
+              break;
+            }
+          }
+          valid(pending.length <= 32775);
+          // Own only the incomplete residual, rather than retaining a large coalesced
+          // native backing buffer through a subarray while another callback is awaited.
+          if (pending.length > 0) pending = Buffer.from(pending);
+        });
+      } catch {
+        refuse();
+      }
+    };
+    method(child.process, "stdout", "on", ["data", handler], window);
+    method(child.process, "stdout", "once", ["end", refuse], window);
+    method(child.process, "child", "once", ["error", refuse], window);
+  });
+  drain(task);
+  return window.wait(task);
+}
+/** Internal only: both native modules must recognize the exact protected context/preparation. */
+export async function releaseOwnedControllerToDenial(
+  value: PausedHostController,
+  context: ProtectedHostExecutionContext,
+  preparation: DeniedHostExecutionPreparation,
+): Promise<OwnedControllerExchange> {
+  const child = children.get(value);
+  let window: Window | undefined;
+  try {
+    entry(value);
+    valid(child && !child.stopped && child.phase === "paused");
+    child.window.check();
+    // Reserve the native context before input/method hooks, and carry the already-started
+    // original grant epoch through every registration/header/body capture and crypto await.
+    child.window.capture(() =>
+      reserveProtectedHostControllerRelease(context, value, child.inspection),
+    );
+    child.phase = "releasing";
+    const binding = child.window.capture(() => protectedHostExecutionBinding(context));
+    child.window.capture(() => assertDeniedHostExecutionPreparation(preparation, context));
+    const grantRemaining = child.window.capture(() =>
+      remainingDeniedHostExecutionPreparation(preparation, context),
+    );
+    window = child.window.capture(
+      () =>
+        new Window(Math.min(30000, grantRemaining), () => {
+          assertProtectedHostExecutionContextData(context);
+          assertDeniedHostExecutionPreparation(preparation, context);
+        }),
+    );
+    const original = child.window;
+    const dataRemaining = window.capture(() => remainingProtectedHostExecutionContext(context));
+    const dataWindow = window.capture(
+      () => new Window(dataRemaining, () => assertProtectedHostExecutionContextData(context)),
+    );
+    const ownedWindow = window;
+    dataWindow.onStop(() => {
+      ownedWindow.stop();
+      return child.dispose();
+    });
+    window.onStop(() => dataWindow.stop());
+    original.check();
+    child.unwatch();
+    // Old native callbacks consult child.window. No closed construction guard is rebound
+    // into a new authority; this distinct watchdog owns only the immutable DATA lifetime.
+    child.window = dataWindow;
+    original.retire();
+    child.image.preparations.delete(original);
+    child.image.preparations.set(dataWindow, child.dispose);
+    child.unwatch = dataWindow.watch(() => dataWindow.stop());
+    child.phase = "capturing";
+    const response = receiveWithheldRequest(child, window);
+    drain(response);
+    offer(
+      child.process,
+      {
+        schema: 1,
+        kind: "release-denial",
+        nonce: child.nonce,
+        declaration: binding.declaration,
+        data_valid_until: binding.data_valid_until,
+        remaining_ms: window.remaining(),
+      },
+      window,
+    );
+    window.capture(() => completeProtectedHostControllerRelease(context, value));
+    const captured = await response;
+    const cap = Object.freeze(Object.create(null)) as OwnedControllerExchange;
+    window.capture(() => {
+      const header = captured.value.header;
+      valid(/^sha256:[0-9a-f]{64}$/u.test(child.image.image));
+      const identity: Readonly<OwnedControllerExchangeBinding> = Object.freeze({
+        schema: 1,
+        purpose: "tarubot-owned-controller-denial-exchange-v1",
+        context_nonce: binding.context_nonce,
+        controller_nonce: child.nonce,
+        worker_sequence: header.worker as number,
+        request_sequence: 0,
+        operation: header.operation as "exec" | "put" | "fetch",
+        request_sha256: header.request_sha256 as string,
+        input_sha256: header.input_sha256 as string,
+        input_size: header.input_size as number,
+        rootfs_sha256: binding.rootfs_sha256,
+        recipe_sha256: binding.recipe_sha256,
+        verified_native_image_id: child.image.image,
+        configuration_sha256: binding.configuration_sha256,
+        release_sha256: binding.release_sha256,
+      });
+      exchanges.set(cap, {
+        child,
+        context,
+        preparation,
+        window: ownedWindow,
+        binding: identity,
+        request: captured.value.request,
+        input: captured.value.input,
+        phase: "withheld",
+      });
+    });
+    window.check();
+    return cap;
+  } catch {
+    window?.stop();
+    child?.window.stop();
+    for (const stop of [
+      () => fenceDeniedHostExecutionPreparation(preparation),
+      () => fenceProtectedHostExecutionContext(context),
+    ]) {
+      try {
+        stop();
+      } catch {
+        /* Fixed denial only. */
+      }
+    }
+    if (child) await child.dispose();
+    throw new Error(failure);
+  }
+}
+/** The sole consumer can emit only a digest-bound DENY; no command or destination handler exists. */
+export async function deliverOwnedControllerDenial(
+  value: OwnedControllerExchange,
+  grant: DeniedHostExecutionGrant,
+): Promise<void> {
+  const saved = exchanges.get(value);
+  try {
+    entry(value);
+    valid(saved && saved.phase === "withheld" && saved.child.phase === "withheld");
+    saved.phase = "delivering";
+    saved.child.phase = "delivering";
+    saved.window.capture(() => nativeGrantAssertion(value, saved, grant, false));
+    const response = receive(saved.child.process, saved.window);
+    drain(response);
+    const payload = saved.window.capture(() =>
+      encodeFrame({
+        schema: 1,
+        kind: "deny",
+        nonce: saved.binding.controller_nonce,
+        worker: saved.binding.worker_sequence,
+        sequence: 0,
+        request_sha256: saved.binding.request_sha256,
+        input_sha256: saved.binding.input_sha256,
+      }),
+    );
+    // Capture native method/options BEFORE the last original proof guard and one-use grant
+    // reservation. No accepted handler, retry or REAL-operation purpose can enter this path.
+    method(saved.child.process, "stdin", "write", [payload], saved.window, () => {
+      nativeGrantAssertion(value, saved, grant, false);
+      nativeGrantAssertion(value, saved, grant, true);
+    });
+    const reply = await response;
+    saved.window.capture(() => {
+      fields(reply.value, ["schema", "kind", "nonce", "worker", "sequence"]);
+      valid(
+        reply.value.schema === 1 &&
+          reply.value.kind === "denied" &&
+          reply.value.nonce === saved.binding.controller_nonce &&
+          reply.value.worker === saved.binding.worker_sequence &&
+          reply.value.sequence === 0,
+      );
+      saved.child.phase = "denied";
+    });
+    await saved.window.wait(saved.child.stoppedPromise);
+    saved.window.check();
+    saved.phase = "denied";
+    await cleanup(saved.child);
+  } catch {
+    if (saved) {
+      fenceExchange(saved);
+      await saved.child.dispose();
+    }
+    throw new Error(failure);
+  }
+}
 export function inspectOwnedHostController(
   value: BuiltHostController | PausedHostController,
 ): HostControllerInspection {
   entry(value);
   const image = images.get(value);
-  if (image) return image.inspection;
+  if (image) {
+    valid(!image.disposed);
+    return image.inspection;
+  }
   const child = children.get(value);
   valid(child);
   child.window.check();
   valid(!child.stopped && child.phase === "paused");
   return child.inspection;
+}
+/** Dispose only an actually branded artifact and its accepted local resources. */
+export async function disposeOwnedHostControllerArtifact(
+  value: BuiltHostController,
+): Promise<void> {
+  entry(value);
+  const image = images.get(value);
+  valid(image);
+  if (image.disposal) {
+    await image.disposal;
+    return;
+  }
+  image.disposed = true;
+  // Install the owned Promise before a native stop/clock callback can synchronously
+  // reenter. An async IIFE's initial body runs before its assignment completes.
+  let resolveDisposal: (() => void) | undefined;
+  let rejectDisposal: ((reason: Error) => void) | undefined;
+  const disposal = new Promise<void>((resolve, reject) => {
+    resolveDisposal = resolve;
+    rejectDisposal = reject;
+  });
+  image.disposal = disposal;
+  drain(disposal);
+  const work = (async () => {
+    const cleanupWindow = new Window(10_000);
+    let directory: string | undefined;
+    try {
+      const owned = [...image.preparations];
+      for (const [window] of owned) window.stop();
+      // Each preparation installed its disposal before accepting any directory/child.
+      // A failed/unknown child removal withholds tag disposal and cannot be retried.
+      const stopped = Promise.all(owned.map(([, dispose]) => dispose()));
+      drain(stopped);
+      await cleanupWindow.wait(stopped);
+      cleanupWindow.capture(() =>
+        privateRoot((path) => {
+          directory = path;
+        }),
+      );
+      valid(directory);
+      const removed = removeOwned(directory, "image", image.tag, cleanupWindow);
+      drain(removed);
+      valid(await cleanupWindow.wait(removed));
+      cleanupWindow.check();
+    } catch {
+      throw new Error(failure);
+    } finally {
+      cleanupWindow.stop();
+      if (directory !== undefined) {
+        try {
+          rmSync(directory, { recursive: true, force: true });
+        } catch {
+          /* Owned cleanup. */
+        }
+      }
+    }
+  })();
+  drain(work);
+  void Reflect.apply(nativeThen, work, [
+    () => resolveDisposal?.(),
+    () => rejectDisposal?.(new Error(failure)),
+  ]);
+  await disposal;
 }
 export async function stopOwnedHostController(value: PausedHostController): Promise<void> {
   entry(value);
@@ -1442,11 +2070,16 @@ export async function stopOwnedHostController(value: PausedHostController): Prom
     await state.stopOperation;
     return;
   }
+  if (state.phase !== "paused") {
+    await cleanup(state);
+    return;
+  }
   // Reserve before protocol/callback hooks. Concurrent callers share one owned stop.
   state.phase = "stopping";
   state.stopOperation = (async () => {
     try {
       const reply = receive(state.process, state.window);
+      drain(reply);
       offer(state.process, { schema: 1, kind: "stop", nonce: state.nonce }, state.window);
       const response = await reply;
       state.window.capture(() => {
