@@ -59,6 +59,8 @@ export function scanCommands(index: unknown): string[][] {
 if (import.meta.main) {
   let directory: string | undefined;
   let completed: ReleaseScanGate | undefined;
+  let stage = "scanner setup";
+  let nativeExitCode: number | undefined;
   try {
     const digest = process.env.DIGEST ?? "";
     const temp = process.env.RUNNER_TEMP;
@@ -87,6 +89,7 @@ if (import.meta.main) {
       chmodSync(join(plugins, "docker-buildx"), 0o700);
     }
     const run = (command: string[], name: string) => {
+      nativeExitCode = undefined;
       const result = Bun.spawnSync(command, {
         cwd: privateDirectory,
         stdin: "ignore",
@@ -102,24 +105,36 @@ if (import.meta.main) {
         maxBuffer: 16 * 1024 * 1024,
         killSignal: "SIGKILL",
       });
+      if (Number.isInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 255)
+        nativeExitCode = result.exitCode;
       writeFileSync(join(privateDirectory, `${name}.stdout`), result.stdout, { mode: 0o600 });
       writeFileSync(join(privateDirectory, `${name}.stderr`), result.stderr, { mode: 0o600 });
       if (!result.success || result.exitedDueToTimeout || result.exitedDueToMaxBuffer)
         throw new Error("scan-failed");
       return result.stdout;
     };
+    stage = "image index retrieval";
     run(["docker", "buildx", "imagetools", "inspect", "--raw", `${image}@${digest}`], "index");
+    stage = "image index verification";
     const index = boundIndex(readFileSync(join(privateDirectory, "index.stdout")), digest);
     const images = platformImages(index);
     for (const [i, command] of scanCommands(index).entries()) {
       const binding = images[i];
       if (!binding) throw new Error("invalid-scan-input");
-      gate.checkReport(run(command, `platform-${i}`), binding);
+      stage = `scanner execution for ${binding.platform}`;
+      const bytes = run(command, `platform-${i}`);
+      // Stage labels are first-party constants; raw tool output stays in the private files.
+      stage = `report and vulnerability validation for ${binding.platform}`;
+      gate.checkReport(bytes, binding);
     }
     completed = gate;
   } catch {
+    const exit =
+      stage.startsWith("scanner execution") && nativeExitCode !== undefined
+        ? ` (native exit ${nativeExitCode})`
+        : "";
     console.log(
-      "::error::Release platform evidence, scanner execution or vulnerability gate failed; signing/promotion is blocked.",
+      `::error::Release scan failed during ${stage}${exit}; signing/promotion is blocked.`,
     );
     process.exitCode = 1;
   } finally {
@@ -134,14 +149,13 @@ if (import.meta.main) {
   if (completed && !process.exitCode) {
     try {
       // Cleanup and both scan durations count against expiry, including a frozen wall clock.
+      stage = "final gate after private cleanup";
       completed.finish();
       console.log(
         "Both runtime platform digests passed the pinned high/critical fixable-vulnerability gate.",
       );
     } catch {
-      console.log(
-        "::error::Release platform evidence, scanner execution or vulnerability gate failed; signing/promotion is blocked.",
-      );
+      console.log(`::error::Release scan failed during ${stage}; signing/promotion is blocked.`);
       process.exitCode = 1;
     }
   }
