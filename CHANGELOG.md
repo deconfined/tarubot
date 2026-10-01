@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.34**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.35**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.35 — Retain shortened journal deadlines
+
+- Retain every shorter observed deadline across the same original owner and consumer operation, including prepared and sealed terminal reads. Clock and refusal work count before the next callback or native offer.
+- Shorten held waits and idle timers when the original allowance shrinks; check saved bounds before result delivery even when synchronous work delays timer execution. Expiry permanently refuses without renewing evidence.
+- Preserve original tickets, full repair comparisons, request counts and fixed error contracts. These fixes add no host or workflow authority; release activation remains fenced.
 
 ## 2.36.34 — Verify current staging host phases
 

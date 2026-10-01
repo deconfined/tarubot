@@ -293,43 +293,108 @@ function budget(
 ): Budget {
   // Includes the first denial/clock and caller snapshot, rather than starting after them.
   const physicalStarted = performance.now();
+  let physicalEnd = physicalStarted + maximum;
   let started: number | undefined,
     last: number | undefined,
     fenced = false,
     checking = false;
+  const anchors: number[] = [];
+  const ownedHook = <T>(at: number, work: () => T): T => {
+    anchors.push(at);
+    try {
+      return work();
+    } finally {
+      anchors.pop(); // Synchronous only: never retain this offer anchor across an await.
+    }
+  };
+  const waits = new Set<{
+    end: number;
+    timer: ReturnType<typeof setTimeout> | undefined;
+    timerEnd: number | undefined;
+    reject(reason: Error): void;
+  }>();
   const fence = () => {
     fenced = true;
+    for (const bound of waits) {
+      clearTimeout(bound.timer);
+      bound.reject(new Error("invalid-control-owner-boundary"));
+    }
   };
-  const now = () => {
+  const rearm = () => {
+    for (const bound of waits) {
+      bound.end = Math.min(bound.end, physicalEnd);
+      if (fenced || performance.now() >= bound.end) {
+        fence();
+        return;
+      }
+      if (bound.timer !== undefined && bound.timerEnd === bound.end) continue;
+      clearTimeout(bound.timer);
+      bound.timerEnd = bound.end;
+      bound.timer = setTimeout(fence, Math.max(0, bound.end - performance.now()));
+    }
+  };
+  const alive = () => requireOwner(!fenced && checking && performance.now() < physicalEnd);
+  const sample = () => {
+    alive();
+    const at: unknown = clock();
+    try {
+      void Reflect.apply(nativeThen, at, [undefined, () => {}]);
+    } catch {}
+    integer(at);
+    return at;
+  };
+  const observeNow = (observedPhysical: number) => {
+    // Project each shortened wall observation from BEFORE its hooks. A later frozen clock
+    // cannot offer the same residual time again after synchronous work consumes it.
+    for (const anchor of anchors) observedPhysical = Math.min(observedPhysical, anchor);
     let owns = false;
     try {
-      requireOwner(!fenced && !checking);
+      requireOwner(!fenced && !checking && observedPhysical < physicalEnd);
       checking = true;
       owns = true;
       return hooks(fence, () => {
+        const observe = (at: number) => {
+          if (started === undefined) started = at;
+          physicalEnd = Math.min(physicalEnd, observedPhysical + (started + maximum - at));
+          requireOwner(
+            !fenced &&
+              checking &&
+              at >= (last ?? started) &&
+              at - started < maximum &&
+              performance.now() < physicalEnd,
+          );
+          last = at;
+          rearm();
+          requireOwner(!fenced);
+          return at;
+        };
+        alive();
         synchronousRefusal(refusal);
-        const at: unknown = clock();
-        try {
-          void Reflect.apply(nativeThen, at, [undefined, () => {}]);
-        } catch {}
-        integer(at);
+        observe(sample());
+        alive();
         synchronousRefusal(refusal);
-        if (started === undefined) started = at;
-        requireOwner(
-          !fenced &&
-            checking &&
-            at >= (last ?? started) &&
-            at - started < maximum &&
-            performance.now() - physicalStarted < maximum,
-        );
-        last = at;
-        return at;
+        // Preserve the FIRST epoch, then observe time spent by the last denial hook. No
+        // caller callback follows this final sample or can renew its retained projection.
+        return observe(sample());
       });
     } catch {
       fence();
       throw new Error("invalid-control-owner-boundary");
     } finally {
       if (owns) checking = false;
+    }
+  };
+  const now = () => observeNow(performance.now());
+  const finishCapture = (at: number, captured: unknown) => {
+    try {
+      observeNow(at);
+    } catch (error) {
+      // A refused post-hook observation withholds the callback's native Promise too.
+      // Drain its rejection intrinsically without reading a caller-controlled then.
+      try {
+        void Reflect.apply(nativeThen, captured, [undefined, () => {}]);
+      } catch {}
+      throw error;
     }
   };
   const origin = now();
@@ -339,7 +404,7 @@ function budget(
       const remaining = Math.min(
         whole ? maximum : 10_000,
         maximum - (last - origin),
-        maximum - (performance.now() - physicalStarted),
+        physicalEnd - performance.now(),
       );
       requireOwner(remaining > 0);
       return Object.freeze({ wall: last, remaining });
@@ -360,11 +425,15 @@ function budget(
     capture<T>(work: () => T): T {
       now();
       let owns = false;
+      let offeredPhysical: number | undefined;
+      let captured: unknown;
       try {
         requireOwner(!fenced && !checking);
         checking = true;
         owns = true;
-        const value = hooks(fence, work);
+        offeredPhysical = performance.now();
+        const value = ownedHook(offeredPhysical, () => hooks(fence, work));
+        captured = value;
         requireOwner(!fenced && checking);
         return value;
       } catch {
@@ -372,40 +441,41 @@ function budget(
         throw new Error("invalid-control-owner-boundary");
       } finally {
         if (owns) checking = false;
-        now();
+        // This synchronous hook's cost belongs to its immediate post-hook observation.
+        // Its anchor never crosses an await or gets reused by a later continuation.
+        finishCapture(offeredPhysical ?? performance.now(), captured);
       }
     },
     async wait<T>(work: () => Promise<T>, whole = false, preserveError = false): Promise<T> {
       const limit = remaining(whole);
       requireOwner(limit > 0);
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = {
+        end: Math.min(physicalEnd, performance.now() + limit),
+        timer: undefined as ReturnType<typeof setTimeout> | undefined,
+        timerEnd: undefined as number | undefined,
+        reject: (_reason: Error) => {},
+      };
       try {
-        let end = performance.now() + limit;
-        let rejectDeadline: (reason: Error) => void = () => {};
         const schedule = () => {
-          end = Math.min(end, performance.now() + remaining(whole));
-          requireOwner(performance.now() < end);
-          clearTimeout(timer);
-          timer = setTimeout(
-            () => {
-              fence();
-              rejectDeadline(new Error("invalid-control-owner-boundary"));
-            },
-            Math.max(0, end - performance.now()),
-          );
+          bound.end = Math.min(bound.end, performance.now() + remaining(whole));
+          rearm();
+          requireOwner(!fenced && performance.now() < bound.end);
         };
         const timeout = new Promise<never>((_, reject) => {
-          rejectDeadline = reject;
+          bound.reject = reject;
         });
+        void Reflect.apply(nativeThen, timeout, [undefined, () => {}]);
+        waits.add(bound);
         schedule();
         const result = await Promise.race([
           Promise.resolve().then(() => {
-            requireOwner(performance.now() < end);
+            requireOwner(performance.now() < bound.end);
             now();
-            requireOwner(performance.now() < end);
-            const pending = work();
+            requireOwner(performance.now() < bound.end);
+            const offeredPhysical = performance.now();
+            const pending = ownedHook(offeredPhysical, work);
             try {
-              now();
+              observeNow(offeredPhysical);
               schedule();
             } catch (error) {
               try {
@@ -419,16 +489,17 @@ function budget(
         ]);
         // A synchronous fulfillment/copy hook can starve the timer's callback. Its saved
         // deadline still bounds this result and cannot be renewed by another queued wait.
-        requireOwner(performance.now() < end);
+        requireOwner(performance.now() < bound.end);
         now();
-        requireOwner(performance.now() < end);
+        requireOwner(performance.now() < bound.end);
         return result;
       } catch (error) {
         fence();
         if (preserveError) throw error;
         throw new Error("invalid-control-owner-boundary");
       } finally {
-        clearTimeout(timer);
+        waits.delete(bound);
+        clearTimeout(bound.timer);
       }
     },
   };

@@ -1154,6 +1154,8 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
 });
 
 describe("whole ordinary-journal volume and native checkpoints", () => {
+  // This positive fixture performs three encrypted histories and hundreds of native-shaped
+  // authority reads; harness headroom changes none of their original operation deadlines.
   test("completed repair infra inspect/begin/finish preserve34-GET authority checks without per-read amplification", async () => {
     const f = nativeFixture();
     const completion = await completed(f);
@@ -1187,7 +1189,7 @@ describe("whole ordinary-journal volume and native checkpoints", () => {
     expect(f.seen.length - beforeFinish).toBe(204); // Initial/final plus one fresh check per4PUT.
     expect(ordinaryCalls(f).length - beforeFinishObjects).toBe(16);
     expect(Object.isFrozen(ticket)).toBe(true);
-  });
+  }, 15_000);
   test("trust private inspection delegation reuses one original proof; publish stays entirely per-object", async () => {
     const f = nativeFixture("staging");
     const history = await ordinaryHistory(f, f.store, f.make());

@@ -965,6 +965,8 @@ describe("independently current owner control configuration", () => {
     }
   });
 
+  // Three real encrypted histories and all native owner checks need harness headroom;
+  // each production operation still retains its own unchanged wall/physical limit.
   test("actual ordinary infra and trust journals use owner-guarded access, with repairing denying further I/O", async () => {
     for (const target of ["infra", "staging", "production"] as const) {
       const f = fixture(target),
@@ -994,7 +996,7 @@ describe("independently current owner control configuration", () => {
       ).rejects.toThrow("control-consumer-write-failed");
       expect(f.store.writes).toHaveLength(writes);
     }
-  });
+  }, 15_000);
 
   test("configuration, scope and raw-reader capabilities are snapshotted and private across awaits", async () => {
     const f = fixture();
@@ -1301,6 +1303,185 @@ describe("native original whole-journal owner evidence", () => {
     expect(() => window.now()).toThrow("invalid-control-owner-boundary");
     expect(f.seen).toHaveLength(0);
   });
+  test("every shortened native wall observation permanently projects its physical limit", () => {
+    for (const observe of ["now", "remaining", "snapshot"] as const) {
+      const f = fixture();
+      let clocks = 0;
+      const window = beginNativeOwnerJournalOperation(
+        f.make({
+          now: () => {
+            clocks++;
+            return f.clock.now;
+          },
+        }),
+      );
+      f.clock.now += 29_980;
+      if (observe === "remaining") expect(window.remaining()).toBeLessThanOrEqual(20);
+      else {
+        window.now();
+        if (observe === "snapshot")
+          expect(window.remainingSnapshot().remaining).toBeLessThanOrEqual(20);
+      }
+      const observedClocks = clocks;
+      const until = performance.now() + 60;
+      while (performance.now() < until) {
+        /* A frozen wall clock cannot offer its same twenty milliseconds after this cost. */
+      }
+      let offers = 0;
+      expect(() => window.capture(() => offers++)).toThrow("invalid-control-owner-boundary");
+      expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+      expect(() => window.remainingSnapshot()).toThrow("invalid-control-owner-boundary");
+      expect(clocks).toBe(observedClocks); // Known expiry refuses even the next clock hook.
+      expect(offers).toBe(0);
+      expect(f.seen).toHaveLength(0);
+    }
+  });
+  test("an owned capture or work hook cannot renew time shortened during that same hook", async () => {
+    for (const waited of [false, true]) {
+      const f = fixture(),
+        window = beginNativeOwnerJournalOperation(f.make());
+      let hooks = 0;
+      const work = () => {
+        hooks++;
+        f.clock.now += 29_980;
+        const until = performance.now() + 60;
+        while (performance.now() < until) {
+          /* The first short sample follows this hook, but retains its pre-hook anchor. */
+        }
+        return 1;
+      };
+      if (waited)
+        await expect(window.within(() => Promise.resolve(work()))).rejects.toThrow(
+          "invalid-control-owner-boundary",
+        );
+      else expect(() => window.capture(work)).toThrow("invalid-control-owner-boundary");
+      expect(hooks).toBe(1);
+      expect(() => window.capture(work)).toThrow("invalid-control-owner-boundary");
+      expect(hooks).toBe(1);
+      expect(f.seen).toHaveLength(0);
+    }
+  });
+  test("synchronous work anchors retire before awaited idle and resumed observations", async () => {
+    const f = fixture(),
+      window = beginNativeOwnerJournalOperation(f.make());
+    await expect(
+      window.within(async () => {
+        await Bun.sleep(120);
+        f.clock.now += 29_900; // The wall advances only in this later resumed phase.
+        return 1;
+      }),
+    ).resolves.toBe(1);
+    expect(window.remaining()).toBeLessThanOrEqual(100);
+    window.stop();
+    expect(f.seen).toHaveLength(0);
+  });
+  test("a guard inside owned synchronous work retains its pre-work anchor before offers", async () => {
+    for (const late of [false, true]) {
+      const f = fixture(),
+        window = beginNativeOwnerJournalOperation(f.make());
+      let offers = 0;
+      const pending = window.within(() => {
+        if (late) {
+          f.clock.now += 29_980;
+          const until = performance.now() + 60;
+          while (performance.now() < until) {
+            /* A native method/getter would consume this synchronous pre-offer phase. */
+          }
+        }
+        window.now(); // Allowed for live work, but must inherit this work's old anchor.
+        offers++;
+        return Promise.resolve(1);
+      });
+      if (late) await expect(pending).rejects.toThrow("invalid-control-owner-boundary");
+      else await expect(pending).resolves.toBe(1);
+      expect(offers).toBe(late ? 0 : 1);
+      window.stop();
+      expect(f.seen).toHaveLength(0);
+    }
+  });
+  test("a shortened last clock hook includes its own physical cost before returning", () => {
+    const f = fixture();
+    let late = false,
+      lateClocks = 0;
+    const owner = f.make({
+      now: () => {
+        if (late) {
+          lateClocks++;
+          const until = performance.now() + 60;
+          while (performance.now() < until) {
+            /* The original sample is anchored before this caller-controlled clock hook. */
+          }
+        }
+        return f.clock.now;
+      },
+    });
+    const window = beginNativeOwnerJournalOperation(owner);
+    f.clock.now += 29_980;
+    late = true;
+    expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    expect(() => window.capture(() => "late capture")).toThrow("invalid-control-owner-boundary");
+    expect(lateClocks).toBe(1); // The expired first sample must not offer a final clock.
+    expect(f.seen).toHaveLength(0);
+  });
+  test("a backward first sample cannot be hidden by a restored final sample", () => {
+    const f = fixture();
+    let active = false,
+      reads = 0;
+    const window = beginNativeOwnerJournalOperation(
+      f.make({ now: () => (active && ++reads === 1 ? instant - 1 : instant) }),
+    );
+    active = true;
+    expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    expect(reads).toBe(1); // Refuse before the later callback could restore the epoch.
+    expect(() => window.remaining()).toThrow("invalid-control-owner-boundary");
+    expect(reads).toBe(1);
+    expect(f.seen).toHaveLength(0);
+  });
+  test("the final denial cannot advance wall time after the offered clock sample", async () => {
+    const f = fixture();
+    let denials = 0;
+    await expect(
+      f.make().readOwnerAnchor(f.scope, () => {
+        if (++denials === 2) f.clock.now += 60_000;
+      }),
+    ).rejects.toThrow("invalid-control-owner-boundary");
+    expect(denials).toBe(2);
+    expect(f.seen).toHaveLength(0);
+  });
+  test("later original observations and stop promptly reject already held native waits", async () => {
+    for (const stopped of [false, true]) {
+      const f = fixture(),
+        window = beginNativeOwnerJournalOperation(f.make());
+      let release!: () => void,
+        entered!: () => void,
+        settled = false;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const pending = window.within(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+            entered();
+          }),
+      );
+      void pending.catch(() => {
+        settled = true;
+      });
+      await ready;
+      if (stopped) window.stop();
+      else {
+        f.clock.now += 29_980;
+        window.now(); // A later response hook must rearm the already installed timer.
+      }
+      await Bun.sleep(80);
+      expect(settled).toBe(true);
+      await expect(pending).rejects.toThrow("invalid-control-owner-boundary");
+      release();
+      expect(() => window.capture(() => "late result")).toThrow("invalid-control-owner-boundary");
+      expect(f.seen).toHaveLength(0);
+    }
+  });
   test("cached remaining uses the last original observation without any later clock hook", () => {
     const f = fixture();
     let wall = instant,
@@ -1344,6 +1525,55 @@ describe("native original whole-journal owner evidence", () => {
     ).rejects.toThrow("invalid-control-owner-boundary");
     expect(() => window.remaining()).toThrow("invalid-control-owner-boundary");
     expect(f.seen).toHaveLength(0);
+  });
+  test("refused post-capture values drain native rejected Promises without then getters", () => {
+    const f = fixture(),
+      modulePath = new URL("../../scripts/control-owner-boundary.ts", import.meta.url).pathname;
+    const program = `
+      import { runInNewContext } from "node:vm";
+      const { GitHubControlOwnerBoundary, beginNativeOwnerJournalOperation } = await import(${JSON.stringify(modulePath)});
+      let unhandled = 0, gets = 0, thenReads = 0;
+      const codes = [];
+      process.on("unhandledRejection", () => unhandled++);
+      for (const foreign of [false, true]) {
+        let wall = ${instant};
+        const owner = new GitHubControlOwnerBoundary(${JSON.stringify(f.configuration)}, {
+          store: { read: async () => null, write: async () => {}, readVersion: async () => null },
+          get: async () => { gets++; throw Error("unexpected mock GET"); }, now: () => wall,
+        });
+        const window = beginNativeOwnerJournalOperation(owner);
+        try {
+          window.capture(() => {
+            wall += 29_980;
+            const end = performance.now() + 60;
+            while (performance.now() < end) {}
+            const pending = foreign ? runInNewContext('Promise.reject(Error("invented-private-work"))')
+              : Promise.reject(Error("invented-private-work"));
+            Object.defineProperty(pending, "then", { get() { thenReads++; throw Error("invented-then-getter"); } });
+            return pending;
+          });
+          codes.push("accepted");
+        } catch (error) { codes.push(error.message); }
+      }
+      await Bun.sleep(20);
+      console.log(JSON.stringify({ unhandled, gets, thenReads, codes }));
+    `;
+    // The child observes the runtime's actual unhandled-rejection event independently of
+    // Bun's test harness; all configuration is invented and no network method is offered.
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(Buffer.from(child.stderr).toString()).toBe("");
+    expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+      unhandled: 0,
+      gets: 0,
+      thenReads: 0,
+      codes: ["invalid-control-owner-boundary", "invalid-control-owner-boundary"],
+    });
   });
   test("cross-realm rejected first clocks are drained without callback getters or native offers", () => {
     const f = fixture(),

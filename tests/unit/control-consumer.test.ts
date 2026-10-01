@@ -105,6 +105,155 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
 }
 
 describe("independently owner-anchored normal control consumers", () => {
+  test("the first owned anchor expiry includes capture cost before metadata offers", async () => {
+    const f = fixture();
+    f.state.anchor.expires_at = instant + 20;
+    f.state.beforeAnchor = async () => {
+      const until = performance.now() + 60;
+      while (performance.now() < until) {
+        /* The anchor's absolute expiry already bounds this original preparation cost. */
+      }
+    };
+    await expect(f.guard.check()).rejects.toThrow("control-consumer-guard-failed");
+    expect(f.state.anchors).toBe(1);
+    expect(f.state.reads).toHaveLength(0);
+  });
+  test("an original consumer ticket retains shortened physical time across synchronous rechecks", async () => {
+    const f = fixture(),
+      ticket = await f.guard.check();
+    const reads = f.state.reads.length;
+    f.setTime(instant + 29_980);
+    f.state.beforeAnchor = async () => {
+      const until = performance.now() + 60;
+      while (performance.now() < until) {
+        /* A frozen wall cannot restore the original ticket's observed twenty milliseconds. */
+      }
+    };
+    await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+    expect(f.state.reads).toHaveLength(reads);
+    const anchors = f.state.anchors;
+    f.setTime(instant);
+    await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+    expect(f.state.anchors).toBe(anchors);
+  });
+  test("held consumer rechecks shorten their existing timer and fence late callbacks", async () => {
+    const f = fixture(),
+      ticket = await f.guard.check();
+    const reads = f.state.reads.length;
+    let release!: () => void;
+    f.state.beforeAnchor = () => {
+      f.setTime(instant + 29_980);
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const pending = f.guard.check(ticket);
+    let settled = false;
+    void pending.catch(() => {
+      settled = true;
+    });
+    await Bun.sleep(80);
+    expect(settled).toBe(true);
+    await expect(pending).rejects.toThrow("control-consumer-guard-failed");
+    release();
+    await Bun.sleep(10);
+    expect(f.state.reads).toHaveLength(reads);
+    await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+    expect(f.state.reads).toHaveLength(reads);
+  });
+  test("owned owner-read hooks include simultaneous wall shortening and synchronous cost", async () => {
+    for (const existing of [false, true]) {
+      const f = fixture(),
+        ticket = existing ? await f.guard.check() : undefined;
+      const reads = f.state.reads.length;
+      f.state.beforeAnchor = () => {
+        f.setTime(instant + (existing ? 29_980 : 59_980));
+        const until = performance.now() + 60;
+        while (performance.now() < until) {
+          /* The original local read offer anchors its immediate post-hook sample. */
+        }
+        return Promise.resolve();
+      };
+      await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+      expect(f.state.reads).toHaveLength(reads);
+      const anchors = f.state.anchors;
+      if (ticket) {
+        await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+        expect(f.state.anchors).toBe(anchors);
+      }
+    }
+  });
+  test("native-shaped metadata methods retain the pre-method anchor at their last read guard", async () => {
+    const f = fixture();
+    let wall = instant,
+      offers = 0;
+    const store: ControlStore = {
+      read: (_path, refusal) => {
+        wall += 29_980;
+        const until = performance.now() + 60;
+        while (performance.now() < until) {
+          /* Invented method/getter preparation precedes the actual guarded SDK offer. */
+        }
+        refusal?.();
+        offers++;
+        return Promise.resolve(null);
+      },
+      write: f.store.write,
+    };
+    const guard = new ControlConsumerGuard(f.configuration, {
+      store,
+      owner: f.owner,
+      now: () => wall,
+    });
+    await expect(guard.check()).rejects.toThrow("control-consumer-guard-failed");
+    expect(offers).toBe(0);
+    expect(f.state.writes).toHaveLength(0);
+  });
+  test("post-clock denial expiry refuses before the first owner offer", async () => {
+    const f = fixture();
+    let denials = 0;
+    await expect(
+      f.guard.check(undefined, () => {
+        if (++denials === 2) f.setTime(instant + 60_000);
+      }),
+    ).rejects.toThrow("control-consumer-guard-failed");
+    expect(denials).toBe(2);
+    expect(f.state.anchors).toBe(0);
+    expect(f.state.reads).toHaveLength(0);
+  });
+  test("a slow first ticket sample refuses before any later clock or refusal hook", async () => {
+    const f = fixture();
+    let active = false,
+      clocks = 0,
+      denials = 0;
+    const guard = new ControlConsumerGuard(f.configuration, {
+      store: f.store,
+      owner: f.owner,
+      now: () => {
+        if (!active) return instant;
+        clocks++;
+        const until = performance.now() + 60;
+        while (performance.now() < until) {
+          /* Project the original twenty milliseconds before offering another hook. */
+        }
+        return instant + 29_980;
+      },
+    });
+    const ticket = await guard.check(undefined, () => {
+      if (active) denials++;
+    });
+    const anchors = f.state.anchors,
+      reads = f.state.reads.length;
+    active = true;
+    await expect(guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+    expect(clocks).toBe(1);
+    expect(denials).toBe(1);
+    await expect(guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+    expect(clocks).toBe(1);
+    expect(denials).toBe(1);
+    expect(f.state.anchors).toBe(anchors);
+    expect(f.state.reads).toHaveLength(reads);
+  });
   test("original native tickets retain their refusal and a replacement fences the old authority", async () => {
     const f = fixture();
     let live = true;
@@ -1033,6 +1182,30 @@ describe("lexical native whole journal authority", () => {
       expect(f.offers).toHaveLength(0);
     }
   });
+  test("diagnostic reflection cannot enter an aliased operation or invoke an own message getter", async () => {
+    for (const proxy of [false, true]) {
+      const f = nativeJournalFixture();
+      let hooks = 0;
+      const attempt = () => {
+        hooks++;
+        void withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+          await operation?.store.read("current");
+        }).catch(() => {});
+        throw new Error("invented-private-diagnostic-hook");
+      };
+      const original = new Error("invalid-ssh-trust");
+      Object.defineProperty(original, "message", { get: attempt });
+      const error = proxy ? new Proxy(original, { getPrototypeOf: attempt }) : original;
+      await expect(
+        withinControlJournalOperation(f.controller, f.legacy, async () => {
+          throw error;
+        }),
+      ).rejects.toThrow("control-journal-operation-failed");
+      expect(hooks).toBe(0); // Native classification and own DATA inspection execute no hook.
+      expect(f.calls).toHaveLength(0);
+      expect(f.offers).toHaveLength(0);
+    }
+  });
   test("old SDK callbacks stay fenced after timeout, a fresh operation and failed final result hooks", async () => {
     const f = nativeJournalFixture();
     let saved: ControlJournalOperation | undefined;
@@ -1081,6 +1254,85 @@ describe("lexical native whole journal authority", () => {
 });
 
 describe("native read-only terminal journal delivery", () => {
+  test("owned terminal work and copies retain the anchor before simultaneous short wall and cost", async () => {
+    for (const copied of [false, true]) {
+      const f = nativeJournalFixture();
+      await expect(
+        prepareControlJournalDelivery(f.controller, f.legacy, (operation) => {
+          const work = () => {
+            f.clock.now += 29_980;
+            const until = performance.now() + 60;
+            while (performance.now() < until) {
+              /* No earlier observation is needed to bind this owned hook's own cost. */
+            }
+            return { private: "invented" };
+          };
+          return Promise.resolve(copied ? operation.capture(work) : work());
+        }),
+      ).rejects.toThrow("control-journal-delivery-failed");
+      expect(f.calls).toHaveLength(12);
+      expect(f.offers.filter((path) => !path.includes("recovery/"))).toHaveLength(0);
+    }
+  });
+  test("a later retained preparation observation shortens already held work before callbacks", async () => {
+    const f = nativeJournalFixture();
+    let retained!: ControlJournalReadOperation,
+      release!: () => void,
+      entered!: () => void,
+      settled = false;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+      retained = operation;
+      await operation.wait(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+            entered();
+          }),
+      );
+      await operation.store.read("current");
+      return { late: true };
+    });
+    void pending.catch(() => {
+      settled = true;
+    });
+    await ready;
+    f.clock.now += 29_980;
+    retained.assert();
+    await Bun.sleep(80);
+    expect(settled).toBe(true);
+    await expect(pending).rejects.toThrow("control-journal-delivery-failed");
+    release();
+    await Bun.sleep(10);
+    expect(f.calls).toHaveLength(12);
+    expect(f.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(0);
+    expect(() => retained.remaining()).toThrow("control-journal-delivery-failed");
+  });
+  test("preparation retains its first shortened physical limit before every ordinary read", async () => {
+    for (const observe of ["remaining", "assert"] as const) {
+      const f = nativeJournalFixture();
+      let spun = false;
+      await expect(
+        prepareControlJournalDelivery(f.controller, f.legacy, async (operation) => {
+          f.clock.now += 29_980;
+          if (observe === "remaining") expect(operation.remaining()).toBeLessThanOrEqual(20);
+          else operation.assert();
+          const until = performance.now() + 60;
+          while (performance.now() < until) {
+            /* Consume the original observed residual without changing the wall again. */
+          }
+          spun = true;
+          await operation.store.read("current");
+          return { late: true };
+        }),
+      ).rejects.toThrow("control-journal-delivery-failed");
+      expect(spun).toBe(true);
+      expect(f.calls).toHaveLength(12);
+      expect(f.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(0);
+    }
+  });
   test("remaining subtracts time spent by the final clock hook in preparation and prepared phases", async () => {
     for (const prepared of [false, true]) {
       const f = nativeJournalFixture();

@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
+import { isNativeError } from "node:util/types";
 import type { RecoveryTarget } from "./control-recovery.js";
 import type { ControlStore } from "./infra-control.js";
 import {
@@ -184,6 +185,42 @@ interface TicketState {
   refusal: (() => void) | undefined;
   fenced: boolean;
   checking: boolean;
+  waits: Set<ConsumerWait>;
+  anchors: number[];
+}
+interface ConsumerWait {
+  end: number;
+  timer?: ReturnType<typeof setTimeout>;
+  timerEnd?: number;
+  reject(reason: Error): void;
+}
+function fenceTicket(saved: TicketState): void {
+  saved.fenced = true;
+  for (const bound of saved.waits) {
+    clearTimeout(bound.timer);
+    bound.reject(new Error("control-consumer-operation-expired"));
+  }
+}
+function rearmTicket(saved: TicketState): void {
+  for (const bound of saved.waits) {
+    bound.end = Math.min(bound.end, saved.physicalDeadline);
+    if (saved.fenced || performance.now() >= bound.end) {
+      fenceTicket(saved);
+      return;
+    }
+    if (bound.timer !== undefined && bound.timerEnd === bound.end) continue;
+    clearTimeout(bound.timer);
+    bound.timerEnd = bound.end;
+    bound.timer = setTimeout(() => fenceTicket(saved), Math.max(0, bound.end - performance.now()));
+  }
+}
+function clockSample(clock: () => number): number {
+  const at: unknown = clock();
+  try {
+    void Reflect.apply(nativeThen, at, [undefined, () => {}]);
+  } catch {}
+  time(at);
+  return at;
 }
 interface CapturedStore {
   source: ControlStore;
@@ -195,7 +232,11 @@ interface CapturedStore {
   within<T>(ticket: ControlConsumerTicket, operation: () => Promise<T>): Promise<T>;
   assert(ticket: ControlConsumerTicket): void;
   remaining(ticket: ControlConsumerTicket): number;
-  remainingSnapshot(ticket: ControlConsumerTicket, observedWall: number): number;
+  remainingSnapshot(
+    ticket: ControlConsumerTicket,
+    observedWall: number,
+    observedPhysical: number,
+  ): number;
 }
 // Module-private capabilities prevent a guard for one backend from wrapping another backend.
 const capturedStores = new WeakMap<ControlConsumerGuard, CapturedStore>();
@@ -260,13 +301,29 @@ export class ControlConsumerGuard {
           const saved = this.#ticket(ticket);
           return Math.min(saved.deadline - saved.last, saved.physicalDeadline - performance.now());
         },
-        remainingSnapshot: (ticket, observedWall) => {
+        remainingSnapshot: (ticket, observedWall, observedPhysical) => {
           const saved = this.#tickets.get(ticket);
-          requireConsumer(saved && !saved.fenced && !saved.checking);
-          return Math.min(
-            saved.deadline - Math.max(saved.last, observedWall),
-            saved.physicalDeadline - performance.now(),
-          );
+          try {
+            requireConsumer(saved && !saved.fenced && !saved.checking);
+            saved.last = Math.max(saved.last, observedWall);
+            // The enclosing native observation began before its caller hooks. Retain the
+            // earliest projection even while preparing, rather than issuing another residual.
+            saved.physicalDeadline = Math.min(
+              saved.physicalDeadline,
+              observedPhysical + (saved.deadline - saved.last),
+            );
+            const remaining = Math.min(
+              saved.deadline - saved.last,
+              saved.physicalDeadline - performance.now(),
+            );
+            requireConsumer(remaining > 0);
+            rearmTicket(saved);
+            requireConsumer(!saved.fenced);
+            return remaining;
+          } catch {
+            if (saved) fenceTicket(saved);
+            throw new Error("invalid-control-consumer");
+          }
         },
       });
       Object.freeze(this);
@@ -274,36 +331,56 @@ export class ControlConsumerGuard {
       throw new Error("invalid-control-consumer");
     }
   }
-  #ticket(ticket: ControlConsumerTicket): TicketState {
+  #ticket(ticket: ControlConsumerTicket, observedPhysical = performance.now()): TicketState {
     const saved = this.#tickets.get(ticket);
+    for (const anchor of saved?.anchors ?? [])
+      observedPhysical = Math.min(observedPhysical, anchor);
     let owns = false;
     try {
-      requireConsumer(saved && !saved.fenced && !saved.checking);
+      requireConsumer(
+        saved && !saved.fenced && !saved.checking && observedPhysical < saved.physicalDeadline,
+      );
       saved.checking = true;
       owns = true;
       return this.#hooks(
         () => {
-          saved.fenced = true;
+          fenceTicket(saved);
         },
         () => {
+          const alive = () =>
+            requireConsumer(
+              !saved.fenced && saved.checking && performance.now() < saved.physicalDeadline,
+            );
+          const observe = (now: number) => {
+            saved.physicalDeadline = Math.min(
+              saved.physicalDeadline,
+              observedPhysical + (saved.deadline - now),
+            );
+            requireConsumer(
+              !saved.fenced &&
+                saved.checking &&
+                now >= saved.last &&
+                now >= saved.issued &&
+                now < saved.deadline &&
+                performance.now() < saved.physicalDeadline,
+            );
+            saved.last = now;
+            rearmTicket(saved);
+            requireConsumer(!saved.fenced);
+          };
+          alive();
           synchronousRefusal(saved.refusal);
-          const now = this.#now();
-          time(now);
+          alive();
+          observe(clockSample(this.#now));
+          alive();
           synchronousRefusal(saved.refusal);
-          requireConsumer(
-            !saved.fenced &&
-              saved.checking &&
-              now >= saved.last &&
-              now >= saved.issued &&
-              now < saved.deadline &&
-              performance.now() < saved.physicalDeadline,
-          );
-          saved.last = now;
+          alive();
+          observe(clockSample(this.#now));
           return saved;
         },
       );
     } catch {
-      if (saved) saved.fenced = true;
+      if (saved) fenceTicket(saved);
       throw new Error("invalid-control-consumer");
     } finally {
       if (saved && owns) saved.checking = false;
@@ -324,32 +401,58 @@ export class ControlConsumerGuard {
     }
   }
   async #within<T>(ticket: ControlConsumerTicket, operation: () => Promise<T>): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const state = this.#tickets.get(ticket);
+    let bound: ConsumerWait | undefined;
     try {
       const saved = this.#ticket(ticket);
+      const owned: ConsumerWait = { end: saved.physicalDeadline, reject: () => {} };
+      bound = owned;
+      const schedule = (offeredPhysical = performance.now()) => {
+        this.#ticket(ticket, offeredPhysical);
+        rearmTicket(saved);
+        requireConsumer(!saved.fenced && performance.now() < owned.end);
+      };
+      const expired = new Promise<never>((_, reject) => {
+        owned.reject = reject;
+      });
+      void Reflect.apply(nativeThen, expired, [undefined, () => {}]);
+      saved.waits.add(owned);
+      schedule();
       const result = await Promise.race([
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => {
-              saved.fenced = true;
-              reject(new Error("control-consumer-operation-expired"));
-            },
-            Math.min(saved.deadline - saved.last, saved.physicalDeadline - performance.now()),
-          );
-        }),
+        expired,
         Promise.resolve().then(() => {
           this.#ticket(ticket);
-          return operation();
+          requireConsumer(performance.now() < owned.end);
+          const offeredPhysical = performance.now();
+          let pending: Promise<T>;
+          saved.anchors.push(offeredPhysical);
+          try {
+            pending = operation();
+          } finally {
+            saved.anchors.pop(); // No synchronous offer anchor survives an async idle.
+          }
+          try {
+            schedule(offeredPhysical);
+          } catch (error) {
+            try {
+              void Reflect.apply(nativeThen, pending, [undefined, () => {}]);
+            } catch {}
+            throw error;
+          }
+          return pending;
         }),
       ]);
       this.#ticket(ticket);
+      requireConsumer(performance.now() < owned.end);
       return result;
     } catch (error) {
-      if (state) state.fenced = true;
+      if (state) fenceTicket(state);
       throw error;
     } finally {
-      clearTimeout(timer);
+      if (bound) {
+        state?.waits.delete(bound);
+        clearTimeout(bound.timer);
+      }
     }
   }
   /** Reader-only checks; no absent marker or echo of a supplied generation grants authority. */
@@ -361,9 +464,14 @@ export class ControlConsumerGuard {
     let prior: TicketState | undefined;
     let fenced = false,
       checking = false;
+    const waits = new Set<ConsumerWait>();
     const fence = () => {
       fenced = true;
-      if (prior) prior.fenced = true;
+      if (prior) fenceTicket(prior);
+      for (const bound of waits) {
+        clearTimeout(bound.timer);
+        bound.reject(new Error("invalid-control-consumer"));
+      }
     };
     try {
       if (this.#hook) {
@@ -377,34 +485,81 @@ export class ControlConsumerGuard {
       requireConsumer(!prior || refusal === undefined || refusal === prior.refusal);
       const capturedRefusal = prior ? prior.refusal : refusal;
       let started: number | undefined, previous: number | undefined;
-      const physicalDeadline = Math.min(
+      let physicalDeadline = Math.min(
         physicalStarted + maxOperation,
         prior?.physicalDeadline ?? Infinity,
       );
-      const tick = () => {
+      let deadline = prior?.deadline ?? Infinity;
+      const anchors: number[] = [];
+      const ownedHook = <T>(at: number, work: () => T): T => {
+        anchors.push(at);
+        try {
+          return work();
+        } finally {
+          anchors.pop();
+        }
+      };
+      const rearm = () => {
+        for (const bound of waits) {
+          bound.end = Math.min(bound.end, physicalDeadline);
+          if (fenced || performance.now() >= bound.end) {
+            fence();
+            return;
+          }
+          if (bound.timer !== undefined && bound.timerEnd === bound.end) continue;
+          clearTimeout(bound.timer);
+          bound.timerEnd = bound.end;
+          bound.timer = setTimeout(fence, Math.max(0, bound.end - performance.now()));
+        }
+      };
+      const tick = (observedPhysical = performance.now()) => {
+        for (const anchor of anchors) observedPhysical = Math.min(observedPhysical, anchor);
         let owns = false;
         try {
-          requireConsumer(!fenced && !checking);
-          if (expected !== undefined) this.#ticket(expected);
+          physicalDeadline = Math.min(physicalDeadline, prior?.physicalDeadline ?? Infinity);
+          requireConsumer(!fenced && !checking && observedPhysical < physicalDeadline);
+          if (expected !== undefined) this.#ticket(expected, observedPhysical);
           checking = true;
           owns = true;
           return this.#hooks(fence, () => {
+            const alive = () =>
+              requireConsumer(
+                !fenced && checking && !prior?.fenced && performance.now() < physicalDeadline,
+              );
+            const observe = (at: number) => {
+              if (started === undefined) started = at;
+              deadline = Math.min(deadline, started + maxOperation);
+              physicalDeadline = Math.min(
+                physicalDeadline,
+                prior?.physicalDeadline ?? Infinity,
+                observedPhysical + (deadline - at),
+              );
+              requireConsumer(
+                !fenced &&
+                  checking &&
+                  !prior?.fenced &&
+                  at >= (previous ?? started) &&
+                  at < deadline &&
+                  performance.now() < physicalDeadline,
+              );
+              previous = at;
+              if (prior) {
+                prior.last = Math.max(prior.last, at);
+                prior.physicalDeadline = Math.min(prior.physicalDeadline, physicalDeadline);
+                rearmTicket(prior);
+              }
+              rearm();
+              requireConsumer(!fenced);
+              return at;
+            };
+            alive();
             synchronousRefusal(capturedRefusal);
-            const at = this.#now();
-            time(at);
+            alive();
+            observe(clockSample(this.#now));
+            alive();
             synchronousRefusal(capturedRefusal);
-            if (started === undefined) started = at;
-            const deadline = Math.min(started + maxOperation, prior?.deadline ?? Infinity);
-            requireConsumer(
-              !fenced &&
-                checking &&
-                !prior?.fenced &&
-                at >= (previous ?? started) &&
-                at < deadline &&
-                performance.now() < physicalDeadline,
-            );
-            previous = at;
-            return at;
+            alive();
+            return observe(clockSample(this.#now));
           });
         } catch {
           fence();
@@ -414,15 +569,22 @@ export class ControlConsumerGuard {
         }
       };
       const origin = tick();
-      const deadline = Math.min(origin + maxOperation, prior?.deadline ?? Infinity);
+      const restrict = (until: number) => {
+        deadline = Math.min(deadline, until);
+        // Include the cost of obtaining the anchor under its original absolute lifetime.
+        physicalDeadline = Math.min(physicalDeadline, physicalStarted + (deadline - origin));
+        tick();
+      };
       const capture = <T>(work: () => T): T => {
         tick();
         let owns = false;
+        let offeredPhysical: number | undefined;
         try {
           requireConsumer(!fenced && !checking);
           checking = true;
           owns = true;
-          const value = this.#hooks(fence, work);
+          offeredPhysical = performance.now();
+          const value = ownedHook(offeredPhysical, () => this.#hooks(fence, work));
           requireConsumer(!fenced && checking);
           return value;
         } catch {
@@ -430,33 +592,57 @@ export class ControlConsumerGuard {
           throw new Error("invalid-control-consumer");
         } finally {
           if (owns) checking = false;
-          tick();
+          // Account for this owned synchronous copy hook before its post-hook sample;
+          // future async continuations receive their own pre-hook anchor.
+          tick(offeredPhysical ?? performance.now());
         }
       };
       const wait = async <T>(operation: () => Promise<T>): Promise<T> => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
+        const bound: ConsumerWait = { end: Infinity, reject: () => {} };
         try {
           const remaining = Math.min(deadline - tick(), physicalDeadline - performance.now());
           requireConsumer(remaining > 0);
+          bound.end = Math.min(physicalDeadline, performance.now() + remaining);
+          const schedule = (offeredPhysical = performance.now()) => {
+            tick(offeredPhysical);
+            rearm();
+            requireConsumer(!fenced && performance.now() < bound.end);
+          };
+          const expired = new Promise<never>((_, reject) => {
+            bound.reject = reject;
+          });
+          void Reflect.apply(nativeThen, expired, [undefined, () => {}]);
+          waits.add(bound);
+          prior?.waits.add(bound);
+          schedule();
           const result = await Promise.race([
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
-                fence();
-                reject(new Error("invalid-control-consumer"));
-              }, remaining);
-            }),
+            expired,
             Promise.resolve().then(() => {
               tick();
-              return operation();
+              requireConsumer(performance.now() < bound.end);
+              const offeredPhysical = performance.now();
+              const pending = ownedHook(offeredPhysical, operation);
+              try {
+                schedule(offeredPhysical);
+              } catch (error) {
+                try {
+                  void Reflect.apply(nativeThen, pending, [undefined, () => {}]);
+                } catch {}
+                throw error;
+              }
+              return pending;
             }),
           ]);
           tick();
+          requireConsumer(performance.now() < bound.end);
           return result;
         } catch (error) {
           fence();
           throw error;
         } finally {
-          clearTimeout(timer);
+          waits.delete(bound);
+          prior?.waits.delete(bound);
+          clearTimeout(bound.timer);
         }
       };
       const readAnchor = async () => {
@@ -469,6 +655,7 @@ export class ControlConsumerGuard {
         return capture(() => anchor(structuredClone(value), this.#scope, at));
       };
       const first = await readAnchor();
+      restrict(Math.min(first.expires_at, first.observed_at + freshAge));
       requireConsumer(first.repair.mode !== "repairing");
       const prefix = `recovery/${this.#scope.target}/`;
       const metadata = async () => {
@@ -501,6 +688,7 @@ export class ControlConsumerGuard {
         );
       }
       const final = await readAnchor();
+      restrict(Math.min(final.expires_at, final.observed_at + freshAge));
       requireConsumer(isDeepStrictEqual(identity(first), identity(final)));
       requireConsumer(isDeepStrictEqual(await metadata(), original));
       anchor(first, this.#scope, tick());
@@ -529,6 +717,8 @@ export class ControlConsumerGuard {
         refusal: capturedRefusal,
         fenced: false,
         checking: false,
+        waits: new Set(),
+        anchors: [],
       });
       this.#ticket(ticket);
       return ticket;
@@ -851,11 +1041,22 @@ async function runControlJournalOperation<T>(
   const failures: (() => void)[] = [];
   const retained = new WeakSet<object>();
   let stopped = false;
+  let activeDiagnostic: string | undefined;
+  let stoppedDiagnostic: string | undefined;
+  let workDiagnostic: string | undefined;
+  let copyingResult = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let idleEnd = Number.POSITIVE_INFINITY;
-  const stop = () => {
-    if (stopped) return;
+  const stop = (error?: unknown) => {
+    if (stopped) {
+      if (workDiagnostic === undefined && error !== undefined)
+        workDiagnostic = journalFailureDiagnostic(error);
+      return;
+    }
     stopped = true;
+    // Immediate owned wait rejection can win the Promise race before the leaf's catch.
+    // Preserve only its privately selected fixed effect diagnostic, never callback text.
+    stoppedDiagnostic = activeDiagnostic;
     phase = "closed";
     clearTimeout(idleTimer);
     native.stop();
@@ -863,6 +1064,9 @@ async function runControlJournalOperation<T>(
     const owns = authority.hook === undefined;
     if (owns) authority.hook = cleanup;
     try {
+      // Fence FIRST, then retain only an existing native Error's own fixed DATA message.
+      // Immediate owned wait rejection cannot replace it with its generic timeout error.
+      if (error !== undefined) workDiagnostic = journalFailureDiagnostic(error);
       for (const deny of failures) {
         try {
           synchronousRefusal(deny);
@@ -954,10 +1158,10 @@ async function runControlJournalOperation<T>(
           snapshot.remaining,
           original === undefined
             ? Number.POSITIVE_INFINITY
-            : access.remainingSnapshot(original, snapshot.wall),
+            : access.remainingSnapshot(original, snapshot.wall, physical),
         );
         requireConsumer(remaining > 0);
-        if (terminal && phase !== "active") {
+        if (terminal) {
           idleEnd = Math.min(idleEnd, physical + remaining);
           requireConsumer(performance.now() < idleEnd);
           clearTimeout(idleTimer);
@@ -994,9 +1198,10 @@ async function runControlJournalOperation<T>(
   const use = async <V>(callback: () => Promise<V>, diagnostic: string): Promise<V> => {
     let owns = false;
     try {
-      requireConsumer(phase === "active" && !busy);
+      requireConsumer(phase === "active" && !busy && !copyingResult);
       busy = true;
       owns = true;
+      activeDiagnostic = diagnostic;
       const result = await native.within(callback);
       assert();
       return result;
@@ -1004,7 +1209,10 @@ async function runControlJournalOperation<T>(
       stop();
       throw new Error(diagnostic);
     } finally {
-      if (owns) busy = false;
+      if (owns) {
+        busy = false;
+        activeDiagnostic = undefined;
+      }
     }
   };
   const settle = <V>(
@@ -1019,7 +1227,13 @@ async function runControlJournalOperation<T>(
         hooked(() =>
           Reflect.apply(nativeThen, pending, [
             (value: V) => {
+              let owns = false;
               try {
+                requireConsumer(!copyingResult);
+                // A result reflection hook cannot select a nested leaf's diagnostic or
+                // offer reads while this original bounded copy is being authenticated.
+                copyingResult = true;
+                owns = true;
                 const owned = hooked(() =>
                   native.capture(() => snapshotJournalResult(value, identities)),
                 );
@@ -1028,18 +1242,20 @@ async function runControlJournalOperation<T>(
                 Object.defineProperty(box, "value", { value: owned, enumerable: true });
                 accept(Object.freeze(box));
               } catch (error) {
-                stop();
+                stop(error);
                 reject(error);
+              } finally {
+                if (owns) copyingResult = false;
               }
             },
             (error: unknown) => {
-              stop();
+              stop(error);
               reject(error);
             },
           ]),
         );
       } catch (error) {
-        stop();
+        stop(error);
         reject(error);
       }
     });
@@ -1209,27 +1425,33 @@ async function runControlJournalOperation<T>(
   } catch (error) {
     stop();
     if (terminal) throw new Error("control-journal-delivery-failed");
+    if (workDiagnostic !== undefined) throw new Error(workDiagnostic);
+    if (stoppedDiagnostic !== undefined) throw new Error(stoppedDiagnostic);
     // Keep existing trusted journal refusal names, while arbitrary callback diagnostics stay fixed.
-    let diagnostic: string | undefined;
-    try {
-      if (error instanceof Error) {
-        const message = Object.getOwnPropertyDescriptor(error, "message");
-        if (
-          message &&
-          Object.hasOwn(message, "value") &&
-          typeof message.value === "string" &&
-          /^(?:invalid-control-record|invalid-infrastructure-baseline-run|invalid-target-candidate|invalid-ssh-trust|control-consumer-(?:read|write|guard)-failed)$/u.test(
-            message.value,
-          )
-        )
-          diagnostic = message.value;
-      }
-    } catch {
-      /* Diagnostic inspection is untrusted too; no trap text is returned. */
-    }
+    const diagnostic = journalFailureDiagnostic(error);
     if (diagnostic !== undefined) throw new Error(diagnostic);
     throw new Error("control-journal-operation-failed");
   }
+}
+
+function journalFailureDiagnostic(error: unknown): string | undefined {
+  try {
+    if (isNativeError(error)) {
+      const message = Object.getOwnPropertyDescriptor(error, "message");
+      if (
+        message &&
+        Object.hasOwn(message, "value") &&
+        typeof message.value === "string" &&
+        /^(?:invalid-control-record|invalid-infrastructure-baseline-run|invalid-target-candidate|invalid-ssh-trust|control-consumer-(?:read|write|guard)-failed)$/u.test(
+          message.value,
+        )
+      )
+        return message.value;
+    }
+  } catch {
+    /* Diagnostic inspection is untrusted too; no trap text is returned. */
+  }
+  return undefined;
 }
 
 /** Bounded owned result copy; only explicitly retained native identity objects keep identity. */
