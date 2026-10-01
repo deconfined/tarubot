@@ -1,7 +1,7 @@
 /**
  * The host `.env` backup tool (2.23.0): argument parsing, setting names without values, the
  * required settings, file naming and the recipients file. The SSH read and age encryption are
- * exercised on the operator machine (record linked from docs/archive/README.md).
+ * exercised on the operator machine (verification evidence remains in Git history).
  */
 import { expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";

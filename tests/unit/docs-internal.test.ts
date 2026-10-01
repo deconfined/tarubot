@@ -58,28 +58,8 @@ test("internal guides link to existing files and Markdown headings", () => {
   expect(problems).toEqual([]);
 });
 
-test("the archive retains permanent pointers rather than another copy of session diaries", () => {
-  const archive = read("docs/archive/README.md");
-  const revision = "b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8";
-  // These record names are deliberately historical: the current tree must not recreate their backlog.
-  for (const path of [
-    "REQUIREMENTS.md",
-    ...[
-      "REPLIES",
-      "VERIFICATION",
-      "DEV_GUILD",
-      "OPEN_ITEMS",
-      "SESSION_HANDOFF",
-      "HOSTING",
-      "DEPLOYMENT",
-      "CI_CD",
-      "MIGRATION",
-      "APP_PLATFORM",
-    ].map((name) => `docs/${name}.md`),
-    "docs/proposals/app-platform-deploy-workflow.md",
-  ])
-    expect(archive).toContain(`https://github.com/deconfined/tarubot/blob/${revision}/${path}`);
-  expect(archive).not.toContain("/blob/main/");
+test("obsolete session records stay out of current contributor documentation", () => {
+  // Git and PR history preserve these records; navigation must not recreate a second backlog.
   for (const name of ["SESSION_HANDOFF", "OPEN_ITEMS", "VERIFICATION", "MIGRATION", "APP_PLATFORM"])
     expect(existsSync(resolve(root, `docs/${name}.md`))).toBe(false);
 });

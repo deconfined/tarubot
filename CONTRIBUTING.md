@@ -49,6 +49,7 @@ The build validates site links; `tests/unit/docs-site.test.ts` checks public con
 - [DevBot](docs/DEV_GUILD.md): isolated local development and owner-run acceptance.
 - [CI/CD](docs/CI_CD.md): publication, required checks and dependency updates.
 - [Deployment](docs/DEPLOYMENT.md): the implemented delivery path, not future pipeline proposals.
-- [Pipeline specification](docs/PIPELINE.md): the next design, safety policy and implementation milestones.
+- [Threat model](docs/THREAT_MODEL.md): agreed scope and the requirement to prefer simple, standard components.
+- [Pipeline specification](docs/PIPELINE.md): intended flow, safety policy and outstanding acceptance.
 
 Building a release does not authorize restarting a shared bot, migrating a live database, writing to Discord, changing a provider/environment, pushing, or dispatching a workflow. Agents must follow [AGENTS.md](AGENTS.md); production deployment approval remains the owner's GitHub action.

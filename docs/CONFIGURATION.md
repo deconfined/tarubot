@@ -1,48 +1,39 @@
 # Configuration and tool boundaries
 
-Runtime settings, defaults and ranges are documented once on the site's [configuration page](../site/src/content/docs/deploy/configuration.md). `.env.example` is the local template; `src/config/env.ts` validates it. This reference covers implementation and deployment-specific guards.
+Use the site's [configuration page](../site/src/content/docs/deploy/configuration.md) for runtime settings, defaults and ranges, and `.env.example` for local setup. This reference covers secret handling and maintenance-tool guards.
 
 ## Build configuration
 
-| File | Responsibility |
-| --- | --- |
-| `package.json` | ESM boundary, Bun pin, version and scripts; `build` compiles bot and one-shot tools |
-| `bun.lock` | Generated dependency/source pins; selector commit must match `upstream-revisions.json` |
-| `tsconfig.json` | Strict NodeNext ESM, explicit `.js` imports, bigint-safe modern output, checked optional/indexed values |
-| `tsconfig.build.json` | Application/tool output under `dist/`, including imported JSON; tests are checked separately |
-| `biome.json` | Two-space formatting, explicit types and no CommonJS; excludes generated/private inputs |
-| `site/package.json` | Separate pnpm/Node pins; do not run the site through root Bun scripts |
-
-`bun run build` removes stale generated modules. Rebuild after source changes before using `bun dist/scripts/TOOL.js` or its script alias. `/version` reads the build-local manifest. Scripts and formats that support comments document their inputs inline; strict JSON uses this reference.
+Rebuild with `bun run build` after source changes before running compiled tools under `dist/scripts/`. Toolchain pins and checks are in [CONTRIBUTING](../CONTRIBUTING.md); runtime validation is in `src/config/env.ts`.
 
 ## Secrets from files
 
-`src/config/secrets.ts` resolves `DATABASE_URL`, `DATABASE_CA_CERT`, `DISCORD_TOKEN`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_REPORTS_TOKEN` and `HEALTHCHECKS_PING_URL` from either `NAME` or `NAME_FILE`:
+Use `src/config/secrets.ts` to resolve supported secret settings from either `NAME` or `NAME_FILE`:
 
 - An unset/empty file setting uses the plain value.
 - A file setting reads UTF-8 text and removes exactly one final newline. Setting both forms is a configuration error.
 - Unreadable files name the setting only, never the path or value.
-- Resolution returns a new object; it never writes `process.env`. All bot/tool readers and report redaction use the resolved values.
+- Bot/tool readers and redaction use the resolved values, not direct reads from `process.env`.
 
 Production and staging require a non-empty resolved database CA. Connections verify the certificate and hostname even when URL SSL flags would weaken verification. `RESTORE_DATABASE_URL` and `RESTORE_DATABASE_CA_CERT` have no file forms; an empty restore CA reuses the resolved primary CA.
 
-Staging's release playbook writes secrets to Podman's store over stdin. The unit mounts them read-only at `/run/secrets/` and writes only the corresponding `NAME_FILE` paths into its settings file. Compose deployments still use plain variables. Never log a secret, pass it in argv or read one of these settings directly from `process.env` outside the resolver.
+The staging playbook feeds secrets to Podman over stdin; the unit mounts them read-only and stores only `NAME_FILE` paths in its settings file. Compose deployments use plain variables. Never log secrets or pass them in argv.
 
 ## Staging settings
 
 There is no staging `.env`. `ops/ansible/bot.yml` combines:
 
 1. Plain settings from the release's `vars/bot.yml` and `vars/targets/staging.yml`.
-2. Application and guild identity reported by that image's own `resolveDeployment`, without credentials or network access.
-3. Runtime and backup secrets from the `staging` GitHub environment. The reports token is named `REPORTS_GITHUB_TOKEN` there and mapped to `GITHUB_REPORTS_TOKEN`; GitHub disallows secret names starting with `GITHUB_`. The same convention reserves `SUGGEST_APP_PRIVATE_KEY` for the public-suggestion key.
+2. Application and guild identity reported by the release image.
+3. Runtime and backup secrets from the `staging` GitHub environment. `REPORTS_GITHUB_TOKEN` maps to `GITHUB_REPORTS_TOKEN`, and `SUGGEST_APP_PRIVATE_KEY` to `GITHUB_APP_PRIVATE_KEY`: GitHub disallows secret names starting with `GITHUB_`.
 
-Target files declare required secret names and database identity. Missing/malformed secrets are refused before host writes. Single-line values must contain no whitespace; only PEM values may span lines. Optional tunables use the bot's defaults. See [deployment](DEPLOYMENT.md) and [host operations](HOSTING.md).
+Target files declare required secrets and database identity. Missing/malformed values are refused before host writes. Single-line values must contain no whitespace; only PEM values may span lines. See [deployment](DEPLOYMENT.md) for setup and [host operations](HOSTING.md) for rotation.
 
 Private issue reports may not target the public repository. Public-suggestion app credentials belong only to production; local DevBot uses its reports token for private previews. Staging keeps suggestions off. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 
 ## Maintenance-tool profiles
 
-`src/config/deployment.ts` is the identity guard every Discord/database maintenance tool calls after argument parsing and before I/O. Publishing an import is guarded; a credential-free import dry run is not. After authentication, Discord tools confirm the token's application. Application/guild IDs are defined in that module, not copied into this guide.
+Every Discord/database maintenance tool calls `src/config/deployment.ts` before I/O. Discord tools also confirm the token's application after authentication. Publishing an import is guarded; a credential-free dry run is not. Application/guild identities live in that module.
 
 | Profile | Discord scope | Database boundary |
 | --- | --- | --- |
@@ -52,12 +43,12 @@ Private issue reports may not target the public repository. Public-suggestion ap
 | `devbot` | DevBot identity and test guild, never global registration | Local endpoint, empty CA, primary `tarubot_dev`; restore ends in `_restore_test` |
 | `unmanaged` | Other developers/CI; may not use managed identities or guilds | No deployment-specific database rules |
 
-Select managed profiles explicitly with `TARUBOT_ENVIRONMENT`. An empty marker can infer local DevBot from its application, never production; staging requires its marker despite sharing DevBot's application. Production/rehearsal reject staging database/user names. URLs must carry host, port, user and database themselves: libpq identity overrides in query parameters are refused. A restore target must differ from the primary.
+Select managed profiles with `TARUBOT_ENVIRONMENT`. Only local DevBot may be inferred from its application; staging requires its marker. Production/rehearsal reject staging database/user names. URLs must contain host, port, user and database: libpq identity overrides in query parameters are refused. Restore into a different database from the primary.
 
 ### DevBot rehearsal exceptions
 
 - Only local DevBot's `migrate.js --restore-rehearsal` may use a `*_restore_test` primary, to rehearse a migration before touching `tarubot_dev`.
-- An explicit per-tool-run `DEVBOT_THROWAWAY_GUILD_ID` must equal `TEST_GUILD_ID` and name no managed guild. It **replaces**, not widens, the DevBot guild/registration scope. Other profiles refuse it; runtime and templates never read it. Use `commands.js list --guild <throwaway id>` because a full inventory will also find the normal test guild's commands.
+- Per-tool-run `DEVBOT_THROWAWAY_GUILD_ID` must equal `TEST_GUILD_ID` and name no managed guild. It replaces the DevBot guild/registration scope; other profiles refuse it, and bot startup never reads it. Use `commands.js list --guild <throwaway id>` to inspect that scope.
 
 Shared DevBot updates, `.env` changes and throwaway-server rehearsals are owner-authorized work. See [DevBot](DEV_GUILD.md).
 
@@ -75,6 +66,6 @@ Never use root `bun run` aliases or the development `.env` for production. Conta
 
 ## Schema and host configuration
 
-Numbered migrations are authoritative; `SCHEMA_VERSION` in `database.ts` identifies the required head. There is no automatic schema synchronization or Drizzle Kit push. See [persistence](PERSISTENCE.md) for mappings, transactions and migration checks.
+Use [persistence](PERSISTENCE.md) for schema changes and transaction rules; never use automatic schema synchronization or Drizzle Kit push.
 
-Compose and Quadlet keep read-only bot roots, no capabilities and no-new-privileges. `site.yml` configures the host from reviewed `main`; `bot.yml` deploys the release's unit. Templates must stay in the subset rendered by `tests/fixtures/bot-render.ts`, which CI compares to Ansible. Host playbooks use `ansible.builtin` only. Infrastructure inputs, state and provider pins are documented in [the OpenTofu runbook](../ops/tofu/README.md).
+Compose and Quadlet keep read-only bot roots, no capabilities and no-new-privileges. Host playbooks use `ansible.builtin` only. Bot templates must render in `tests/fixtures/bot-render.ts`, which CI compares to Ansible. See [the OpenTofu runbook](../ops/tofu/README.md) for infrastructure inputs and state.

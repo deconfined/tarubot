@@ -1,7 +1,7 @@
 /**
  * TaruBot's own Lodestone parser (2.20.0), which replaced Nodestone: the rules it applies to
  * lodestone-css-selectors definitions. Real-page parity with the Nodestone build was checked
- * separately on live pages (docs/archive/README.md); these pin each rule with synthetic HTML.
+ * separately on live pages (see Git history); these pin each rule with synthetic HTML.
  */
 import { describe, expect, test } from "bun:test";
 import {

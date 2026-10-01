@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.40**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.41**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.41 — Simplify documentation around the agreed threat model
+
+- Adopt the agreed threat model: realistic Discord-bot risks, minimal complexity and standard components.
+- Remove pipeline implementation diaries, obsolete designs, duplicated history and the archive index. Keep current procedures, development invariants and outstanding acceptance in focused references.
+- Align navigation and documentation checks; preserve deployment approvals and the current production path. Engineering remains paused.
 
 ## 2.36.40 — Qualify target descriptor history
 

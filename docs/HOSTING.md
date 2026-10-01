@@ -1,6 +1,6 @@
 # Host operations
 
-Use [DEPLOYMENT.md](DEPLOYMENT.md) for delivery/setup and [the OpenTofu runbook](../ops/tofu/README.md) for infrastructure. This guide distinguishes the current production Compose host from the staging Quadlet path; it does not assert which version or host is live.
+Use [DEPLOYMENT](DEPLOYMENT.md) for delivery/setup, [configuration](CONFIGURATION.md) for settings and [OpenTofu](../ops/tofu/README.md) for infrastructure. Production currently uses Compose; staging has the Quadlet path. This guide does not assert which host/version is live. The agent rule, confirmed on 2026-09-26, is in [AGENTS.md](../AGENTS.md); real host access and recovery belong to the owner.
 
 ## Everyday checks
 
@@ -13,7 +13,7 @@ docker compose -f docker-compose.production.yml exec -T tarubot \
   bun -e 'console.log(await (await fetch("http://127.0.0.1:3000/health/ready")).text())'
 ```
 
-On a configured Quadlet host, log in as root and run user tools with `run0`, not plain `su`/`runuser`:
+On a configured Quadlet host, log in as root and use `run0`:
 
 ```sh
 run0 --user=tarubot systemctl --user status tarubot.service
@@ -22,38 +22,41 @@ run0 --user=tarubot podman inspect --format '{{.State.Health.Status}}' tarubot
 run0 --user=tarubot sh -c '~/.local/bin/tarubot-tool commands.js list'
 ```
 
-Under SELinux, launching a home-directory executable directly through `run0` can fail with `203/EXEC`; the shell form above avoids it. The bot account has linger and no SSH login.
+Under SELinux, directly launching a home executable through `run0` can fail with `203/EXEC`; the shell form avoids it. The bot account has linger and no SSH login.
 
-Readiness needs database/Discord connectivity and the writer lease. Lodestone/visibility status is informational; degraded upstream data must not be read as an empty roster. `/sync status` and `/config validate` expose operational work/capability problems. The heartbeat pings every five minutes while ready; backup checks are independent. See the site's [monitoring page](../site/src/content/docs/deploy/monitoring.md).
+Readiness needs database/Discord connectivity and the writer lease. Lodestone/visibility status is informational; incomplete upstream data is not an empty roster. `/sync status` and `/config validate` expose operational problems. See [monitoring](../site/src/content/docs/deploy/monitoring.md) for heartbeat and backup checks.
 
 ## Deployment outcomes
 
-Read the **target job's** result, not just the run's conclusion. Production and staging currently run independently; staging failure can coexist with successful production.
+Read the target job's result. Production and staging currently run independently.
 
 | Result | Action |
 | --- | --- |
 | `deployed` | Verify readiness, command inventory and expected behavior |
-| `superseded` / `already-live` | No new deployment; confirm the intended live release |
-| `no-host` / `configured` | No healthy bot was proven; finish host/token setup |
-| `preflight-ok` | Database/backup checks passed, not Discord or a bot deployment |
-| `refused` | Read the reason; fix the precondition before a fresh authorized dispatch |
-| `unhealthy` / `failed` | Inspect the reported phase and live schema before choosing recovery |
-| `unreachable` / `outcome-unknown` | Inspect host state before retrying; a command may already have started |
+| `superseded` / `already-live` | Confirm the intended live release |
+| `no-host` / `configured` | Finish setup; no healthy bot was proven |
+| `preflight-ok` | Database/backup checks passed; no bot/Discord acceptance |
+| `refused` | Fix the precondition before a fresh authorized dispatch |
+| `recovered` | Compose restored the previous release; verify it and diagnose the failed candidate |
+| `needs-you` / `unhealthy` / `failed` | Inspect phase, writer and live schema before recovery |
+| `unreachable` / `outcome-unknown` | Inspect the host before retrying; work may already have started |
 
-Quadlet deployment leaves an unhealthy release in place: **no automatic rollback**. A same-schema rollback is a fresh staging `action=bot` dispatch of the previous version. Across a committed migration it is refused; fix forward or restore under an owner-approved window. A missing/`-` restore point is not evidence that migrations did not commit. Confirm the database's schema head and writer activity independently.
+Quadlet leaves an unhealthy candidate in place: no automatic rollback. A previous-version staging `action=bot` dispatch is safe only with verified unchanged schema and a fenced writer. After a committed migration, fix forward or restore in an owner-approved window. Missing restore-point output does not prove no migration committed.
 
-Before installing/reloading a candidate, the Quadlet play stops the existing writer, requires its stop timestamp and writes private `~/.config/tarubot/recovery-boundary.json` with that boundary and previous/candidate image/schema context. A failed start can therefore leave a boundary even when no workflow result returns. The previous image's schema head does not prove the live database's schema, and the timestamp does not prove a usable provider PITR point. Preserve the record while inspecting/fencing the writer and checking recovery sources; it never authorizes an image rollback or restore by itself.
+The Quadlet play stops the writer and records `~/.config/tarubot/recovery-boundary.json` before installing the candidate. Preserve its stop timestamp and previous/candidate image/schema context. An old image's schema head does not prove the database's current head; a timestamp does not prove usable provider PITR.
 
-Production Compose has its own stage-aware automatic recovery. A schema-preserving restart can roll back; a committed migration cannot be undone by an old image. Never manually start a second worker or delete a run directory to “unstick” a deployment. See the [frozen Compose recovery reference](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#outcomes) for its result codes and [manual recovery](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#updating-to-a-release) when Actions is unavailable.
+Compose has stage-aware automatic recovery, but an old image cannot undo a committed migration. Its private worker log is `~/.local/state/tarubot-deploy/runs/<run>/worker.log`. Never start a second writer or delete run state to unstick a deployment.
+
+For unresolved failure, stop/fence writes, record the live image and schema, and inspect the deployment phase, recovery boundary and available backup/PITR sources. Choose fix-forward or a verified restore, then start one matching release and verify health and commands. If Actions is unavailable, manual recovery still needs the owner's explicit go-ahead. Use the matching release's tools and [maintenance profiles](CONFIGURATION.md#maintenance-tool-profiles).
 
 ## Backups
 
-There are three recovery sources: managed PostgreSQL PITR, independent age-encrypted dumps, and production's stopped-writer pre-migration dump. Quadlet records a stop-time restore point for PITR rather than automatically restoring. Verify recoverability; backup success alone is not a restore drill.
+Recovery sources are managed PostgreSQL PITR, independent age-encrypted dumps and production's stopped-writer pre-migration dump. Quadlet records a stop-time PITR boundary. Verify recoverability with restore drills.
 
-- Production runs `ops/backup.sh` at 04:30 UTC via cron; it uploads the dump and encrypted `.env` copy.
-- Staging runs `tarubot-backup` from a persistent user timer at 04:30 UTC. A healthy deploy/preflight enables it. Runtime and backup secrets remain in Podman's rootless store, so restarts/reboots need no GitHub access.
-- Dumps stream from `pg_dump` to age, never plaintext disk. Public recipients are in [ops/age-recipients.txt](../ops/age-recipients.txt); only the owner holds the decryption key, with an offline second copy.
-- [Retention](../ops/bucket-lifecycle.xml): daily/settings 30 days, monthly 365 days. A host's storage credential can delete copies; encryption is not deletion protection. Keep independent copies for disaster recovery.
+- Production runs `ops/backup.sh` at 04:30 UTC via cron, uploading a dump and encrypted `.env` copy.
+- Staging runs the persistent user `tarubot-backup` timer at 04:30 UTC. Healthy deployment/preflight enables it; Podman's rootless secret store survives reboot without GitHub access.
+- Dumps stream from `pg_dump` to age without plaintext disk. [Public recipients](../ops/age-recipients.txt) are tracked; the owner holds the decryption key and an offline second copy.
+- [Retention](../ops/bucket-lifecycle.xml) is 30 days for daily/settings copies and 365 for monthly copies. A host credential can delete objects; keep independent copies.
 
 Owner-run staging checks:
 
@@ -63,27 +66,23 @@ run0 --user=tarubot journalctl --user -u tarubot-backup.service -n 50 --no-pager
 run0 --user=tarubot sh -c '~/.local/bin/tarubot-backup'
 ```
 
-Production can take a verified encrypted settings copy with `bun run host:env-backup -- --host tarubot@<production host> --identity <owner age key>`, from the operator machine. Run after settings changes. This tool is not for staging, which has no `.env`.
+After production settings changes, the operator can verify an encrypted copy with `bun run host:env-backup -- --host tarubot@<production host> --identity <owner age key>`. Staging has no `.env`; use its configured backup path.
 
 ### Restore a dump
 
-1. Stop writes for a consistent recovery window and establish the writer-lease gate. Never restore over the live database.
-2. Choose a new cluster or production's same-cluster `tarubot_restore`. Before loading data, revoke PUBLIC's `CONNECT`/`TEMPORARY`, preserve the provider's monitoring access, and verify the staging role cannot connect. The application owner keeps its own access.
-3. Fetch the encrypted object and decrypt it on the owner's protected machine. Use `pg_restore --no-owner --no-privileges --exit-on-error` against the isolated target, with verified TLS.
-4. Run the matching release's `check-restore.js` against source and target. Before a migration, select the old schema head explicitly or use the deployed build. Follow [maintenance-tool profile boundaries](CONFIGURATION.md#maintenance-tool-profiles).
-5. Confirm the required schema/image match, adjust only owner-authorized settings, then start exactly one bot. Verify readiness, inventory and data. Retain the recovery source until acceptance passes; remove plaintext scratch artifacts securely.
+1. Stop writes and establish the writer-lease gate. Never restore over the live database.
+2. Choose a new cluster or production's same-cluster `tarubot_restore`. Before loading, revoke PUBLIC's `CONNECT`/`TEMPORARY`, preserve provider monitoring access and verify staging cannot connect.
+3. Fetch/decrypt on the owner's protected machine. Load the isolated target with `pg_restore --no-owner --no-privileges --exit-on-error` and verified TLS.
+4. Run the matching release's `check-restore.js` against source and target. Before migration, select the old schema head explicitly or use the deployed build; see [maintenance profiles](CONFIGURATION.md#maintenance-tool-profiles) and [persistence](PERSISTENCE.md).
+5. Confirm image/schema/access, change only owner-authorized settings and start one bot. Verify readiness, inventory and data. Retain the source until acceptance; securely remove plaintext scratch artifacts.
 
-Staging's role cannot create databases and its tool profile has no restore target. The owner performs its restore drill/reset separately. Provider PITR forks a new cluster: new address, CA and access controls must all be checked. Restore automation must never assume a post-migration image rollback is safe.
-
-The [Compose database restore reference](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#daily-dumps) preserves exact owner-side commands; substitute current private values and verify them before use. Generic restore tooling is on the site's [operations page](../site/src/content/docs/deploy/operations.md).
+Staging cannot create databases and has no restore target in its tool profile; the owner performs its drill/reset separately. PITR creates a new cluster, requiring checks of address, CA and access controls. An image rollback cannot substitute for database recovery. See the site's [operations guide](../site/src/content/docs/deploy/operations.md) for tool usage.
 
 ## Rotation and rebuilds
 
-- **Staging runtime secret:** the owner sets one new environment value, dispatches the live version with `action=bot`, verifies health, then revokes the old credential. For a database password, coordinate the database change and dispatch in one window. The playbook refuses a missing secret on an existing bot.
-- **Host access key/hash:** cloud-init is creation-only. Follow [OpenTofu rebuilds](../ops/tofu/README.md#rebuilding-a-host); a rebuilt host's key must be explicitly verified/repinned. Never silently relearn a mismatch.
-- **Compose production host loss:** retain the database and latest encrypted settings, stop/fence the old host, and follow the [frozen rebuild reference](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#rebuilding-the-host). Do not replace the managed cluster merely to rebuild a VM.
-- **Public-suggestion app key:** production only; the owner rotates it, updates settings, restarts and verifies before revoking the old key. An empty client ID disables suggestions without blocking the bot. The [app operations record](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/HOSTING.md#public-suggestions-the-github-app) preserves the probe/moderation procedure.
+- **Staging runtime secret:** set the new value, dispatch the live version with `action=bot`, verify health, then revoke the old credential. Coordinate database-password changes in one window. Missing secrets on an existing bot are refused.
+- **Host key/access key:** cloud-init is creation-only. Follow [rebuilds](../ops/tofu/README.md#rebuilding-a-host), verify and explicitly repin the new host key.
+- **Compose host loss:** fence the old host, retain the managed database and encrypted settings, then restore the matching Compose configuration and image on the owner-provisioned replacement. Verify schema, TLS/access and one writer before acceptance. Rebuilding a VM does not require replacing its database.
+- **Suggestion app key:** production only. Update settings, restart and verify before revoking the old key. An empty client ID disables suggestions without blocking the bot; see [configuration](CONFIGURATION.md).
 
-dnf-automatic is the Quadlet hosts' only updater and may reboot after daily updates (staging around 06:00 UTC, production's configured schedule 10:00 UTC). Logs, health checks and backups must survive unattended restarts; do not claim that path verified merely because an offline test passed.
-
-The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened to every environment/Infrastructure. [AGENTS.md](../AGENTS.md) carries the binding wording: the owner holds keys, secrets and approvals; agents may read public evidence and rehearse offline, not operate real hosts.
+dnf-automatic is the Quadlet updater and may reboot after updates. Verify that logs, health checks and backups survive restarts. An offline test does not prove the live host was configured. Recovery assumptions and limits are recorded in [the threat model](THREAT_MODEL.md).

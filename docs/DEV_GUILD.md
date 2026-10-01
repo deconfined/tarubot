@@ -1,6 +1,6 @@
 # DevBot testing
 
-Shared DevBot is not a disposable test fixture. Ask the owner before stopping/restarting it, migrating its database, changing `.env`, or writing to Discord. Read-only inspection is allowed. Application/guild identity is defined in `src/config/deployment.ts`; never copy real IDs into examples or tests.
+Shared DevBot is not a disposable fixture. Stopping/restarting it, migrating its database, changing `.env` or writing to Discord needs owner authorization; read-only inspection is allowed. Use `src/config/deployment.ts` for identity, not real IDs copied into examples or tests.
 
 ## Local isolation
 
@@ -23,7 +23,7 @@ Use a dedicated database/application; this setup is not permission to use shared
 
 After the owner's go-ahead:
 
-1. Prepare [the startup plan](TEST_PLANS.md) for the release and read its changelog/schema changes. Pull the pinned image without changing the running process.
+1. Update [the startup plan](TEST_PLANS.md), read the changelog/schema changes and pull the pinned image without changing the running process.
 2. Stop `tarubot` using the development overlay. Dump `tarubot_dev` into `.cache/backups/tarubot_dev-before-X.Y.Z-<sha>.dump` and restore it to `tarubot_dev_restore_test`. Follow the site's [backup procedure](../site/src/content/docs/deploy/operations.md#backup), substituting these names and Compose files.
 3. Run `check-restore.js` with the deployed build or `--schema-version <old head>.sql`. Both databases still have the old schema.
 4. If needed, rehearse the migration in the restore copy with the new image, then migrate DevBot while stopped. The rehearsal command derives its URL inside the container, never on the terminal:
@@ -44,7 +44,7 @@ TARUBOT_IMAGE_TAG=X.Y.Z docker compose -f docker-compose.yml -f docker-compose.d
 ```
 
 6. Register commands in the test guild, then use `commands.js list` to compare the deployed inventory with its own declarations. Run tools inside the same pinned image using `… run --rm --no-deps -T tarubot bun dist/scripts/TOOL.js`; obey [tool-profile guards](CONFIGURATION.md#maintenance-tool-profiles).
-7. Check readiness (writer lease included), logs, schema, command scope and startup plan. Perform/record human acceptance separately from automated regression.
+7. Check readiness (including the writer lease), logs, schema, command scope and startup plan. Record human acceptance separately from automated regression.
 
 ## Test unmerged source
 
@@ -52,8 +52,8 @@ Append `-f docker-compose.build.yml` to the normal development command and use `
 
 ## Staging handover and acceptance
 
-The staging implementation uses `tarubot_staging`, verified TLS and the `staging` profile, not local DevBot's database/profile. Its secrets belong to the GitHub environment. The owner must stop local DevBot before restoring equal-schema data and resetting/moving its token; see [deployment setup](DEPLOYMENT.md#first-host-setup-owner-checklist). Do not assume the move happened from a published image or configure-only run.
+Staging uses `tarubot_staging`, verified TLS and the `staging` profile, with secrets in its GitHub environment. The owner must stop local DevBot before restoring equal-schema data and resetting/moving its token; see [deployment setup](DEPLOYMENT.md#first-host-setup-owner-checklist). Publication or a configure-only run does not prove the handover happened.
 
-Use a throwaway server for destructive permission/visibility rehearsal. The per-run allowance is narrow and local-DevBot-only ([configuration](CONFIGURATION.md#devbot-rehearsal-exceptions)); it never authorizes production onboarding. Remove DevBot/delete the throwaway while still scoped there, then restore the normal test-guild setting. Discord obfuscation's remaining real-REST checks fall on or after 2026-11-16; keep them distinct from fixture coverage.
+Use a throwaway server for destructive permission/visibility rehearsal under the local-DevBot-only [allowance](CONFIGURATION.md#devbot-rehearsal-exceptions). Remove DevBot/delete the throwaway while still scoped there, then restore the normal test-guild setting. This does not authorize production onboarding.
 
-Record manual evidence in the relevant issue/PR: release/commit, environment role, steps and results, and anything skipped/waived. Use roles, not tester names. Previous acceptance and rehearsals are preserved in [the archive](archive/README.md#verification-and-acceptance); unresolved checks are linked from [the documentation index](README.md#tracking-work-and-evidence).
+Record manual evidence in the relevant issue/PR: release/commit, environment role, checks and results, and anything skipped/waived. Use roles, not tester names. Fixture success does not replace live acceptance.

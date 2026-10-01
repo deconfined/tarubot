@@ -1,6 +1,6 @@
 # OpenTofu: TaruBot's hosts
 
-This module builds the provider side of TaruBot's hosts (2.36.0, issue #62). `.github/workflows/infra.yml` plans and applies it from GitHub Actions: its Plan job runs in the `infra-plan` environment with read-only credentials and no approval, and its Apply job runs in `infra`, after @deconfined approves it. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)" (the environments are its confirmed item 4).
+This module builds the provider side of TaruBot's hosts. `.github/workflows/infra.yml` plans and applies it from GitHub Actions: its Plan job runs in the `infra-plan` environment with read-only credentials and no approval, and its Apply job runs in `infra`, after @deconfined approves it. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)" (the environments are its confirmed item 4).
 
 The four layers each have one owner:
 - **OpenTofu** (this module) builds the VM, its firewall, its DNS records and the database access lists.
@@ -62,7 +62,7 @@ The four secrets marked "both" must hold the same value in each environment:
 
 The `_READ_` and `_WRITE_` names keep each provider phase to its own kind: Plan and the separate post-adoption verification read only `_READ_` secrets; the saved-plan Apply step reads only `_WRITE_` ones (`tests/unit/infra.test.ts` checks). The owner supplies the additional read-only secrets in `infra` before enabling adoption.
 
-Plan and Apply also compare a passphrase-keyed binding of the saved plan, private backend/settings, workflow commit/run and policy code. A backend mismatch is refused before provider writes, and Apply rechecks the binding after Compare. The full-plan policy in `scripts/infra-policy.ts` is currently **advisory**: it never removes the `infra` approval requirement or enables auto-apply. Without an independently persisted applied-input baseline it cannot grant a safe decision. See the [pipeline specification](../../docs/PIPELINE.md) for the next milestones.
+Plan and Apply also compare a passphrase-keyed binding of the saved plan, private backend/settings, workflow commit/run and policy code. A backend mismatch is refused before provider writes, and Apply rechecks the binding after Compare. The full-plan policy in `scripts/infra-policy.ts` is currently **advisory**: it never removes the `infra` approval requirement or enables auto-apply. Without an independently persisted applied-input baseline it cannot grant a safe decision. See the [pipeline specification](../../docs/PIPELINE.md) for the intended flow and outstanding acceptance.
 
 ### `TOFU_VARS`
 
@@ -130,21 +130,13 @@ The plan refuses to go on:
 
 There is no state lock. Runs serialize through the workflow's `infra` concurrency group, and a [hand run](#a-hand-run-when-actions-is-down) must never overlap one. The Plan job plans with `-lock=false` as well, because its state key is read-only and could never write a lock: the backend configures none today (no `use_lockfile`), and the flag keeps a later one from making Plan write.
 
-The [next pipeline specification](../../docs/PIPELINE.md#plan-transfer-credentials-and-concurrency) retains this Linode single-writer boundary rather than requiring conditional object writes or a new locking service. Durable journals/baselines have an owner-enabled reviewed path below; automatic SSH enrollment remains pending. The workflow stays dispatch-only with owner-approved Apply and manual host-key pinning.
+The [pipeline design](../../docs/PIPELINE.md#plan-transfer-credentials-and-concurrency) keeps this single-writer boundary. The implemented workflow remains dispatch-only, with owner-approved Apply and manual host-key pinning.
 
-### Durable control records (owner-enabled)
+### Experimental control records
 
-Before activation, the owner verifies bucket privacy/versioning/retention, recovery copies, state-key access to `tarubot/control/v1/infra/`, and the pinned tool's real state/plan shapes. The same passphrase protects these records through a separate scrypt/AES-256-GCM domain; never publish records or private state exports. Recovery tooling and real-backend rehearsal remain pending; do not enable this solely because offline tests passed.
+Leave `TOFU_CONTROL_RECORDS_ENABLED` off. The existing journal/recovery scaffolding needs simplification under the [agreed threat model](../../docs/THREAT_MODEL.md) and real-backend acceptance before owner activation. Offline tests do not establish that readiness.
 
-Enabled ordinary journal access also requires independently owner-administered `control-infra` configuration with a current `CONTROL_OWNER_ANCHOR`. Provision `CONTROL_OWNER_ID`, `CONTROL_REPOSITORY_ID` and `CONTROL_OWNER_ENVIRONMENT_ID` as private canonical positive decimal IDs, plus a separate `CONTROL_OWNER_READ_TOKEN`, in each required execution scope. The environment ID pins `control-infra`, never `infra-plan`, `infra` or proposed `infra-auto`. Workflow steps pass all four as masked secrets; there is no ordinary variable, public output or job-token fallback. The reader needs repository-scoped Environments:read, Actions:read, Contents:read and metadata access, with no configuration write, dispatch or approval permission. Owner-only variable administration and independently fenced competing writers are mandatory; an environment reviewer list alone cannot establish them. See the [owner boundary](../../docs/PIPELINE.md#completed-history-recovery-foundation) for exact repair modes and private bindings.
-
-The default factory now applies this boundary to every enabled infrastructure reader/writer. Disabled reads still avoid state, key and owner lookups. Every completed-repair object access currently performs 68 GitHub GETs; do not activate restored scopes before the separately reviewed bounded integration addresses that request volume. Missing configuration or an uncertain/pending repair blocks access; there is no implicit never-repaired bootstrap, cached approval or automatic repair.
-
-With automation fenced, set `TOFU_CONTROL_RECORDS_ENABLED=true` in both `infra-plan` and `infra`, then dispatch `operation=baseline`. It must show a complete no-change plan for existing state and waits for the existing `infra` approval. Establishment writes only encrypted control records, never provider/state changes. A second establishment cannot replace the baseline. Leave destroy/access-removal/replace switches off.
-
-Enabled Plan reads the current applied-input baseline. Enabled Apply persists intent and its pending reference before applying the reviewed file, verifies resulting state and advances the baseline only on success. Missing baseline, stale state/generation, missing history, failed persistence or a pending operation stops the path. State exports and full JSON are private runner files, not artifacts. The only artifact remains the encrypted saved plan.
-
-Do not retry a failed Apply to clear its journal, switch records off as a recovery shortcut, delete its pending reference, or restore only the newest object. The owner must fence writers and reconcile actual provider/state outcomes and linked record generations before resuming. An intent persisted before its pending reference may be orphaned without any provider write; uncertain outcomes still require investigation. The journal is not a lock. Automatic Apply remains disabled.
+If records were previously enabled, a pending operation, missing baseline/history or uncertain readback blocks another mutation. Fence all writers and reconcile actual provider/state outcomes and related record generations before resuming. Do not disable records to bypass recovery, delete a pending reference, restore only the newest object or blindly retry Apply. See [recovery requirements](../../docs/PIPELINE.md#recovery).
 
 ## The first apply
 

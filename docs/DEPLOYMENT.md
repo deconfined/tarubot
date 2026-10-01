@@ -1,16 +1,16 @@
 # Deployment
 
-This is the **implemented** pipeline. Production still uses Docker Compose; staging has the OpenTofu/Ansible/rootless Quadlet path. A green run with skipped steps, `no-host` or `configured` does not prove staging is running DevBot. Check the target job and its actual result. The [release-integrated infrastructure/safe-auto-apply specification](PIPELINE.md) is separate work, with explicit milestones and activation prerequisites.
+Production currently uses Docker Compose. Staging has the OpenTofu/Ansible/rootless Quadlet path. This guide describes implemented behavior; the [replacement pipeline](PIPELINE.md#current-status) remains inactive. Use [configuration](CONFIGURATION.md) for settings, [the threat model](THREAT_MODEL.md) for trust decisions, and [AGENTS.md](../AGENTS.md) for the confirmed agent rule.
 
 ## Release flow
 
-1. **PR:** CI, security checks and the owner's code-owner review. Merge with a merge commit.
-2. **Publish:** revalidate, build AMD64/ARM64 images, publish candidates to GHCR, scan both exact runtime digests, sign the returned index digest, then promote `latest`. A failed scan blocks signing/promotion even though candidate tags already exist.
-3. **Deploy plan:** bind version, commit and digest; verify provenance; inspect runtime paths and schema changes. Documentation/test/CI-only changes do not request deployment.
-4. **Staging:** `host.yml` runs `site.yml` from the planned `main` head as root, then the release's `bot.yml` as `tarubot`. It deploys without a reviewer when configured. No target host means an automatic `no-host`; no Discord token on an empty host means configure-only. Neither counts as a healthy bot deployment.
-5. **Production:** the owner approves the `production` environment. The frozen Compose job sends its constrained deploy command over SSH; the host checks and deploys the release, and notify reports the outcome.
+1. **Review:** CI/security checks and the owner's code-owner approval, then a merge commit.
+2. **Publish:** build AMD64/ARM64 candidates, scan both exact runtime digests, sign the returned index digest and promote `latest`. A failed scan blocks signing/promotion even if candidate tags exist.
+3. **Deploy plan:** bind version, commit and digest; verify provenance; inspect runtime paths and schema changes. Documentation/test/CI-only changes do not request deployment. The plan reads target and `notify` environment metadata and main-only branch policies. Production must require the owner alone, allow self-review and refuse admin bypass.
+4. **Staging:** `host.yml` runs `site.yml` from the planned `main` head as root, then the release's `bot.yml` for the unprivileged `tarubot` account. Staging normally has no reviewer. A missing host gives `no-host`; an empty host without a Discord token can only be configured.
+5. **Production:** the owner approves the `production` environment. The Compose job sends its constrained command over strict, pinned SSH; the host deploys the release and `notify` reports the outcome.
 
-**Production is not currently gated on staging success.** Its job runs independently. The owner should review genuinely deployed/tested staging evidence before approving, rather than relying on the overall run colour. Publication and infrastructure are also separate: a release does not currently plan/apply OpenTofu.
+Production runs independently of staging. Before approval, review the target's actual deployed/tested evidence: green skipped steps, `no-host` and `configured` do not prove a running DevBot. Publication does not currently plan or apply infrastructure.
 
 ## Workflow inputs
 
@@ -18,32 +18,31 @@ Dispatch Deploy from `main` with an explicit release version:
 
 | Target | Inputs / meaning |
 | --- | --- |
-| `production` | `action=deploy` only; a rollback also needs `rollback=true` and `from=<live version>` |
+| `production` | `action=deploy`; rollback also needs `rollback=true` and `from=<live version>` |
 | `staging` | `deploy`: Configure then bot; `configure`: host only; `bot`: release only; `preflight`: Configure plus database/backup checks without Discord |
 
-Staging image rollback uses `action=bot`, not production's rollback inputs, **only after the owner verifies unchanged live schema and fences the writer**. On missing/changed schema evidence, fix forward or follow owner-controlled recovery. The playbook stops the old writer and persists a private recovery boundary before installing/starting the candidate; it does not automatically put anything back. Normal Deploy requires signed publication; staging also requires a release containing its bot playbook. Re-runs are refused: inspect uncertain outcomes before a fresh, owner-authorized dispatch.
+Quadlet has no automatic rollback. A previous-version staging `action=bot` dispatch requires verified unchanged live schema and a fenced writer. Missing or changed schema evidence calls for fix-forward or owner-controlled recovery. The playbook stops the writer and saves a private recovery boundary before replacing the unit. See [deployment outcomes](HOSTING.md#deployment-outcomes).
 
-Production's repository variable `DEPLOY_ENABLED` must be exactly `true`. Staging has no switch; the owner pauses it by adding an environment reviewer. Per-target host jobs queue rather than cancel waiting runs. See [CI/CD](CI_CD.md) for provenance and [HOSTING](HOSTING.md) for failures.
+Normal Deploy requires signed publication; staging also needs the release's bot playbook. Re-runs are refused. Inspect uncertain host/database state before a fresh owner-authorized dispatch.
+
+Production's `DEPLOY_ENABLED` variable must be exactly `true`. Staging has no switch; the owner pauses it by adding an environment reviewer. Per-target host jobs queue without cancelling waiting runs. See [CI/CD](CI_CD.md#signed-build-provenance) for provenance.
 
 ## First-host setup: owner checklist
 
-These steps belong to the owner, not an agent. They are a procedure, not a claim that setup is complete.
+These are owner actions, not a claim that setup is complete.
 
-1. Protect `main`: signed commits, merge commits only, required CI/security checks, one code-owner approval, stale approvals dismissed.
-2. Create private encrypted-state storage and scoped read/write provider/storage credentials. Create `infra-plan` (read-only, no reviewer) and `infra` (write, owner approval), both accepting only `main`. Read their protection settings back once.
-3. Set identical shared infrastructure inputs in both environments. Follow [the OpenTofu runbook](../ops/tofu/README.md#the-first-apply) for the access-list path. Optional existing-cluster adoption uses exact private current settings and a separate owner-approved `adopt` operation from a completed unchanged baseline, followed by read-only no-change verification. It must not provision or mutate a cluster, or build a host in that operation.
-4. Generate each Configure key outside agent sessions. Store the private half in the target's `ANSIBLE_SSH_KEY`, public half in `TOFU_VARS.configure_keys`. No passphrase: runners use batch SSH. Never place a host private key in user data.
-5. Add the host shape to `TOFU_VARS`; dispatch Infrastructure and approve only the reviewed saved plan. cloud-init sets root credentials and generates the host's own Ed25519 host key at first boot.
-6. Verify the new host key from the owner's machine (prefer comparison with the provider console). Store `TARGET_HOST` and `TARGET_HOST_KEY` (`ssh-ed25519 <key>`) in the target environment. The current workflow uses this explicit pin, not automated TOFU/DNSSEC. Never silently accept a changed key.
-7. Dispatch staging `configure`. First Configure upgrades/reboots a new host; the second must report `changed=0`.
-8. Set staging's database/CA, reports, heartbeat and backup secrets, but no Discord token yet. `REPORTS_GITHUB_TOKEN` maps to the bot's reports setting; see [configuration](CONFIGURATION.md#staging-settings). Single-line values must contain no whitespace.
-9. Dispatch `preflight`: expect `preflight-ok`, a successful encrypted backup and an enabled timer. Decrypt/restore the backup into a scratch database and verify it.
-10. Move DevBot only in a separate approved window: equal schema heads, stopped local bot, owner-restored database, reset token placed only in `staging`, then `bot`. Verify a real healthy deploy, commands and acceptance; never run the same application locally and on staging.
+1. Protect `main`: signed commits, merge commits, required CI/security checks, code-owner approval and dismissal of stale approvals.
+2. Create encrypted-state storage and scoped credentials. Configure main-only `infra-plan` with read-only access/no reviewer, and `infra` with write access/owner approval. Read their settings back at setup and after changes; infrastructure jobs do not self-check those settings.
+3. Set matching shared infrastructure inputs. Follow [the first-apply runbook](../ops/tofu/README.md#the-first-apply). Existing-cluster adoption uses exact private settings, a separate approved import and read-only no-change verification; it must not mutate the cluster or build a host.
+4. Generate Configure keys outside agent sessions. Store the private key in the target's `ANSIBLE_SSH_KEY`, public key in `TOFU_VARS.configure_keys`. Runners use batch SSH, so no passphrase. Never put a host private key in user data.
+5. Set the host shape; dispatch Infrastructure and approve only the reviewed saved plan. cloud-init sets credentials; the host generates its own Ed25519 host key at first boot.
+6. Verify that key from the owner's machine, preferably against the provider console. Set `TARGET_HOST` and `TARGET_HOST_KEY` (`ssh-ed25519 <key>`). The current workflow uses this explicit pin; automated durable enrollment/DNSSEC is unfinished. Never silently accept a changed key.
+7. Dispatch staging `configure`. The first run upgrades/reboots the new host; the second must report `changed=0`.
+8. Add staging database/CA, reports, heartbeat and backup settings, initially without a Discord token. Follow [staging settings](CONFIGURATION.md#staging-settings). Dispatch `preflight`; require `preflight-ok`, an enabled timer and a successful encrypted backup. Decrypt/restore it into a scratch database and verify it.
+9. Move DevBot in a separate owner-approved window: equal schema heads, local bot stopped, owner-restored database, reset token only in `staging`, then `bot`. Verify health, commands and acceptance; never run the same application in both places.
 
-Production's Quadlet cutover is not implemented here. It needs a separately reviewed change and owner-run window, with the old bot stopped before the new one starts. Do not follow the [archived production-move plan](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/docs/DEPLOYMENT.md#phase-6-productions-move-2370-once) as if it had shipped.
+Production's Quadlet cutover needs a separate reviewed change and owner-run window. Stop the old bot before starting its replacement.
 
 ## Boundaries
 
-The infrastructure workflow binds the encrypted saved plan to its private backend/inputs and workflow run before writes, and emits an advisory full-plan policy decision. It is still dispatch-only with owner-approved Apply. Replacement release/safe-apply/acceptance components exist but their publisher hook defaults off and a **code-level admission fence blocks activation before credentials** until database adoption and durable SSH enrollment ship. Do not set `RELEASE_PIPELINE_ENABLED` now. See [implementation milestones](PIPELINE.md#implementation-milestones-and-acceptance) and the component details; no live acceptance or production cutover is claimed.
-
-The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened to Infrastructure/every deployment environment. [AGENTS.md](../AGENTS.md) carries it verbatim. Agents hold no host-access key/environment secret, never approve or bypass a gate, and dispatch only when asked in that session. Environment, provider, token and key changes remain owner actions.
+Infrastructure is dispatch-only with owner-approved Apply. It binds the encrypted saved plan to its backend, inputs and workflow run before writes; its full-plan policy decision is advisory. The release-integrated automatic path remains off and code-fenced before credentials. Do not enable `RELEASE_PIPELINE_ENABLED`; see [PIPELINE](PIPELINE.md) for the agreed flow and remaining gaps.

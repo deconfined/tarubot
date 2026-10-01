@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.40 target descriptor history",
-  "objective": "Verify a one-way handoff of authenticated target descriptor history, original content and statement expiry, complete native source evidence, encrypted path/readback commitments and retirement of temporary proofs using invented inputs. No real host or bot operation occurs; release activation remains fenced and the disposable guest remains stopped.",
+  "title": "Session: 2.36.41 documentation cleanup",
+  "objective": "Verify that contributor documentation reflects the agreed threat model, retains current operating procedures and links, and removes duplicate history and unnecessary design detail.",
   "user": [
-    "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
-    "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
+    "Review the reduced documentation and agreed threat model.",
+    "Keep remaining work and manual acceptance evidence in issues and PRs."
   ],
   "assistant": [
-    "Verify the genuine target-content and historical issuance factories with invented RSA, HTTP and storage responses. Check copied, mismatched, nested, expired and repeated handoffs, immutable data and original proof retirement. Contact no real host, provider or deployment environment.",
-    "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
+    "Check documentation links, version metadata and affected documentation contracts.",
+    "Keep engineering paused; make no live bot, host, database, environment or provider changes."
   ],
   "bot": [
     "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
-    "Continue existing behavior; local infrastructure tooling adds no migration, deployment or new Discord action."
+    "Continue existing behavior; this documentation cleanup introduces no runtime change."
   ]
 }

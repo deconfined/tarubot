@@ -3,7 +3,7 @@
  * capabilities and no-new-privileges in both Compose files that start it: docker-compose.yml
  * (registry deployments, and DevBot through its overlay) and docker-compose.production.yml. The
  * production backup job has the same three, plus one small tmpfs for the CA file it writes.
- * Throwaway container runs found what each process writes (docs/archive/README.md): nothing at all
+ * Throwaway container runs found what each process writes (see Git history): nothing at all
  * for the bot, its tools and its health check, and only /tmp/ca.crt for the backup job. These pin
  * the settings, and that no overlay file loosens them again.
  *

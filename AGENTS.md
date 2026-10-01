@@ -4,6 +4,7 @@ Use [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and the change checklis
 
 ## Implementation
 
+- Follow the agreed [threat model](docs/THREAT_MODEL.md): minimal complexity, minimal bespoke design; use standard components wherever possible.
 - Work within this repository. Use Bun for installation, scripts, tests and builds. The sole exception is `site/`: use its pinned pnpm/Node from that directory; add no root site scripts.
 - Keep commands, gateway events and components in their discoverable modules. Add explanatory comments to first-party code, tooling and tests.
 - Use Drizzle and `src/infrastructure/postgres/schema.ts`. Bind transaction work with `orm(client)`; state, audit and outbox writes use that client. Applied numbered SQL migrations are immutable. Raw SQL is for migration/control, session locks, probes and catalog-based restore verification. See [PERSISTENCE](docs/PERSISTENCE.md).
