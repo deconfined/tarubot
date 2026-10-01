@@ -845,6 +845,8 @@ describe("bounded reviewed release scanner exceptions", () => {
     }
   });
 
+  // These grouped CLI cases start nested Bun processes under ARM64 emulation. Allow the test
+  // runner time for all cases while each individual fixture retains its ten-second limit.
   test("real CLI accepts the default clean reports and literal invented source exception with private cleanup", () => {
     for (const options of [{}, { entries: [entry("linux/amd64", Date.now())] }]) {
       const { processResult, seen } = cli(options);
@@ -859,7 +861,7 @@ describe("bounded reviewed release scanner exceptions", () => {
         ])
           expect(call.env[name]).toBeUndefined();
     }
-  });
+  }, 60_000);
 
   test("matching report never excuses process failure, signal or malformed stdout; invalid policy stops before I/O", () => {
     for (const reply of [{ exitCode: 1 }, { signal: true }, { malformed: true }]) {
@@ -872,5 +874,5 @@ describe("bounded reviewed release scanner exceptions", () => {
     const { processResult, seen } = cli({ entries: [expired] });
     expect(processResult.exitCode).toBe(1);
     expect(seen).toEqual([]);
-  });
+  }, 60_000);
 });

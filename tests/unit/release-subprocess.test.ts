@@ -1,5 +1,5 @@
 /** Real CLI boundaries use executable stand-ins only: no registry, GitHub, host or credentials. */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -13,6 +13,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// ARM64 emulation slows the nested Bun processes these CLI fixtures start; child limits stay fixed.
+setDefaultTimeout(60_000);
 
 const scratch = mkdtempSync(join(tmpdir(), "release-subprocess-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
