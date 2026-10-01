@@ -49,6 +49,35 @@ Compose has stage-aware automatic recovery, but an old image cannot undo a commi
 
 For unresolved failure, stop/fence writes, record the live image and schema, and inspect the deployment phase, recovery boundary and available backup/PITR sources. Choose fix-forward or a verified restore, then start one matching release and verify health and commands. If Actions is unavailable, manual recovery still needs the owner's explicit go-ahead. Use the matching release's tools and [maintenance profiles](CONFIGURATION.md#maintenance-tool-profiles).
 
+### Infrastructure and enrollment records
+
+Recovery is an owner-run procedure. Fence all Infrastructure and Host writers, keep durable records enabled, and preserve the failed run's encrypted plan, private inputs/state and every relevant object version. Work privately from its reviewed source and original backend settings. Use standard S3 [version listing](https://docs.aws.amazon.com/cli/latest/reference/s3api/list-object-versions.html) and [version reads](https://docs.aws.amazon.com/cli/latest/reference/s3api/get-object.html), and the existing `RecordCodec`, `hostRecordCodec` and `S3ControlStore` helpers. Derive `actualState` with `stateEvidence(rawState)` from native private state. Never roll native state back to satisfy an old record, bulk-restore the bucket, delete pending markers or retry an uncertain write without checking its actual outcome.
+
+Choose the repair from verified outcomes:
+
+| Observed outcome | Owner action |
+| --- | --- |
+| Apply never started; native state exactly matches the intent's `before`; read-only provider/refresh checks confirm no remote effects or enrollment activity | Authenticate the prior completed generation and its links, and require `current` still to name that predecessor and the original pending generation. Restore its selected `current` ciphertext version to the same bucket/key, preserve the abandoned intent/history, then require `InfrastructureRecords.inspect(actualState)` to succeed. This shortcut requires a prior complete generation; an already restored valid head needs no write. |
+| Apply partially completed, evidence is missing, or provider/state/history disagree | Keep pending. Review a repair of the actual effects before changing records. A failed job or a no-change plan alone does not establish completion. |
+| Apply completed but enrollment or record completion was interrupted | Verify the exact saved plan against actual show and matching raw-state reads. Prepare the per-object repair below; ordinary `enroll` and `finish` are not retry commands. |
+| Completion and pending clear already succeeded despite a lost acknowledgement | Reopen the complete infrastructure links, host records and DNS evidence. If all agree and no pending marker remains, a new authorized dispatch needs no record repair. |
+
+For verified completed Apply, keep the original generation `G`, intent, run and binding. Require the same native state lineage and a serial later than `intent.before`. Recover the first persisted key from version history; verify the same instance/addresses, rescan only to confirm that key, reconcile its SSHFP and validate DNSSEC locally. If no key was ever persisted, make an explicit owner console/TOFU decision and persist the first key before authentication or SSHFP publication. A different key, conflicting history or changed intended effects requires a separately reviewed recovery plan; never fabricate a successful run or repurpose the old generation.
+
+For an interrupted initial baseline, verify its complete no-change plan and native state exactly equal to `intent.before`, then complete the original generation using the same history table. It has no prior completed head to restore.
+
+Review this write table privately before making single writes, each followed by exact ciphertext readback. Require `current` to match an original operation stage: `{baseline: intent.previous, pending: G}`, `{baseline: G, pending: G}` or `{baseline: G, pending: null}`. Stop for an unrelated generation. Reconcile every target in `hosts/pending`, including targets removed from later inputs. Retain existing matching history bytes; create historical objects only when definitely absent.
+
+| Record | Required value and order |
+| --- | --- |
+| Affected `hosts/<target>` | The original host identity/generation and first observed key, with `status: "complete"` only after instance/key/DNS verification. Keep `hosts/pending` set. |
+| `baselines/G` | `{intent, state: actualState}`; the original intent and verified post-Apply state evidence. |
+| `completed/G` | `{generation: G, baseline: privateDigest(baseline)}`. |
+| `current` | `{baseline: G, pending: null}` only after the matching history is complete. Require `InfrastructureRecords.inspect(actualState)` to reopen every link successfully. |
+| `hosts/pending` | `{schema: 1, targets: []}` last, after every affected host record and infrastructure completion reopen successfully. |
+
+If `current` still names the original predecessor/pending generation and both new history objects are absent, the existing `finish({generation: G, binding: intent.binding}, actualState)` can perform infrastructure completion after host verification. Otherwise follow the reviewed write table; it deliberately refuses to overwrite history. Any uncertain acknowledgement stops further writes until readback establishes what happened. Preserve all versions and perform one owner-controlled strict Host validation while other writers remain fenced. Host replacement remains blocked until a separately reviewed owner recovery plan permits a new generation.
+
 ## Backups
 
 Recovery sources are managed PostgreSQL PITR, independent age-encrypted dumps and production's stopped-writer pre-migration dump. Quadlet records a stop-time PITR boundary. Verify recoverability with restore drills.
