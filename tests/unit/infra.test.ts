@@ -1136,13 +1136,15 @@ describe("no host and no real address", () => {
     );
   });
 
-  test("only github.com, the registry in the lock file, example.org and the endpoint's shape", () => {
+  test("hostnames are limited to public documentation, placeholders and the endpoint's shape", () => {
     for (const file of FILES) {
       const text = read(file);
       const allowed = (host: string) =>
         host === "github.com" ||
         host === "example.org" ||
         host.endsWith(".example.org") ||
+        // Public provider documentation is not a private infrastructure identifier.
+        (host === "techdocs.akamai.com" && file === "ops/tofu/README.md") ||
         (host === "registry.opentofu.org" && file === "ops/tofu/.terraform.lock.hcl");
       const hosts = [...new Set(hostNames(text))].filter((h) => !allowed(h));
       // The README shows the endpoint only as a shape.

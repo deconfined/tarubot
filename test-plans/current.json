@@ -1,17 +1,17 @@
 {
-  "title": "Session: 2.36.42 Alpine runtime verification",
-  "objective": "Verify the patched Alpine bot image builds and scans on AMD64 and ARM64 while retaining existing application behavior.",
+  "title": "Session: 2.36.42 private-backend acceptance",
+  "objective": "Rehearse encrypted state, saved-plan transfer and versioned control-record recovery with disposable data; identify owner prerequisites without enabling the replacement pipeline.",
   "user": [
-    "Review the Alpine runtime image change and release evidence.",
-    "Approve any production deployment separately in GitHub; no live restart is part of these checks."
+    "Review the offline acceptance evidence and unexercised intended-backend checks.",
+    "Configure or verify private storage and environment protections outside agent sessions before authorizing protected acceptance runs."
   ],
   "assistant": [
-    "Run compilation, type checks, unit and contract tests with the Alpine base.",
-    "Scan both runtime architectures with the pinned scanner and verify package fixes.",
-    "Use disposable PostgreSQL for database integration; make no live bot, host, database, environment or provider changes."
+    "Use pinned OpenTofu and Bun with a private local S3-compatible service and invented data.",
+    "Prove exact encrypted-plan application, stale-plan refusal, record readback and interruption recovery preserving first SSH trust.",
+    "Correct native CLI incompatibilities and run focused checks; make no live bot, host, database, environment or provider changes."
   ],
   "bot": [
-    "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
-    "Continue existing application behavior using the patched Alpine runtime."
+    "Do not restart or connect to Discord for this offline rehearsal.",
+    "Continue the owner's existing deployment unchanged; pipeline maintenance does not declare a new bot release."
   ]
 }

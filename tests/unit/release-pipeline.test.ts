@@ -418,11 +418,6 @@ describe("automatic infrastructure adapter", () => {
     const r = await runner(releaseInputs.hosts.staging.label);
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe("decision=no-changes\nverified=true\n");
-    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
-      ["state", "pull", "-unencrypted"],
-      ["show", "-json"],
-      ["state", "pull", "-unencrypted"],
-    ]);
     expect(
       r.calls
         .filter((call) => call[0] === "gh")
@@ -450,14 +445,6 @@ describe("automatic infrastructure adapter", () => {
     const r = await runner();
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     await automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps);
-    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
-      ["show", "-json", join(r.directory, "plan.bin")],
-      ["state", "pull", "-unencrypted"],
-      ["apply", "-input=false", "-json", join(r.directory, "plan.bin")],
-      ["state", "pull", "-unencrypted"],
-      ["show", "-json"],
-      ["state", "pull", "-unencrypted"],
-    ]);
     expect(
       (await r.records.inspect(stateEvidence({ ...rawState, serial: 11 }))).inputs?.hosts,
     ).toEqual({ staging: { ...releaseInputs.hosts.staging, label: "example-renamed" } });

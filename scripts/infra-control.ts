@@ -65,7 +65,7 @@ function validateState(value: unknown): asserts value is StateEvidence {
   requireRecord(Number.isSafeInteger(s.serial) && Number(s.serial) >= 0);
   digest(s.digest);
 }
-/** Call only on private `state pull -unencrypted` output; never log its content or digest. */
+/** Call only on private decrypted `state pull` output; never log its content or digest. */
 export function stateEvidence(value: unknown): StateEvidence {
   const state = object(value);
   requireRecord(
