@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseHTML } from "linkedom";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -25,9 +26,11 @@ const prose = (text: string) => text.replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[
 function anchors(text: string): Set<string> {
   const found = new Set<string>();
   for (const match of prose(text).matchAll(/^#{1,6}\s+(.+?)\s*#*$/gmu)) {
-    const base = (match[1] ?? "")
+    // Parse inline HTML as DOM text; headings become comparison slugs, never rendered markup.
+    const heading = parseHTML(`<html><body>${match[1] ?? ""}</body></html>`).document.body
+      .textContent;
+    const base = (heading ?? "")
       .toLowerCase()
-      .replace(/<[^>]*>/gu, "")
       .replace(/[^\p{L}\p{N}_\-\s]/gu, "")
       .replace(/\s/gu, "-");
     let slug = base;

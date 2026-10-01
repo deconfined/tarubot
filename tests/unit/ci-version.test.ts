@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkRelease, checkStartupPlan, validateVersion } from "../../scripts/ci-version.js";
 
+// Hosted CI runs the real Git fixtures; the minimal image build has no Git executable.
+const hasGit = Bun.which("git") !== null;
+
 test("release validation accepts SemVer and rejects invalid numeric prerelease identifiers", () => {
   for (const version of ["2.8.0", "2.8.0-rc.1", "2.8.0+build.5"])
     expect(validateVersion(version)).toBe(version);
@@ -150,41 +153,47 @@ async function versionFixture(options: {
   }
 }
 
-test("the CLI exposes a release only for a known increase with consistent metadata", async () => {
-  const maintenance = await versionFixture({ version: "2.8.0", previous: "2.8.0" });
-  expect(maintenance.code).toBe(0);
-  expect(maintenance.output).toBe("version=2.8.0\nrelease=false\n");
-  const release = await versionFixture({
-    version: "2.8.0",
-    previous: "2.7.1",
-    changelog: "## 2.8.0 — Release\n",
-    plan: startupPlan("2.8.0"),
-  });
-  expect(release.code).toBe(0);
-  expect(release.output).toBe("version=2.8.0\nrelease=true\n");
-  const stalePlan = await versionFixture({
-    version: "2.8.0",
-    previous: "2.7.1",
-    changelog: "## 2.8.0\n",
-    plan: startupPlan("2.7.1"),
-  });
-  expect(stalePlan.code).not.toBe(0);
-  expect(stalePlan.error).toContain("release version");
-  expect(stalePlan.output).toBe("");
-});
+test.skipIf(!hasGit)(
+  "the CLI exposes a release only for a known increase with consistent metadata",
+  async () => {
+    const maintenance = await versionFixture({ version: "2.8.0", previous: "2.8.0" });
+    expect(maintenance.code).toBe(0);
+    expect(maintenance.output).toBe("version=2.8.0\nrelease=false\n");
+    const release = await versionFixture({
+      version: "2.8.0",
+      previous: "2.7.1",
+      changelog: "## 2.8.0 — Release\n",
+      plan: startupPlan("2.8.0"),
+    });
+    expect(release.code).toBe(0);
+    expect(release.output).toBe("version=2.8.0\nrelease=true\n");
+    const stalePlan = await versionFixture({
+      version: "2.8.0",
+      previous: "2.7.1",
+      changelog: "## 2.8.0\n",
+      plan: startupPlan("2.7.1"),
+    });
+    expect(stalePlan.code).not.toBe(0);
+    expect(stalePlan.error).toContain("release version");
+    expect(stalePlan.output).toBe("");
+  },
+);
 
-test("the CLI never treats missing bases as releases and refuses an unreadable declared base", async () => {
-  for (const base of ["", "0".repeat(40)]) {
-    const result = await versionFixture({ version: "2.8.0", base });
-    expect(result.code).toBe(0);
-    expect(result.output).toBe("version=2.8.0\nrelease=false\n");
-  }
-  const missing = await versionFixture({ version: "2.8.0", base: "a".repeat(40) });
-  expect(missing.code).not.toBe(0);
-  expect(missing.error).toContain("could not read its base manifest");
-  expect(missing.output).toBe("");
-  const decreased = await versionFixture({ version: "2.7.1", previous: "2.8.0" });
-  expect(decreased.code).not.toBe(0);
-  expect(decreased.error).toContain("decrease");
-  expect(decreased.output).toBe("");
-});
+test.skipIf(!hasGit)(
+  "the CLI never treats missing bases as releases and refuses an unreadable declared base",
+  async () => {
+    for (const base of ["", "0".repeat(40)]) {
+      const result = await versionFixture({ version: "2.8.0", base });
+      expect(result.code).toBe(0);
+      expect(result.output).toBe("version=2.8.0\nrelease=false\n");
+    }
+    const missing = await versionFixture({ version: "2.8.0", base: "a".repeat(40) });
+    expect(missing.code).not.toBe(0);
+    expect(missing.error).toContain("could not read its base manifest");
+    expect(missing.output).toBe("");
+    const decreased = await versionFixture({ version: "2.7.1", previous: "2.8.0" });
+    expect(decreased.code).not.toBe(0);
+    expect(decreased.error).toContain("decrease");
+    expect(decreased.output).toBe("");
+  },
+);

@@ -338,25 +338,29 @@ test("Linode reads bind actual ID and both addresses; boot polling is bounded an
     /^host-enrollment-failed$/,
   );
 });
-test("stock keyscan tolerates unavailable IPv6 and keygen validates two consistent rounds", async () => {
-  const scans: string[] = [];
-  const result = await scanEd25519(host, {
-    run: async (argv) => {
-      if (argv[0]?.endsWith("ssh-keyscan")) {
-        scans.push(argv.at(-1) ?? "");
-        return {
-          code: argv[1] === "-6" ? 1 : 0,
-          stdout: argv[1] === "-6" ? "" : `${host.ipv4} ${observed.key}\n`,
-        };
-      }
-      // Real local stock keygen reads invented public bytes only; no private key or host is used.
-      const result = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
-      return { code: result.exitCode, stdout: result.stdout.toString() };
-    },
-  });
-  expect(result).toEqual(observed);
-  expect(scans).toEqual([host.ipv4, host.ipv6, host.ipv4, host.ipv6]);
-});
+// Minimal build images lack OpenSSH; hosted CI and the native lab run this executable check.
+test.skipIf(Bun.which("/usr/bin/ssh-keygen") === null)(
+  "stock keyscan tolerates unavailable IPv6 and keygen validates two consistent rounds",
+  async () => {
+    const scans: string[] = [];
+    const result = await scanEd25519(host, {
+      run: async (argv) => {
+        if (argv[0]?.endsWith("ssh-keyscan")) {
+          scans.push(argv.at(-1) ?? "");
+          return {
+            code: argv[1] === "-6" ? 1 : 0,
+            stdout: argv[1] === "-6" ? "" : `${host.ipv4} ${observed.key}\n`,
+          };
+        }
+        // Real local stock keygen reads invented public bytes only; no private key or host is used.
+        const result = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
+        return { code: result.exitCode, stdout: result.stdout.toString() };
+      },
+    });
+    expect(result).toEqual(observed);
+    expect(scans).toEqual([host.ipv4, host.ipv6, host.ipv4, host.ipv6]);
+  },
+);
 test("reachable key disagreement and wrong scan address refuse instead of relearning", async () => {
   const other = Buffer.from(blob);
   other[50] = (other[50] ?? 0) ^ 1;
