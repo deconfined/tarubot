@@ -1025,15 +1025,25 @@ describe("the other workflows", () => {
     ],
   ];
 
-  test("only deploy.yml names production's settings, host.yml staging's and infra.yml Tofu's", () => {
+  test("workflow credentials stay scoped; Host may read only the durable trust storage settings", () => {
     for (const file of files) {
       const source = read(`.github/workflows/${file}`);
-      for (const [owner, names] of owners)
-        expect({ file, owner, named: names.test(source) }).toEqual({
+      for (const [owner, names] of owners) {
+        // Host reads the enrolled key from private storage; provider tokens and storage-write
+        // credentials still belong exclusively to the infrastructure workflows.
+        const scoped =
+          file === "host.yml" && owner === "infra.yml"
+            ? source.replace(
+                /secrets\.TOFU_STATE_(?:BUCKET|ENDPOINT|PASSPHRASE|READ_ACCESS_KEY|READ_SECRET_KEY)\b/gu,
+                "host trust read",
+              )
+            : source;
+        expect({ file, owner, named: names.test(scoped) }).toEqual({
           file,
           owner,
           named: file === owner || (owner === "infra.yml" && file === "release-infra.yml"),
         });
+      }
       // No workflow runs untrusted pull-request code with the repository's secrets.
       expect({ file, target: source.includes("pull_request_target") }).toEqual({
         file,

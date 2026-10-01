@@ -81,7 +81,7 @@ Staging cannot create databases and has no restore target in its tool profile; t
 ## Rotation and rebuilds
 
 - **Staging runtime secret:** set the new value, dispatch the live version with `action=bot`, verify health, then revoke the old credential. Coordinate database-password changes in one window. Missing secrets on an existing bot are refused.
-- **Host key/access key:** cloud-init is creation-only. Follow [rebuilds](../ops/tofu/README.md#rebuilding-a-host), verify and explicitly repin the new host key.
+- **Host key/access key:** cloud-init is creation-only. Follow [rebuilds](../ops/tofu/README.md#rebuilding-a-host); replacement Apply is fenced until owner-controlled trust recovery is implemented. Preserve the old trust history and never repin a changed key to bypass a refusal.
 - **Compose host loss:** fence the old host, retain the managed database and encrypted settings, then restore the matching Compose configuration and image on the owner-provisioned replacement. Verify schema, TLS/access and one writer before acceptance. Rebuilding a VM does not require replacing its database.
 - **Suggestion app key:** production only. Update settings, restart and verify before revoking the old key. An empty client ID disables suggestions without blocking the bot; see [configuration](CONFIGURATION.md).
 

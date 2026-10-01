@@ -7,7 +7,7 @@
  *   first attempts only, one concurrency group per target that queues every waiting run and never
  *   cancels, least permissions, every ${{ }} through env:, no tracing and no verbose or diffing
  *   ansible-playbook, the two pinned checkouts (the release's ref from the image's own label), the
- *   14 secret names each in the one step that needs them, and the key removed on every path.
+ *   target secrets only in their settings/bot steps, and the key removed on every path.
  * - Behavior: the step scripts run here with simulated getent, docker and ansible-playbook
  *   (tests/fixtures/host-workflow) and the real ssh-keygen: the request check, the no-host rule,
  *   the host settings and their masks, the Configure key without a passphrase, files and the
@@ -135,6 +135,15 @@ const secretsIn = (value: unknown) =>
 
 /** The host's three settings, read in "Load the host settings" only. */
 const HOST_SECRETS = ["ANSIBLE_SSH_KEY", "TARGET_HOST", "TARGET_HOST_KEY"];
+/** Automatic release trust uses the existing private storage read configuration, never writes. */
+const TRUST_SECRETS = [
+  "ANSIBLE_SSH_KEY",
+  "TOFU_STATE_BUCKET",
+  "TOFU_STATE_ENDPOINT",
+  "TOFU_STATE_PASSPHRASE",
+  "TOFU_STATE_READ_ACCESS_KEY",
+  "TOFU_STATE_READ_SECRET_KEY",
+];
 /** The bot's 11 variables (vars/bot.yml tb_secret_env), set in "Deploy the bot" only. */
 const BOT_SECRETS = [
   "BACKUP_STORAGE_ACCESS_KEY",
@@ -169,10 +178,12 @@ const ORDER = [
   "Find the release's commit in its image",
   "Check out main's host configuration",
   "Check out the release",
+  "Install Bun for host trust and acceptance",
+  "Install the local DNSSEC resolver",
+  "Load enrolled host trust",
   "Install Ansible",
   "Configure the host",
   "Deploy the bot",
-  "Install Bun for acceptance validation",
   "Require exact-release staging acceptance",
   "Summary",
   "Remove the key",
@@ -253,17 +264,19 @@ describe("the workflow's shape", () => {
     expect(steps.map((s) => [s.name, s.if ?? ""])).toEqual([
       ["Check the request", ""],
       ["Recheck automatic release freshness", "inputs.accept_release"],
-      ["Load the host settings", ""],
+      ["Load the host settings", "inputs.accept_release != true"],
       [
         "Find the release's commit in its image",
         `${unlessSkipped} && inputs.action != 'configure'`,
       ],
       ["Check out main's host configuration", unlessSkipped],
       ["Check out the release", `${unlessSkipped} && inputs.action != 'configure'`],
+      ["Install Bun for host trust and acceptance", `inputs.accept_release && ${unlessSkipped}`],
+      ["Install the local DNSSEC resolver", `inputs.accept_release && ${unlessSkipped}`],
+      ["Load enrolled host trust", `inputs.accept_release && ${unlessSkipped}`],
       ["Install Ansible", unlessSkipped],
       ["Configure the host", `${unlessSkipped} && inputs.action != 'bot'`],
       ["Deploy the bot", `${unlessSkipped} && inputs.action != 'configure'`],
-      ["Install Bun for acceptance validation", `inputs.accept_release && ${unlessSkipped}`],
       ["Require exact-release staging acceptance", `inputs.accept_release && ${unlessSkipped}`],
       ["Summary", "always()"],
       ["Remove the key", "always()"],
@@ -303,11 +316,19 @@ describe("the workflow's shape", () => {
     );
   });
 
-  test("names 14 secrets: the host's three in its settings step, the bot's 11 in the bot's step", () => {
-    expect(secretsIn(host)).toEqual([...HOST_SECRETS, ...BOT_SECRET_NAMES].sort());
+  test("separates manual pins, read-only enrollment trust and bot settings", () => {
+    expect(secretsIn(host)).toEqual(
+      [...new Set([...HOST_SECRETS, ...TRUST_SECRETS, ...BOT_SECRET_NAMES])].sort(),
+    );
     for (const s of steps) {
       const expected =
-        s.id === "host" ? HOST_SECRETS : s.name === "Deploy the bot" ? BOT_SECRET_NAMES : [];
+        s.id === "host"
+          ? HOST_SECRETS
+          : s.name === "Load enrolled host trust"
+            ? TRUST_SECRETS
+            : s.name === "Deploy the bot"
+              ? BOT_SECRET_NAMES
+              : [];
       expect({ step: s.name, secrets: secretsIn(s) }).toEqual({ step: s.name, secrets: expected });
     }
     // Each variable straight from its environment secret: its own name, or SECRET_OF's for the
@@ -337,6 +358,31 @@ describe("the workflow's shape", () => {
       expect(env.ANSIBLE_CONFIG).toBe(`\${{ github.workspace }}/config/ops/ansible/ansible.cfg`);
     expect(stepOf("Configure the host")["working-directory"]).toBe("config/ops/ansible");
     expect(stepOf("Deploy the bot")["working-directory"]).toBe("release/ops/ansible");
+  });
+
+  test("loads enrolled trust before the one common playbook engine, without provider or write credentials", () => {
+    const trust = stepOf("Load enrolled host trust");
+    expect(trust.env).toEqual({
+      TARGET: `\${{ inputs.target }}`,
+      STATE_BUCKET: `\${{ secrets.TOFU_STATE_BUCKET }}`,
+      STATE_ENDPOINT: `\${{ secrets.TOFU_STATE_ENDPOINT }}`,
+      AWS_ACCESS_KEY_ID: `\${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}`,
+      AWS_SECRET_ACCESS_KEY: `\${{ secrets.TOFU_STATE_READ_SECRET_KEY }}`,
+      TF_VAR_state_passphrase: `\${{ secrets.TOFU_STATE_PASSPHRASE }}`,
+      ANSIBLE_SSH_KEY: `\${{ secrets.ANSIBLE_SSH_KEY }}`,
+    });
+    expect(trust.run).toContain("bun config/scripts/host-trust.ts");
+    expect(trust.run).not.toMatch(/keyscan|TOFU_VARS|backend\.hcl|tofu (?:show|state)/u);
+    expect(secretsIn(host).join(" ")).not.toMatch(/LINODE|CLOUDFLARE|WRITE_ACCESS|WRITE_SECRET/u);
+    expect(ORDER.indexOf("Install Bun for host trust and acceptance")).toBeLessThan(
+      ORDER.indexOf(trust.name),
+    );
+    expect(ORDER.indexOf("Install the local DNSSEC resolver")).toBeLessThan(
+      ORDER.indexOf(trust.name),
+    );
+    expect(ORDER.indexOf(trust.name)).toBeLessThan(ORDER.indexOf("Configure the host"));
+    expect(steps.filter((s) => s.name === "Configure the host")).toHaveLength(1);
+    expect(steps.filter((s) => s.name === "Deploy the bot")).toHaveLength(1);
   });
 
   test("removes the key even when the job fails or is cancelled", () => {
@@ -475,6 +521,7 @@ const context = (
     commit: COMMIT,
     digest: DIGEST,
     config_commit: CONFIG,
+    accept_release: "false",
     ...inputs,
   } as Record<string, string>,
   secrets: {
@@ -584,11 +631,18 @@ function job(where: Box, c: Context, bot?: { result?: unknown; exit?: number }) 
   const log: string[] = [];
   const results: Record<string, ReturnType<typeof runStep>> = {};
   for (const name of ORDER) {
-    if (name.startsWith("Check out") || name === "Install Ansible") continue;
+    if (
+      name.startsWith("Check out") ||
+      name === "Install Ansible" ||
+      name.startsWith("Install Bun") ||
+      name === "Install the local DNSSEC resolver"
+    )
+      continue;
+    if (name === "Load the host settings" && c.inputs.accept_release === "true") continue;
     if (
       [
         "Recheck automatic release freshness",
-        "Install Bun for acceptance validation",
+        "Load enrolled host trust",
         "Require exact-release staging acceptance",
       ].includes(name) &&
       c.inputs.accept_release !== "true"
@@ -791,6 +845,7 @@ describe.skipIf(!canSettle)("the host settings", () => {
         "-o HostKeyAlgorithms=ssh-ed25519",
         "-o CheckHostIP=no",
         "-o UpdateHostKeys=no",
+        "-o VerifyHostKeyDNS=no",
         "-o AddressFamily=any",
         "-o ConnectTimeout=20",
         "-o ServerAliveInterval=15",

@@ -19,7 +19,7 @@ concurrency:
   queue: max
 jobs:
   plan:
-    # Public execution readers bind this exact reusable job path, never a suffix.
+    # Stable names keep the ordinary Plan/Apply outcomes clear in Actions.
     name: Plan infrastructure
     if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
@@ -48,11 +48,6 @@ jobs:
           PUBLICATION_RUN: ${{ inputs.publication_run }}
           SCHEMA_HEAD: ${{ inputs.schema_head }}
           CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
-          # Private control-infra owner anchor uses a separate read-only GitHub credential.
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
@@ -111,10 +106,6 @@ jobs:
           DIGEST: ${{ needs.plan.outputs.digest }}
           BINDING: ${{ needs.plan.outputs.binding }}
           CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}

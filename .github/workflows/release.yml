@@ -31,8 +31,8 @@ jobs:
       - name: Refuse incomplete pipeline activation
         run: |
           # Intentional code-level fence, not an owner-variable override. Remove only with the
-          # reviewed durable enrollment and database-adoption milestones, before live rehearsal.
-          echo '::error::Durable SSH enrollment and existing-cluster adoption are not implemented; replacement release activation is blocked before credentials load.'
+          # reviewed backend, host and staging acceptance, before enabling automatic delivery.
+          echo '::error::Replacement release acceptance is incomplete; activation is blocked before credentials load.'
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}

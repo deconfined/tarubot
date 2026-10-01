@@ -138,7 +138,7 @@ The [pipeline design](../../docs/PIPELINE.md#plan-transfer-credentials-and-concu
 
 The manual Infrastructure workflow uses encrypted records for its applied-input baseline and pending operations. Its protected job and scoped storage credentials supply authority; record access needs no separate owner token or historical workflow proof. The records use the existing Bun S3 client and authenticated encryption under the state passphrase.
 
-Leave `TOFU_CONTROL_RECORDS_ENABLED` off until real-backend persistence and interruption/recovery checks pass and the owner enables it. Offline tests do not establish that readiness. Automatic Apply remains disabled; the replacement pipeline's target-proof tooling is still fenced pending simplification under the [agreed threat model](../../docs/THREAT_MODEL.md).
+Leave `TOFU_CONTROL_RECORDS_ENABLED` off until real-backend persistence and interruption/recovery checks pass and the owner enables it. Offline tests do not establish that readiness. Automatic Apply remains disabled; the replacement workflow remains fenced pending backend and host acceptance under the [agreed threat model](../../docs/THREAT_MODEL.md).
 
 If records were previously enabled, a pending operation, missing baseline/history or uncertain readback blocks another mutation. Fence all writers and reconcile actual provider/state outcomes and related record generations before resuming. Do not disable records to bypass recovery, delete a pending reference, restore only the newest object or blindly retry Apply. See [recovery requirements](../../docs/PIPELINE.md#recovery).
 

@@ -130,6 +130,7 @@ jobs:
 
       - name: Load the host settings
         id: host
+        if: inputs.accept_release != true
         env:
           TARGET_HOST: ${{ secrets.TARGET_HOST }}
           TARGET_HOST_KEY: ${{ secrets.TARGET_HOST_KEY }}
@@ -217,7 +218,7 @@ jobs:
               ansible_ssh_common_args: ("-F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes"
                 + " -o StrictHostKeyChecking=yes -o UserKnownHostsFile=" + $dir + "/known_hosts"
                 + " -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=target -o HostKeyAlgorithms=ssh-ed25519"
-                + " -o CheckHostIP=no -o UpdateHostKeys=no -o AddressFamily=any -o ConnectTimeout=20"
+                + " -o CheckHostIP=no -o UpdateHostKeys=no -o VerifyHostKeyDNS=no -o AddressFamily=any -o ConnectTimeout=20"
                 + " -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=FATAL")}}}}' \
             > "$dir/inventory.json"
           out skip false
@@ -258,6 +259,36 @@ jobs:
           path: release
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Install Bun for host trust and acceptance
+        if: inputs.accept_release && steps.host.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: config/package.json
+
+      - name: Install the local DNSSEC resolver
+        if: inputs.accept_release && steps.host.outputs.skip != 'true'
+        run: |
+          # Ubuntu's maintained resolver, DNSSEC root anchor and OpenSSH tools; no custom build.
+          set -Eeuo pipefail
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq unbound dnsutils dns-root-data openssh-client >/dev/null
+
+      - name: Load enrolled host trust
+        if: inputs.accept_release && steps.host.outputs.skip != 'true'
+        env:
+          TARGET: ${{ inputs.target }}
+          STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+          STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          ANSIBLE_SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+        run: |
+          # Read complete durable enrollment once, validate DNS locally, and write a literal
+          # destination plus the stored host key. No provider credentials or fresh key scan.
+          set -Eeuo pipefail
+          bun config/scripts/host-trust.ts
 
       - name: Install Ansible
         if: steps.host.outputs.skip != 'true'
@@ -331,12 +362,6 @@ jobs:
             -e "tarubot_target=$TARGET" -e "tarubot_action=$ACTION" -e "tarubot_version=$VERSION" \
             -e "tarubot_commit=$COMMIT" -e "tarubot_digest=$DIGEST" \
             -e "tarubot_result=$RUNNER_TEMP/result.json"
-
-      - name: Install Bun for acceptance validation
-        if: inputs.accept_release && steps.host.outputs.skip != 'true'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: config/package.json
 
       - name: Require exact-release staging acceptance
         id: accept

@@ -1,12 +1,12 @@
 /** Replacement pipeline contracts and hostile evidence; all commands/storage are invented stand-ins. */
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { YAML } from "bun";
 import { z } from "zod";
 import {
-  InfrastructureJournal,
+  InfrastructureRecords,
   RecordCodec,
   stateEvidence,
   type ControlStore,
@@ -25,15 +25,9 @@ import {
   verifyReleaseProvenance,
 } from "../../scripts/release-policy.js";
 import { boundIndex, scanCommands, scanner } from "../../scripts/release-scan.js";
-import { baselineFixtureInstant, baselineRunFixture } from "../fixtures/infra/baseline-run.js";
 import { releaseInputs, releasePlan } from "../fixtures/infra/release.js";
-import { appliedTargetFixture } from "../fixtures/infra/applied-target.js";
-import { createInfrastructureBaselineRunVerifier } from "../../scripts/infra-baseline-run.js";
-import { targetIssuancePins } from "../../scripts/target-issuance.js";
-import {
-  openEncryptedTargetCandidate,
-  targetCandidateFileName,
-} from "../../scripts/target-candidate.js";
+import { hostRecordCodec } from "../../scripts/infra-control-cli.js";
+import { HostEnrollmentRecords } from "../../scripts/host-enrollment.js";
 
 const root = (path: string) => new URL(`../../${path}`, import.meta.url);
 const text = (path: string) => readFileSync(root(path), "utf8");
@@ -261,34 +255,33 @@ describe("release and acceptance binding", () => {
 
 const passphrase = "invented-release-passphrase-with-more-than-32-characters";
 const codec = new RecordCodec(passphrase, "a".repeat(64));
-const rawState = appliedTargetFixture().raw;
+const rawState = {
+  version: 4,
+  terraform_version: "1.12.6",
+  lineage: "11111111-1111-4111-8111-111111111111",
+  serial: 10,
+  resources: [],
+  outputs: {},
+};
 describe("automatic infrastructure adapter", () => {
   async function runner(label = "example-renamed") {
     const directory = mkdtempSync(join(scratch, "infra-"));
     const objects = new Map<string, Uint8Array>();
+    let failFinish = false;
     const store: ControlStore = {
       async read(key) {
         return objects.get(key) ?? null;
       },
       async write(key, value) {
+        if (failFinish && key.startsWith("baselines/"))
+          throw new Error("invented-private-storage-error");
         objects.set(key, Uint8Array.from(value));
       },
     };
-    // Invented REST evidence still passes the native parser and opaque proof validation.
-    const clock = { now: baselineFixtureInstant };
-    const journal = new InfrastructureJournal(store, codec, {
-      now: () => clock.now,
-      verifyBaselineRun: async (request, denial) => {
-        const source = baselineRunFixture(request);
-        return createInfrastructureBaselineRunVerifier(source.configuration, {
-          get: source.get,
-          now: () => clock.now,
-        })(request, denial);
-      },
-    });
-    const first = await journal.inspect(stateEvidence(rawState));
-    await journal.finish(
-      await journal.begin(
+    const records = new InfrastructureRecords(store, codec);
+    const first = await records.inspect(stateEvidence(rawState));
+    await records.finish(
+      await records.begin(
         first,
         releaseInputs,
         { commit: release.commit, run: "1000" },
@@ -297,8 +290,10 @@ describe("automatic infrastructure adapter", () => {
       ),
       first.state,
     );
-    const snapshot = await journal.inspect(first.state);
-    const candidate = appliedTargetFixture(label).plan;
+    const snapshot = await records.inspect(first.state);
+    const hostCodec = hostRecordCodec("example-bucket", "https://storage.example.org", passphrase);
+    const enrollment = new HostEnrollmentRecords(store, hostCodec);
+    const candidate = releasePlan(label);
     const values = {
       ...releaseInputs,
       hosts: { staging: { ...releaseInputs.hosts.staging, label } },
@@ -313,7 +308,6 @@ describe("automatic infrastructure adapter", () => {
       GITHUB_WORKFLOW_REF: "deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main",
       CONTROL_RECORDS_ENABLED: "true",
       TF_VAR_state_passphrase: passphrase,
-      TARGET_CANDIDATE_STAGING_PASSPHRASE: "invented-dedicated-staging-candidate-key-123456789",
       GITHUB_OUTPUT: join(directory, "output"),
       LINODE_TOKEN: "invented-write-token",
       CLOUDFLARE_API_TOKEN: "invented-write-token",
@@ -323,15 +317,13 @@ describe("automatic infrastructure adapter", () => {
       writeFileSync(join(directory, name), JSON.stringify(value));
     let state = rawState;
     let failApply = false;
-    let applyDuration = 0;
-    let expiredRead: string | undefined;
     let current = release.commit;
     let plan: unknown = candidate;
+    let mismatchedShow = false;
+    let changedRead = "";
     const calls: string[][] = [];
-    const budgets: { name: string; timeout?: number }[] = [];
-    const execute = (argv: string[], name: string, timeout?: number): Uint8Array => {
-      calls.push(argv);
-      budgets.push({ name, ...(timeout === undefined ? {} : { timeout }) });
+    const execute = (argv: string[], name: string): Uint8Array => {
+      calls.push([...argv]);
       let output: unknown = {};
       if (argv[0] === "gh") output = { object: { sha: current } };
       else if (argv[0] === "bash") {
@@ -349,7 +341,8 @@ describe("automatic infrastructure adapter", () => {
           write("plan.json", plan);
         }
       } else if (argv[0] === "tofu") {
-        if (argv[2] === "state") output = state;
+        if (argv[2] === "state")
+          output = name === changedRead ? { ...state, serial: state.serial + 1 } : state;
         if (argv[2] === "show")
           output =
             argv.length > 4
@@ -357,21 +350,20 @@ describe("automatic infrastructure adapter", () => {
               : {
                   format_version: "1.0",
                   terraform_version: "1.12.6",
-                  values: candidate.planned_values,
+                  values: mismatchedShow
+                    ? { ...candidate.planned_values, root_module: { resources: [] } }
+                    : candidate.planned_values,
                 };
         if (argv[2] === "apply") {
-          // The provider write is never reached until intent and its pending reference are durable.
+          // Actual encrypted intent and pending readbacks must precede the invented provider effect.
           const head = objects.get("current");
           expect(head && (codec.open("current", head) as { pending: string }).pending).toBeTruthy();
           if (failApply) throw new Error("invented-private-provider-error");
-          clock.now += applyDuration;
-          state = appliedTargetFixture(label, 11).raw;
+          state = { ...rawState, serial: 11 };
         }
       }
-      if (name === expiredRead) clock.now += 60_000;
       return Buffer.from(JSON.stringify(output));
     };
-    const deps = { execute, journal };
     const binding = () => ({
       ...env,
       DIGEST: new Bun.CryptoHasher("sha256")
@@ -382,22 +374,11 @@ describe("automatic infrastructure adapter", () => {
     return {
       directory,
       env,
-      journal,
+      records,
+      objects,
       calls,
-      budgets,
-      deps,
       binding,
-      slowApply: () => {
-        applyDuration = 45 * 60_000;
-      },
-      expireFirstPull: (mode: "plan" | "apply") => {
-        expiredRead = mode === "plan" ? "state-before" : "state-after";
-      },
-      shortPreparation: (duration: number) => {
-        const prepare = journal.prepareTargetCandidates.bind(journal);
-        journal.prepareTargetCandidates = (input) =>
-          prepare({ ...input, expires_at: clock.now + duration });
-      },
+      deps: { execute, records, enrollment },
       fail: () => {
         failApply = true;
       },
@@ -407,42 +388,49 @@ describe("automatic infrastructure adapter", () => {
       invalid: () => {
         plan = { ...candidate, errored: true };
       },
+      reviewRequired: () => {
+        plan = {
+          ...candidate,
+          resource_changes: candidate.resource_changes.map((resource, index) =>
+            index === 0
+              ? { ...resource, change: { ...resource.change, actions: ["delete", "create"] } }
+              : resource,
+          ),
+        };
+      },
+      mismatch: () => {
+        mismatchedShow = true;
+      },
+      changeRead: (name: string) => {
+        changedRead = name;
+      },
+      failCompletion: () => {
+        failFinish = true;
+      },
+      pendingHost: () =>
+        objects.set(
+          "hosts/pending",
+          hostCodec.seal("hosts/pending", { schema: 1, targets: ["staging"] }),
+        ),
     };
   }
-  test("a valid no-change baseline continues read-only, without ever invoking Apply", async () => {
+  test("no-change continuation reopens the same completed baseline without provider Apply or candidate artifacts", async () => {
     const r = await runner(releaseInputs.hosts.staging.label);
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
-    expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toContain(
-      "decision=no-changes\nverified=true",
-    );
-    expect(r.calls.some((c) => c[2] === "apply")).toBe(false);
-    expect(r.calls.filter((c) => c[0] === "tofu").map((c) => c.slice(2))).toEqual([
+    expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe("decision=no-changes\nverified=true\n");
+    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
       ["state", "pull", "-unencrypted"],
       ["show", "-json"],
       ["state", "pull", "-unencrypted"],
     ]);
-    const declaration = openEncryptedTargetCandidate({
-      bytes: readFileSync(
-        join(r.directory, "target-candidates", targetCandidateFileName("staging")),
-      ),
-      candidate_passphrase: r.env.TARGET_CANDIDATE_STAGING_PASSPHRASE,
-      expected: {
-        target: "staging",
-        release,
-        mode: "no-changes",
-        producer: {
-          repository: "deconfined/tarubot",
-          workflow_ref: targetIssuancePins.publication,
-          ref: "refs/heads/main",
-          event: "push",
-          attempt: 1,
-          commit: release.commit,
-          run: release.publication_run,
-        },
-      },
-    });
-    expect(declaration.baseline_writer.run.run).toBe("1000");
-    expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe("decision=no-changes\nverified=true\n");
+    expect(
+      r.calls
+        .filter((call) => call[0] === "gh")
+        .every((call) => call.at(-1)?.endsWith("git/ref/heads/main")),
+    ).toBe(true);
+    expect(new Bun.Glob("target-candidates/**").scanSync({ cwd: r.directory }).next().done).toBe(
+      true,
+    );
   });
   test("a non-applyable no-change plan can continue, but a changed one cannot apply", () => {
     const context = {
@@ -452,27 +440,17 @@ describe("automatic infrastructure adapter", () => {
     expect(
       requireAutomaticPlan({ ...releasePlan(), applyable: false }, releaseInputs, context),
     ).toBe("no-changes");
-    const label = "example-renamed";
-    const inputs = {
-      ...releaseInputs,
-      hosts: { staging: { ...releaseInputs.hosts.staging, label } },
-    };
+    const label = "example-renamed",
+      inputs = { ...releaseInputs, hosts: { staging: { ...releaseInputs.hosts.staging, label } } };
     expect(() =>
       requireAutomaticPlan({ ...releasePlan(label), applyable: false }, inputs, context),
     ).toThrow();
   });
-  test("safe Apply uses the exact saved file, rechecks policy and records verified completion", async () => {
+  test("safe Apply uses the exact encrypted plan and completes the ordinary records after state verification", async () => {
     const r = await runner();
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     await automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps);
-    expect(r.calls.filter((c) => c[0] === "tofu" && c[2] === "apply")).toEqual([
-      ["tofu", "-chdir=ops/tofu", "apply", "-input=false", "-json", join(r.directory, "plan.bin")],
-    ]);
-    expect(
-      (await r.journal.inspect(stateEvidence(appliedTargetFixture("example-renamed", 11).raw)))
-        .inputs?.hosts,
-    ).toEqual({ staging: { ...releaseInputs.hosts.staging, label: "example-renamed" } });
-    expect(r.calls.filter((c) => c[0] === "tofu").map((c) => c.slice(2))).toEqual([
+    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
       ["show", "-json", join(r.directory, "plan.bin")],
       ["state", "pull", "-unencrypted"],
       ["apply", "-input=false", "-json", join(r.directory, "plan.bin")],
@@ -480,52 +458,32 @@ describe("automatic infrastructure adapter", () => {
       ["show", "-json"],
       ["state", "pull", "-unencrypted"],
     ]);
+    expect(
+      (await r.records.inspect(stateEvidence({ ...rawState, serial: 11 }))).inputs?.hosts,
+    ).toEqual({ staging: { ...releaseInputs.hosts.staging, label: "example-renamed" } });
+    expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe(
+      "decision=safe\nverified=false\nverified=true\n",
+    );
   });
-  test("a legitimate long provider Apply starts its original candidate window only after success", async () => {
-    const r = await runner();
-    await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
-    r.slowApply();
-    await automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps);
-    const declaration = openEncryptedTargetCandidate({
-      bytes: readFileSync(
-        join(r.directory, "target-candidates", targetCandidateFileName("staging")),
-      ),
-      candidate_passphrase: r.env.TARGET_CANDIDATE_STAGING_PASSPHRASE,
-      expected: {
-        target: "staging",
-        release,
-        mode: "apply",
-        producer: {
-          repository: "deconfined/tarubot",
-          workflow_ref: targetIssuancePins.publication,
-          ref: "refs/heads/main",
-          event: "push",
-          attempt: 1,
-          commit: release.commit,
-          run: release.publication_run,
-        },
-      },
-    });
-    expect(declaration.issued_at).toBe(baselineFixtureInstant + 45 * 60_000);
-    expect(declaration.expires_at - declaration.issued_at).toBe(86_400_000);
-  });
-  test("missing or reused candidate keys fail closed before any provider Apply", async () => {
-    for (const key of ["", passphrase]) {
-      const r = await runner();
-      await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
-      r.env.TARGET_CANDIDATE_STAGING_PASSPHRASE = key;
+  test("unstable state, wrong applied show and corrupted completed baseline never produce verified continuation", async () => {
+    for (const failure of ["changed-state", "wrong-show", "corrupt-baseline"] as const) {
+      const r = await runner(releaseInputs.hosts.staging.label);
+      if (failure === "changed-state") r.changeRead("state-verified");
+      if (failure === "wrong-show") r.mismatch();
+      if (failure === "corrupt-baseline") r.objects.set("current", new Uint8Array([1]));
       await expect(
-        automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps),
+        automaticInfrastructure("plan", release, r.directory, r.env, r.deps),
       ).rejects.toThrow();
-      expect(r.calls.some((c) => c[2] === "apply")).toBe(false);
+      expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe("");
+      expect(r.calls.some((call) => call[2] === "apply")).toBe(false);
     }
   });
-  test("a late first pull offers neither applied show nor a second pull in either mode", async () => {
+  test("pending host enrollment blocks no-change continuation and safe provider Apply", async () => {
     for (const mode of ["plan", "apply"] as const) {
       const r = await runner(mode === "plan" ? releaseInputs.hosts.staging.label : undefined);
       if (mode === "apply")
         await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
-      r.expireFirstPull(mode);
+      r.pendingHost();
       await expect(
         automaticInfrastructure(
           mode,
@@ -534,101 +492,12 @@ describe("automatic infrastructure adapter", () => {
           mode === "plan" ? r.env : r.binding(),
           r.deps,
         ),
-      ).rejects.toThrow("invalid-target-candidate");
-      expect(
-        r.budgets.filter(
-          (value) => value.name === "applied-state" || value.name === "state-verified",
-        ),
-      ).toEqual([]);
-      const first = r.budgets.find(
-        (value) => value.name === (mode === "plan" ? "state-before" : "state-after"),
-      );
-      expect(first?.timeout).toBeGreaterThan(0);
-      expect(first?.timeout).toBeLessThanOrEqual(60_000);
-      expect(() =>
-        readFileSync(join(r.directory, mode === "plan" ? "state-before.json" : "state-after.json")),
-      ).toThrow();
-      expect(() =>
-        readFileSync(join(r.directory, "target-candidates", targetCandidateFileName("staging"))),
-      ).toThrow();
-    }
-  });
-  test("the default adapter offers actual native read children with the same finite budget", async () => {
-    const native = Bun.spawnSync;
-    for (const slow of [false, true]) {
-      const r = await runner(releaseInputs.hosts.staging.label);
-      if (slow) r.shortPreparation(200);
-      const offers: { argv: string[]; timeout?: number }[] = [];
-      const spy = spyOn(Bun, "spawnSync").mockImplementation(
-        (command: unknown, options?: unknown) => {
-          const argv = command as string[],
-            configuration = options as { timeout?: number };
-          offers.push({
-            argv: [...argv],
-            ...(configuration.timeout === undefined ? {} : { timeout: configuration.timeout }),
-          });
-          const name =
-            argv[0] === "bash"
-              ? `phase-${argv.at(-1)}`
-              : argv[0] === "gh"
-                ? "freshness"
-                : argv[2] === "state"
-                  ? "state-before"
-                  : "applied-state";
-          const response = Buffer.from(r.deps.execute(argv, name)).toString();
-          // Every requested provider command is invented; only this harmless local child runs.
-          return native({
-            cmd: [
-              process.execPath,
-              "-e",
-              slow && argv[0] === "tofu"
-                ? "await Bun.sleep(1000); process.stdout.write(process.env.INVENTED_RESPONSE ?? '');"
-                : "process.stdout.write(process.env.INVENTED_RESPONSE ?? '');",
-            ],
-            env: { INVENTED_RESPONSE: response },
-            ...(configuration.timeout === undefined ? {} : { timeout: configuration.timeout }),
-          });
-        },
-      );
-      try {
-        const work = automaticInfrastructure("plan", release, r.directory, r.env, {
-          journal: r.journal,
-        });
-        if (slow) await expect(work).rejects.toThrow();
-        else await expect(work).resolves.toBeUndefined();
-      } finally {
-        spy.mockRestore();
-      }
-      const reads = offers.filter((offer) => offer.argv[0] === "tofu");
-      expect(reads).toHaveLength(slow ? 1 : 3);
-      expect(
-        reads.every(
-          (offer) =>
-            Number.isSafeInteger(offer.timeout) &&
-            Number(offer.timeout) > 0 &&
-            Number(offer.timeout) <= (slow ? 200 : 60_000),
-        ),
-      ).toBe(true);
-      expect(
-        offers
-          .filter((offer) => offer.argv[0] === "bash")
-          .every((offer) => offer.timeout === undefined),
-      ).toBe(true);
-    }
-  });
-  test("invalid plans, disabled control records and stale releases stop without provider writes", async () => {
-    for (const mode of ["invalid", "stale", "disabled"] as const) {
-      const r = await runner();
-      if (mode === "invalid") r.invalid();
-      if (mode === "stale") r.stale();
-      if (mode === "disabled") r.env.CONTROL_RECORDS_ENABLED = "false";
-      await expect(
-        automaticInfrastructure("plan", release, r.directory, r.env, r.deps),
       ).rejects.toThrow();
-      expect(r.calls.some((c) => c[2] === "apply")).toBe(false);
+      expect(r.calls.some((call) => call[2] === "apply")).toBe(false);
+      expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).not.toContain("verified=true");
     }
   });
-  test("wrong handoff and saved-plan tampering stop; provider failure retains pending intent", async () => {
+  test("wrong handoff and plan tampering stop before effects; provider failure retains pending intent", async () => {
     const r = await runner();
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     const expected = r.binding();
@@ -645,15 +514,42 @@ describe("automatic infrastructure adapter", () => {
     await expect(
       automaticInfrastructure("apply", release, r.directory, expected, r.deps),
     ).rejects.toThrow();
-    expect(r.calls.some((c) => c[2] === "apply")).toBe(false);
+    expect(r.calls.some((call) => call[2] === "apply")).toBe(false);
     writeFileSync(join(r.directory, "plan.bin"), "invented-encrypted-plan");
     r.fail();
     await expect(
       automaticInfrastructure("apply", release, r.directory, expected, r.deps),
     ).rejects.toThrow();
-    await expect(r.journal.inspect(stateEvidence(rawState))).rejects.toThrow();
+    await expect(r.records.inspect(stateEvidence(rawState))).rejects.toThrow();
   });
-  test("dispatch, re-run and workflow impersonation cannot acquire automatic authority", () => {
+  test("post-Apply verification or completion failure leaves durable pending and no verified result", async () => {
+    for (const failure of ["changed-state", "wrong-show", "finish-failed"] as const) {
+      const r = await runner();
+      await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
+      if (failure === "changed-state") r.changeRead("state-verified");
+      if (failure === "wrong-show") r.mismatch();
+      if (failure === "finish-failed") r.failCompletion();
+      await expect(
+        automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps),
+      ).rejects.toThrow();
+      expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).not.toContain("verified=true");
+      await expect(r.records.inspect(stateEvidence({ ...rawState, serial: 11 }))).rejects.toThrow();
+    }
+  });
+  test("invalid or review-required plans, disabled records and stale main stop without provider writes", async () => {
+    for (const mode of ["invalid", "review-required", "stale", "disabled"] as const) {
+      const r = await runner();
+      if (mode === "invalid") r.invalid();
+      if (mode === "review-required") r.reviewRequired();
+      if (mode === "stale") r.stale();
+      if (mode === "disabled") r.env.CONTROL_RECORDS_ENABLED = "false";
+      await expect(
+        automaticInfrastructure("plan", release, r.directory, r.env, r.deps),
+      ).rejects.toThrow();
+      expect(r.calls.some((call) => call[2] === "apply")).toBe(false);
+    }
+  });
+  test("dispatch, rerun and another workflow cannot use the automatic adapter", () => {
     const env = {
       GITHUB_REPOSITORY: "deconfined/tarubot",
       GITHUB_REF: "refs/heads/main",
@@ -705,7 +601,7 @@ describe("replacement workflow graph and acceptance execution", () => {
     });
     expect(job("release-infra", "plan").environment).toBe("infra-plan");
     expect(job("release-infra", "apply").environment).toBe("infra-auto");
-    // Execution attribution depends on the whole REST job path across both reusable callers.
+    // Keep the existing workflow structure clear without inventing another authority reader.
     expect(job("publish", "release").name).toBe("Replacement release orchestration");
     expect(job("release", "infrastructure").uses).toBe("./.github/workflows/release-infra.yml");
     expect(job("release-infra", "plan").name).toBe("Plan infrastructure");
@@ -716,6 +612,14 @@ describe("replacement workflow graph and acceptance execution", () => {
     );
     expect(job("release-infra", "complete").steps[0]?.run).toContain("$APPLY_RESULT == skipped");
     expect(job("release-infra", "complete").steps[0]?.run).toContain("$APPLY_VERIFIED == true");
+    // The protected jobs use ordinary state/provider roles; no historical workflow authority,
+    // descriptor key or per-target candidate secret is required for infrastructure completion.
+    const serialized = text(".github/workflows/release-infra.yml");
+    expect(serialized).not.toMatch(/CONTROL_OWNER_|CONTROL_REPOSITORY_ID|TARGET_CANDIDATE_/u);
+    expect(serialized).toContain("secrets.TOFU_STATE_READ_ACCESS_KEY");
+    expect(serialized).toContain("secrets.TOFU_STATE_WRITE_ACCESS_KEY");
+    expect(serialized).toContain("secrets.LINODE_READ_TOKEN");
+    expect(serialized).toContain("secrets.LINODE_WRITE_TOKEN");
   });
   test("the unfinished trust/adoption prerequisites are a code fence before environment jobs", () => {
     const fence = z.string().parse(job("release", "identity").steps[0]?.run);

@@ -6,7 +6,7 @@ The [agreed threat model](THREAT_MODEL.md) governs this design: minimal complexi
 
 Production still uses Compose. Staging uses the reviewed Ansible host and bot playbooks, with a manually pinned host key. Infrastructure is dispatch-only: read-only Plan, then owner-approved Apply. The full-plan classifier is advisory; automatic Apply is disabled.
 
-The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Manual infrastructure records use the protected job's authority, with encrypted baseline/pending records and persistence readback; real-backend acceptance remains outstanding. Experimental target-proof tooling remains fenced pending simplification under the threat model. Host deployment uses ordinary Ansible and OpenSSH. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
+The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Infrastructure records use the protected job's authority, with encrypted baseline/pending records and persistence readback. New-host Apply includes first enrollment; ordinary deployment reads the stored key and validates DNSSEC once before strict Ansible/OpenSSH delivery. Private-backend and live staging acceptance remain outstanding. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
 
 ## Intended flow
 

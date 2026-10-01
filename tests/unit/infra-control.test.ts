@@ -1,11 +1,9 @@
-import { baselineRunFixture } from "../fixtures/infra/baseline-run.js";
 /** Invented encrypted storage/state only; fault injection never contacts a backend or provider. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  InfrastructureJournal,
   InfrastructureRecords,
   RecordCodec,
   privateDigest,
@@ -16,11 +14,9 @@ import {
 import {
   controlPhase,
   infrastructureRecords,
-  legacyTargetJournal,
   S3ControlStore,
 } from "../../scripts/infra-control-cli.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
-import type { GitHubReadRequest } from "../../scripts/trust-run.js";
 
 const passphrase = "invented control-record passphrase with sufficient entropy";
 const codec = new RecordCodec(passphrase, "a".repeat(64));
@@ -49,13 +45,7 @@ class MemoryStore implements ControlStore {
   loseAcknowledgement = 0;
   corruptReadback = false;
   readError = false;
-  reads: { key: string; refusal: (() => void) | undefined }[] = [];
-  beforeRead = async (_key: string, _refusal: (() => void) | undefined) => {};
-  async read(key: string, refusal?: () => void): Promise<Uint8Array | null> {
-    refusal?.();
-    this.reads.push({ key, refusal });
-    await this.beforeRead(key, refusal);
-    refusal?.();
+  async read(key: string): Promise<Uint8Array | null> {
     if (this.readError) throw new Error("invented-private-storage-diagnostic");
     const data = this.data.get(key);
     if (data && this.corruptReadback && this.writes.at(-1) === key)
@@ -86,77 +76,12 @@ async function established() {
   return { store, journal, snapshot: await journal.inspect(before), ticket };
 }
 
-describe("native infrastructure read fences", () => {
-  test("the original baseline proof reaches every structural reopen and cannot be refreshed after denial", async () => {
-    const f = await established();
-    const original = baselineRunFixture({ kind: "baseline", run });
-    const journal = new InfrastructureJournal(f.store, codec, {
-      verifyBaselineRun: original.verify,
-    });
-    f.store.reads.length = 0;
-    let captured: (() => void) | undefined;
-    f.store.beforeRead = async (_path, refusal) => {
-      if (refusal) {
-        captured = refusal;
-        original.clock.now += 30_000;
-      }
-    };
-    await expect(journal.inspect(before)).rejects.toThrow("invalid-infrastructure-baseline-run");
-    expect(f.store.reads.map((entry) => [entry.key, typeof entry.refusal])).toEqual([
-      ["current", "undefined"],
-      [`intents/${f.snapshot.generation}`, "undefined"],
-      [`baselines/${f.snapshot.generation}`, "undefined"],
-      [`completed/${f.snapshot.generation}`, "undefined"],
-      ["current", "function"],
-    ]);
-    expect(typeof captured).toBe("function");
-    original.clock.now -= 30_000;
-    await original.verify({ kind: "baseline", run });
-    expect(() => captured?.()).toThrow("invalid-infrastructure-baseline-run");
-  });
-  test("historical absence and exact readback keep the same verified predecessor fence", async () => {
-    const f = await established();
-    const original = baselineRunFixture({ kind: "baseline", run });
-    const journal = new InfrastructureJournal(f.store, codec, {
-      verifyBaselineRun: original.verify,
-    });
-    const snapshot = await journal.inspect(before);
-    f.store.reads.length = 0;
-    await journal.begin(snapshot, inputs, run, binding, "apply");
-    const guarded = f.store.reads.filter((entry) => entry.refusal !== undefined);
-    expect(guarded.some((entry) => entry.key.startsWith("intents/"))).toBe(true);
-    expect(guarded.filter((entry) => entry.key === "current").length).toBeGreaterThanOrEqual(2);
-    expect(f.store.reads.slice(-3).every((entry) => typeof entry.refusal === "function")).toBe(
-      true,
-    );
-    original.clock.now += 30_000;
-    for (const entry of guarded)
-      expect(() => entry.refusal?.()).toThrow("invalid-infrastructure-baseline-run");
-  });
-});
-
 describe("control-record encryption and evidence", () => {
-  test("runtime privacy hides derived keys and preserves pre-hardening ciphertext and backend/path bindings", () => {
+  test("derived encryption keys stay out of ordinary diagnostics", () => {
     const privateCodec = new RecordCodec(passphrase, "a".repeat(64));
-    const path = "intents/11111111-1111-4111-8111-111111111111";
-    // Produced by the pre-hardening RecordCodec with only the invented fixture passphrase.
-    const legacy = Buffer.from(
-      "54494331896985342b3fb359ec579ba9160f2c796b5359dd7ac97b8457ea4b055013bf2d09893204cacd0bc2a79e731c4bc244cdf9ffaf6e08423ec22fad5e12e7cef056",
-      "hex",
-    );
     expect(Object.keys(privateCodec)).toEqual([]);
     expect(JSON.stringify(privateCodec)).toBe("{}");
     expect(Bun.inspect(privateCodec)).not.toContain("Buffer");
-    expect(Reflect.get(privateCodec, "key")).toBeUndefined();
-    expect(Reflect.get(privateCodec, "backend")).toBeUndefined();
-    Object.assign(privateCodec, { key: Buffer.alloc(32), backend: "b".repeat(64) });
-    expect(privateCodec.open(path, legacy)).toEqual({ fixture: "invented-legacy-record" });
-    expect(() => privateCodec.open("current", legacy)).toThrow("invalid-control-record");
-    const bytes = privateCodec.seal(path, inputs);
-    expect(new RecordCodec(passphrase, "a".repeat(64)).open(path, bytes)).toEqual(inputs);
-    expect(() => new RecordCodec(passphrase, "b".repeat(64)).open(path, bytes)).toThrow(
-      "invalid-control-record",
-    );
   });
   test("randomized authenticated encryption exposes neither values nor private digests", () => {
     const a = codec.seal("current", inputs);
@@ -200,32 +125,6 @@ describe("control-record encryption and evidence", () => {
 });
 
 describe("single-writer journal transitions", () => {
-  test("diagnostics and instance shadows cannot expose or replace the journal's history capabilities", async () => {
-    const f = await established();
-    const shadow = new MemoryStore();
-    expect(Object.keys(f.journal)).toEqual([]);
-    expect(JSON.stringify(f.journal)).toBe("{}");
-    expect(Bun.inspect(f.journal)).not.toContain("example-staging");
-    for (const name of ["store", "codec", "read", "persist", "head", "baseline", "validateIntent"])
-      expect(Reflect.get(f.journal, name)).toBeUndefined();
-    Object.assign(f.journal, {
-      store: shadow,
-      codec: new RecordCodec(`${passphrase}-shadow`, "c".repeat(64)),
-      read: async () => null,
-      persist: async () => {},
-      head: async () => ({ baseline: null, pending: null }),
-      baseline: async () => ({ intent: {}, state: before }),
-      validateIntent: () => {},
-    });
-    const ticket = await f.journal.begin(f.snapshot, inputs, run, binding, "apply");
-    await expect(f.journal.inspect(before)).rejects.toThrow("invalid-control-record");
-    await f.journal.finish(ticket, after);
-    expect((await f.journal.inspect(after)).generation).toBe(ticket.generation);
-    expect(f.store.get("current")).toEqual({ baseline: ticket.generation, pending: null });
-    expect(shadow.writes).toEqual([]);
-    f.store.data.delete(`completed/${ticket.generation}`);
-    await expect(f.journal.inspect(after)).rejects.toThrow("invalid-control-record");
-  });
   test("baseline establishment is explicit; ordinary Apply cannot learn a missing baseline", async () => {
     const store = new MemoryStore();
     const journal = new InfrastructureRecords(store, codec);
@@ -707,256 +606,6 @@ describe("manual infrastructure records factory", () => {
       "invalid-control-evidence",
     );
     expect(created).toBe(0);
-  });
-});
-
-describe("dormant target journal factory", () => {
-  const scratch = mkdtempSync(join(tmpdir(), "infra-journal-factory-test-"));
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
-  const backend =
-    'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://us-east-1.example.org" }\nuse_path_style = false\n';
-  const environment = () => ({
-    AWS_ACCESS_KEY_ID: "invented-access",
-    AWS_SECRET_ACCESS_KEY: "invented-secret",
-    // Neither supplied ambient session field authorizes a temporary credential in this factory.
-    AWS_SESSION_TOKEN: "invented-unapproved-session",
-    S3_SESSION_TOKEN: "invented-other-unapproved-session",
-    TF_VAR_state_passphrase: passphrase,
-    CONTROL_OWNER_ID: "123456",
-    CONTROL_REPOSITORY_ID: "234567",
-    CONTROL_OWNER_ENVIRONMENT_ID: "1010",
-    CONTROL_OWNER_READ_TOKEN: "invented_owner_read_token_1234567890",
-  });
-  test("reopens historical raw-backend ciphertext and writes the same namespace through the scoped store", async () => {
-    const directory = mkdtempSync(join(scratch, "compatible-"));
-    writeFileSync(join(directory, "backend.hcl"), backend, { mode: 0o600 });
-    const physicalPrefix = "tarubot/control/v1/infra/";
-    const previous = "33333333-3333-4333-8333-333333333333";
-    const originalCodec = new RecordCodec(
-      passphrase,
-      privateDigest({ backend, key: "tarubot/infra.tfstate" }),
-    );
-    const intent = {
-      generation: previous,
-      previous: null,
-      kind: "baseline",
-      run,
-      binding,
-      inputs,
-      before,
-    };
-    const baseline = { intent, state: before };
-    const objects = new Map<string, Uint8Array>();
-    for (const [path, value] of [
-      ["current", { baseline: previous, pending: null }],
-      [`intents/${previous}`, intent],
-      [`baselines/${previous}`, baseline],
-      [`completed/${previous}`, { generation: previous, baseline: privateDigest(baseline) }],
-    ] as const)
-      objects.set(physicalPrefix + path, originalCodec.seal(path, value));
-    const options: Bun.S3Options[] = [];
-    const calls: string[] = [];
-    const requests: GitHubReadRequest[] = [];
-    const api = "https://api.github.com/repos/deconfined/tarubot";
-    const ownerRecord: Record<string, unknown> = {
-      schema: 1,
-      target: "infra",
-      backend: privateDigest({ backend, key: "tarubot/infra.tfstate" }),
-      namespace: physicalPrefix,
-      revision: "44444444-4444-4444-8444-444444444444",
-      repair: { mode: "never-repaired" },
-    };
-    const observed = 1_800_000_000_000;
-    const nextRun = { commit: run.commit, run: "5678" };
-    const executionData = {
-      ...baselineRunFixture({ kind: "baseline", run }).data,
-      ...baselineRunFixture({ kind: "apply", run: nextRun }).data,
-    };
-    const journal = legacyTargetJournal(directory, environment(), {
-      now: () => observed,
-      async get(request) {
-        requests.push(structuredClone(request));
-        const data: Record<string, unknown> = {
-          ...executionData,
-          [api]: {
-            id: 234567,
-            full_name: "deconfined/tarubot",
-            fork: false,
-            owner: { id: 123456, login: "deconfined" },
-          },
-          [`${api}/environments/control-infra`]: {
-            id: 1010,
-            name: "control-infra",
-            url: `${api}/environments/control-infra`,
-          },
-          [`${api}/environments/control-infra/variables/CONTROL_OWNER_ANCHOR`]: {
-            name: "CONTROL_OWNER_ANCHOR",
-            value: JSON.stringify(ownerRecord),
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-01T00:00:00Z",
-          },
-        };
-        if (!Object.hasOwn(data, request.url)) throw new Error("unexpected-invented-owner-api");
-        return {
-          status: 200,
-          url: request.url,
-          headers: { "content-type": "application/json" },
-          body: Buffer.from(JSON.stringify(data[request.url])),
-        };
-      },
-      // Native-shaped streams/presigns exercise the actual scoped factory and owner guard.
-      createClient(native) {
-        options.push(structuredClone(native));
-        return {
-          presign(key: string) {
-            const url = new URL(`${native.endpoint}/${key}`);
-            url.searchParams.set("X-Amz-Date", "20260930T000000Z");
-            url.searchParams.set(
-              "X-Amz-Credential",
-              `${native.accessKeyId}/20260930/${native.region}/s3/aws4_request`,
-            );
-            return url.toString();
-          },
-          file(key: string) {
-            calls.push(key);
-            return {
-              stream: () =>
-                new ReadableStream<Uint8Array>({
-                  start(controller) {
-                    const bytes = objects.get(key);
-                    if (bytes) {
-                      controller.enqueue(Uint8Array.from(bytes));
-                      controller.close();
-                    } else
-                      controller.error(
-                        Object.assign(new Error("invented-absence"), { code: "NoSuchKey" }),
-                      );
-                  },
-                }),
-            };
-          },
-          async write(key: string, bytes: Uint8Array) {
-            calls.push(key);
-            objects.set(key, Uint8Array.from(bytes));
-            return bytes.length;
-          },
-        } as unknown as Bun.S3Client;
-      },
-    });
-    expect(Object.isFrozen(journal)).toBe(true);
-    expect(Object.keys(journal)).toEqual([]);
-    expect(requests).toHaveLength(0);
-    expect(options[0]).toMatchObject({
-      endpoint: "https://state-bucket-example.us-east-1.example.org",
-      virtualHostedStyle: true,
-      sessionToken: "",
-      retry: 0,
-    });
-    const snapshot = await journal.inspect(before);
-    expect(snapshot).toEqual({ generation: previous, inputs, state: before });
-    // The actual factory retains one original owner proof across all8 object reads.
-    expect(requests).toHaveLength(38); //24owner GETs +14independent original baseline GETs.
-    expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.state)).toBe(true);
-    const ticket = await journal.begin(snapshot, inputs, nextRun, binding, "apply");
-    await journal.finish(ticket, after);
-    expect(await journal.inspect(after)).toEqual({
-      generation: ticket.generation,
-      inputs,
-      state: after,
-    });
-    const latest = objects.get(`${physicalPrefix}current`);
-    expect(latest).toBeDefined();
-    if (!latest) throw new Error("missing-invented-current-record");
-    expect(originalCodec.open("current", latest)).toEqual({
-      baseline: ticket.generation,
-      pending: null,
-    });
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls.every((path) => path.startsWith(physicalPrefix))).toBe(true);
-    expect(objects.has("tarubot/infra.tfstate")).toBe(false);
-    expect(requests.length).toBeGreaterThan(0);
-    expect(
-      requests.every(
-        (request) =>
-          request.headers.Authorization === `Bearer ${environment().CONTROL_OWNER_READ_TOKEN}`,
-      ),
-    ).toBe(true);
-    expect(
-      requests.some((request) => request.url.endsWith("/variables/CONTROL_OWNER_ANCHOR")),
-    ).toBe(true);
-    // A completed ordinary pointer does not bypass an independently fenced owner scope.
-    ownerRecord.revision = "66666666-6666-4666-8666-666666666666";
-    ownerRecord.repair = { mode: "repairing", generation: "55555555-5555-4555-8555-555555555555" };
-    const count = calls.length;
-    await expect(journal.inspect(after)).rejects.toThrow("control-consumer-read-failed");
-    expect(calls).toHaveLength(count);
-  });
-  test("missing credentials, owner configuration or noncanonical unsafe IDs stop before native/GitHub effects", () => {
-    const directory = mkdtempSync(join(scratch, "invalid-"));
-    writeFileSync(join(directory, "backend.hcl"), backend, { mode: 0o600 });
-    let created = false;
-    let fetched = false;
-    const changes: NodeJS.ProcessEnv[] = [
-      { AWS_ACCESS_KEY_ID: "" },
-      { AWS_SECRET_ACCESS_KEY: "" },
-      { TF_VAR_state_passphrase: "short" },
-      { CONTROL_OWNER_READ_TOKEN: "" },
-      { CONTROL_OWNER_READ_TOKEN: undefined },
-      { CONTROL_OWNER_READ_TOKEN: "short" },
-      { CONTROL_OWNER_READ_TOKEN: "invented\nprivate-token" },
-    ];
-    for (const name of [
-      "CONTROL_OWNER_ID",
-      "CONTROL_REPOSITORY_ID",
-      "CONTROL_OWNER_ENVIRONMENT_ID",
-    ])
-      for (const value of [
-        undefined,
-        "",
-        "0",
-        "01",
-        "+1",
-        "-1",
-        "1.0",
-        " 1",
-        "1 ",
-        "1e3",
-        "0x10",
-        "9007199254740992",
-        "999999999999999999999",
-      ])
-        changes.push({ [name]: value });
-    for (const changed of changes)
-      expect(() =>
-        legacyTargetJournal(
-          directory,
-          { ...environment(), ...changed },
-          {
-            createClient() {
-              created = true;
-              throw new Error("unexpected-invented-storage-construction");
-            },
-            async get() {
-              fetched = true;
-              throw new Error("unexpected-invented-owner-api");
-            },
-          },
-        ),
-      ).toThrow("invalid-control-evidence");
-    expect(created).toBe(false);
-    expect(fetched).toBe(false);
-  });
-  test("default disabled-control read needs neither owner configuration, backend nor native transport", async () => {
-    const directory = mkdtempSync(join(scratch, "disabled-"));
-    await controlPhase("read", directory, { CONTROL_RECORDS_ENABLED: "false" });
-    expect(JSON.parse(readFileSync(join(directory, "control-context.json"), "utf8"))).toEqual({
-      enabled: false,
-    });
-    expect(JSON.parse(readFileSync(join(directory, "baseline-inputs.json"), "utf8"))).toBeNull();
-    await expect(
-      controlPhase("read", directory, { CONTROL_RECORDS_ENABLED: "true" }),
-    ).rejects.toThrow("invalid-control-evidence");
   });
 });
 

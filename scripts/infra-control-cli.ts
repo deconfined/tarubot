@@ -1,7 +1,6 @@
 /** Private infrastructure phase adapter. Never expose S3 exceptions, records, paths or hashes. */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createControlJournal } from "./control-journals.js";
 import { handoffBinding, classifyPlan } from "./infra-policy.js";
 import {
   HostEnrollmentRecords,
@@ -16,7 +15,6 @@ import {
 import {
   InfrastructureRecords,
   RecordCodec,
-  type InfrastructureJournal,
   privateDigest,
   stateEvidence,
   verifyAppliedPlan,
@@ -30,14 +28,6 @@ const backendKey = "tarubot/infra.tfstate";
 function fail(): never {
   throw new Error("invalid-control-evidence");
 }
-/** Runtime configuration has one canonical safe positive decimal representation, never coercion. */
-function configuredId(value: string | undefined): number {
-  if (typeof value !== "string" || !/^[1-9][0-9]{0,15}$/u.test(value)) fail();
-  const id = Number(value);
-  if (!Number.isSafeInteger(id) || id <= 0 || String(id) !== value) fail();
-  return id;
-}
-
 /** Small native S3 adapter; only bounded ciphertext is read and uncertain writes are never retried. */
 export class S3ControlStore implements ControlStore {
   constructor(private readonly client: Pick<Bun.S3Client, "file" | "write">) {}
@@ -172,53 +162,6 @@ export function hostEnrollmentRecords(
     return new HostEnrollmentRecords(
       nativeStore(bucket, endpoint, environment),
       hostRecordCodec(bucket, endpoint, environment.TF_VAR_state_passphrase ?? ""),
-    );
-  } catch {
-    fail();
-  }
-}
-
-/** Dormant automatic target adapter only; never selected by the manual Infrastructure CLI. */
-export function legacyTargetJournal(
-  directory: string,
-  environment: NodeJS.ProcessEnv,
-  /** Internal native/GitHub/clock test seams, never CLI/environment-selected authority overrides. */
-  dependencies: NonNullable<Parameters<typeof createControlJournal>[1]> = {},
-): InfrastructureJournal {
-  try {
-    // Independent owner configuration is mandatory for every enabled ordinary reader/writer.
-    // A token for contents:read or a caller's approval flag cannot stand in for this capability.
-    const owner = {
-      owner_id: configuredId(environment.CONTROL_OWNER_ID),
-      repository_id: configuredId(environment.CONTROL_REPOSITORY_ID),
-      environment_id: configuredId(environment.CONTROL_OWNER_ENVIRONMENT_ID),
-      token: environment.CONTROL_OWNER_READ_TOKEN ?? "",
-    };
-    const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
-    const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
-    const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
-      backend,
-    )?.[1];
-    const passphrase = environment.TF_VAR_state_passphrase ?? "";
-    const accessKeyId = environment.AWS_ACCESS_KEY_ID;
-    const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
-    if (!bucket || !endpoint || !accessKeyId || !secretAccessKey || passphrase.length < 32) fail();
-    // Preserve exact historical backend bytes/state-key identity; scoped routing does not rekey.
-    return createControlJournal(
-      {
-        target: "infra",
-        backend: privateDigest({ backend, key: backendKey }),
-        passphrase,
-        owner,
-        storage: {
-          scope: "infra",
-          bucket,
-          endpoint,
-          region: "us-east-1",
-          credentials: { accessKeyId, secretAccessKey, sessionToken: null },
-        },
-      },
-      dependencies,
     );
   } catch {
     fail();
