@@ -7,13 +7,14 @@ Use [CONTRIBUTING.md](../CONTRIBUTING.md) for the local change checklist. This r
 | Workflow | Purpose and gate |
 | --- | --- |
 | `ci.yml` | Version/changelog, types, lint/format, build, unit/contract/PostgreSQL tests and AMD64/ARM64 image builds; required `CI result` |
-| `codeql.yml` | JavaScript/TypeScript and Actions analysis; required security gate |
 | `publish.yml`, `scan.yml` | Revalidate merged `main`, publish candidate images, scan both exact platform digests, sign provenance, then promote `latest` |
 | `release.yml`, `release-infra.yml` | Inactive replacement components; code-fenced before credentials until adoption/trust ship; see [PIPELINE](PIPELINE.md#replacement-components-implemented-but-activation-fenced) |
 | `deploy.yml`, `host.yml` | Verify the published release and run target-specific deployment; see [DEPLOYMENT](DEPLOYMENT.md) |
 | `infra.yml` | Dispatch-only infrastructure plan/approved apply; see [OpenTofu](../ops/tofu/README.md) |
 | `pages.yml` | pnpm/Node site build and Pages publication; site changes must have a green Build |
 | `dependency-audit.yml` | Advisory audit of all locked Bun dependencies |
+
+CodeQL uses the repository’s GitHub default setup for JavaScript/TypeScript and Actions. Its configuration and required security checks are managed by the owner through repository settings.
 
 Actions use full-SHA pins; checkouts never persist credentials. PR jobs are read-only and use invented migration input. CI needs no live Discord/database/provider credentials. The version gate runs last so earlier checks still report on dependency PRs awaiting a version commit.
 

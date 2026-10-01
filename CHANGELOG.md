@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.36.28**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.29**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.29 — Integrate the owner’s CodeQL workflow cleanup
+
+- Merge main’s removal of the custom CodeQL workflow from PR #67 and align CI documentation with the repository’s GitHub default setup.
+- Preserve the verified pipeline components, release activation fence and existing deployment approval boundaries.
 
 ## 2.36.28 — Bind native enrollment execution evidence
 

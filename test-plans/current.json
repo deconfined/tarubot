@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.28 native enrollment execution evidence",
-  "objective": "Exercise exact completed enrollment identity and the same private original proof through native reads and bounded use. Request volume and host integration remain pending; the disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.29 owner CodeQL workflow cleanup",
+  "objective": "Verify the merged owner removal of the custom CodeQL workflow and current CI documentation while retaining the reviewed pipeline. Release activation remains fenced; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise invented enrollment and recovery responses for numeric repository/environment pins, job identity, owner approval, original deadlines, native callback refusal, copied proofs and abandoned work; contact no real endpoint, host or provider.",
+    "Verify owner workflow integration, source quality, unit and contract checks from an isolated candidate; contact no real host or provider.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [
