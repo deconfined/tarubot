@@ -20,7 +20,7 @@
  *   GitHub's, the registry's and Pushover's.
  * - Behavior: the plan, SSH and notify scripts run here with simulated gh, docker, ssh, curl and
  *   date (tests/fixtures/deploy-workflow) to check the targets, production's switch, the gates,
- *   the dispatch's action, staging's floor, the image's provenance, the runtime-change rule, the
+ *   the dispatch's action, staging's floor, the image's provenance, maintenance publication admission, the
  *   compare API's 300-file cap, dispatches and rollbacks, the host-side summary, the clock
  *   warnings, the SSH retry rules and the messages.
  */
@@ -295,6 +295,8 @@ interface Scenario {
   readonly version?: string;
   readonly from?: string;
   readonly attempt?: string;
+  /** The completed publisher's own attempt; re-runs cannot reuse an earlier publication. */
+  readonly publicationAttempt?: number;
   /** Production's switch, DEPLOY_ENABLED ("true" by default). */
   readonly switches?: { readonly production?: string };
   readonly plan?: {
@@ -332,6 +334,7 @@ function contextOf(scenario: Scenario): Record<string, unknown> {
           event === "workflow_run"
             ? {
                 conclusion: "success",
+                run_attempt: scenario.publicationAttempt ?? 1,
                 event: "push",
                 head_branch: "main",
                 path: ".github/workflows/publish.yml",
@@ -419,6 +422,7 @@ describe("the workflow's shape", () => {
     for (const term of [
       "github.run_attempt == '1' && (",
       "github.event.workflow_run.conclusion == 'success'",
+      "github.event.workflow_run.run_attempt == 1",
       "github.event.workflow_run.event == 'push'",
       "github.event.workflow_run.head_branch == 'main'",
       "github.event.workflow_run.path == '.github/workflows/publish.yml'",
@@ -445,6 +449,8 @@ describe("the workflow's shape", () => {
       });
     for (const name of Object.keys(deploy.jobs) as JobName[])
       expect({ name, second: runs(name, { attempt: "2" }) }).toEqual({ name, second: false });
+    // A new Deploy run triggered by a publisher re-run must not inherit old successful jobs.
+    expect(runs("plan", { publicationAttempt: 2 })).toBe(false);
     // host.yml's job refuses them too.
     expect(hostText).toContain("\n    if: github.run_attempt == '1'\n");
   });
@@ -652,7 +658,7 @@ describe("the workflow's shape", () => {
     const { plan, notify } = deploy.jobs;
     expect(plan.environment).toBeUndefined();
     expect(refs(plan, "secrets")).toEqual([]);
-    expect(refs(plan, "vars")).toEqual(["DEPLOY_ENABLED"]);
+    expect(refs(plan, "vars")).toEqual(["DEPLOY_ENABLED", "RELEASE_PIPELINE_ENABLED"]);
     const production = deploy.jobs.deploy;
     expect(production.environment).toBe("production");
     expect(refs(production, "secrets")).toEqual(["DEPLOY_SSH_KEY"]);
@@ -817,9 +823,11 @@ describe("the staging job and host.yml", () => {
           from: `\${{ steps.plan.outputs.${output} }}`,
         });
     }
-    // host.yml takes exactly these inputs.
+    // Legacy staging omits the replacement's optional acceptance inputs.
     expect(Object.keys(staging.with).sort()).toEqual(
-      Object.keys(host.on.workflow_call.inputs).sort(),
+      Object.keys(host.on.workflow_call.inputs)
+        .filter((key) => !["accept_release", "schema_head", "publication_run"].includes(key))
+        .sort(),
     );
     // The plan writes the three new outputs.
     const plan = runOf("plan", "plan");
@@ -931,6 +939,7 @@ describe("no host in the repository", () => {
     "api.pushover.net",
     "slsa.dev",
     "steps.host",
+    "jobs.host",
   ]);
 
   test("the workflows and ops/deploy.sh name no host beyond GitHub, GHCR and Pushover", () => {
@@ -1016,15 +1025,25 @@ describe("the other workflows", () => {
     ],
   ];
 
-  test("only deploy.yml names production's settings, host.yml staging's and infra.yml Tofu's", () => {
+  test("workflow credentials stay scoped; Host may read only the durable trust storage settings", () => {
     for (const file of files) {
       const source = read(`.github/workflows/${file}`);
-      for (const [owner, names] of owners)
-        expect({ file, owner, named: names.test(source) }).toEqual({
+      for (const [owner, names] of owners) {
+        // Host reads the enrolled key from private storage; provider tokens and storage-write
+        // credentials still belong exclusively to the infrastructure workflows.
+        const scoped =
+          file === "host.yml" && owner === "infra.yml"
+            ? source.replace(
+                /secrets\.TOFU_STATE_(?:BUCKET|ENDPOINT|PASSPHRASE|READ_ACCESS_KEY|READ_SECRET_KEY)\b/gu,
+                "host trust read",
+              )
+            : source;
+        expect({ file, owner, named: names.test(scoped) }).toEqual({
           file,
           owner,
-          named: file === owner,
+          named: file === owner || (owner === "infra.yml" && file === "release-infra.yml"),
         });
+      }
       // No workflow runs untrusted pull-request code with the repository's secrets.
       expect({ file, target: source.includes("pull_request_target") }).toEqual({
         file,
@@ -1059,7 +1078,9 @@ describe("the other workflows", () => {
       .passthrough()
       .parse(YAML.parse(read(".github/workflows/publish.yml")));
     expect(publish.on.push).toEqual({ branches: ["main"] });
-    expect(publish.jobs.publish.if).toBe("github.ref == 'refs/heads/main'");
+    expect(publish.jobs.publish.if.replace(/\s+/gu, " ").trim()).toBe(
+      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && needs.verify.outputs.release == 'true'",
+    );
   });
 
   test("CI checks the host scripts with ShellCheck", () => {
@@ -1746,6 +1767,9 @@ describe.skipIf(!hasJq)("the plan step", () => {
   const sha = (seed: string) => new Bun.CryptoHasher("sha1").update(seed).digest("hex");
   const C = sha("release");
   const P = sha("previous");
+  /** Last published commit: later maintenance/source merges keep its version until C. */
+  const BASE = sha("previous published release");
+  const PUBLICATION = "36300000041";
   const D = `sha256:${"cd".repeat(32)}`;
   const IMAGE = "ghcr.io/deconfined/tarubot";
   /** github.sha: main's head when the run was created, which staging's Configure applies. */
@@ -1815,12 +1839,35 @@ describe.skipIf(!hasJq)("the plan step", () => {
     readonly switches?: { readonly production?: string };
     /** github.sha (CONFIG by default). */
     readonly configCommit?: string;
+    /** The fixed publisher job response; default is one completed successful promotion. */
+    readonly publicationJobs?: unknown;
+    readonly publicationRun?: string;
+    /** Omit all image/environment resources, proving a maintenance run uses only Jobs. */
+    readonly publicationOnly?: boolean;
+    readonly previousVersion?: string;
+    /** null omits the previous version image; malformed labels are represented literally. */
+    readonly previousRevision?: string | null;
+    readonly previousPackageVersion?: string;
+    readonly releaseStatus?: string;
+    /** The last merge alone, deliberately distinct from the full released range. */
+    readonly parentFiles?: File[];
   }
 
   /** The simulated repository and registry for the release at commit C. */
   function repository(overrides: Overrides) {
     const where = box();
     const release = overrides.release ?? V;
+    // Log only invented local stub arguments; no fixture falls through to a real CLI/network.
+    for (const name of ["gh", "docker"]) {
+      const path = join(where.bin, name);
+      writeFileSync(
+        path,
+        readFileSync(path, "utf8").replace(
+          "set -euo pipefail\n",
+          `set -euo pipefail\nprintf '%s\\n' "$*" >>"$STUB/${name}-calls"\n`,
+        ),
+      );
+    }
     writeFileSync(join(where.dir, "now"), `${overrides.now ?? "4 1200"}\n`);
     api(where.dir, `${R}/environments/production`, overrides.production ?? production);
     api(
@@ -1883,21 +1930,54 @@ describe.skipIf(!hasJq)("the plan step", () => {
           .filter(Boolean)
           .map((call) => call.trimEnd().split("\n"))
       : [];
-    return { ...result, attestations };
+    const calls = (name: string) => {
+      const path = join(where.dir, `${name}-calls`);
+      return existsSync(path) ? readFileSync(path, "utf8").trimEnd().split("\n") : [];
+    };
+    return { ...result, attestations, ghCalls: calls("gh"), imageCalls: calls("docker") };
   }
 
-  /** Run the plan for an automatic run of the release whose merge changed `files`. */
+  /** Run the exact plan shell against a release range and a separate version-only last merge. */
   function plan(files: File[], overrides: Overrides = {}) {
     const where = repository(overrides);
-    api(where.dir, `${R}/contents/package.json?ref=${P}`, { version: "2.36.0" });
+    const previous = overrides.previousVersion ?? "2.36.0";
+    api(where.dir, `${R}/contents/package.json?ref=${P}`, { version: previous });
+    api(where.dir, `${R}/contents/package.json?ref=${BASE}`, {
+      version: overrides.previousPackageVersion ?? previous,
+    });
     api(where.dir, `${R}/commits/${C}`, { parents: [{ sha: P }] });
-    api(where.dir, `${R}/compare/${P}...${C}`, { files });
+    api(where.dir, `${R}/compare/${P}...${C}`, {
+      status: "ahead",
+      files: overrides.parentFiles ?? [version],
+    });
+    api(where.dir, `${R}/compare/${BASE}...${C}`, {
+      status: overrides.releaseStatus ?? "ahead",
+      files,
+    });
+    if (overrides.previousRevision !== null)
+      writeFileSync(
+        join(where.dir, "images", previous),
+        `${D} ${overrides.previousRevision ?? BASE}\n`,
+      );
+    if (overrides.publicationOnly) {
+      for (const resource of ["api", "images", "attested"])
+        rmSync(join(where.dir, resource), { recursive: true });
+    }
+    api(
+      where.dir,
+      `${R}/actions/runs/${PUBLICATION}/attempts/1/jobs?per_page=100`,
+      overrides.publicationJobs ?? {
+        total_count: 1,
+        jobs: [{ name: "Promote latest", status: "completed", conclusion: "success" }],
+      },
+    );
     return planned(
       where,
       runScript(runOf("plan", "plan"), where, {
         ...environment(overrides),
         EVENT: "workflow_run",
         HEAD_SHA: C,
+        PUBLICATION_RUN: overrides.publicationRun ?? PUBLICATION,
         INPUT_VERSION: "",
         INPUT_ROLLBACK: "",
         INPUT_FROM: "",
@@ -1950,35 +2030,108 @@ describe.skipIf(!hasJq)("the plan step", () => {
   const productionOff = { switches: { production: "" } } as const;
   const toStaging = { version: V, target: "staging" } as const;
 
-  test("a merge of documentation, tests, CI and OpenTofu asks for nothing", () => {
-    const p = plan([
-      { filename: "docs/HOSTING.md", status: "modified" },
-      { filename: "CHANGELOG.md", status: "modified" },
-      { filename: "tests/unit/x.test.ts", status: "added" },
-      { filename: ".github/workflows/ci.yml", status: "modified" },
-      { filename: ".github/workflows/host.yml", status: "modified" },
-      { filename: ".github/CODEOWNERS", status: "added" },
-      { filename: "site/src/content/docs/index.md", status: "modified" },
-      { filename: "ops/tofu/main.tf", status: "modified" },
-      { filename: "ops/tofu/examples/user-data-with-hash.yaml", status: "modified" },
-      { filename: "ops/ansible/requirements-lint.txt", status: "modified" },
-      version,
-    ]);
+  test("maintenance publication skips images, environments and notification before any release checks", () => {
+    const p = plan(docsOnly, {
+      publicationOnly: true,
+      configCommit: "not-a-commit",
+      publicationJobs: {
+        total_count: 2,
+        jobs: [
+          { name: "CI result", status: "completed", conclusion: "success" },
+          { name: "Promote latest", status: "completed", conclusion: "skipped" },
+        ],
+      },
+    });
     expect(p.code).toBe(0);
-    expect(p.outputs).toMatchObject({
+    expect(p.outputs).toEqual({
+      notify: "false",
       deploy: "false",
-      reason: "no-runtime-change",
-      version: V,
+      reason: "no-release",
       production: "false",
       staging: "false",
+      production_reason: "-",
     });
-    expect(p.summary).toContain("nothing to deploy");
-    // It was verified all the same: the provenance check comes before this exit.
-    expect(p.summary).toContain(`Provenance verified: publish.yml on refs/heads/main, commit ${C}`);
-    expect(p.summary).toContain("run **Deploy** with the newest version");
+    expect(p.summary).toContain("no new release");
+    expect(p.imageCalls).toEqual([]);
+    expect(p.attestations).toEqual([]);
+    expect(p.ghCalls).toEqual([
+      `api ${R}/actions/runs/${PUBLICATION}/attempts/1/jobs?per_page=100`,
+    ]);
+    // The frozen notify/deploy conditions consume false outputs without new branches.
+    expect(runs("notify", { plan: { notify: p.outputs.notify ?? null } })).toBe(false);
+    expect(runs("deploy", { plan: { production: p.outputs.production ?? "true" } })).toBe(false);
+    expect(runs("deploy-staging", { plan: { staging: p.outputs.staging ?? "true" } })).toBe(false);
   });
 
-  test("source, a dependency change, publish.yml or a host file deploys both targets", () => {
+  test("a missing, failed, duplicate or truncated publication job refuses without image/environment reads", () => {
+    const success = { name: "Promote latest", status: "completed", conclusion: "success" };
+    for (const publicationJobs of [
+      {},
+      { total_count: 0, jobs: [] },
+      { total_count: 1, jobs: [{ ...success, conclusion: "failure" }] },
+      { total_count: 1, jobs: [{ ...success, status: "in_progress" }] },
+      { total_count: 2, jobs: [success, success] },
+      { total_count: 101, jobs: [success] },
+      { total_count: 2, jobs: [success] },
+    ]) {
+      const p = plan(source, { publicationJobs, publicationOnly: true });
+      expect({ code: p.code, reason: p.outputs.reason, notify: p.outputs.notify ?? null }).toEqual({
+        code: 1,
+        reason: "publication",
+        notify: "false",
+      });
+      expect(p.imageCalls).toEqual([]);
+      expect(p.ghCalls).toHaveLength(1);
+    }
+    const unreadable = plan(source, { publicationRun: "42", publicationOnly: true });
+    expect(unreadable.outputs.reason).toBe("publication");
+    const invalid = plan(source, { publicationRun: "not-a-run", publicationOnly: true });
+    expect(invalid.ghCalls).toEqual([]);
+    expect(invalid.outputs.reason).toBe("publication");
+  });
+
+  test("a version-only release deploys accumulated application, migration and host changes", () => {
+    const p = plan(
+      [
+        ...source,
+        { filename: "migrations/011_more.sql", status: "added" },
+        { filename: "ops/ansible/bot.yml", status: "modified" },
+        version,
+      ],
+      { parentFiles: [version] },
+    );
+    expect(p.outputs).toMatchObject({ deploy: "true", production: "true", staging: "true" });
+    expect(p.summary).toContain("Migration files added in this release:** migrations/011_more.sql");
+    expect(p.summary).toContain("- `ops/ansible/bot.yml`");
+    expect(p.summary).toContain(`https://github.com/deconfined/tarubot/compare/${BASE}...${C}`);
+    expect(p.summary).toContain("| Previous published release | `2.36.0` |");
+    expect(p.ghCalls).toContain(`api ${R}/compare/${BASE}...${C}`);
+    expect(p.ghCalls).not.toContain(`api ${R}/compare/${P}...${C}`);
+    // Publication decides what is a release; Deploy has no second path/version classifier.
+    expect(plan(docsOnly).outputs.deploy).toBe("true");
+    expect(plan([version]).outputs.deploy).toBe("true");
+  });
+
+  test("missing or inconsistent previous publication refuses instead of using the last merge", () => {
+    for (const overrides of [
+      { previousRevision: null },
+      { previousRevision: "not-a-sha" },
+      { previousVersion: V },
+      { previousVersion: "unknown" },
+      { previousPackageVersion: "2.35.0" },
+    ]) {
+      const p = plan(source, overrides);
+      expect({ code: p.code, reason: p.outputs.reason }).toEqual({
+        code: 1,
+        reason: "previous-release",
+      });
+      expect(p.ghCalls).not.toContain(`api ${R}/compare/${P}...${C}`);
+    }
+    for (const releaseStatus of ["diverged", "behind", "identical"])
+      expect(plan(source, { releaseStatus }).outputs.reason).toBe("compare");
+  });
+
+  test("every admitted published release deploys both targets", () => {
     for (const files of [
       [{ filename: "src/main.ts", status: "modified" }],
       [{ ...version, patch: '@@ -1 +1 @@\n-  "zod": "4.1.0",\n+  "zod": "4.2.0",' }],
@@ -2056,9 +2209,9 @@ describe.skipIf(!hasJq)("the plan step", () => {
 
   test("an unattested image is refused before the plan can end early or deploy anything", () => {
     const refusals: [string, ReturnType<typeof plan>][] = [
-      ["a quiet merge, no attestation", plan(docsOnly, { attestedFor: null })],
-      ["a runtime merge, no attestation", plan(source, { attestedFor: null })],
-      ["a runtime merge, signed for another commit", plan(source, { attestedFor: P })],
+      ["a published docs release, no attestation", plan(docsOnly, { attestedFor: null })],
+      ["a published source release, no attestation", plan(source, { attestedFor: null })],
+      ["a published source release, signed for another commit", plan(source, { attestedFor: P })],
       ["gh passing with no result", plan(source, { attestAnswer: "[]\n" })],
       // Signed by another workflow whose name only starts like publish.yml's, or by publish.yml
       // on another branch: gh's --signer-workflow would pass the first, the exact identity doesn't.
@@ -2130,10 +2283,9 @@ describe.skipIf(!hasJq)("the plan step", () => {
       })),
       ...tail,
     ];
-    // Below the cap the list is whole: 299 documentation files are a quiet merge.
-    expect(plan(many(299)).outputs).toMatchObject({ deploy: "false", reason: "no-runtime-change" });
-    // At the cap the rest may be missing, so neither "no runtime change", "no host-side file" nor
-    // "no edited migration" can be read from it, whatever the listed files are.
+    // A whole released range deploys even when the listed changes are documentation.
+    expect(plan(many(299)).outputs.deploy).toBe("true");
+    // At the cap, migration/host-side changes may be missing from the approval evidence.
     const hidden: File[] = [
       { filename: "ops/deploy.sh", status: "modified" },
       { filename: "migrations/001_init.sql", status: "modified" },
@@ -2147,7 +2299,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
       });
       expect(p.outputs.deploy).toBeUndefined();
       expect(p.stdout).toContain(
-        "::error::This merge changes 300 files or more, more than GitHub's compare API lists",
+        "::error::This release changes 300 files or more, more than GitHub's compare API lists",
       );
       expect(p.summary).toBe("");
     }
@@ -2178,9 +2330,11 @@ describe.skipIf(!hasJq)("the plan step", () => {
       { filename: "ops/deploy.sh", status: "modified" },
     ]);
     expect(p.outputs.deploy).toBe("true");
-    expect(p.summary).toContain("**Migration files added in this merge:** migrations/011_more.sql");
     expect(p.summary).toContain(
-      "**Host-side changes in this merge** (on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging host Configure runs `ops/ansible/site.yml` as root, and the release's `ops/ansible/bot.yml` runs the bot as the unprivileged `tarubot` user):",
+      "**Migration files added in this release:** migrations/011_more.sql",
+    );
+    expect(p.summary).toContain(
+      "**Host-side changes in this release** (on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging host Configure runs `ops/ansible/site.yml` as root, and the release's `ops/ansible/bot.yml` runs the bot as the unprivileged `tarubot` user):",
     );
     expect(p.summary).toContain("- `ops/deploy.sh`");
     expect(p.summary).toContain(
@@ -2208,10 +2362,10 @@ describe.skipIf(!hasJq)("the plan step", () => {
     expect(template.summary).toContain("check production's .env first");
   });
 
-  test("a merge without host-side changes says so for this merge only, never a bare none", () => {
+  test("a release without host-side changes says so for this range only, never a bare none", () => {
     const p = plan(source);
     expect(p.summary).toContain(
-      "**Host-side changes in this merge**: no file under `ops/`, `docker-compose.production.yml` or `production.env.example` changed.",
+      "**Host-side changes in this release**: no file under `ops/`, `docker-compose.production.yml` or `production.env.example` changed.",
     );
     expect(p.summary).toContain("the host-side changes of the releases in between run too");
     expect(p.summary).not.toMatch(/\*\*Host-side changes:\*\* none/u);
@@ -2430,7 +2584,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
     // Staging has no switch: a staging dispatch deploys whatever production's reads.
     for (const value of ["", "false", "true"]) {
       const p = dispatch(toStaging, { switches: { production: value } });
-      expect({ value, code: p.code, staging: p.outputs.staging }).toEqual({
+      expect({ value, code: p.code, staging: p.outputs.staging ?? "true" }).toEqual({
         value,
         code: 0,
         staging: "true",
@@ -2469,7 +2623,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
       production: "false",
       production_reason: "gate",
     });
-    // A quiet merge carries it too.
+    // An admitted published documentation release carries it too.
     expect(plan(docsOnly).outputs).toMatchObject({ notify: "true", production_reason: "-" });
   });
 
@@ -2613,7 +2767,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
           reason: "-",
         },
       });
-      // No image, provenance or runtime rule: there is no release.
+      // No image or provenance: there is no release.
       expect(p.attestations).toEqual([]);
       expect(p.summary).toBe(
         `## Configure staging\n\n**Staging** runs Configure at once, without approval: \`ops/ansible/site.yml\` at main's head ([\`${CONFIG.slice(0, 12)}\`](https://github.com/deconfined/tarubot/commit/${CONFIG})), as root on the staging host. The bot and its release don't change.\n\n`,
@@ -2674,7 +2828,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
     for (const release of ["2.36.0", V, "3.0.0"])
       for (const action of ["deploy", "bot", "preflight"]) {
         const p = dispatch({ version: release, target: "staging", action }, { release });
-        expect({ release, action, code: p.code, staging: p.outputs.staging }).toEqual({
+        expect({ release, action, code: p.code, staging: p.outputs.staging ?? "true" }).toEqual({
           release,
           action,
           code: 0,
@@ -2694,7 +2848,7 @@ describe.skipIf(!hasJq)("the plan step", () => {
       );
     }
     // Beside production, an older release leaves staging out, and production goes on.
-    const merge = plan(source, { release: "2.35.99" });
+    const merge = plan(source, { release: "2.35.99", previousVersion: "2.35.98" });
     expect(merge.code).toBe(0);
     expect(merge.outputs).toMatchObject({ production: "true", staging: "false" });
     expect(merge.stdout).toContain("::warning::2.35.99 is older than 2.36.0");
@@ -2749,70 +2903,8 @@ describe.skipIf(!hasJq)("the plan step", () => {
   });
 });
 
-describe("the runtime-change rule", () => {
-  const source = runOf("plan", "plan");
-  const grab = (name: string) =>
-    new RegExp(new RegExp(`${name}='([^']+)'`, "u").exec(source)?.[1] ?? "^$", "u");
-  const nonRuntime = grab("NON_RUNTIME");
-  const alwaysRuntime = grab("ALWAYS_RUNTIME");
-  const hostSide = grab("HOST_SIDE");
-  const runtime = (path: string) => alwaysRuntime.test(path) || !nonRuntime.test(path);
-
-  test("sorts paths into what runs on a host and what doesn't", () => {
-    const table: [string, boolean][] = [
-      ["docs/HOSTING.md", false],
-      ["site/src/content/docs/index.md", false],
-      ["tests/unit/deploy-script.test.ts", false],
-      ["test-plans/current.json", false],
-      ["CHANGELOG.md", false],
-      ["README.md", false],
-      [".github/workflows/ci.yml", false],
-      [".github/workflows/deploy.yml", false],
-      [".github/workflows/host.yml", false],
-      [".github/workflows/infra.yml", false],
-      [".github/CODEOWNERS", false],
-      ["docker-compose.yml", false],
-      ["docker-compose.devbot.yml", false],
-      ["docker-compose.build.yml", false],
-      ["docker-compose.tools.yml", false],
-      [".env.example", false],
-      ["production.env.example", false],
-      ["staging.env.example", false],
-      // OpenTofu reaches the hosts only through the Infrastructure workflow (2.36.0).
-      ["ops/tofu/main.tf", false],
-      ["ops/tofu/cloud-init.yaml.tftpl", false],
-      ["ops/tofu/.terraform.lock.hcl", false],
-      ["ops/tofu/README.md", false],
-      // ansible-lint's pins feed only CI; requirements.txt is staging's Ansible (2.36.0).
-      ["ops/ansible/requirements-lint.txt", false],
-      ["ops/ansible/requirements.txt", true],
-      ["ops/ansible/site.yml", true],
-      ["ops/ansible/bot.yml", true],
-      ["ops/ansible/vars/targets/staging.yml", true],
-      ["ops/ansible/templates/bot/tarubot.container.j2", true],
-      ["ops/ansible/files/bot/tarubot-tool", true],
-      ["ops/tofus/main.tf", true],
-      ["biome.json", false],
-      [".github/workflows/publish.yml", true],
-      ["src/main.ts", true],
-      ["scripts/migrate.ts", true],
-      ["migrations/011_x.sql", true],
-      ["ops/deploy.sh", true],
-      ["ops/backup.sh", true],
-      ["docker-compose.production.yml", true],
-      ["Dockerfile", true],
-      [".dockerignore", true],
-      ["bun.lock", true],
-      ["bunfig.toml", true],
-      ["tsconfig.json", true],
-      ["tsconfig.build.json", true],
-      ["package.json", true],
-      ["src/docs/notes.md", true],
-      ["docs.ts", true],
-    ];
-    for (const [path, expected] of table)
-      expect({ path, runtime: runtime(path) }).toEqual({ path, runtime: expected });
-  });
+describe("the host-side approval evidence", () => {
+  const hostSide = new RegExp(pattern(runOf("plan", "plan"), "HOST_SIDE"), "u");
 
   test("lists what runs on a host, or shapes one, as host-side", () => {
     for (const [path, expected] of [

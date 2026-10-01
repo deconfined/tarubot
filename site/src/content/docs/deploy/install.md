@@ -95,6 +95,8 @@ Next: [back up](/tarubot/deploy/operations/#backup) the database regularly, and 
 
 `TARUBOT_IMAGE_TAG` also accepts `sha-<commit>`, the full commit that published an image. To pin by digest, set `TARUBOT_IMAGE` to the complete reference, such as `ghcr.io/deconfined/tarubot@sha256:<digest>`; it overrides `TARUBOT_IMAGE_TAG`.
 
+New bot releases publish version and commit tags after their checks pass. Documentation and pipeline maintenance can merge without a bot release, so some commits on `main` have no image. Existing version tags are preserved.
+
 ### Checking where an image came from
 
 Images from 2.32.0 on carry signed build provenance: a signature, made by the project's publish workflow on `main`, that names the commit the image was built from. The upstream project checks it before every deploy. To check an image yourself, with the [GitHub CLI](https://cli.github.com) signed in (it asks for a login even for this public repository):

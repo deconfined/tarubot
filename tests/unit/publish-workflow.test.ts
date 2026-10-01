@@ -18,8 +18,11 @@
  * deploy job (tests/unit/deploy-workflow.test.ts pins its flags).
  */
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { YAML } from "bun";
 import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
@@ -69,7 +72,16 @@ const workflow = z
     on: z.unknown(),
     permissions: z.record(z.string(), z.string()),
     concurrency: z.unknown(),
-    jobs: z.object({ verify: z.unknown(), publish: job, attest: job, latest: job }).strict(),
+    jobs: z
+      .object({
+        verify: z.unknown(),
+        publish: job,
+        scan: z.unknown(),
+        attest: job,
+        release: z.unknown(),
+        latest: job,
+      })
+      .strict(),
   })
   .strict();
 
@@ -132,10 +144,179 @@ describe("the build's digest", () => {
   });
 });
 
+describe("explicit release publication", () => {
+  test("only the first main push with a version increase may publish", () => {
+    // Manual verification and unchanged-version maintenance must never receive a build digest.
+    expect(build.if.replace(/\s+/gu, " ").trim()).toBe(
+      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && needs.verify.outputs.release == 'true'",
+    );
+    expect(build.concurrency).toEqual({
+      group: `publish-${expr("github.repository")}-${expr("needs.verify.outputs.version")}`,
+      "cancel-in-progress": false,
+    });
+    const jobs = publish.jobs as typeof publish.jobs & {
+      scan: { needs: string };
+      release: { needs: string[] };
+    };
+    expect(jobs.scan.needs).toBe("publish");
+    expect(needsOf(attest)).toContain("publish");
+    expect(jobs.release.needs).toContain("publish");
+    expect(latest.if).toContain("needs.publish.result == 'success'");
+    // Deploy uses this existing nonmatrix job's success/skipped conclusion as admission.
+    expect(latest.name).toBe("Promote latest");
+  });
+
+  test("reruns cannot write or orchestrate a release using retained upstream successes", () => {
+    const replacement = z.object({ if: z.string() }).parse(publish.jobs.release);
+    // These workflow conditions use ordinary comparisons/booleans, so evaluate their actual
+    // text against fixed contexts. Earlier successful jobs deliberately remain successful.
+    for (const [github, expected] of [
+      [{ ref: "refs/heads/main", event_name: "push", run_attempt: "1" }, true],
+      [{ ref: "refs/heads/main", event_name: "push", run_attempt: "2" }, false],
+      [{ ref: "refs/heads/main", event_name: "workflow_dispatch", run_attempt: "1" }, false],
+      [{ ref: "refs/heads/fixture", event_name: "push", run_attempt: "1" }, false],
+    ] as const) {
+      for (const target of [build, attest, replacement, latest]) {
+        const result = runInNewContext(target.if, {
+          github,
+          vars: { RELEASE_PIPELINE_ENABLED: "true" },
+          needs: {
+            verify: { outputs: { release: "true" } },
+            publish: { result: "success" },
+            attest: { result: "success" },
+            release: { result: "success", outputs: { accepted: "true" } },
+          },
+          always: () => true,
+        });
+        expect(result).toBe(expected);
+      }
+    }
+  });
+
+  test("the registry guard permits only a confirmed absent tag, before the build", () => {
+    const guard = stepOf(build, "Require an unpublished version");
+    expect(build.steps.indexOf(guard)).toBeLessThan(build.steps.indexOf(stepOf(build, "build")));
+    expect(guard.env).toEqual({
+      VERSION: expr("needs.verify.outputs.version"),
+      GHCR_USER: expr("github.actor"),
+      GHCR_TOKEN: expr("secrets.GITHUB_TOKEN"),
+    });
+
+    // Exercise the actual shell guard with a fixed local curl replacement. Unknown routes fail
+    // immediately, so none of these cases can reach a registry or read real credentials.
+    const directory = mkdtempSync(join(tmpdir(), "tarubot-publish-guard-"));
+    try {
+      const calls = join(directory, "calls");
+      const tokenFilter = String.raw`(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))`;
+      expect(guard.run).toContain(`jq -er '${tokenFilter}'`);
+      // The Bun build image need not contain jq; only its fixed token extraction is simulated.
+      writeFileSync(
+        join(directory, "jq"),
+        `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] !== "-er" || args[1] !== process.env.TOKEN_FILTER) process.exit(99);
+try {
+  const response = JSON.parse(await Bun.stdin.text());
+  const token = response.token ?? response.access_token;
+  if (typeof token !== "string" || !new RegExp("^[A-Za-z0-9._~+/-]+=*$").test(token)
+      || token.includes(String.fromCharCode(10)) || token.includes(String.fromCharCode(13))) process.exit(4);
+  process.stdout.write(token + "\\n");
+} catch {
+  process.exit(4);
+}
+`,
+        { mode: 0o700 },
+      );
+      writeFileSync(
+        join(directory, "curl"),
+        `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const url = args.at(-1);
+if (!args.includes("--connect-timeout") || !args.includes("--max-time")) process.exit(99);
+if (args[args.indexOf("--config") + 1] !== "-" || args.includes("--user")) process.exit(99);
+if (args.some((arg) => arg.includes("invented-workflow-token") || arg.includes("invented-registry-bearer"))) process.exit(99);
+const config = await Bun.stdin.text();
+if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:example/tarubot:pull") {
+  appendFileSync(process.env.CALLS, "token\\n");
+  if (config !== 'user = "invented-user:invented-workflow-token"\\n') process.exit(99);
+  if (process.env.TOKEN_CASE === "error") process.exit(7);
+  const tokens = { newline: "invented\\nbearer", quote: 'invented"bearer', space: "invented bearer", backslash: "invented\\\\bearer", object: {} };
+  process.stdout.write(process.env.TOKEN_CASE === "empty" ? "{}" : JSON.stringify({token: tokens[process.env.TOKEN_CASE] ?? "invented-registry-bearer"}));
+} else if (url === "https://ghcr.io/v2/example/tarubot/manifests/2.40.0") {
+  appendFileSync(process.env.CALLS, "manifest\\n");
+  if (!args.includes("--head")) process.exit(99);
+  if (config !== 'header = "Authorization: Bearer invented-registry-bearer"\\n') process.exit(99);
+  if (process.env.STATUS === "error") process.exit(7);
+  process.stdout.write(process.env.STATUS);
+} else {
+  process.exit(99);
+}
+`,
+        { mode: 0o700 },
+      );
+      const outcome = (status: string, tokenCase = "valid") => {
+        writeFileSync(calls, "");
+        const result = Bun.spawnSync(["bash", "-e", "-c", guard.run ?? ""], {
+          env: {
+            PATH: `${directory}:${process.env.PATH}`,
+            GITHUB_REPOSITORY: "Example/TaruBot",
+            VERSION: "2.40.0",
+            GHCR_USER: "invented-user",
+            GHCR_TOKEN: "invented-workflow-token",
+            CALLS: calls,
+            STATUS: status,
+            TOKEN_CASE: tokenCase,
+            TOKEN_FILTER: tokenFilter,
+          },
+        });
+        const rawOutput = `${result.stdout.toString()}${result.stderr.toString()}`;
+        // The standard add-mask command is the only permitted appearance of the derived token.
+        const mask = "::add-mask::invented-registry-bearer\n";
+        const output = rawOutput.replace(mask, "");
+        expect(output).not.toContain("invented-workflow-token");
+        expect(output).not.toContain("invented-registry-bearer");
+        return {
+          exit: result.exitCode,
+          calls: readFileSync(calls, "utf8"),
+          output,
+          masked: rawOutput.includes(mask),
+        };
+      };
+      expect(outcome("404")).toMatchObject({ exit: 0, calls: "token\nmanifest\n", masked: true });
+      expect(outcome("200")).toMatchObject({
+        exit: 1,
+        calls: "token\nmanifest\n",
+        output: expect.stringContaining("already exists"),
+      });
+      for (const status of ["301", "307", "401", "403", "429", "500", "000", "error"])
+        expect(outcome(status)).toMatchObject({ exit: 1, calls: "token\nmanifest\n" });
+      for (const tokenCase of [
+        "empty",
+        "error",
+        "newline",
+        "quote",
+        "space",
+        "backslash",
+        "object",
+      ])
+        expect(outcome("404", tokenCase)).toMatchObject({
+          exit: 1,
+          calls: "token\n",
+          masked: false,
+        });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the attest job", () => {
   test("runs after publish, from main, with only the permissions signing needs", () => {
-    expect(needsOf(attest)).toEqual(["publish"]);
-    expect(attest.if).toBe("github.ref == 'refs/heads/main'");
+    expect(needsOf(attest)).toEqual(["publish", "scan"]);
+    expect(attest.if.replace(/\s+/gu, " ").trim()).toBe(
+      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'",
+    );
     expect(attest["runs-on"]).toBe("ubuntu-24.04");
     // No packages: write and no registry login: the attestation stays with the repository.
     expect(attest.permissions).toEqual({
@@ -159,21 +340,25 @@ describe("the attest job", () => {
     expect(read("ops/deploy.sh")).toContain(`readonly IMAGE=${image}\n`);
   });
 
-  test("reads no tag: its only expression is the build's digest", () => {
+  test("reads no tag: expressions bind only the release checkout and build's digest", () => {
     const expressions = [...JSON.stringify(attest).matchAll(/\$\{\{\s*([^}]*?)\s*\}\}/gu)].map(
       (m) => m[1],
     );
-    expect(new Set(expressions)).toEqual(new Set(["needs.publish.outputs.digest"]));
+    expect(new Set(expressions)).toEqual(new Set(["github.sha", "needs.publish.outputs.digest"]));
     // No step pulls, inspects or retags an image, and none uses a registry action.
     for (const s of attest.steps) {
       expect(s.run ?? "").not.toMatch(/docker|imagetools|crane|oras|skopeo|gh api/u);
-      if (s.uses) expect(s.uses).toMatch(/^actions\/attest@/u);
+      if (s.uses) expect(s.uses).toMatch(/^(?:actions\/(?:attest|checkout)|oven-sh\/setup-bun)@/u);
     }
   });
 
   test("checks the digest before signing, since an empty one would sign discovered subjects", () => {
     const names = attest.steps.map((s) => s.name);
-    expect(names).toEqual(["Check the digest the build returned", "Attest build provenance"]);
+    expect(names.filter(Boolean)).toEqual([
+      "Check the digest the build returned",
+      "Recheck reviewed scanner exceptions before signing",
+      "Attest build provenance",
+    ]);
     const check = stepOf(attest, "Check the digest the build returned");
     expect(check.env).toEqual({ DIGEST: DIGEST_OUTPUT });
     const run = check.run ?? "";
@@ -192,6 +377,33 @@ describe("the attest job", () => {
       `sha256:${"a1".repeat(32)}\nsha256:${"b2".repeat(32)}`,
     ])
       expect({ digest, exit: outcome(digest) }).toEqual({ digest, exit: 1 });
+  });
+});
+
+describe("reviewed exception expiry before registry/signature writes", () => {
+  test("both bounded jobs use their own release source and cannot install runtime policy overrides", () => {
+    // A successful earlier scan cannot authorize an expired exception after another job waits.
+    for (const j of [attest, latest]) {
+      expect(j["timeout-minutes"]).toBe(10);
+      const checkout = j.steps.find((s) => s.uses?.startsWith("actions/checkout@"));
+      expect(checkout?.with).toEqual({ ref: expr("github.sha"), "persist-credentials": false });
+      const setup = j.steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
+      expect(setup?.with).toEqual({ "bun-version-file": "package.json" });
+      expect(j.steps.map((s) => s.run ?? "").join("\n")).not.toMatch(/bun install|--policy/u);
+    }
+    const signIndex = attest.steps.indexOf(stepOf(attest, "Attest build provenance"));
+    expect(attest.steps[signIndex - 1]?.run).toBe(
+      "bun --no-env-file scripts/release-scan-exceptions.ts sign",
+    );
+    const promote = stepOf(latest, "Advance the latest tag after successful publication").run ?? "";
+    const check = "bun --no-env-file scripts/release-scan-exceptions.ts promote";
+    expect(promote.indexOf(check)).toBeGreaterThan(
+      promote.indexOf('if [ "$current" != "$GITHUB_SHA" ]'),
+    );
+    expect(promote.slice(promote.indexOf(check)).trim().split("\n")).toEqual([
+      check,
+      `docker buildx imagetools create --tag "$image:latest" "$image@\${DIGEST}"`,
+    ]);
   });
 });
 
@@ -221,8 +433,9 @@ describe("who may sign or write", () => {
 
 describe("the latest tag", () => {
   test("waits for attest and promotes the signed digest, never the sha- tag", () => {
-    expect(needsOf(latest).sort()).toEqual(["attest", "publish"]);
-    expect(latest.if).toBe("github.ref == 'refs/heads/main'");
+    expect(needsOf(latest).sort()).toEqual(["attest", "publish", "release"]);
+    expect(latest.if).toContain("needs.release.outputs.accepted == 'true'");
+    expect(latest.if).toContain("needs.attest.result == 'success'");
     const promote = stepOf(latest, "Advance the latest tag after successful publication");
     expect(promote.env?.DIGEST).toBe(DIGEST_OUTPUT);
     const run = promote.run ?? "";

@@ -1,13 +1,10 @@
-# Deploys a release to production over SSH, after the owner's approval (2.30.0, issue #41), and to
-# staging through the reusable host.yml, without one (2.36.0, issue #62). The owner's decisions are
-# REQUIREMENTS.md "Approved SSH-deploy amendments (2026-09-26)" and "Approved pipeline amendments
-# (2026-09-29)"; docs/HOSTING.md has the flow and the outcomes, and docs/CI_CD.md the settings.
+# A new published release deploys to staging through host.yml and requests the owner's production
+# approval. Maintenance Publish runs stop before registry/environment checks or notifications.
+# AGENTS.md carries the owner/agent boundaries; docs/DEPLOYMENT.md describes the current flow.
 #
 #   plan            Public data only (no secret, no environment): the release, its image digest,
-#                   the image's signed build provenance, the diff and whether anything that runs on
-#                   the hosts changed. It writes the plan to the run summary and decides which
-#                   targets this run deploys, and what staging does. Docs-, test- and CI-only merges
-#                   end here, with a quiet Pushover message.
+#                   signed build provenance and changes since the previous published version.
+#                   It writes migration/host-side evidence to the summary and selects targets.
 #   deploy          The `production` environment: it waits for @deconfined's approval, and only
 #                   then do the deploy key and the host settings load. It opens one SSH connection,
 #                   whose forced command is ops/deploy.sh's Compose path on the host; the host
@@ -93,6 +90,7 @@ jobs:
       github.run_attempt == '1' && (
         (github.event_name == 'workflow_run'
          && github.event.workflow_run.conclusion == 'success'
+         && github.event.workflow_run.run_attempt == 1
          && github.event.workflow_run.event == 'push'
          && github.event.workflow_run.head_branch == 'main'
          && github.event.workflow_run.path == '.github/workflows/publish.yml'
@@ -104,7 +102,7 @@ jobs:
     # `gh attestation verify oci://…` resolve anonymously, and no job token is written to disk.
     permissions:
       contents: read # package.json, CHANGELOG.md, migrations/ and the compare API
-      actions: read # the environments' protection rules and branch policies
+      actions: read # completed publication jobs and environment protection/branch policies
       attestations: read # the image's build-provenance attestations, for gh attestation verify
     outputs:
       deploy: ${{ steps.plan.outputs.deploy }}
@@ -128,6 +126,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PUBLICATION_RUN: ${{ github.event.workflow_run.id }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_ROLLBACK: ${{ inputs.rollback }}
           INPUT_FROM: ${{ inputs.from }}
@@ -136,6 +135,7 @@ jobs:
           # Main's head when this run was created: staging's Configure applies site.yml from it.
           CONFIG_COMMIT: ${{ github.sha }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          RELEASE_PIPELINE_ENABLED: ${{ vars.RELEASE_PIPELINE_ENABLED }}
         run: |
           set -Eeuo pipefail
           export LC_ALL=C
@@ -148,11 +148,6 @@ jobs:
           # The first release whose own ops/ansible/bot.yml deploys staging (#62): staging's deploy,
           # bot and preflight take nothing older, since each release deploys with its own bot.yml.
           STAGING_MIN_RELEASE=2.36.0
-          # Paths that never change what runs on a host; every other path is a runtime change.
-          # ops/tofu/ reaches the hosts only through the Infrastructure workflow, and ansible-lint's
-          # pins feed only CI; ops/ansible/requirements.txt is staging's Ansible, so it counts.
-          NON_RUNTIME='^(docs/|site/|tests/|test-plans/|\.github/|[^/]+\.md$|docker-compose(\.devbot|\.tools|\.build)?\.yml$|\.env\.example$|production\.env\.example$|staging\.env\.example$|ops/tofu/|ops/ansible/requirements-lint\.txt$|biome\.json$)'
-          ALWAYS_RUNTIME='^\.github/workflows/publish\.yml$'
           # Files that run on a host, or shape its settings: on production's Docker host as a
           # docker-group user, which is root-equivalent there; on the staging host, Configure runs
           # ops/ansible/site.yml as root and the release's ops/ansible/bot.yml runs the bot as the
@@ -167,7 +162,6 @@ jobs:
           revision_of() { docker buildx imagetools inspect "$IMAGE:$1" --format '{{json .Image}}' | jq -er '."linux/amd64".config.Labels["org.opencontainers.image.revision"] | select(test("^[0-9a-f]{40}$"))'; }
           raw() { gh api -H 'Accept: application/vnd.github.raw+json' "repos/$R/contents/$1?ref=$2"; }
           older() { local -a a b; local i; IFS=. read -r -a a <<< "$1"; IFS=. read -r -a b <<< "$2"; for i in 0 1 2; do (( a[i] == b[i] )) && continue; (( a[i] < b[i] )); return; done; return 1; }
-          is_runtime() { [[ $1 =~ $ALWAYS_RUNTIME ]] || ! [[ $1 =~ $NON_RUNTIME ]]; }
           # GitHub's compare API lists at most 300 files and can't page past them, so a list of
           # 300 may be cut short. The plan claims nothing from such a list: it refuses, since the
           # approver couldn't see the host-side changes (the host would still decide migrations).
@@ -176,6 +170,32 @@ jobs:
             n=$(jq -e '.files | arrays | length' <<< "$1") || fail compare "The compare API's answer has no file list."
             (( n < 300 )) || fail compare-too-large "$2 changes 300 files or more, more than GitHub's compare API lists, so the plan can't show the host-side changes or check the migrations. Deploy by hand per docs/HOSTING.md."
           }
+
+          # Maintenance publication completes verification but skips this fixed, non-matrix job.
+          # Check its standard conclusion before touching images or environment/notify settings.
+          # A single complete page is enough for this fixed graph; never accept a truncated list.
+          if [[ $EVENT == workflow_run ]]; then
+            out notify false
+            [[ $PUBLICATION_RUN =~ ^[1-9][0-9]*$ ]] || fail publication "The publish run has no valid ID."
+            jobs=$(gh api "repos/$R/actions/runs/$PUBLICATION_RUN/attempts/1/jobs?per_page=100") || fail publication "The publication jobs could not be read."
+            published=$(jq -er '
+              if (.total_count | type == "number") and .total_count >= 0 and .total_count <= 100
+                and (.jobs | type == "array") and (.jobs | length) == .total_count
+              then [.jobs[] | select(.name == "Promote latest")]
+                | if length == 1 and .[0].status == "completed"
+                    and (.[0].conclusion == "success" or .[0].conclusion == "skipped")
+                  then .[0].conclusion else error("publication job") end
+              else error("incomplete jobs") end' <<< "$jobs") || fail publication "The publication job is missing, incomplete or unsuccessful."
+            if [[ $published == skipped ]]; then
+              out deploy false
+              out reason no-release
+              out production false
+              out staging false
+              out production_reason -
+              summary "## Deploy: no new release" "" "Publication verified a maintenance change and produced no release image."
+              exit 0
+            fi
+          fi
 
           # 1. The targets: an automatic run asks for both, a dispatch for the one it names.
           #    Production has a switch, DEPLOY_ENABLED: while it isn't exactly `true`, production is
@@ -199,6 +219,7 @@ jobs:
           PRODUCTION=false STAGING=false PRODUCTION_REASON=- target_notes=()
           # What staging does: an automatic run deploys, a staging dispatch names its action.
           STAGING_ACTION=deploy
+          RELEASE_PIPELINE_ENABLED=${RELEASE_PIPELINE_ENABLED-false}
           if [[ $EVENT == workflow_run ]]; then
             requested=(production staging)
           else
@@ -217,7 +238,9 @@ jobs:
           fi
           for target in "${requested[@]}"; do
             if [[ $target == staging ]]; then
-              STAGING=true
+              # The replacement orchestrator already deployed and accepted this automatic release
+              # inside publication. Do not deliver it twice. Explicit staging dispatch stays recovery.
+              if [[ $EVENT != workflow_run || $RELEASE_PIPELINE_ENABLED != true ]]; then STAGING=true; fi
             elif [[ $DEPLOY_ENABLED == true ]]; then
               PRODUCTION=true
             else
@@ -268,7 +291,7 @@ jobs:
           [[ $PRODUCTION == true || $STAGING == true ]] || fail gate "No requested target passed its environment's gate."
 
           # 3. A staging `configure` dispatch configures the host alone, from main's head: there is
-          #    no release, image or provenance to check, and no runtime rule.
+          #    no release, image or provenance to check.
           if [[ $STAGING_ACTION == configure ]]; then
             out production false
             out staging true
@@ -345,42 +368,28 @@ jobs:
             target_notes+=("**Staging is off in this run:** $V is older than $STAGING_MIN_RELEASE, the first release whose \`ops/ansible/bot.yml\` deploys staging.")
           fi
 
-          # 8. Automatic runs: did anything that runs on a host change in this merge?
+          # 8. Show the whole released range, including work merged before a version-only bump.
+          # The parent's version names the previous release; its published image gives that
+          # release's actual commit. Missing history refuses automation rather than hiding changes.
           host_files=() added=() previous=
           if [[ $EVENT == workflow_run ]]; then
             P=$(gh api "repos/$R/commits/$C" --jq '.parents[0].sha') || fail compare "The commits API didn't answer."
             [[ $P =~ ^[0-9a-f]{40}$ ]] || fail compare "$C has no parent to compare with."
-            previous=$(raw package.json "$P" | jq -r .version || true)
-            cmp=$(gh api "repos/$R/compare/$P...$C") || fail compare "The compare API didn't answer."
-            listed "$cmp" "This merge"
-            runtime=false
-            while IFS= read -r f; do
-              [[ -n $f ]] || continue
-              if [[ $f == package.json ]]; then
-                # Only the version line may change for package.json to count as non-runtime. A
-                # missing patch (too large to show) reads as "?", which counts as a runtime change.
-                patch=$(jq -r '.files[] | select(.filename == "package.json") | .patch // "?"' <<< "$cmp")
-                if grep -E '^[-+?]' <<< "$patch" | grep -vqE '^[-+][[:space:]]*"version":'; then runtime=true; fi
-              elif is_runtime "$f"; then
-                runtime=true
-              fi
-              if [[ $f =~ $HOST_SIDE ]]; then host_files+=("$f"); fi
-            done < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$cmp")
-            # 9. An applied migration never changes; added files are listed.
-            changed=$(jq -r '.files[] | select((.filename | startswith("migrations/")) or ((.previous_filename // "") | startswith("migrations/"))) | select(.status != "added") | .filename' <<< "$cmp")
-            [[ -z $changed ]] || fail applied-migration-changed "This merge edits, renames or removes an applied migration: $(tr -c 'A-Za-z0-9._/-' ' ' <<< "$changed")"
-            mapfile -t added < <(jq -r '.files[] | select(.status == "added" and (.filename | startswith("migrations/"))) | .filename' <<< "$cmp")
-            if [[ $runtime == false ]]; then
-              out deploy false
-              out reason no-runtime-change
-              out production false
-              out staging false
-              out production_reason "$PRODUCTION_REASON"
-              summary "## Deploy $V: nothing to deploy" "" \
-                "This merge ([$P...$C](https://github.com/$R/compare/$P...$C)) changes nothing that runs on the hosts (documentation, tests, CI or the version only), so nothing deploys and no approval is requested." \
-                "If an earlier release wasn't deployed, run **Deploy** with the newest version." "" "$provenance"
-              exit 0
+            previous=$(raw package.json "$P" | jq -er .version) || fail previous-release "The previous release version could not be read."
+            if ! [[ $previous =~ $VER ]] || ! older "$previous" "$V"; then
+              fail previous-release "The parent must name an older plain release version."
             fi
+            BASE=$(revision_of "$previous") || fail previous-release "The previous release image is unavailable; use an owner-authorized manual deployment."
+            [[ $BASE =~ ^[0-9a-f]{40}$ ]] || fail previous-release "The previous release image has no valid commit."
+            [[ $(raw package.json "$BASE" | jq -r .version || true) == "$previous" ]] || fail previous-release "The previous image commit does not match its version."
+            cmp=$(gh api "repos/$R/compare/$BASE...$C") || fail compare "The compare API didn't answer."
+            [[ $(jq -r .status <<< "$cmp") == ahead ]] || fail compare "The release must descend from the previous published version."
+            listed "$cmp" "This release"
+            mapfile -t host_files < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$cmp" | grep -E "$HOST_SIDE" || true)
+            # Applied migrations remain immutable throughout the accumulated released range.
+            changed=$(jq -r '.files[] | select((.filename | startswith("migrations/")) or ((.previous_filename // "") | startswith("migrations/"))) | select(.status != "added") | .filename' <<< "$cmp")
+            [[ -z $changed ]] || fail applied-migration-changed "This release edits, renames or removes an applied migration: $(tr -c 'A-Za-z0-9._/-' ' ' <<< "$changed")"
+            mapfile -t added < <(jq -r '.files[] | select(.status == "added" and (.filename | startswith("migrations/"))) | .filename' <<< "$cmp")
           elif [[ $ACTION == rollback ]]; then
             mapfile -t host_files < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$back" | grep -E "$HOST_SIDE" || true)
           fi
@@ -388,7 +397,7 @@ jobs:
           newest=$(gh api "repos/$R/contents/migrations?ref=$C" --jq '[.[].name | select(test("^[0-9]{3}_[a-z0-9_]+\\.sql$"))] | sort | last // "none"') || newest=unknown
           out schema_head "$newest"
 
-          # 10. The plan, public data only.
+          # 9. The plan, public data only.
           if [[ $ACTION == rollback ]]; then
             summary "## Roll back from $FROM to $V" ""
           else
@@ -398,7 +407,10 @@ jobs:
             "| Version | \`$V\` |" \
             "| Commit | [\`${C:0:12}\`](https://github.com/$R/commit/$C) |" \
             "| Image | \`$IMAGE@$D\` |"
-          if [[ -n $previous ]]; then summary "| Previous release on main | \`$previous\` |"; fi
+          if [[ -n $previous ]]; then
+            summary "| Previous published release | \`$previous\` |" \
+              "| Released changes | [\`${BASE:0:12}...${C:0:12}\`](https://github.com/$R/compare/$BASE...$C) |"
+          fi
           summary "| Newest migration at this commit | \`$newest\` |" ""
           if [[ $PRODUCTION == true && $STAGING == true ]]; then
             summary "**Targets:** production, once @$REVIEWER approves it, and staging, which deploys at once beside the approval request, without one."
@@ -410,20 +422,20 @@ jobs:
           summary "${target_notes[@]}" "" "$provenance" ""
           if [[ $EVENT == workflow_run ]]; then
             if (( ${#added[@]} )); then
-              summary "**Migration files added in this merge:** ${added[*]}"
+              summary "**Migration files added in this release:** ${added[*]}"
             else
-              summary "**Migration files added in this merge:** none"
+              summary "**Migration files added in this release:** none"
             fi
           fi
           summary "If a host is older than the previous release, earlier migrations are included too; each host decides from what is live there." ""
-          # An automatic run can only list this merge's host-side changes, and a dispatch none: each
+          # An automatic run lists this release's host-side changes, and a dispatch none: each
           # host deploys from whatever is live, so both point at the files' history up to C.
           history="[\`ops/\`](https://github.com/$R/commits/$C/ops), [\`docker-compose.production.yml\`](https://github.com/$R/commits/$C/docker-compose.production.yml) and [\`production.env.example\`](https://github.com/$R/commits/$C/production.env.example)"
           label=
           if [[ $ACTION == rollback ]]; then
             label="**Host-side differences between $V and $FROM**"
           elif [[ $EVENT == workflow_run ]]; then
-            label="**Host-side changes in this merge**"
+            label="**Host-side changes in this release**"
           fi
           if [[ -n $label ]] && (( ${#host_files[@]} )); then
             summary "$label ($HOST_RUN):"
@@ -485,7 +497,7 @@ jobs:
             summary "<details><summary>Changelog</summary>" "" "$notes" "" "</details>"
           fi
 
-          # 11. Outputs for the deploy jobs.
+          # 10. Outputs for the deploy jobs.
           out production "$PRODUCTION"
           out staging "$STAGING"
           out production_reason "$PRODUCTION_REASON"

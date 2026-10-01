@@ -148,6 +148,146 @@ variable "database_ids" {
   }
 }
 
+# Existing clusters are opt-in adoption inputs, never inferred settings for a new database.
+# Pinned Linode v4.5.0 schema: databasepostgresqlv2/framework_resource_schema.go at
+# c77ffd4d69cde96fb01b9bf83f6506e5cab957a4. SSL and encryption are computed assertions;
+# allow_list remains exclusively owned by linode_database_access_controls.db.
+variable "existing_databases" {
+  description = "Private recorded settings of existing clusters to import, keyed by database_ids; empty preserves access-list-only management."
+  type = map(object({
+    label                   = string
+    engine_id               = string
+    region                  = string
+    type                    = string
+    cluster_size            = number
+    suspended               = bool
+    expected_encrypted      = bool
+    expected_ssl_connection = bool
+    updates = object({
+      day_of_week = number
+      duration    = number
+      frequency   = string
+      hour_of_day = number
+    })
+    # Require an explicit null for a cluster outside a private network; no inferred network.
+    private_network = object({
+      vpc_id        = number
+      subnet_id     = number
+      public_access = bool
+    })
+    # Every supported Optional+Computed engine setting is nullable. Omission converts to null,
+    # preserving provider-imported values; the owner still records all current configured overrides.
+    engine_config = object({
+      engine_config_pg_autovacuum_analyze_scale_factor          = optional(number)
+      engine_config_pg_autovacuum_analyze_threshold             = optional(number)
+      engine_config_pg_autovacuum_max_workers                   = optional(number)
+      engine_config_pg_autovacuum_naptime                       = optional(number)
+      engine_config_pg_autovacuum_vacuum_cost_delay             = optional(number)
+      engine_config_pg_autovacuum_vacuum_cost_limit             = optional(number)
+      engine_config_pg_autovacuum_vacuum_scale_factor           = optional(number)
+      engine_config_pg_autovacuum_vacuum_threshold              = optional(number)
+      engine_config_pg_bgwriter_delay                           = optional(number)
+      engine_config_pg_bgwriter_flush_after                     = optional(number)
+      engine_config_pg_bgwriter_lru_maxpages                    = optional(number)
+      engine_config_pg_bgwriter_lru_multiplier                  = optional(number)
+      engine_config_pg_deadlock_timeout                         = optional(number)
+      engine_config_pg_default_toast_compression                = optional(string)
+      engine_config_pg_idle_in_transaction_session_timeout      = optional(number)
+      engine_config_pg_jit                                      = optional(bool)
+      engine_config_pg_max_files_per_process                    = optional(number)
+      engine_config_pg_max_locks_per_transaction                = optional(number)
+      engine_config_pg_max_logical_replication_workers          = optional(number)
+      engine_config_pg_max_parallel_workers                     = optional(number)
+      engine_config_pg_max_parallel_workers_per_gather          = optional(number)
+      engine_config_pg_max_pred_locks_per_transaction           = optional(number)
+      engine_config_pg_max_replication_slots                    = optional(number)
+      engine_config_pg_max_slot_wal_keep_size                   = optional(number)
+      engine_config_pg_max_stack_depth                          = optional(number)
+      engine_config_pg_max_standby_archive_delay                = optional(number)
+      engine_config_pg_max_standby_streaming_delay              = optional(number)
+      engine_config_pg_max_wal_senders                          = optional(number)
+      engine_config_pg_max_worker_processes                     = optional(number)
+      engine_config_pg_password_encryption                      = optional(string)
+      engine_config_pg_pg_partman_bgw_interval                  = optional(number)
+      engine_config_pg_pg_partman_bgw_role                      = optional(string)
+      engine_config_pg_pg_stat_monitor_pgsm_enable_query_plan   = optional(bool)
+      engine_config_pg_pg_stat_monitor_pgsm_max_buckets         = optional(number)
+      engine_config_pg_pg_stat_statements_track                 = optional(string)
+      engine_config_pg_temp_file_limit                          = optional(number)
+      engine_config_pg_timezone                                 = optional(string)
+      engine_config_pg_track_activity_query_size                = optional(number)
+      engine_config_pg_track_commit_timestamp                   = optional(string)
+      engine_config_pg_track_functions                          = optional(string)
+      engine_config_pg_track_io_timing                          = optional(string)
+      engine_config_pg_wal_sender_timeout                       = optional(number)
+      engine_config_pg_wal_writer_delay                         = optional(number)
+      engine_config_pg_stat_monitor_enable                      = optional(bool)
+      engine_config_pglookout_max_failover_replication_time_lag = optional(number)
+      engine_config_shared_buffers_percentage                   = optional(number)
+      engine_config_work_mem                                    = optional(number)
+    })
+  }))
+  default   = {}
+  nullable  = false
+  sensitive = true
+
+  validation {
+    condition = alltrue([
+      for k, d in var.existing_databases : can(regex("^[a-z]{1,16}$", k)) && contains(keys(var.database_ids), k)
+    ])
+    error_message = "Every existing_databases key must be a public-safe database_ids key."
+  }
+
+  validation {
+    condition = length(distinct([
+      for k in keys(var.existing_databases) : try(var.database_ids[k], "")
+    ])) == length(var.existing_databases)
+    error_message = "Existing database adoption keys must refer to distinct clusters."
+  }
+
+  validation {
+    condition = alltrue([
+      for d in values(var.existing_databases) : try(
+        d != null && length(trimspace(d.label)) > 0
+        && can(regex("^postgresql/[0-9][0-9A-Za-z._-]*$", d.engine_id))
+        && length(trimspace(d.region)) > 0 && length(trimspace(d.type)) > 0
+        && d.cluster_size >= 1 && floor(d.cluster_size) == d.cluster_size
+        && d.suspended != null && d.expected_encrypted != null && d.expected_ssl_connection != null
+        && d.engine_config != null,
+        false
+      )
+    ])
+    error_message = "Existing clusters require explicit nonempty identity/settings, an integral positive cluster_size, suspension/security observations and an engine_config object."
+  }
+
+  validation {
+    condition = alltrue([
+      for d in values(var.existing_databases) : try(
+        d.updates.day_of_week >= 1 && d.updates.day_of_week <= 7 && floor(d.updates.day_of_week) == d.updates.day_of_week
+        && d.updates.duration > 0 && floor(d.updates.duration) == d.updates.duration
+        && d.updates.frequency == "weekly"
+        && d.updates.hour_of_day >= 0 && d.updates.hour_of_day <= 23 && floor(d.updates.hour_of_day) == d.updates.hour_of_day,
+        false
+      )
+    ])
+    error_message = "Existing clusters require an explicit weekly maintenance window with day 1-7, an integral positive duration and hour 0-23."
+  }
+
+  validation {
+    condition = alltrue([
+      for d in values(var.existing_databases) : try(
+        d.private_network == null ? true : (
+          d.private_network.vpc_id > 0 && floor(d.private_network.vpc_id) == d.private_network.vpc_id
+          && d.private_network.subnet_id > 0 && floor(d.private_network.subnet_id) == d.private_network.subnet_id
+          && d.private_network.public_access != null
+        ),
+        false
+      )
+    ])
+    error_message = "Every recorded private_network must be explicitly null or hold positive integral VPC/subnet IDs and an explicit public_access flag."
+  }
+}
+
 variable "db_allow_extra" {
   description = "Access-list entries that aren't OpenTofu hosts, in the CIDR form the Linode API stores (198.51.100.10/32)."
   type        = list(string)

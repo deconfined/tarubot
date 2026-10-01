@@ -10,6 +10,9 @@ on:
       version:
         description: Validated application SemVer
         value: ${{ jobs.checks.outputs.version }}
+      release:
+        description: Version strictly increased from the known PR or push base
+        value: ${{ jobs.checks.outputs.release }}
 
 permissions:
   contents: read
@@ -26,6 +29,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     services:
       postgres:
         image: postgres:18.4-alpine
@@ -125,10 +129,9 @@ jobs:
           TARUBOT_IMAGE_TAG=0.0.0 DATABASE_URL=postgresql://tarubot:x@db.example:27520/tarubot \
             DATABASE_CA_CERT=x DISCORD_TOKEN=x \
             docker compose --env-file /dev/null -f docker-compose.production.yml config --quiet
-      # Last, so dependency-update pull requests report every other step of this job before a
-      # maintainer adds the required version increment; the job, the container builds that depend
-      # on it, and CI result still fail without it.
-      - name: Validate version and changelog
+      # Maintenance passes all checks without a release bump. Only a known version increase
+      # declares a release; manual verification has no predecessor and never infers one.
+      - name: Validate version and release metadata
         id: version
         env:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
@@ -196,6 +199,7 @@ jobs:
           # With the example inventory and host settings, so both examples parse too.
           ansible-playbook --syntax-check -i inventory.example.yml -e @host.example.yml site.yml
           ansible-playbook --syntax-check -i inventory.example.yml bot.yml
+          ansible-playbook --syntax-check -i inventory.example.yml accept.yml
           # ansible-lint runs its own syntax check without an inventory, which ansible.cfg's
           # unparsed_is_failed would refuse; the setting stays on for real runs.
           ANSIBLE_INVENTORY_UNPARSED_FAILED=False ansible-lint --offline --project-dir .
@@ -203,6 +207,15 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
+      - name: Check acceptance refusals with Ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ops/ansible/ansible.cfg
+          LC_ALL: C.UTF-8
+        run: |
+          # Exercise the actual Jinja assertions with invented container/backup results only.
+          # The generated localhost play contains no host, service, database or Discord commands.
+          bun tests/fixtures/acceptance-checks.ts "$RUNNER_TEMP/acceptance-checks.yml"
+          ansible-playbook -i localhost, "$RUNNER_TEMP/acceptance-checks.yml"
       - name: Render the bot's templates with the test renderer
         run: |
           # bot-render.ts needs no dependencies (it imports only from bun and node:), so this job

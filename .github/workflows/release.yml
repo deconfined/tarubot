@@ -1,0 +1,105 @@
+# Replacement release orchestrator. Publisher calls it only after scan/signature success.
+# No provider/host credential reaches admission, and production's frozen delivery stays separate.
+name: Release pipeline
+on:
+  workflow_call:
+    inputs:
+      version: {type: string, required: true}
+      commit: {type: string, required: true}
+      digest: {type: string, required: true}
+      publication_run: {type: string, required: true}
+    outputs:
+      accepted:
+        value: ${{ jobs.complete.outputs.accepted }}
+permissions: {}
+jobs:
+  identity:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+      digest: ${{ steps.identity.outputs.digest }}
+      publication_run: ${{ steps.identity.outputs.publication_run }}
+      schema_head: ${{ steps.identity.outputs.schema_head }}
+    steps:
+      - name: Refuse incomplete pipeline activation
+        run: |
+          # Intentional code-level fence, not an owner-variable override. Remove only with the
+          # reviewed backend, host and staging acceptance, before enabling automatic delivery.
+          echo '::error::Replacement release acceptance is incomplete; activation is blocked before credentials load.'
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with: {bun-version-file: package.json}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DIGEST: ${{ inputs.digest }}
+          PUBLICATION_RUN: ${{ inputs.publication_run }}
+        run: bun scripts/release-admission.ts
+      - name: Remove private admission output
+        if: always()
+        run: rm -rf -- "${RUNNER_TEMP:?}/release-admission"
+  infrastructure:
+    needs: identity
+    uses: ./.github/workflows/release-infra.yml
+    permissions: {contents: read}
+    secrets: inherit
+    with:
+      version: ${{ needs.identity.outputs.version }}
+      commit: ${{ needs.identity.outputs.commit }}
+      digest: ${{ needs.identity.outputs.digest }}
+      publication_run: ${{ needs.identity.outputs.publication_run }}
+      schema_head: ${{ needs.identity.outputs.schema_head }}
+  staging:
+    needs: [identity, infrastructure]
+    if: needs.infrastructure.outputs.verified == 'true'
+    uses: ./.github/workflows/host.yml
+    permissions: {contents: read}
+    secrets: inherit
+    with:
+      target: staging
+      action: deploy
+      version: ${{ needs.identity.outputs.version }}
+      commit: ${{ needs.identity.outputs.commit }}
+      digest: ${{ needs.identity.outputs.digest }}
+      config_commit: ${{ needs.identity.outputs.commit }}
+      schema_head: ${{ needs.identity.outputs.schema_head }}
+      publication_run: ${{ needs.identity.outputs.publication_run }}
+      accept_release: true
+  complete:
+    needs: [identity, infrastructure, staging]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      accepted: ${{ steps.complete.outputs.accepted }}
+    steps:
+      - id: complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDENTITY_RESULT: ${{ needs.identity.result }}
+          INFRA_RESULT: ${{ needs.infrastructure.result }}
+          STAGING_RESULT: ${{ needs.staging.result }}
+          INFRA_VERIFIED: ${{ needs.infrastructure.outputs.verified }}
+          STAGING_ACCEPTED: ${{ needs.staging.outputs.accepted }}
+          COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -Eeuo pipefail
+          [[ $IDENTITY_RESULT == success && $INFRA_RESULT == success && $STAGING_RESULT == success ]]
+          [[ $INFRA_VERIFIED == true && $STAGING_ACCEPTED == true ]]
+          [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]
+          current=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          [[ $current == "$COMMIT" ]]
+          echo 'accepted=true' >> "$GITHUB_OUTPUT"

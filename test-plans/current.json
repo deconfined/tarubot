@@ -1,16 +1,16 @@
 {
-  "title": "Session: 2.36.0 the simple pipeline",
-  "objective": "2.36.0 (#62) moves staging onto the simple pipeline: OpenTofu builds the VM, cloud-init sets its keys, Ansible from a GitHub runner configures it and deploys the bot, and GitHub environments hold the secrets. There is no bot change and no migration; production keeps its Compose path.",
+  "title": "Session: 2.36.41 documentation cleanup",
+  "objective": "Verify that contributor documentation reflects the agreed threat model, retains current operating procedures and links, and removes duplicate history and unnecessary design detail.",
   "user": [
-    "Before merging: delete STAGING_DEPLOY_ENABLED and staging's old deploy key and variables; retire the old staging host.",
-    "After merging: create the infra-plan and infra environments, run the import-only apply, build staging, pin its host key, then configure and preflight it."
+    "Review the reduced documentation and agreed threat model.",
+    "Keep remaining work and manual acceptance evidence in issues and PRs."
   ],
   "assistant": [
-    "Build DevBot at 2.36.0 (no migration, no bot change), register the guild commands, and confirm 21 roots and 47 paths.",
-    "Read the staging runs' logs (read-only), grep them for names, addresses and secrets, and record the verification."
+    "Check documentation links, version metadata and affected documentation contracts.",
+    "Keep engineering paused; make no live bot, host, database, environment or provider changes."
   ],
   "bot": [
-    "Run 2.35.0 in production until the 2.36.0 deploy; nothing changes for members.",
-    "Post this responsibility-separated session plan in #chat."
+    "If an owner-authorized development restart uses this release, post this responsibility-separated plan.",
+    "Continue existing behavior; this documentation cleanup introduces no runtime change."
   ]
 }

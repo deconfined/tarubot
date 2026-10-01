@@ -1,12 +1,252 @@
 # Version history
 
-The current application version is **2.36.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.41**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
 
-## 2.36.2 - Remove custom CodeQL pipeline.
+## 2.36.41 — Simplify documentation around the agreed threat model
 
-## 2.36.1 - Remove Claude Code from the pipeline.
+- Adopt the agreed threat model: realistic Discord-bot risks, minimal complexity and standard components.
+- Remove pipeline implementation diaries, obsolete designs, duplicated history and the archive index. Keep current procedures, development invariants and outstanding acceptance in focused references.
+- Align navigation and documentation checks; preserve deployment approvals and the current production path. Engineering remains paused.
 
-Opting for a different code review platform.
+## 2.36.40 — Qualify target descriptor history
+
+- Add a one-way handoff from the authenticated target-content consumer to immutable historical data. Retain the original content, receipt, source execution and issuance evidence while permanently retiring the temporary read proofs.
+- Preserve original content and statement expiry, exact encrypted path and readback commitments. Historical token times remain attribution evidence; qualified data supplies no current host, command or deployment authority.
+- Keep the protected runtime and workflow activation fenced while enrollment, journal qualification and a practical fresh-per-command authority model remain pending.
+
+## 2.36.39 — Bind a protected denial controller
+
+- Add closed native preparation and execution entrypoints that bind immutable runner event bytes, separately evaluated inputs and authenticated Git object closures. A distinct signed preparation record transports data across steps; its lifetime confers no command authority.
+- Bind each actual registered worker request to a fresh current execution proof and a one-use denial grant under the original short deadline. The fixed consumer sends a denial and cleans up its owned controller resources; this purpose cannot authorize a future SSH operation.
+- Require the owner-confirmed immutable OIDC subject format with numeric owner and repository IDs. Keep the unfinished workflow graph fenced before mint or driver release; actual destination authority, protected enrollment and durable reboot integration remain pending.
+
+## 2.36.38 — Measure a local paused host controller
+
+- Add a deterministic controller recipe using pinned public Python image layers and a closed wheel set. Independently derive the complete root filesystem and execution configuration, then compare the actual built image before issuing an opaque artifact capability.
+- Prepare and inspect an owned native controller child under fixed engine options, import roots and phase mounts. Keep the driver paused before play parsing; registered workers require native credentials, live pidfds and a private fork barrier.
+- Expose build, prepare, inspect and stop only. Declarations and inspection data confer no command authority; protected event, evaluated-input and real destination integration remain pending, with release activation fenced.
+
+## 2.36.37 — Retain original host exchange deadlines
+
+- Count synchronous current-host work and private stream reflection from before their hooks. Retain every shorter original deadline through method binding, stream locking, native reads/writes, result copying and held acknowledgements. Retain returned stream locks before post-method refusal so cleanup can cancel and release them.
+- Shorten owned timers immediately and refuse saved-bound expiry before another callback or byte offer. Invalid native Promise clocks drain without reading caller then getters; original framing, backpressure and uncertain terminal behavior remain covered.
+- Allow the same host proof's pure assertions during bounded public synchronous work; nested verification, another work operation and assertions from reserved factory hooks still refuse. Preserve 16 authority GETs, staging-only phase evidence and the release activation fence.
+
+## 2.36.36 — Retain original transport deadlines
+
+- Retain every shorter observed wall and physical deadline through SSH preparation, native enrollment reads, DNS validation and authenticated target storage. Synchronous callback work counts from before its hooks, and held native waits immediately inherit tighter bounds.
+- Restrict the same storage consumer operation before historical issuance verification to a retained 30-second read allowance before the verifier starts. Preserve the original overall and external limits, exact routes, bytes and proof identities without renewing the historical verifier.
+- Preserve DNS total/query limits, genuine native and legacy enrollment request counts, and accepted SSH commands' separate lifetime. These offline fixes add no host authority or workflow activation.
+
+## 2.36.35 — Retain shortened journal deadlines
+
+- Retain every shorter observed deadline across the same original owner and consumer operation, including prepared and sealed terminal reads. Clock and refusal work count before the next callback or native offer.
+- Shorten held waits and idle timers when the original allowance shrinks; check saved bounds before result delivery even when synchronous work delays timer execution. Expiry permanently refuses without renewing evidence.
+- Preserve original tickets, full repair comparisons, request counts and fixed error contracts. These fixes add no host or workflow authority; release activation remains fenced.
+
+## 2.36.34 — Verify current staging host phases
+
+- Add separate native, read-only evidence for preparation and execution phases of the future protected staging host job. Exact repository, run, reusable sources, job and check-run identities are reopened with current main and target-gate settings.
+- Keep capture, requests, waits and result copying inside one original 30-second wall and physical window. Invalid evidence, nested entry and late work permanently refuse; final remaining time and native offers retain the original bounds.
+- Refuse production and today's unfinished graph. Phase evidence grants no commands and proves neither evaluated inputs nor private event or controller origin; protected grant integration and release activation remain pending.
+
+## 2.36.33 — Retain terminal journal read scope
+
+- Add a separate opaque preparation that retains the original native owner and repair proof while withholding bounded journal data. Its read facade retires at preparation completion.
+- Seal once through a fresh full comparison of the same original evidence; retain pure refusal and remaining-time checks without new reads or expiry renewal. Copied, nested, expired and abandoned preparations permanently refuse.
+- Preserve ordinary journal methods and their closing behavior. This primitive grants no host-command or write authority; protected current-job and private execution-grant integration remain pending.
+
+## 2.36.32 — Count local DNS preparation time
+
+- Count input, clock, runtime measurement and private copying in one original DNS preparation window. Per-call refusal and remaining-time callbacks can only deny or shorten that window.
+- Capture native arguments, environment and process binding before the final check; cap resolver execution by both its 22-second limit and the original remaining time. Late responses, invalid bytes, nested entry and cleanup failure refuse delivery.
+- Verify native timeout behavior with a harmless local child and invented resolver responses. Measured DNS evidence remains data; protected native host composition and release activation remain pending.
+
+## 2.36.31 — Retain SSH preparation refusal
+
+- Count dependency, input, path and stream-channel capture in the original SSH preparation deadline, and carry synchronous refusal through scheduled trust reads and the actual native spawn.
+- Retain the original proof expiry without renewal; capture native arguments, environment and methods before the final check. Conflicting stream calls permanently fence the exchange and detach its pipes.
+- Give an accepted command its own bounded physical timer. Native descriptor, owner, enrollment and DNS composition remains pending; these transport fixes grant no host authority or activation.
+
+## 2.36.30 — Bound ordinary journal owner checks
+
+- Retain one native owner and completed-repair proof across each ordinary journal method under its original wall/physical deadline. Intermediate reads use that proof; each write and final result require a fresh full comparison without renewing it.
+- Bind the private store facade to its actual owner and backend, retain exact repair-run observations, and permanently refuse nested, expired or abandoned operations.
+- Reduce repeated owner GETs within ordinary methods. Trust publication and deferred target projection retain their existing per-object checks; native host/provider integration and activation remain pending.
+
+## 2.36.29 — Integrate the owner’s CodeQL workflow cleanup
+
+- Merge main’s removal of the custom CodeQL workflow from PR #67 and align CI documentation with the repository’s GitHub default setup.
+- Preserve the verified pipeline components, release activation fence and existing deployment approval boundaries.
+
+## 2.36.28 — Bind native enrollment execution evidence
+
+- Retain a private original proof of the exact successful owner-approved enrollment run, repository, target environment and completed job/critical step under one wall/physical observation budget.
+- Carry synchronous refusal through native requests, responses and parsing; copied proofs, nested refusal and abandoned reads cannot authorize later offers.
+- Preserve the legacy enrollment/recovery receipt while counting capture and physical time in its original read window. Host integration and request-volume work remain pending; release activation stays fenced.
+
+## 2.36.27 — Retain control-read refusal boundaries
+
+- Carry the original preparation, writer and consumer refusal through ordinary journal reads and completed-repair metadata reads, including native request and stream callbacks.
+- Count synchronous capture and byte copying in the original operation window; expired, nested or abandoned work permanently refuses later offers and cannot turn refusal into object absence.
+- Capture native write methods before the final refusal check so a method getter cannot start a late write. Existing request volume and provisioning prerequisites remain; release activation stays fenced.
+
+## 2.36.26 — Native target issuance adapters
+
+- Add a separate current-issuer verifier that retains successful original-writer and source-projection evidence while the exact sealing job is running.
+- Bound one runner OIDC request and current-key signature validation under the original mint deadline, with exact release, audience and job bindings.
+- Compose private pending candidates with v2 content/bootstrap persistence under the original proof and immutable candidate expiry. Workflow and host integration remain pending; release activation stays fenced.
+
+## 2.36.25 — Integrate the owner’s review workflow removal
+
+- Merge main’s removal of the Claude Code review and interactive workflows and their dependent tests from PR #66.
+- Update active CI documentation and suggestion comments while retaining public-text cleaning, deployment approval rules and verified pipeline components.
+
+## 2.36.24 — Private pending target projection
+
+- Derive minimized pending target candidates inside the infrastructure journal from exact linked records and matching plan, show and both raw-state readbacks. No-change projection retains the original successful writer proof; Apply projection uses its native current ticket and grants no ordinary baseline authority.
+- Encrypt candidates with dedicated per-target keys into exclusive private local files under one original preparation deadline and immutable expiry. Copied tickets and declarations cannot recreate the native projection capability.
+- Carry preparation refusal into each native writer-verification read so delayed responses cannot start more reads after the original deadline.
+- Preserve the automatic path's existing state-pull/show ordering. Candidate files still need protected producer transport, final source and writer evidence, token minting and workflow integration; activation remains fenced.
+
+## 2.36.23 — Private v2 applied-target transport
+
+- Add separate per-target content and bootstrap encryption, immutable content paths and a bootstrap location derived from the expected release identity.
+- Retain one original publication deadline across content sealing and bootstrap persistence; uncertain writes and abandoned publications stop further use. Read-only consumers verify actual historical issuance and reopen the same private bytes under the original proof.
+- Bind authenticated consumer results to opaque in-process identities and exercise invented crypto, GitHub and storage responses. Token minting, producer workflow wiring and host authorization remain pending.
+- Allow normal file-sync latency in the controller fetch success fixture while retaining the short deadline for its explicit late-sync refusal.
+
+## 2.36.22 — Historical target issuance evidence
+
+- Define a separate v2 content receipt and immutable issuance statement, with exact private-content, source-projection, issuer-job and release bindings and an absolute lifetime of at most 24 hours.
+- Verify historical GitHub signatures against current official keys and fresh native job evidence, preserving the original observation deadline across nested reads. Local mint-window helpers permit one attempt without redating the statement.
+- Add invented RSA and GitHub fixtures for expiry, tampering, job contradictions, opaque proof forgery and abandoned reads. Private content storage, token minting and the proposed projection/sealing workflow remain pending.
+
+## 2.36.21 — Guarded Ansible connection fixtures
+
+- Add a first-party connection plugin and a private parent-owned framing coordinator for local controller fixtures, with one-use operation allocation and uncertainty fencing across worker resets.
+- Gate pipelined input on the exact passwordless sudo success marker and carry command/file channels through bounded framing. Keep controller output private and file-fetch completion conditional on a complete known result.
+- Exercise the pinned controller with invented handlers and a target-only fixture launcher. Actual descriptor, journal, SSH and durable reboot integration remain pending; no operational transport or host authority is created by these fixtures.
+
+## 2.36.20 — Original baseline execution evidence
+
+- Require fresh evidence that the original infrastructure writer job succeeded before reusing a completed baseline, including when its final pointer persisted but acknowledgement failed.
+- Bind a native private execution proof to the exact original run and reopen the same encrypted journal records before returning. Finish validates structural links privately while its writer job is still running; ordinary readers cannot bypass the execution check.
+- Capture the real reader in the owner-guarded factory and establish exact reusable Plan/Apply job names. Public workflow evidence proves execution under the trusted journal-writer contract; it does not attest private state hashes or authorize activation.
+
+## 2.36.19 — Private host bridge framing
+
+- Add bounded binary framing for one future command or file-transfer exchange, with exact operation nonce, directional sequence, private channel identity, strict metadata and ordered backpressure.
+- Require complete request delivery and clean response EOF before exposing a known remote result. Uncertain outcomes immediately fence ordinary I/O; only an already reserved uncertain terminal may flush under the original deadline.
+- Keep SSH authorization, the Ansible plugin, launcher and operational integration separate. Frames cannot supply a descriptor, key, approval or transport proof; no host is contacted by these stream fixtures.
+
+## 2.36.18 — Mandatory owner-guarded journal factories
+
+- Construct ordinary infrastructure and per-target trust journals only through private scoped storage and the independent current owner boundary. Expose a frozen journal, with no raw storage, key, approval override or repair capability.
+- Integrate the default infrastructure CLI factory and all seven workflow entry points with explicit masked owner configuration and a separate read-only GitHub credential. Preserve historical encryption identity and the disabled-control early return.
+- Keep owner provisioning, remaining trust/host integration and activation pending. Completed-repair checks still have substantial request volume and need a separately reviewed bounded integration; these declarations create no credentials or environment settings.
+
+## 2.36.17 — Reviewed scanner exceptions
+
+- Authenticate each pinned Trivy JSON report to its exact runtime child digest and platform before evaluating fixed high/critical findings. Remote-only scanning, bounded strict parsing and every execution error remain mandatory gates.
+- Add an empty source policy for reviewed exceptions with exact finding identity, reason, issue and at most 30 days of validity. OS identity authenticates the full digest-bearing target before projecting exact family/base version and extended-support status; package paths remain literal.
+- Recheck expiry after both scans and immediately before signing or latest promotion, requiring more remaining life than each bounded write job can consume. Keep ignore/config overrides disabled and scanner output private.
+
+## 2.36.16 — Fresh streaming SSH transport
+
+- Add bounded private streaming SSH with backpressure, independent input/output channels and known remote exit status for future Ansible integration. Every exchange obtains fresh durable enrollment and local DNSSEC authority; uncertain transport permanently fences its instance and grants no retry.
+- Bound proof preparation with wall and physical deadlines, then recheck private paths, durable-key pin and original proof expiry immediately before one isolated SSH start.
+- Keep the Ansible plugin, launcher and operational workflow integration pending. Offline subprocess fixtures authenticate to no host; frozen production delivery and release activation remain unchanged.
+
+## 2.36.15 — Independent owner configuration for control consumers
+
+- Read fresh owner configuration independently of object storage, pin repository/environment identity and bind completed repair metadata to the exact private intent and approved final recovery run. Reject missing, contradictory, changed or expired boundaries; expose no repair capability.
+- Count freshness from before the first request, including physical elapsed time with a frozen wall clock. Exercise real encrypted completed histories in all three control scopes.
+- Keep normal factory/workflow integration and activation pending. Owner-only configuration administration and request-volume acceptance remain required; no environment or live journal is changed.
+
+## 2.36.14 — GitHub-signed private descriptor receipts
+
+- Authenticate private sealing receipts with GitHub RS256 signatures and an exact receipt/job audience, reviewed subjects and bounded signed expiry. Bind actual repository and check-run identities independently of Actions job IDs; require successful producer-job evidence separately.
+- Keep automatic Apply isolated to the proposed `infra-auto` scope. Preserve the owner-reviewed Infrastructure environment and refuse its tokens as automatic release authority.
+- Keep private token transport, owner-anchor/host workflow integration and activation pending. No token is minted, owner gate changed or live operation performed by these offline checks.
+
+## 2.36.13 — Scoped descriptor transport
+
+- Add a descriptor-only private store and separate sealing/consumption factories, bound to each target's immutable path, physical routing and dedicated descriptor passphrase. Refuse state, trust and recovery paths, ambient credential fallback and consumer writes.
+- Keep private authority, fresh-connection host integration and owner activation pending; no environment, provider, running bot or frozen production delivery changes.
+
+## 2.36.12 — Live authority and guarded control consumers
+
+- Add bounded read-only verification of an active owner-approved target job before mutation, and of the exact successful infrastructure producer job before consuming an encrypted target descriptor. Keep private grant/event and sealing-receipt authentication separate from public GitHub metadata.
+- Add explicit owner-anchored control-consumer guards that distinguish a never-repaired scope from an expected completed repair. Refuse missing, pending, changed or uncertain recovery evidence before and after normal record operations.
+- Keep operational workflow/credential integration and release activation fenced; no owner gate, environment, real backend or running bot is changed.
+
+## 2.36.11 — Private target handoff and exact-version reads
+
+- Add purpose/target/backend-bound encryption and exact persistence readback for minimized applied-target descriptors. Consumption requires a fresh independent successful infrastructure sealing job, exact release/current producer and unchanged ciphertext; overall publication success is not required inside its own staging dependency.
+- Add scoped owner-selected historical object reads with a measured isolated curl transfer that signs the exact version query. Require full response bytes and matching version metadata; refuse redirects, partial/deleted/compressed objects, ambiguous absence, inherited credentials and retries. Credentials stay in a private input pipe.
+- Keep workflow integration, independent repair anchors and guarded normal consumers pending. These transport components authorize no enrollment, restore, deployment or activation.
+
+## 2.36.10 — Scoped provider and control-record adapters
+
+- Add bounded read-only instance verification and a target-scoped SSHFP writer that requires a fresh authorization callback immediately before mutation. Preserve unrelated algorithms and refuse conflicting records, uncertain responses and automatic retries.
+- Add explicit scoped native S3 stores for infrastructure and each target's trust/recovery records. Verify bucket-qualified routing and authorized credentials locally before each operation, refuse ambient session-token fallback and cap streamed objects. Preserve the existing infrastructure encryption identity and record namespace; keep credentials, derived keys and journal authority in runtime-private fields and snapshot caller inputs before validation.
+- Derive minimized applied-host descriptors only from complete linked infrastructure evidence, stable state readbacks and authenticated previous applied inputs. Bind the current release producer separately from a historical completed baseline; encrypted transport, protected enrollment and activation remain pending.
+
+## 2.36.9 — Trust transport and completed-history recovery
+
+- Add bounded two-round Ed25519 observation and strict literal-address SSH with private durable-key pins, isolated authentication/configuration, fresh connection proof and no pooled connection or automatic retry. Preserve trust across safe applied-baseline updates and snapshot requests across asynchronous verification.
+- Add an authenticated Unbound build, pinned root anchors and measured private runtime dependencies for local SSHFP/A/AAAA validation. Bind the runtime manifest into durable trust evidence; remote AD flags, unsigned answers and different validated addresses cannot satisfy it. Add read-only owner-approved workflow evidence and a localhost DNSSEC rehearsal with a separate lab helper.
+- Add owner-fenced restoration of exact encrypted versions from fully completed infrastructure or target-trust history. Require independent fresh remote outcome verification, exact latest-object checks, persistence readback and a consumer guard bound to an owner-recorded repair generation and independently successful repair run. Incomplete outcomes remain blocked; operational workflow integration and activation remain fenced.
+
+## 2.36.8 — Durable SSH trust foundation
+
+- Add a separate per-target encrypted trust journal, canonical Ed25519/SSHFP checks and owner-fenced one-shot enrollment generations. Persist intent and consumption before observing keys, retain immutable linked history, and refuse missing, stale, conflicting or interrupted evidence.
+- Bind exact owned SSHFP publication, pinned local DNSSEC evidence and independent successful enrollment-run evidence before connection authority. Exercise storage/readback failures and expiry across awaited operations. Operational adapters and activation remain fenced; no live enrollment or DNS edit is performed.
+
+## 2.36.7 — Existing database adoption guards
+
+- Add optional existing-cluster configuration and declarative imports using owner-supplied settings, independent import-only plan guards and preserved access-list ownership. Cluster creation, replacement, deletion and remote mutation cannot pass the adoption path.
+- Require durable intent, exact saved-plan import and a subsequent read-only no-change verification before completing the applied-input baseline. Keep replacement activation fenced; no real cluster import or provider change is performed by implementation or synthetic checks.
+
+## 2.36.6 — Replacement release components and staging evidence
+
+- Scan both exact runtime child digests with a checksum-pinned Trivy gate before signing. Reject malformed/duplicate platform evidence, index digest mismatches, scan errors and fixable high/critical vulnerabilities; isolate scanner/admission subprocesses and remove private diagnostics on every exit.
+- Add inactive replacement release/infrastructure workflows, exact publication/provenance identity, journaled safe Apply and stable no-change verification. Require main-only pre-existing environments, no dispatch/re-run automatic authority and explicit successful target acceptance; retain production's byte-identical Compose delivery jobs.
+- Add staging checks for the candidate image/schema, repeated readiness/Discord/writer lease, exact candidate command inventory, backup timer, a new completed encrypted off-site backup and process-start/restart stability. Skipped/configured/superseded outcomes cannot count as acceptance; test the actual Ansible assertions with invented evidence.
+- Refuse unknown unchanged firewall/database fields and inconsistent host, DNS and database identities before automatic infrastructure continuation. Use portable temporary directories so control-record tests run in clean Docker builds.
+- Stop the previous Quadlet writer and persist its recovery boundary before installing/starting a candidate; refuse a missing stop boundary. Replace blind rollback advice with schema-aware fix-forward/owner recovery.
+- Keep a code-level activation fence before all replacement credential jobs until database adoption and durable SSH enrollment ship. No live activation, deployment, credential change or production cutover; synthetic acceptance is not live acceptance.
+
+## 2.36.5 — Durable infrastructure control records
+
+- Add encrypted, backend/path-bound operation journals and applied-input baselines with exact write/readback verification. Refuse pending operations, missing referenced records, stale generations and state/baseline mismatches without claiming distributed locking.
+- Add owner-enabled integration with the existing reviewed Apply, including verified post-Apply state and a separately approved, no-change `baseline` dispatch. Bind the private baseline, control generation and full plan JSON into the Plan-to-Apply handoff; classification remains advisory.
+- Cover storage faults, interrupted pointer/completion writes, hostile data, encryption binding and the reviewed phase sequence with invented fixtures. No automatic lane, live activation, database adoption, SSH enrollment or production-path change.
+
+## 2.36.4 — Linode single-writer pipeline specification
+
+- Keep Linode compute, the existing PostgreSQL cluster and private Object Storage as the initial target; retain GitHub environment secrets and native passphrase encryption. OVH is an optional later reviewed migration, not a prerequisite.
+- Replace mandatory conditional storage writes with workflow-serialized control records, verified persistence and owner-fenced recovery. Specify operation journals, applied-input baselines, trust generations and refusal of interrupted/ambiguous writes; version history and readback are not distributed locks.
+- Clarify that a hand run must exclude queued/running automation. Durable control records and enrollment remain pending; no workflow, live infrastructure, deployment or member-facing behavior changes.
+
+## 2.36.3 — Infrastructure safety foundation
+
+- Add an advisory, credential-free full-plan classifier with a narrow label/TTL/known-host access-addition allowlist, explicit baseline-intent requirements and adversarial synthetic tests. It grants no automatic write authority; existing infrastructure review and production gates stay intact.
+- Bind the encrypted saved plan to private backend/inputs, workflow commit/run and policy code using a passphrase-keyed digest. Refuse backend/input/run mismatches before provider writes and recheck after Compare, including direct-Apply and post-comparison file changes.
+- Install pinned Bun in infrastructure jobs without package installation. Document the completed foundation and remaining adoption, enrollment, staging and separately reviewed production work; no live infrastructure or deployment operations.
+
+## 2.36.2 — Self-contained pipeline specification
+
+- Document the proposed release-integrated pipeline, existing-cluster import, narrow automatic policy, credential/state boundaries, durable SSH TOFU with DNSSEC SSHFP, staging acceptance and migration-aware recovery.
+- Record the accepted initial SSH TOFU risk, remaining technical/owner prerequisites and ordered implementation milestones. Link the specification from current contributor and deployment references; no environment, live infrastructure or runtime behavior changes.
+
+## 2.36.1 — Task-focused contributor documentation
+
+- Add one contributor guide with credential-free synthetic testing, the change checklist and the separate pnpm/Node site workflow; shorten the README and agent guides to point at it.
+- Replace duplicated engineering/operations narrative with focused references and a documentation index. Distinguish the implemented Compose/staging paths from future pipeline plans, and a healthy deployment from skipped/configure-only jobs.
+- Preserve approved decisions, manual evidence and retired runbooks through immutable Git links in `docs/archive/README.md`, rather than keeping long handoff/backlog/verification diaries in the current tree. Keep the confirmed deployment rules verbatim and acceptance gaps explicit.
+- Add internal-link/archive regression checks. No bot behavior, migration, dependency, live deployment or pipeline change; the documentation site's content and structure are unchanged.
 
 ## 2.36.0 — The simple pipeline for staging
 

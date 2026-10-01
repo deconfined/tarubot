@@ -1,7 +1,7 @@
 /**
  * TaruBot's host configuration (#62, ops/ansible/site.yml; docs/HOSTING.md "Configure"). The Deploy
  * workflow's Configure step runs site.yml from main's head, as root over SSH from a GitHub runner,
- * so a merged change reaches staging's root without another step. CI's syntax check and
+ * so a published release reaches staging's root without another step. CI's syntax check and
  * ansible-lint see its form; these pin what they can't:
  * - nothing is left of the pull unit, the host lock, the start tag or Ansible on the hosts;
  * - one play as root, with no become, that waits for cloud-init first, reads no lookup, secret or

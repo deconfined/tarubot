@@ -4,9 +4,12 @@
 # Linode labels (display names inside the account, like production's documented `tarubot`) and
 # database IDs are never masked: they are public words or never printed, and masking them would
 # censor the change list. Values under six characters identify nothing and would mask too much.
-[ (.hosts[] | .fqdn),
+. as $vars
+| [ (.hosts[] | .fqdn),
   .cloudflare_zone_id,
   (.db_allow_extra[] | ., split("/")[0]),
   (.root_password_hash | select(. != "")),
   ((.root_keys[], .configure_keys[]) | split(" ")[] | select(startswith("AAAA")))
-] | map(select(length >= 6)) | unique
+] | map(select(length >= 6)) as $common
+# Adoption labels and arbitrary engine strings can identify private objects at any length.
+| ($common + [(($vars.existing_databases // {}) | .. | strings | select(length > 0))]) | unique

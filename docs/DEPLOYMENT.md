@@ -1,116 +1,52 @@
-# TaruBot deployment process: who does what
+# Deployment
 
-From building a host to "the new bot is online in prod", on the simple pipeline ([#62](https://github.com/deconfined/tarubot/issues/62)). [HOSTING.md](HOSTING.md#the-simple-pipeline-2360) has the detail behind each step, [CI_CD.md](CI_CD.md) the workflows' side, and [ops/tofu/README.md](../ops/tofu/README.md) the infrastructure runbook.
+Production currently uses Docker Compose. Staging has the OpenTofu/Ansible/rootless Quadlet path. This guide describes implemented behavior; the [replacement pipeline](PIPELINE.md#current-status) remains inactive. Use [configuration](CONFIGURATION.md) for settings, [the threat model](THREAT_MODEL.md) for trust decisions, and [AGENTS.md](../AGENTS.md) for the confirmed agent rule.
 
-- **Manual** means @deconfined: a click, a dispatch, or a value in a GitHub environment.
-- **Automatic** means GitHub Actions or the host, with nobody involved.
-- **Approval** marks the only points where a run waits for you.
+## Release flow
 
-**Status:** since 2.36.0, **staging** runs all of this. Production keeps its Compose deploy ([HOSTING.md](HOSTING.md#automated-deploys-2300)) until **2.37.0**, which moves it (Phase 6). Where production differs, the table says so.
+1. **Review:** CI/security checks and the owner's code-owner approval, then a merge commit. Ordinary maintenance keeps the application version.
+2. **Publish:** an explicit version increase builds AMD64/ARM64 candidates, scans both exact runtime digests, signs the returned index digest and promotes `latest`. A failed scan blocks signing/promotion even if candidate tags exist. Existing version tags cannot be overwritten; manual Publish dispatches and reruns only verify.
+3. **Deploy plan:** first confirm publication completed; maintenance runs stop before image or environment lookups and notification. Bind the released version, commit and digest; verify provenance; inspect migration and host changes since the previous version's published image commit. This includes accumulated changes when the final commit only bumps the version. The plan reads target and `notify` environment metadata and main-only branch policies. Production must require the owner alone, allow self-review and refuse admin bypass.
+4. **Staging:** `host.yml` runs `site.yml` from the planned `main` head as root, then the release's `bot.yml` for the unprivileged `tarubot` account. Staging normally has no reviewer. A missing host gives `no-host`; an empty host without a Discord token can only be configured.
+5. **Production:** the owner approves the `production` environment. The Compose job sends its constrained command over strict, pinned SSH; the host deploys the release and `notify` reports the outcome.
 
-**Agents:** they never approve a run, never create or change an environment or its secrets, and never hold a key. They dispatch a workflow only when you ask in that session.
+Production runs independently of staging. Before approval, review the target's actual deployed/tested evidence: green skipped steps, `no-host` and `configured` do not prove a running DevBot. Publication does not currently plan or apply infrastructure.
 
----
+Automatic deployment needs the previous version's published image to establish the comparison baseline. If that image is missing or unreadable, it refuses rather than substitute the release commit's parent. The owner can inspect the full release history and use the existing explicit Deploy dispatch.
 
-## Phase 0: One-time setup
+## Workflow inputs
 
-| # | Manual | Automatic |
-|---|---|---|
-| 0.1 | **Protect Main ruleset:** require review from code owners, 1 approval, and dismiss stale approvals on push. Keep signed commits, merge commits only, `CI result` and the CodeQL gate. In Actions settings, turn off "Allow GitHub Actions to create and approve pull requests". | — |
-| 0.2 | **On your own machine:**<br>• a private Object Storage bucket for OpenTofu state, with a read-only key and a read/write key<br>• two Linode tokens: read-only with a short expiry (e.g. 90 days), and read/write<br>• two Cloudflare tokens on the zone: Zone and DNS Read, and DNS Edit<br>• a state passphrase of **32+** random characters<br>• optionally, root's console hash (`mkpasswd -m yescrypt`) | — |
-| 0.3 | **Environments,** each accepting **`main` only:**<br>• `infra-plan`: no reviewer; read-only tokens and state key<br>• `infra`: you as the only reviewer, no admin bypass; write tokens and read/write state key<br>• `staging`: no reviewer<br>• `production`: you as reviewer (it exists today, and gets the new secrets in 2.37.0)<br>`infra-plan` and `infra` both also hold `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_PASSPHRASE` and `TOFU_VARS`. | — |
-| 0.4 | **Configure key** for each environment: generate it in memory, with no passphrase, and send the private half straight into that environment's `ANSIBLE_SSH_KEY`. Its public half goes into `TOFU_VARS.configure_keys`. | — |
-| 0.5 | **Read the environments' settings back once** (`gh api …/environments/<name>`): main-only, and `infra`'s reviewer is you. | — |
-| 0.6 | Dispatch **Infrastructure** `operation=apply` with `TOFU_VARS.hosts = {}`. | **Plan** (in `infra-plan`, no approval) must show exactly one line: the database access list's import, `+0 -0`. |
-| 0.7 | **Approval:** approve the Apply job only if the plan is exactly that line. | **Apply** imports the access list into the state. |
+Dispatch Deploy from `main` with an explicit release version:
 
----
+| Target | Inputs / meaning |
+| --- | --- |
+| `production` | `action=deploy`; rollback also needs `rollback=true` and `from=<live version>` |
+| `staging` | `deploy`: Configure then bot; `configure`: host only; `bot`: release only; `preflight`: Configure plus database/backup checks without Discord |
 
-## Phase 1: Build a host (a new host, or a rebuild)
+Quadlet has no automatic rollback. A previous-version staging `action=bot` dispatch requires verified unchanged live schema and a fenced writer. Missing or changed schema evidence calls for fix-forward or owner-controlled recovery. The playbook stops the writer and saves a private recovery boundary before replacing the unit. See [deployment outcomes](HOSTING.md#deployment-outcomes).
 
-| # | Manual | Automatic |
-|---|---|---|
-| 1.1 | Edit `TOFU_VARS`, in both `infra-plan` and `infra`: add `hosts.<role>` (label, fqdn, region, type, role). For a rebuild, set any new key or hash here too. | — |
-| 1.2 | Dispatch **Infrastructure** `operation=apply`. For a rebuild add `replace=linode_instance.host["<role>"]`, `allow_destroy` and `allow_access_removal`. | **Plan** runs in `infra-plan` with read-only tokens and no approval. Its summary lists each change's action and resource, and `+N -M` on the access list. It never shows a host, domain or address. It keeps the plan as a one-day encrypted artifact. |
-| 1.3 | **Approval:** read the summary, then approve (or reject) the Apply job in `infra`. | **Apply** refuses a plan whose digest, change list or variables differ, and OpenTofu refuses a stale one. It then applies exactly that plan: the Linode (disk encrypted), its Cloud Firewall (SSH and ICMP in), the A and AAAA records, and the host's addresses on the database access list. |
-| 1.4 | — | **cloud-init, first boot only:** hostname; root's keys (your FIDO2 key and the Configure key); root's console hash if given, otherwise root is locked; password SSH off; `verify-required` for FIDO keys; `python3-libselinux`. The host generates its own SSH host key. |
-| 1.5 | Check production is still healthy after any access-list change: the heartbeat and `/sync status`. | — |
-| 1.6 | **Pin the host key (trust on first use):** `ssh-keyscan -q -t ed25519 <name> \| cut -d' ' -f2- \| gh secret set TARGET_HOST_KEY --env <role>`. Then set `TARGET_HOST`. Optionally compare the fingerprint with the one cloud-init printed on Lish. | — |
-| 1.7 | Dispatch **Deploy** `target=<role>` `action=configure`. | **Configure** (`site.yml`, as root, over SSH from a GitHub runner):<br>• waits for cloud-init<br>• on a new host, upgrades everything and **reboots once**<br>• installs Podman and friends<br>• sets dnf-automatic to all updates, rebooting when needed<br>• hardens sshd<br>• adds `pam_wheel` on `su` and a polkit rule refusing non-root<br>• creates the `tarubot` account with linger |
-| 1.8 | Dispatch `action=configure` again. | Must report `changed=0`. |
+Normal Deploy requires signed publication; staging also needs the release's bot playbook. Re-runs are refused. Inspect uncertain host/database state before a fresh owner-authorized dispatch.
 
----
+Production's `DEPLOY_ENABLED` variable must be exactly `true`. Staging has no switch; the owner pauses it by adding an environment reviewer. Per-target host jobs queue without cancelling waiting runs. See [CI/CD](CI_CD.md#signed-build-provenance) for provenance.
 
-## Phase 2: First bot on a new host
+## First-host setup: owner checklist
 
-| # | Manual | Automatic |
-|---|---|---|
-| 2.1 | **Set the environment's secrets,** all except the Discord token:<br>• `DATABASE_URL` (password percent-encoded) and `DATABASE_CA_CERT`<br>• `REPORTS_GITHUB_TOKEN` and `HEALTHCHECKS_PING_URL`<br>• `BACKUP_STORAGE_ENDPOINT`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`<br>• `HEALTHCHECKS_BACKUP_URL`<br>• production only: `SUGGEST_APP_PRIVATE_KEY`<br>Single-line values must have no stray spaces or newlines. | — |
-| 2.2 | Dispatch `action=preflight`. | **Preflight:** writes the database and backup secrets, runs `migrate.js` (it must print "Schema ready."), makes one backup to the bucket, and enables the nightly backup timer. The result is `preflight-ok`. |
-| 2.3 | **Restore drill** on your machine: fetch the newest `daily/` dump, decrypt it with the age key, `pg_restore` it into a scratch database and count rows. | — |
-| 2.4 | Set `DISCORD_TOKEN`. If that application runs anywhere else, stop it first and reset the token: one Discord app never runs in two places. | — |
-| 2.5 | Dispatch `action=deploy`, or just wait for the next merge. | **Bot** (Phase 3, step 3.4) → `deployed`. |
+These are owner actions, not a claim that setup is complete.
 
----
+1. Protect `main`: signed commits, merge commits, required CI/security checks, code-owner approval and dismissal of stale approvals.
+2. Create encrypted-state storage and scoped credentials. Configure main-only `infra-plan` with read-only access/no reviewer, and `infra` with write access/owner approval. Read their settings back at setup and after changes; infrastructure jobs do not self-check those settings.
+3. Set matching shared infrastructure inputs. Follow [the first-apply runbook](../ops/tofu/README.md#the-first-apply). Existing-cluster adoption uses exact private settings, a separate approved import and read-only no-change verification; it must not mutate the cluster or build a host.
+4. Generate Configure keys outside agent sessions. Store the private key in the target's `ANSIBLE_SSH_KEY`, public key in `TOFU_VARS.configure_keys`. Runners use batch SSH, so no passphrase. Never put a host private key in user data.
+5. Set the host shape; dispatch Infrastructure and approve only the reviewed saved plan. cloud-init sets credentials; the host generates its own Ed25519 host key at first boot.
+6. Require successful durable enrollment after the approved new-host Apply. For the current manual Host path, also verify that same key from the owner's machine, preferably against the provider console, and set `TARGET_HOST` and `TARGET_HOST_KEY` (`ssh-ed25519 <key>`). Never silently accept a changed key.
+7. Dispatch staging `configure`. The first run upgrades/reboots the new host; the second must report `changed=0`.
+8. Add staging database/CA, reports, heartbeat and backup settings, initially without a Discord token. Follow [staging settings](CONFIGURATION.md#staging-settings). Dispatch `preflight`; require `preflight-ok`, an enabled timer and a successful encrypted backup. Decrypt/restore it into a scratch database and verify it.
+9. Move DevBot in a separate owner-approved window: equal schema heads, local bot stopped, owner-restored database, reset token only in `staging`, then `bot`. Verify health, commands and acceptance; never run the same application in both places.
 
-## Phase 3: Ship a release (every merge)
+Production's Quadlet cutover needs a separate reviewed change and owner-run window. Stop the old bot before starting its replacement.
 
-| # | Manual | Automatic |
-|---|---|---|
-| 3.1 | Review the PR as code owner, then **merge with a merge commit**. | On the PR: CI (`CI result`), CodeQL and the Claude review. |
-| 3.2 | — | **Publish containers:** builds the amd64 and arm64 images, pushes them to GHCR, signs build provenance and moves `latest`. |
-| 3.3 | — | **Deploy → Plan**, from public data only: version, commit, digest, **provenance verified** against `publish.yml@main`, `main`'s head for Configure, and the schema head. |
-| 3.4 | — | **Deploy staging, with no approval:**<br>1. **Configure:** `main`'s `site.yml`.<br>2. **Bot:** the release's own `bot.yml`, as `tarubot`:<br>• every check before any write: secrets present and well formed, `DATABASE_URL` is this target's database, the Discord token belongs to the right application, the image's labels match the plan, and a rollback doesn't cross a migration<br>• each secret goes into its Podman secret over stdin, never argv, logs or disk<br>• the Quadlet unit is rendered and dry-run<br>• **restart:** the old bot stops and frees the writer lease, `migrate.js` runs in the new image, the new bot starts<br>• healthy within 3 minutes, and still healthy 60 s later<br>• backup timer on, test-guild commands registered, old images tidied<br>→ `deployed` |
-| 3.5 | Test on staging with DevBot (after the DevBot move). | — |
-| 3.6 | **Approval** (production, from 2.37.0): *Review deployments → production → Approve*. The approval text names the Configure commit, the version and digest, and any migrations. One approval covers the whole job. | — |
-| 3.7 | — | **Deploy production:** the same Configure and Bot as 3.4, registering **global** commands. |
-| 3.8 | — | **Pushover:** outcome, version and schema head. **`deployed` = the new bot is online in prod.** |
+Before rehearsing the replacement Host path, the owner supplies matching `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_PASSPHRASE`, `TOFU_STATE_READ_ACCESS_KEY` and `TOFU_STATE_READ_SECRET_KEY` in the target environment. These give read-only access to the enrolled trust records; Host needs no provider token or infrastructure inputs. It requires complete trust with no pending enrollment, validates DNSSEC locally, and connects to a literal enrolled address with the stored key. Missing records or DNSSEC failure stops delivery.
 
----
+## Boundaries
 
-## Phase 4: When something goes wrong, or needs changing
-
-| # | Manual | Automatic |
-|---|---|---|
-| 4.1 | Read the run summary or the Pushover: `refused`, `unhealthy` or `failed`, with the step and reason. | The run fails and pages. **Nothing is rolled back automatically**, and an `unhealthy` release stays in place. |
-| 4.2 | **Roll back:** dispatch the previous version with `action=bot`. The `unhealthy` summary names the exact dispatch. | That release's own `bot.yml` deploys it, skipping Configure. **Across a migration it is refused** (`rollback-across-migration`), so fix forward or restore. |
-| 4.3 | **Rotate a secret:** set the new value in the environment, dispatch the live version with `action=bot`, then revoke the old value. For the **database password**: set the secret, change the password, and dispatch at once. One secret per dispatch. | Writes the new value into its Podman secret and restarts the bot. |
-| 4.4 | **Change host config:** merge a `site.yml` change. | Applied by the next deploy's Configure, or a `configure` dispatch. |
-| 4.5 | **Pause:** for staging, add a required reviewer to `staging`; for production, simply don't approve. | — |
-| 4.6 | **New root key, Configure key or root hash:** update `TOFU_VARS`, then rebuild the host (Phase 1). | — |
-
----
-
-## Phase 5: Running on its own
-
-| # | Manual | Automatic |
-|---|---|---|
-| 5.1 | — | **dnf-automatic:** all updates daily, rebooting when one needs it (staging around 06:00 UTC, production 10:00 UTC). |
-| 5.2 | — | **Nightly backup** at 04:30 UTC: the database dump, age-encrypted, goes to the bucket (daily, plus monthly on the 1st), and pings its own healthchecks.io check. |
-| 5.3 | — | **Heartbeat** to healthchecks.io every 5 minutes while the bot is ready. |
-| 5.4 | — | **Crash restarts** (`Restart=always`). Secrets stay in Podman's store, so restarts and reboots don't need GitHub. |
-| 5.5 | Act on pages: the heartbeat, the backup check, or a failed run. | — |
-
----
-
-## Phase 6: Production's move (2.37.0, once)
-
-| # | Manual | Automatic |
-|---|---|---|
-| 6.1 | Build the new production host (Phase 1) and set its secrets without the Discord token (Phase 2, step 2.1). Make sure any pending migration has already reached the old host. | — |
-| 6.2 | Merge 2.37.0, with no other runtime merges until the cutover is done. Reject the merge's own production request. Dispatch `action=preflight` for 2.37.0, then **Approval**. | Preflight on the new host: first Configure (upgrade and reboot), `Schema ready.`, one backup → `preflight-ok`. |
-| 6.3 | Dispatch the 2.37.0 deploy with `action=bot`. **While its approval waits:**<br>1. Stop the old bot.<br>2. Shut the old Linode down in Cloud Manager.<br>3. Reset the Discord token into the `production` environment.<br>Then **Approval**. | Bot on the new host → `deployed`, global commands registered, Pushover. **About 2 to 4 minutes down.** |
-| 6.4 | Keep the old Linode off for a week as a fallback. Then delete it, remove it from `db_allow_extra`, and rotate the shared secrets. | 2.38.0 removes `deploy.sh`, the Compose files and the old runbooks. |
-
----
-
-## Where things live
-
-| What | Where | Who can change it |
-|---|---|---|
-| Every secret and every approval | GitHub environments `infra-plan`, `infra`, `staging`, `production` | You only |
-| Host shape (`TOFU_VARS`) | `infra-plan` and `infra`, identical in both | You only |
-| Infrastructure state | Your private bucket, encrypted with your passphrase | Written only by the approved Apply job |
-| Bot secrets on a host | Podman's secret store in `tarubot`'s rootless storage | Only the Bot step, from the environment |
-| Host configuration and the bot's unit | `ops/ansible/` in `main` | Merges you review |
-| Infrastructure code | `ops/tofu/` in `main` | Merges you review |
+Infrastructure is dispatch-only with owner-approved Apply. It binds the encrypted saved plan to its backend, inputs and workflow run before writes; its full-plan policy decision is advisory. The release-integrated automatic path remains off and code-fenced before credentials. Do not enable `RELEASE_PIPELINE_ENABLED`; see [PIPELINE](PIPELINE.md) for the agreed flow and remaining gaps.

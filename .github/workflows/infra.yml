@@ -13,7 +13,11 @@
 #          applies exactly the Plan job's saved plan. It refuses a file whose SHA-256 or change
 #          list differs from the Plan job's, or that was planned with values other than infra's
 #          own TOFU_VARS, and OpenTofu refuses the plan if the state changed since (a stale plan).
-#          It never plans.
+#          It never plans. Owner-enabled encrypted control records persist intent before Apply and
+#          verify state/baseline completion after it. A pending operation blocks subsequent writes.
+#          The protected job and environment credentials authorize this work; records need no
+#          separate GitHub owner variable, API token or historical workflow proof.
+#          operation=baseline uses this same approval gate but establishes only the initial record.
 #
 # Each step runs one phase of ops/tofu/ci/tofu-ci.sh, which holds the scripts and, beside it, the
 # jq programs, so Plan and Apply run the same code; each step's env: holds only the secrets its
@@ -22,8 +26,8 @@
 # inside TOFU_VARS before anything else prints (GitHub masks a secret only where its whole value
 # appears), plan and apply write to private files under $RUNNER_TEMP/tofu, and diagnostics print
 # filtered. The runner prints each step's env: unmasked, so the replace input never goes there:
-# prepare reads it from the event payload. Apply prints no host key either: after a build the
-# owner pins it from their own machine (README.md, "Pinning a new host key").
+# prepare reads it from the event payload. After a verified new-host Apply, first-key enrollment
+# and SSHFP publication use private durable records; no key or address is printed.
 #
 # The saved plan is the one file that leaves a job: a one-day artifact, which anyone signed in to
 # GitHub can download from this public repository. It is only ever OpenTofu's own encrypted file
@@ -44,9 +48,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "plan shows the changes; apply also makes them, after your approval"
+        description: "plan previews; apply reviews changes; baseline records unchanged state; adopt imports existing clusters"
         type: choice
-        options: [plan, apply]
+        options: [plan, apply, baseline, adopt]
         default: plan
       replace:
         description: 'Rebuild one host: linode_instance.host["<key>"] (needs allow_destroy)'
@@ -89,11 +93,17 @@ jobs:
       changes: ${{ steps.summary.outputs.changes }}
       has_changes: ${{ steps.summary.outputs.has_changes }}
       digest: ${{ steps.summary.outputs.digest }}
+      binding: ${{ steps.summary.outputs.binding }}
+      policy_decision: ${{ steps.summary.outputs.policy_decision }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the project Bun version
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       # The replace input reaches the script through the event payload, never env:, which the
@@ -110,6 +120,14 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh init
+      - name: Read durable control records
+        env:
+          CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
+          # Read-only S3 credentials read private encrypted applied-input records.
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash ops/tofu/ci/tofu-ci.sh control_read
       - name: Plan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
@@ -127,7 +145,7 @@ jobs:
         run: bash ops/tofu/ci/tofu-ci.sh summarize
       # Only a plan that passed the guards, for an apply, leaves the job: the encrypted file alone.
       - name: Keep the saved plan for Apply
-        if: inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true'
+        if: inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && steps.summary.outputs.has_changes == 'true')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: saved-plan
@@ -144,7 +162,7 @@ jobs:
     needs: plan
     if: >-
       github.run_attempt == '1' && github.ref == 'refs/heads/main'
-      && inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'
+      && (inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && needs.plan.outputs.has_changes == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: infra
@@ -156,6 +174,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the project Bun version
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Prepare the values and the masks
@@ -170,6 +192,13 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh init
+      - name: Read durable control records
+        env:
+          CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash ops/tofu/ci/tofu-ci.sh control_read
       - name: Fetch the saved plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -179,9 +208,16 @@ jobs:
         env:
           DIGEST: ${{ needs.plan.outputs.digest }}
           APPROVED: ${{ needs.plan.outputs.changes }}
+          BINDING: ${{ needs.plan.outputs.binding }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh compare
+      - name: Install first-host enrollment tools
+        if: inputs.operation == 'apply'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends unbound dnsutils dns-root-data openssh-client
       - name: Apply
+        if: inputs.operation == 'apply' || inputs.operation == 'adopt'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
@@ -189,6 +225,23 @@ jobs:
           LINODE_TOKEN: ${{ secrets.LINODE_WRITE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WRITE_TOKEN }}
         run: bash ops/tofu/ci/tofu-ci.sh apply
+      # Import completion is withheld until refresh uses read-only provider tokens in a new step.
+      - name: Verify adoption with read-only provider credentials
+        if: inputs.operation == 'adopt'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+        run: bash ops/tofu/ci/tofu-ci.sh verify_adoption
+      - name: Establish initial baseline without provider changes
+        if: inputs.operation == 'baseline'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
+          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
+        run: bash ops/tofu/ci/tofu-ci.sh baseline
       - name: Clean up
         if: always()
         run: rm -rf -- "${RUNNER_TEMP:?}/tofu"

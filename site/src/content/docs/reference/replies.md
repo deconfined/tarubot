@@ -152,4 +152,4 @@ Every click is authorized again for the person who clicked.
 
 Every message is sent with mentions turned off, so no reply or post pings anyone.
 
-Presenter authors: the reply house style, including every approved card, is [docs/REPLIES.md](https://github.com/deconfined/tarubot/blob/main/docs/REPLIES.md) in the repository.
+Presenter authors: the reply house style and links to the executable card examples are in [docs/REPLIES.md](https://github.com/deconfined/tarubot/blob/main/docs/REPLIES.md) in the repository.

@@ -34,6 +34,10 @@
 # applied) hold the rules; tests/unit/infra.test.ts runs them against sample plans and runs these
 # phases with a stand-in tofu.
 # Nothing here traces its commands, and the workflow's last step removes $RUNNER_TEMP/tofu.
+# The Bun policy helper adds an advisory full-plan classification and a keyed handoff binding.
+# This does not enable unattended Apply or change the owner's existing review gate.
+# Owner-enabled control records enclose Apply in a durable journal; a separate baseline dispatch
+# establishes the first applied-input record without changing providers or state.
 set -Eeuo pipefail
 umask 077
 
@@ -65,16 +69,20 @@ prepare() {
   # The shape check prints nothing of the value: jq's own messages could quote it. Values reach jq
   # through printf (a shell builtin) and a pipe, never an argument or a temporary file.
   if ! printf '%s' "${TOFU_VARS-}" | jq -e -f "$here/shape.jq" >/dev/null 2>&1; then
-    fail "TOFU_VARS must be one JSON object with exactly the keys hosts, root_keys, configure_keys, root_password_hash, cloudflare_zone_id, database_ids and db_allow_extra, in the shape of ops/tofu/examples/example.tfvars.json."
+    fail "TOFU_VARS must match the required keys and optional existing_databases map in ops/tofu/examples/example.tfvars.json."
   fi
   printf '%s' "${TOFU_VARS-}" | jq -c -f "$here/masks.jq" >"$d/masks.json"
   local m
   while IFS= read -r m; do
     echo "::add-mask::$m"
-  done < <(jq -r '.[]' "$d/masks.json")
+  # Workflow command payload escaping preserves a private multiline value as one command. Raw
+  # jq strings would split it into fragments and expose the later lines before they are masked.
+  done < <(jq -r '.[] | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' "$d/masks.json")
   # From here on every identifying value prints as ***.
 
   printf '%s' "${TOFU_VARS-}" | jq -c . >"$d/values.tfvars.json"
+  bun "$module/../../scripts/database-adoption.ts" validate "$d" >"$d/input-validation.log" 2>"$d/input-validation.stderr" ||
+    fail "Private infrastructure inputs or existing-cluster settings are invalid; nothing was planned."
 
   # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
   [[ ${STATE_BUCKET-} =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "TOFU_STATE_BUCKET must be an Object Storage bucket name."
@@ -127,6 +135,30 @@ init() {
   echo "init ok"
 }
 
+# A decrypted state export is private, never an output/artifact; it supplies lineage/serial evidence.
+control_state() {
+  tofu -chdir="$module" state pull -unencrypted >"$d/state.json" 2>"$d/state.stderr" ||
+    fail "Private state evidence couldn't be read; control records require existing state."
+}
+
+control_call() {
+  bun "$module/../../scripts/infra-control-cli.ts" "$1" "$d" >"$d/control.log" 2>"$d/control.stderr" ||
+    fail "Infrastructure control evidence or persistence failed; reconcile any pending operation before another write."
+}
+
+control_read() {
+  if [[ ${CONTROL_RECORDS_ENABLED-} == true ]]; then
+    state_settings
+    control_state
+  fi
+  control_call read
+  echo "Control-record evidence read; automatic Apply remains disabled."
+}
+
+control_enabled() {
+  [[ -f $d/control-context.json ]] && jq -e '.enabled == true' "$d/control-context.json" >/dev/null 2>&1
+}
+
 plan() {
   state_settings
   provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."
@@ -157,9 +189,16 @@ changes() {
     fail "The change list couldn't be built from the saved plan; nothing was applied."
 }
 
+# This fence is independent of destroy/access overrides and the advisory automatic policy.
+database_guard() {
+  bun "$module/../../scripts/database-adoption.ts" guard "$d" >"$d/adoption-guard.log" 2>"$d/adoption-guard.stderr" ||
+    fail "The cluster guard refused this plan; mutations are never permitted and imports require reviewed adoption."
+}
+
 summarize() {
   local has_changes delimiter digest refuse=0 action address counts
   changes
+  database_guard
   if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
 
   {
@@ -186,12 +225,26 @@ summarize() {
   # the list goes out whole, under a random delimiter no change line can hold.
   delimiter="changes_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
+  # Bind private backend/inputs, run, code and plan bytes without publishing a dictionary hash
+  # of the backend's identifying values. Only the passphrase-keyed digest leaves the runner.
+  local binding decision
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be bound to this run and backend; nothing was applied."
+  bun "$module/../../scripts/infra-policy.ts" classify "$d" >"$d/policy.json" 2>"$d/policy.stderr" ||
+    fail "The infrastructure policy couldn't read its evidence; nothing was applied."
+  decision=$(jq -er '.decision | select(. == "invalid" or . == "review-required" or . == "safe" or . == "no-changes")' "$d/policy.json" 2>/dev/null) ||
+    fail "The infrastructure policy returned no recognized decision."
+  # Markdown backticks are literal formatting; command substitution is intentionally disabled.
+  # shellcheck disable=SC2016
+  printf '\nAdvisory safe-plan policy: `%s`. The owner-approved Apply gate remains required.\n' "$decision" >>"$GITHUB_STEP_SUMMARY"
   {
     echo "changes<<$delimiter"
     cat -- "$d/changes.txt"
     echo "$delimiter"
     echo "has_changes=$has_changes"
     echo "digest=$digest"
+    echo "binding=$binding"
+    echo "policy_decision=$decision"
   } >>"$GITHUB_OUTPUT"
 
   # The guards: a change this can't name is never applied; a delete or replace needs
@@ -212,55 +265,141 @@ summarize() {
 }
 
 compare() {
+  # A failed comparison must never retain an earlier successful marker.
+  rm -f -- "$d/verified.binding"
   # Apply applies only what was reviewed: the Plan job's saved plan, byte for byte, and only when
   # its change list is the one the Plan job showed. GitHub drops a job output that looks like a
   # secret, so a missing digest or an empty list is refused rather than taken as "no changes".
   [[ ${DIGEST-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's digest didn't arrive, so there is nothing reviewed to compare with; dispatch a new run."
-  [[ -n ${APPROVED-} ]] || fail "The Plan job's change list didn't arrive, so there is nothing reviewed to compare with; dispatch a new run."
+  local operation
+  operation=$(jq -r '.inputs.operation // ""' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "The dispatch couldn't be read."
+  [[ -n ${APPROVED-} || $operation == baseline ]] || fail "The Plan job's change list didn't arrive, so there is nothing reviewed to compare with; dispatch a new run."
   [[ -f $d/plan.bin ]] || fail "The saved plan didn't arrive (the artifact is kept one day); dispatch a new run."
   local digest current
   digest=$(sha256sum -- "$d/plan.bin" | cut -d' ' -f1)
   [[ $digest == "${DIGEST-}" ]] || fail "The saved plan isn't the file the Plan job made; nothing was applied. Dispatch a new run."
+  # Reconstruct full JSON from the encrypted saved plan before checking its bound evidence.
   changes
+  # All private inputs, including ignored creation-only credentials, must agree before handoff.
+  bun "$module/../../scripts/database-adoption.ts" inputs "$d" >"$d/input-comparison.log" 2>"$d/input-comparison.stderr" ||
+    fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
+  database_guard
+  [[ ${BINDING-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's handoff binding didn't arrive; nothing was applied."
+  local binding
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be checked; nothing was applied."
+  [[ $binding == "${BINDING-}" ]] || fail "The plan's backend, inputs, run or code differs from Plan; nothing was applied."
   current=$(<"$d/changes.txt")
   [[ $current == "${APPROVED-}" ]] || fail "The saved plan's changes differ from the ones the Plan job showed; nothing was applied. Dispatch a new run."
-  # The saved plan carries the values it was planned with, infra-plan's TOFU_VARS, and applies
-  # those; this job masked and listed the changes with infra's copy. The change list reads only
-  # hosts and db_allow_extra, so a key or hash set in one copy alone would otherwise pass unseen.
-  jq -e --slurpfile v "$d/values.tfvars.json" '(.variables | map_values(.value) | del(.state_passphrase)) == $v[0]' "$d/plan.json" >/dev/null 2>&1 ||
-    fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
+  printf '%s' "$binding" >"$d/verified.binding"
   echo "The saved plan is the reviewed one."
 }
 
 apply() {
   state_settings
   provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."
+  # Recheck immediately before the provider write; directly invoking Apply cannot skip Compare.
+  local binding verified
+  [[ -f $d/verified.binding ]] || fail "Apply has no successful plan comparison; nothing was applied."
+  verified=$(<"$d/verified.binding")
+  binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
+    fail "The plan handoff couldn't be rechecked; nothing was applied."
+  [[ $binding == "$verified" ]] || fail "The plan handoff changed after comparison; nothing was applied."
+  database_guard
+  local operation
+  operation=$(jq -er '.inputs.operation | select(. == "apply" or . == "adopt")' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "Apply requires a reviewed apply or adopt dispatch."
+  if [[ $operation == adopt ]]; then
+    control_enabled || fail "Cluster adoption requires a completed durable baseline."
+  fi
+  # A previous uncertain enrollment blocks every later mutation, even with changed inputs.
+  # New hosts also require enabled records and an unused target before provider creation.
+  control_call enrollment_check
+  if control_enabled; then
+    # Reload persisted state immediately before intent creation; changes since Plan are refused.
+    control_state
+    control_call begin
+  fi
   local rc=0 action address line
   # The saved plan alone, with no option that could change it: OpenTofu applies exactly what it
   # holds, and refuses it as "Saved plan is stale" if the state changed since the Plan job read it.
-  # Prints only the apply's counts, the filtered diagnostics on a failure, and one line per host
-  # built or rebuilt: no key, name, address or ID. The owner then pins the new host's key from
-  # their own machine.
+  # Prints only counts and filtered diagnostics. Infra remains pending through new-host enrollment,
+  # with literal addresses and the first public key kept in private encrypted records.
   tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?
   jq -rR -f "$here/applied.jq" "$d/apply.jsonl" 2>/dev/null || true
   if ((rc != 0)); then
-    echo "::error::apply failed (exit $rc); a stale plan fails here too, so dispatch a new run. Its diagnostics, with names, numbers and addresses left out:"
+    echo "::error::apply failed (exit $rc); reconcile any pending control operation before a new run. Its diagnostics, with names, numbers and addresses left out:"
     jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/apply.jsonl" 2>/dev/null || true
     exit 1
   fi
+  if [[ $operation == adopt ]]; then
+    # Import advanced only state. Keep the journal pending until a distinct step, with read-only
+    # provider credentials, refreshes a no-change plan and verifies the original saved result.
+    echo "Import applied; durable completion awaits read-only no-change verification."
+    return
+  fi
+  if control_enabled; then
+    control_state
+    cp -- "$d/state.json" "$d/applied-evidence-state.json"
+    tofu -chdir="$module" show -json >"$d/applied-state.json" 2>"$d/applied-state.stderr" ||
+      fail "Applied state verification failed; the durable operation remains pending."
+    # A competing state writer between pull and show invalidates the verification evidence.
+    control_state
+    cmp -s -- "$d/state.json" "$d/applied-evidence-state.json" ||
+      fail "State changed during Apply verification; the durable operation remains pending."
+    # No host authentication occurs here. Persist TOFU before SSHFP publication and complete
+    # enrollment after provider readback and local DNSSEC validation. The combined command finishes
+    # the Infra baseline only then, while the host pending index still blocks a later Host reader.
+    control_call enroll
+    echo "Applied state verified and durable baseline completed."
+    echo "New-host enrollment checked; durable trust contains no pending operation."
+  fi
   while read -r action address _; do
-    if [[ $action =~ ^(create|replace)$ && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
-      line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"
+    if [[ $action == create && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
+      line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): durable first-host enrollment completed"
       echo "$line"
       echo "- $line" >>"$GITHUB_STEP_SUMMARY"
     fi
   done <"$d/changes.txt"
 }
 
+# Never overwrite the exact imported plan or re-plan with provider-write credentials. The workflow
+# supplies read-only provider tokens here, while retaining storage writes for journal completion.
+verify_adoption() {
+  state_settings
+  provider_tokens "Read-only provider tokens are required for adoption verification."
+  control_enabled || fail "Adoption verification requires enabled control records."
+  [[ -f $d/control-ticket.json ]] || fail "Adoption verification has no pending ticket."
+  control_state
+  cp -- "$d/state.json" "$d/applied-evidence-state.json"
+  tofu -chdir="$module" plan -input=false -lock=false -json -var-file="$d/values.tfvars.json" -out="$d/adoption-verify.bin" >"$d/adoption-verify.jsonl" 2>"$d/adoption-verify.stderr" ||
+    fail "Read-only adoption refresh failed; durable intent remains pending."
+  tofu -chdir="$module" show -json "$d/adoption-verify.bin" >"$d/adoption-no-change.json" 2>"$d/adoption-show.stderr" ||
+    fail "Adoption refresh evidence couldn't be read; durable intent remains pending."
+  tofu -chdir="$module" show -json >"$d/applied-state.json" 2>"$d/applied-state.stderr" ||
+    fail "Imported state verification failed; durable intent remains pending."
+  control_state
+  cmp -s -- "$d/state.json" "$d/applied-evidence-state.json" ||
+    fail "State changed during adoption verification; durable intent remains pending."
+  bun "$module/../../scripts/database-adoption.ts" verify "$d" >"$d/adoption-verify.log" 2>"$d/adoption-verify-policy.stderr" ||
+    fail "Adoption is not verified unchanged; durable intent remains pending."
+  control_call finish
+  echo "Expected imports and read-only no-change refresh verified; durable baseline completed."
+}
+
+baseline() {
+  state_settings
+  control_enabled || fail "Baseline establishment requires owner-enabled control records."
+  # Compare is still mandatory, but no provider Apply is invoked for baseline establishment.
+  [[ -f $d/verified.binding ]] || fail "Baseline has no successful plan comparison."
+  control_state
+  control_call baseline
+  echo "Initial applied-input baseline established; no provider or state mutation."
+}
+
 case ${1-} in
-  install | prepare | init | plan | summarize | compare | apply)
-    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|plan|summarize|compare|apply"
+  install | prepare | init | control_read | plan | summarize | compare | apply | verify_adoption | baseline)
+    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline"
     "$1"
     ;;
-  *) fail "usage: tofu-ci.sh install|prepare|init|plan|summarize|compare|apply" ;;
+  *) fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline" ;;
 esac

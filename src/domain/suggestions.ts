@@ -55,8 +55,8 @@ export const SUGGESTION_ACTIONS = ["suggestion.posted", "suggestion.unconfirmed"
 /** `enhancement` exists in the repository; GitHub creates `from-discord` on first use. */
 export const SUGGESTION_LABELS = ["enhancement", "from-discord"] as const;
 /**
- * A fixed substring of every suggestion's first line. .github/workflows/claude.yml refuses to
- * start the agent for an issue whose body contains it, whatever the author or the text.
+ * A fixed substring of every suggestion's first line. It identifies member-submitted text
+ * for readers and any trusted workflow trigger that must distinguish its origin.
  */
 export const SUGGESTION_MARKER = "Suggested in Discord with TaruBot";
 /** The fixed first line of every public suggestion; it contains the marker. */
@@ -278,7 +278,7 @@ const EMAIL = new RegExp(
  *   then the issue reporter's credential shapes (never the deployment's own secret values); then
  *   runs of 17 or more digits or other number characters in any script (Discord and Lodestone
  *   IDs), with any marks on them (keycaps `1⃣`, `1̇`), so `➀➁…` and `1⃣2⃣…` go too.
- * - Every `@` last: a GitHub @mention notifies that account, and `@claude` would ask the agent.
+ * - Every `@` last: a GitHub @mention notifies that account and can invoke installed automation.
  * The quantifiers are bounded (or, for a host's labels, start only where a run begins) and Discord
  * caps the option at 1,000 characters, so backtracking stays small. No replacement equals its own
  * match, so a pass that changes nothing proves that no pattern matches.
