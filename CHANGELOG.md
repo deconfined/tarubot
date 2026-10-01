@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.36.22**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.23**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.23 — Private v2 applied-target transport
+
+- Add separate per-target content and bootstrap encryption, immutable content paths and a bootstrap location derived from the expected release identity.
+- Retain one original publication deadline across content sealing and bootstrap persistence; uncertain writes and abandoned publications stop further use. Read-only consumers verify actual historical issuance and reopen the same private bytes under the original proof.
+- Bind authenticated consumer results to opaque in-process identities and exercise invented crypto, GitHub and storage responses. Token minting, producer workflow wiring and host authorization remain pending.
+- Allow normal file-sync latency in the controller fetch success fixture while retaining the short deadline for its explicit late-sync refusal.
 
 ## 2.36.22 — Historical target issuance evidence
 

@@ -264,7 +264,9 @@ for mode in ('nonzero','partial','late','cleanup','success'):
             if mode=='cleanup':closed.append('selector');raise OSError('invented-sensitive-selector-diagnostic')
         def select(self,*args):self.calls+=1;return [(None,selectors.EVENT_WRITE if self.calls<=2 else selectors.EVENT_READ)]
     m.socket.socket=lambda *args:FakeSocket();m.socket_path=lambda *args:'/unused-invented-socket';m.selectors.DefaultSelector=FakeSelect
-    m.control=lambda *args:{'nonce':nonce,'socket':'b'*32+'.sock','remaining_ms':80}
+    # Ordinary fsync latency belongs to the positive control's budget; only the explicit
+    # late-fsync case needs the short deadline that proves replacement is denied.
+    m.control=lambda *args:{'nonce':nonce,'socket':'b'*32+'.sock','remaining_ms':2000 if mode=='success' else 80}
     m.fence=lambda *args:None
     def slow_fsync(fd):time.sleep(.12);original_fsync(fd)
     os.fsync=slow_fsync if mode=='late' else original_fsync
