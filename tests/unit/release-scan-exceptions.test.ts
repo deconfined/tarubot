@@ -538,6 +538,7 @@ describe("bounded reviewed release scanner exceptions", () => {
     }
   });
 
+  // Five real Bun processes share this test; ARM64 emulation must fit their combined startup time.
   test("a completed scan cannot carry an expired source exception through later signing/promotion waits", () => {
     const directory = mkdtempSync(join(scratch, "checkpoint-")),
       module = join(directory, "release-scan-exceptions.ts");
@@ -591,7 +592,7 @@ describe("bounded reviewed release scanner exceptions", () => {
       expect(current.stderr.toString()).toBe("");
       expect(current.stdout.toString()).not.toContain("invented-override");
     }
-  });
+  }, 60_000);
 
   test("pre-write checkpoints require strictly more than the fixed ten-minute budget without accepting future reviews", () => {
     for (const remaining of [600_000, 600_001]) {
