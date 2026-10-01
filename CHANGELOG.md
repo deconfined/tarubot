@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.25**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.26**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.26 — Native target issuance adapters
+
+- Add a separate current-issuer verifier that retains successful original-writer and source-projection evidence while the exact sealing job is running.
+- Bound one runner OIDC request and current-key signature validation under the original mint deadline, with exact release, audience and job bindings.
+- Compose private pending candidates with v2 content/bootstrap persistence under the original proof and immutable candidate expiry. Workflow and host integration remain pending; release activation stays fenced.
 
 ## 2.36.25 — Integrate the owner’s review workflow removal
 
