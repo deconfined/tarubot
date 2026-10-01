@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.36.24**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.25**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.25 — Integrate the owner’s review workflow removal
+
+- Merge main’s removal of the Claude Code review and interactive workflows and their dependent tests from PR #66.
+- Update active CI documentation and suggestion comments while retaining public-text cleaning, deployment approval rules and verified pipeline components.
 
 ## 2.36.24 — Private pending target projection
 

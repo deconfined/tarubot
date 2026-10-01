@@ -14,7 +14,6 @@ Use [CONTRIBUTING.md](../CONTRIBUTING.md) for the local change checklist. This r
 | `infra.yml` | Dispatch-only infrastructure plan/approved apply; see [OpenTofu](../ops/tofu/README.md) |
 | `pages.yml` | pnpm/Node site build and Pages publication; site changes must have a green Build |
 | `dependency-audit.yml` | Advisory audit of all locked Bun dependencies |
-| `claude-code-review.yml`, `claude.yml` | Advisory read-only PR review and trusted `@claude` requests |
 
 Actions use full-SHA pins; checkouts never persist credentials. PR jobs are read-only and use invented migration input. CI needs no live Discord/database/provider credentials. The version gate runs last so earlier checks still report on dependency PRs awaiting a version commit.
 
@@ -63,6 +62,6 @@ Dependency PRs need the same version/changelog/test-plan update as any change. D
 
 The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened to all deployment environments and Infrastructure. Its binding wording is in [AGENTS.md](../AGENTS.md). Agents read public logs but never hold environment secrets, approve/bypass/re-run a deployment, change an environment, or use real infrastructure credentials. Dispatch requires the owner's request in that session.
 
-The PR review is advisory and read-only. Do not push concurrently with an `@claude` code-editing run: its API commits can overwrite newer branch changes. Do not ask it to edit fork PRs. Workflows gated on trusted author association must skip the Discord suggestion marker; a trusted comment can still expose untrusted member text to an assistant.
+Trusted workflow triggers must not automatically execute text submitted through Discord. The suggestion marker identifies member-submitted text even when a trusted account posts it.
 
 Public Actions logs must not expose hosts, addresses, zone/account/cluster IDs, keys or secrets. Keep data masked, pass workflow expressions through validated inputs and avoid trace/debug output. Historical credential/review analysis is preserved in [the archive](archive/README.md#operations-and-cutovers).
