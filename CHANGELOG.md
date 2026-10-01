@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.33**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.34**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.34 — Verify current staging host phases
+
+- Add separate native, read-only evidence for preparation and execution phases of the future protected staging host job. Exact repository, run, reusable sources, job and check-run identities are reopened with current main and target-gate settings.
+- Keep capture, requests, waits and result copying inside one original 30-second wall and physical window. Invalid evidence, nested entry and late work permanently refuse; final remaining time and native offers retain the original bounds.
+- Refuse production and today's unfinished graph. Phase evidence grants no commands and proves neither evaluated inputs nor private event or controller origin; protected grant integration and release activation remain pending.
 
 ## 2.36.33 — Retain terminal journal read scope
 
