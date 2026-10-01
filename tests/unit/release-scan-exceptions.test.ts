@@ -150,6 +150,7 @@ function refusal(work: () => unknown): void {
 function cli(
   options: {
     entries?: unknown[];
+    reports?: unknown[];
     reply?: { exitCode?: number; signal?: boolean; malformed?: boolean };
   } = {},
 ) {
@@ -181,7 +182,7 @@ function cli(
   };
   const indexBytes = JSON.stringify(index),
     calls = join(directory, "calls.jsonl");
-  const responses = [report(0, options.entries !== undefined), report(1, false)];
+  const responses = options.reports ?? [report(0, options.entries !== undefined), report(1, false)];
   for (const tool of ["docker", "trivy"])
     writeFileSync(
       join(bin, tool),
@@ -232,7 +233,7 @@ process.exit(reply.exitCode??0);
             JSON.parse(line) as { tool: string; args: string[]; env: Record<string, string> },
         )
     : [];
-  return { processResult, seen };
+  return { processResult, seen, output };
 }
 
 describe("bounded reviewed release scanner exceptions", () => {
@@ -864,11 +865,34 @@ describe("bounded reviewed release scanner exceptions", () => {
     }
   }, 60_000);
 
+  // A valid tool exit can still fail report validation or the unchanged policy. Public
+  // diagnostics contain fixed stage/platform labels, never report or stderr strings.
+  test("CLI identifies the report validation stage without printing report details", () => {
+    const vulnerable = report(0, true);
+    const denied = cli({ reports: [vulnerable, report(1)] });
+    expect(denied.processResult.exitCode).toBe(1);
+    expect(denied.output).toContain("report and vulnerability validation for linux/amd64");
+    expect(denied.output).not.toContain("TEST-VULNERABILITY");
+    expect(denied.output).not.toContain("example-library");
+    const malformed = structuredClone(vulnerable);
+    result(malformed).Vulnerabilities = "invented-private-report-content";
+    const invalid = cli({ reports: [malformed, report(1)] });
+    expect(invalid.processResult.exitCode).toBe(1);
+    expect(invalid.output).toContain("report and vulnerability validation for linux/amd64");
+  }, 60_000);
+
   test("matching report never excuses process failure, signal or malformed stdout; invalid policy stops before I/O", () => {
     for (const reply of [{ exitCode: 1 }, { signal: true }, { malformed: true }]) {
-      const { processResult, seen } = cli({ entries: [entry("linux/amd64", Date.now())], reply });
+      const { processResult, seen, output } = cli({
+        entries: [entry("linux/amd64", Date.now())],
+        reply,
+      });
       expect(processResult.exitCode).toBe(1);
       expect(seen.map((c) => c.tool)).toEqual(["docker", "trivy"]);
+      expect(output).toContain(
+        reply.malformed ? "report and vulnerability validation" : "scanner execution",
+      );
+      if (reply.exitCode !== undefined) expect(output).toContain("native exit 1");
     }
     const expired = entry("linux/amd64", Date.now());
     expired.expires_at = Date.now() - 1;

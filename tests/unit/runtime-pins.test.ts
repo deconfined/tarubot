@@ -14,7 +14,8 @@ test("the Bun runtime pin agrees across package.json, its types, and every image
   expect(manifest.devDependencies["@types/bun"]).toBe(version);
   const stages = [...(await read("Dockerfile")).matchAll(/^FROM\s+oven\/bun:([^\s@]+)/gm)];
   expect(stages.length).toBeGreaterThan(0);
-  for (const [, tag] of stages) expect(tag).toBe(version);
+  // The official Alpine variant supplies Bun's musl binary on both supported architectures.
+  for (const [, tag] of stages) expect(tag).toBe(`${version}-alpine`);
 });
 
 test("CI integration tests use the PostgreSQL image that Compose deploys", async () => {

@@ -161,6 +161,8 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: false
+          # Refresh Alpine packages on each build even when the upstream Bun tag is unchanged.
+          no-cache-filters: base
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
