@@ -1079,7 +1079,7 @@ describe("the other workflows", () => {
       .parse(YAML.parse(read(".github/workflows/publish.yml")));
     expect(publish.on.push).toEqual({ branches: ["main"] });
     expect(publish.jobs.publish.if.replace(/\s+/gu, " ").trim()).toBe(
-      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && needs.verify.outputs.release == 'true'",
+      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'",
     );
   });
 
@@ -1845,6 +1845,10 @@ describe.skipIf(!hasJq)("the plan step", () => {
     /** Omit all image/environment resources, proving a maintenance run uses only Jobs. */
     readonly publicationOnly?: boolean;
     readonly previousVersion?: string;
+    /** Same-version maintenance commits before the successful first publication. */
+    readonly sameVersionParents?: number;
+    /** Negative fixture for a missing, malformed or self-referential history parent. */
+    readonly earlierParent?: string | null;
     /** null omits the previous version image; malformed labels are represented literally. */
     readonly previousRevision?: string | null;
     readonly previousPackageVersion?: string;
@@ -1941,7 +1945,20 @@ describe.skipIf(!hasJq)("the plan step", () => {
   function plan(files: File[], overrides: Overrides = {}) {
     const where = repository(overrides);
     const previous = overrides.previousVersion ?? "2.36.0";
-    api(where.dir, `${R}/contents/package.json?ref=${P}`, { version: previous });
+    let parent = P;
+    for (let i = 0; i < (overrides.sameVersionParents ?? 0); i++) {
+      api(where.dir, `${R}/contents/package.json?ref=${parent}`, {
+        version: overrides.release ?? V,
+      });
+      const next = sha(`earlier version parent ${i}`);
+      api(where.dir, `${R}/commits/${parent}`, { parents: [{ sha: next }] });
+      parent = next;
+    }
+    api(where.dir, `${R}/contents/package.json?ref=${parent}`, { version: previous });
+    if (overrides.earlierParent !== undefined)
+      api(where.dir, `${R}/commits/${P}`, {
+        parents: overrides.earlierParent === null ? [] : [{ sha: overrides.earlierParent }],
+      });
     api(where.dir, `${R}/contents/package.json?ref=${BASE}`, {
       version: overrides.previousPackageVersion ?? previous,
     });
@@ -2117,6 +2134,10 @@ describe.skipIf(!hasJq)("the plan step", () => {
       { previousRevision: null },
       { previousRevision: "not-a-sha" },
       { previousVersion: V },
+      { previousVersion: V, earlierParent: null },
+      { previousVersion: V, earlierParent: "not-a-sha" },
+      { previousVersion: V, earlierParent: P },
+      { previousVersion: NEWER },
       { previousVersion: "unknown" },
       { previousPackageVersion: "2.35.0" },
     ]) {
@@ -2129,6 +2150,39 @@ describe.skipIf(!hasJq)("the plan step", () => {
     }
     for (const releaseStatus of ["diverged", "behind", "identical"])
       expect(plan(source, { releaseStatus }).outputs.reason).toBe("compare");
+  });
+
+  test("a first successful publication walks same-version maintenance parents before comparing the previous image", () => {
+    const files = [
+      ...source,
+      { filename: "migrations/011_more.sql", status: "added" },
+      { filename: "ops/ansible/bot.yml", status: "modified" },
+    ];
+    const p = plan(files, { release: "2.36.3", previousVersion: "2.36.2", sameVersionParents: 2 });
+    expect(p.code).toBe(0);
+    expect(p.outputs).toMatchObject({
+      deploy: "true",
+      version: "2.36.3",
+      production: "true",
+      staging: "true",
+    });
+    expect(p.ghCalls).toContain(`api ${R}/commits/${P} --jq .parents[0].sha`);
+    expect(p.ghCalls).toContain(
+      `api ${R}/commits/${sha("earlier version parent 0")} --jq .parents[0].sha`,
+    );
+    expect(p.ghCalls).toContain(`api ${R}/compare/${BASE}...${C}`);
+    expect(p.ghCalls).not.toContain(`api ${R}/compare/${P}...${C}`);
+    expect(p.summary).toContain("Previous published release | `2.36.2`");
+    expect(p.summary).toContain("migrations/011_more.sql");
+    expect(p.summary).toContain("ops/ansible/bot.yml");
+    expect(p.attestations).toHaveLength(1);
+    // Walking declarations never substitutes for a missing image or a consistent ancestry range.
+    expect(plan(files, { sameVersionParents: 1, previousRevision: null }).outputs.reason).toBe(
+      "previous-release",
+    );
+    expect(plan(files, { sameVersionParents: 1, releaseStatus: "diverged" }).outputs.reason).toBe(
+      "compare",
+    );
   });
 
   test("every admitted published release deploys both targets", () => {

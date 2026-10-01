@@ -369,16 +369,21 @@ jobs:
           fi
 
           # 8. Show the whole released range, including work merged before a version-only bump.
-          # The parent's version names the previous release; its published image gives that
-          # release's actual commit. Missing history refuses automation rather than hiding changes.
+          # Maintenance may keep the release version across several first-parent commits. Walk
+          # back to the prior declaration; its published image gives the actual released commit.
           host_files=() added=() previous=
           if [[ $EVENT == workflow_run ]]; then
             P=$(gh api "repos/$R/commits/$C" --jq '.parents[0].sha') || fail compare "The commits API didn't answer."
             [[ $P =~ ^[0-9a-f]{40}$ ]] || fail compare "$C has no parent to compare with."
-            previous=$(raw package.json "$P" | jq -er .version) || fail previous-release "The previous release version could not be read."
-            if ! [[ $previous =~ $VER ]] || ! older "$previous" "$V"; then
-              fail previous-release "The parent must name an older plain release version."
-            fi
+            while :; do
+              previous=$(raw package.json "$P" | jq -er .version) || fail previous-release "The previous release version could not be read."
+              [[ $previous =~ $VER ]] || fail previous-release "Release history must name plain release versions."
+              [[ $previous == "$V" ]] || break
+              parent=$(gh api "repos/$R/commits/$P" --jq '.parents[0].sha') || fail previous-release "Earlier release history could not be read."
+              [[ $parent =~ ^[0-9a-f]{40}$ && $parent != "$P" ]] || fail previous-release "Release history has no valid earlier parent."
+              P=$parent
+            done
+            older "$previous" "$V" || fail previous-release "The previous declaration must name an older release version."
             BASE=$(revision_of "$previous") || fail previous-release "The previous release image is unavailable; use an owner-authorized manual deployment."
             [[ $BASE =~ ^[0-9a-f]{40}$ ]] || fail previous-release "The previous release image has no valid commit."
             [[ $(raw package.json "$BASE" | jq -r .version || true) == "$previous" ]] || fail previous-release "The previous image commit does not match its version."
