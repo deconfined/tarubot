@@ -449,6 +449,251 @@ async function completed(f: Fixture) {
 }
 
 describe("independently current owner control configuration", () => {
+  test("the same refusal runs after clocks and queued preparation before an actual GitHub offer", async () => {
+    for (const queued of [false, true]) {
+      const f = fixture();
+      let live = true,
+        calls = 0;
+      const boundary = f.make({
+        now: () => {
+          calls++;
+          if (queued && calls === 1)
+            queueMicrotask(() => {
+              live = false;
+            });
+          else if (!queued && calls === 4) live = false;
+          return instant;
+        },
+      });
+      await refusal(
+        boundary.readOwnerAnchor(f.scope, () => {
+          if (!live) throw new Error("private-original-window");
+        }),
+      );
+      expect(f.seen).toHaveLength(0);
+    }
+    for (const value of [
+      true,
+      false,
+      {},
+      Promise.resolve(),
+      Promise.reject(new Error("private-refusal")),
+    ]) {
+      const f = fixture();
+      await refusal(f.make().readOwnerAnchor(f.scope, (() => value) as () => void));
+      expect(f.seen).toHaveLength(0);
+    }
+  });
+  test("swallowed nested clock, snapshot and response denials fence the owning boundary", async () => {
+    for (const phase of ["clock", "snapshot", "response"] as const) {
+      for (const wrong of [false, true]) {
+        const f = fixture();
+        let boundary: GitHubControlOwnerBoundary;
+        let nested = true;
+        const reenter = () => {
+          if (!nested) return;
+          nested = false;
+          void boundary
+            .readOwnerAnchor(wrong ? { ...f.scope, target: "production" } : f.scope)
+            .catch(() => {});
+        };
+        boundary = f.make({
+          now: () => {
+            if (phase === "clock") reenter();
+            return instant;
+          },
+          get: async (request) => {
+            const response = await f.get(request);
+            if (phase === "response")
+              Object.defineProperty(response, "body", {
+                get() {
+                  reenter();
+                  return Buffer.from(JSON.stringify(f.data[request.url]));
+                },
+              });
+            return response;
+          },
+        });
+        const scope =
+          phase === "snapshot"
+            ? new Proxy(f.scope, {
+                ownKeys(value) {
+                  reenter();
+                  return Reflect.ownKeys(value);
+                },
+              })
+            : f.scope;
+        await refusal(boundary.readOwnerAnchor(scope));
+        expect(f.seen).toHaveLength(phase === "response" ? 1 : 0);
+      }
+    }
+  });
+  test("first clock and caller snapshot costs consume the original physical budget", () => {
+    for (const phase of ["clock", "snapshot"]) {
+      const f = fixture();
+      const modulePath = new URL("../../scripts/control-owner-boundary.ts", import.meta.url)
+        .pathname;
+      const program = `
+        import { performance } from "node:perf_hooks";
+        const input = ${JSON.stringify({ configuration: f.configuration, scope: f.scope, phase })};
+        let elapsed = 0, gets = 0, calls = 0, code;
+        Object.defineProperty(performance, "now", { value: () => elapsed });
+        const { GitHubControlOwnerBoundary } = await import(${JSON.stringify(modulePath)});
+        const boundary = new GitHubControlOwnerBoundary(input.configuration, {
+          store: { read: async () => null, write: async () => {}, readVersion: async () => null },
+          now: () => { if (input.phase === "clock" && ++calls === 1) elapsed = 60000; return ${instant}; },
+          get: async () => { gets++; throw Error("unexpected-native-offer"); },
+        });
+        const scope = input.phase === "snapshot" ? new Proxy(input.scope, {
+          ownKeys(value) { elapsed = 60000; return Reflect.ownKeys(value); },
+        }) : input.scope;
+        try { await boundary.readOwnerAnchor(scope); code = "accepted"; } catch(error) { code = error.message; }
+        console.log(JSON.stringify({ gets, code }));
+      `;
+      const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.exitCode).toBe(0);
+      expect(Buffer.from(child.stderr).toString()).toBe("");
+      expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+        gets: 0,
+        code: "invalid-control-owner-boundary",
+      });
+    }
+  });
+  test("native HTTP end and response callbacks retain the refusal without opening a connection", () => {
+    for (const phase of ["valid", "end-getter", "response", "data", "headers", "nested-headers"]) {
+      const f = fixture();
+      const modulePath = new URL("../../scripts/control-owner-boundary.ts", import.meta.url)
+        .pathname;
+      const program = `
+        import { spyOn } from "bun:test";
+        import * as https from "node:https";
+        import { EventEmitter } from "node:events";
+        const input = ${JSON.stringify({ configuration: f.configuration, scope: f.scope, data: f.data, phase })};
+        let live = true, offers = 0, ends = 0, headerReads = 0, code;
+        let boundary;
+        const request = (options, accept) => {
+          offers++;
+          const handle = new EventEmitter();
+          handle.destroy = () => {};
+          Object.defineProperty(handle, "end", { get() {
+            if (input.phase === "end-getter") live = false;
+            return () => {
+              ends++;
+              queueMicrotask(() => {
+                const response = new EventEmitter();
+                response.destroy = () => {};
+                response.complete = true;
+                response.statusCode = 200;
+                Object.defineProperty(response, "rawHeaders", { get() {
+                  headerReads++;
+                  if (input.phase === "headers") live = false;
+                  if (input.phase === "nested-headers") void boundary.readOwnerAnchor(input.scope).catch(() => {});
+                  return ["content-type", "application/json"];
+                } });
+                if (input.phase === "response") live = false;
+                accept(response);
+                if (input.phase === "data") live = false;
+                response.emit("data", Buffer.from(JSON.stringify(input.data["https://api.github.com" + options.path])));
+                response.emit("end");
+              });
+            };
+          } });
+          return handle;
+        };
+        const patched = spyOn(https, "request").mockImplementation(request);
+        // Refuse to import/run the native adapter unless the transport is exactly our fake.
+        const transport = await import("node:https");
+        if (transport.request !== patched || https.request !== patched) throw Error("fake transport not installed");
+        const { GitHubControlOwnerBoundary } = await import(${JSON.stringify(modulePath)});
+        boundary = new GitHubControlOwnerBoundary(input.configuration, {
+          store: { read: async () => null, write: async () => {}, readVersion: async () => null },
+          now: () => ${instant},
+        });
+        try { await boundary.readOwnerAnchor(input.scope, () => { if (!live) throw Error("private-expired"); }); code = "accepted"; }
+        catch(error) { code = error.message; }
+        console.log(JSON.stringify({ offers, ends, headerReads, code }));
+      `;
+      const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect({ exit: child.exitCode, diagnostic: Buffer.from(child.stderr).toString() }).toEqual({
+        exit: 0,
+        diagnostic: "",
+      });
+      expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+        offers: phase === "valid" ? 6 : 1,
+        ends: phase === "end-getter" ? 0 : phase === "valid" ? 6 : 1,
+        headerReads: phase === "valid" ? 6 : ["headers", "nested-headers"].includes(phase) ? 1 : 0,
+        code: phase === "valid" ? "accepted" : "invalid-control-owner-boundary",
+      });
+    }
+  });
+  test("all completed-repair metadata reads retain the original pure owner window without extra GETs", async () => {
+    const f = fixture();
+    await completed(f);
+    const calls: { path: string; refusal: (() => void) | undefined }[] = [];
+    const read = f.store.read.bind(f.store);
+    f.store.read = async (path, refusal?: () => void) => {
+      refusal?.();
+      calls.push({ path, refusal });
+      const bytes = await read(path);
+      refusal?.();
+      return bytes;
+    };
+    let live = true;
+    const boundary = f.make();
+    await boundary.confirmCompletedRepair({ ...f.scope, generation: repairGeneration }, () => {
+      if (!live) throw new Error("private-original-window");
+    });
+    expect(f.seen.length).toBeGreaterThan(0);
+    const gets = f.seen.length;
+    const paths = calls.map((entry) => entry.path);
+    for (const suffix of [
+      "registration",
+      "current",
+      `intents/${repairGeneration}`,
+      `completed/${repairGeneration}`,
+    ])
+      expect(paths).toContain(`recovery/infra/${suffix}`);
+    expect(calls.every((entry) => typeof entry.refusal === "function")).toBe(true);
+    live = false;
+    for (const entry of calls) expect(() => entry.refusal?.()).toThrow();
+    live = true;
+    // A later call has its own window, but cannot restore any abandoned original callback.
+    await boundary.readOwnerAnchor(f.scope);
+    expect(f.seen).toHaveLength(gets + 6);
+    for (const entry of calls) expect(() => entry.refusal?.()).toThrow();
+  });
+  test("a final owner mismatch permanently fences already accepted repair metadata callbacks", async () => {
+    const f = fixture();
+    await completed(f);
+    const callbacks: (() => void)[] = [];
+    const read = f.store.read.bind(f.store);
+    let currentReads = 0;
+    f.store.read = async (path, refusal?: () => void) => {
+      if (refusal) callbacks.push(refusal);
+      const bytes = await read(path);
+      if (path === "recovery/infra/current" && ++currentReads === 2) {
+        f.record.revision = "77777777-7777-4777-8777-777777777777";
+        f.sync();
+      }
+      return bytes;
+    };
+    const boundary = f.make();
+    await refusal(boundary.confirmCompletedRepair({ ...f.scope, generation: repairGeneration }));
+    expect(callbacks.length).toBeGreaterThan(0);
+    for (const callback of callbacks) expect(callback).toThrow("invalid-control-owner-boundary");
+    await boundary.readOwnerAnchor(f.scope);
+    for (const callback of callbacks) expect(callback).toThrow("invalid-control-owner-boundary");
+  });
   test("all targets require explicit scoped current variables and compatible bounded public anchor shape", async () => {
     for (const target of ["infra", "staging", "production"] as const) {
       const f = fixture(target),

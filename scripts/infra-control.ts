@@ -352,7 +352,8 @@ export function consumePendingTargetCandidateForSeal(value: PendingTargetCandida
 
 /** GET null means a definite absent key only, never permission denial or an ambiguous failure. */
 export interface ControlStore {
-  read(key: string): Promise<Uint8Array | null>;
+  /** Optional synchronous refusal only; it cannot approve an object or renew authority. */
+  read(key: string, beforeRead?: () => void): Promise<Uint8Array | null>;
   /** Trusted wrappers invoke this synchronous fence after awaited checks, before raw mutation. */
   write(key: string, bytes: Uint8Array, beforeWrite?: () => void): Promise<void>;
 }
@@ -410,6 +411,7 @@ export class RecordCodec {
 export class InfrastructureJournal {
   // Trusted dependency capabilities remain caller-owned; instance shadows cannot replace them.
   readonly #store: ControlStore;
+  readonly #storeRead: ControlStore["read"];
   readonly #codec: RecordCodec;
   readonly #verify: VerifyInfrastructureBaselineRun | undefined;
   readonly #clock: () => number;
@@ -421,6 +423,9 @@ export class InfrastructureJournal {
     dependencies: { verifyBaselineRun?: VerifyInfrastructureBaselineRun; now?: () => number } = {},
   ) {
     this.#store = store;
+    const read = store.read;
+    requireRecord(typeof read === "function");
+    this.#storeRead = read.bind(store);
     this.#codec = codec;
     const verify = dependencies.verifyBaselineRun;
     requireRecord(verify === undefined || typeof verify === "function");
@@ -430,10 +435,31 @@ export class InfrastructureJournal {
     this.#clock = clock;
   }
   async #read(path: string, denial?: () => void): Promise<unknown | null> {
-    denial?.();
-    const bytes = await this.#store.read(path);
-    denial?.();
+    const bytes = await this.#readBytes(path, null, denial);
     return bytes === null ? null : this.#codec.open(path, encryptedBytes(bytes));
+  }
+  #readFence(boundary: ExecutionBoundary | null, denial?: () => void): (() => void) | undefined {
+    if (boundary === null && denial === undefined) return undefined;
+    return () => {
+      requireRecord(denial?.() === undefined);
+      if (boundary) assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
+      // An execution assertion's clock can consume the shorter candidate preparation.
+      requireRecord(denial?.() === undefined);
+    };
+  }
+  async #readBytes(
+    path: string,
+    boundary: ExecutionBoundary | null = null,
+    denial?: () => void,
+  ): Promise<Uint8Array | null> {
+    const fence = this.#readFence(boundary, denial);
+    fence?.();
+    const bytes = await this.#within(boundary, () => {
+      fence?.();
+      return this.#storeRead(path, fence);
+    });
+    fence?.();
+    return bytes;
   }
   async #within<T>(boundary: ExecutionBoundary | null, work: () => Promise<T>): Promise<T> {
     if (boundary === null) return work();
@@ -452,8 +478,7 @@ export class InfrastructureJournal {
   ): Promise<void> {
     // Refusing an existing history key is a safety check, NOT atomic conditional creation.
     denial?.();
-    if (historical)
-      requireRecord((await this.#within(boundary, () => this.#store.read(path))) === null);
+    if (historical) requireRecord((await this.#readBytes(path, boundary, denial)) === null);
     denial?.();
     const bytes = this.#codec.seal(path, value);
     denial?.();
@@ -466,7 +491,7 @@ export class InfrastructureJournal {
           };
     await this.#within(boundary, () => this.#store.write(path, bytes, beforeWrite));
     denial?.();
-    const readback = await this.#within(boundary, () => this.#store.read(path));
+    const readback = await this.#readBytes(path, boundary, denial);
     denial?.();
     requireRecord(
       readback !== null && Buffer.from(bytes).equals(Buffer.from(encryptedBytes(readback))),
@@ -493,7 +518,7 @@ export class InfrastructureJournal {
     const records = new Map<string, Uint8Array>();
     const read = async (path: string) => {
       denial?.();
-      const value = await this.#within(boundary, () => this.#store.read(path));
+      const value = await this.#readBytes(path, boundary, denial);
       denial?.();
       if (value === null) return null;
       const bytes = encryptedBytes(value);
@@ -730,7 +755,7 @@ export class InfrastructureJournal {
   async #reopenPredecessor(writer: CurrentWriter, denial: () => void): Promise<void> {
     for (const [path, expected] of writer.predecessorBytes) {
       denial();
-      const value = await this.#store.read(path);
+      const value = await this.#readBytes(path, null, denial);
       denial();
       requireRecord(Buffer.from(encryptedBytes(value)).equals(Buffer.from(expected)));
       denial();

@@ -119,7 +119,287 @@ function fake() {
   };
 }
 
+/** Synchronous native-shaped seams expose each offer without opening a connection. */
+function nativeOffers() {
+  let options: Bun.S3Options = {};
+  let hook: (phase: string) => void = () => {};
+  const offers: string[] = [];
+  let part = 0;
+  const reader = {
+    get read() {
+      hook("read-getter");
+      return async () => {
+        offers.push("read");
+        hook("read");
+        return part++ === 0 ? { done: false, value: Uint8Array.from([7]) } : { done: true };
+      };
+    },
+    cancel: async () => {
+      hook("cancel");
+    },
+    releaseLock: () => {
+      hook("release");
+    },
+  };
+  const stream = {
+    get getReader() {
+      hook("getReader-getter");
+      return () => {
+        offers.push("getReader");
+        return reader;
+      };
+    },
+  };
+  const file = {
+    get stream() {
+      hook("stream-getter");
+      return () => {
+        offers.push("stream");
+        return stream;
+      };
+    },
+  };
+  const client = {
+    presign(key: string) {
+      hook("presign");
+      const url = new URL(`${options.endpoint}/${key}`);
+      url.searchParams.set("X-Amz-Date", "20260930T000000Z");
+      url.searchParams.set(
+        "X-Amz-Credential",
+        `${options.accessKeyId}/20260930/${options.region}/s3/aws4_request`,
+      );
+      return url.toString();
+    },
+    file() {
+      offers.push("file");
+      hook("file");
+      return file;
+    },
+    get write() {
+      hook("write-getter");
+      return async () => {
+        offers.push("write");
+        return 1;
+      };
+    },
+  };
+  const store = createControlStorage(configuration(), {
+    createClient(received) {
+      options = received;
+      return client as unknown as Bun.S3Client;
+    },
+  });
+  return {
+    store,
+    offers,
+    setHook(value: typeof hook) {
+      hook = value;
+    },
+  };
+}
+
 describe("scoped native control storage", () => {
+  test("cross-realm rejected refusals stay private and arbitrary thenable getters are never invoked", () => {
+    const storagePath = new URL("../../scripts/control-storage.ts", import.meta.url).pathname;
+    const consumerPath = new URL("../../scripts/control-consumer.ts", import.meta.url).pathname;
+    const ownerPath = new URL("../../scripts/control-owner-boundary.ts", import.meta.url).pathname;
+    const program = `
+      import { runInNewContext } from "node:vm";
+      import { createControlStorage } from ${JSON.stringify(storagePath)};
+      import { ControlConsumerGuard } from ${JSON.stringify(consumerPath)};
+      import { GitHubControlOwnerBoundary } from ${JSON.stringify(ownerPath)};
+      let options, offers = 0, unhandled = 0, thenGetters = 0, refused = 0;
+      process.on("unhandledRejection", () => { unhandled++; });
+      const store = createControlStorage(${JSON.stringify(configuration())}, {
+        createClient(value) {
+          options = value;
+          return {
+            presign(key) {
+              const url = new URL(options.endpoint + "/" + key);
+              url.searchParams.set("X-Amz-Date", "20260930T000000Z");
+              url.searchParams.set("X-Amz-Credential", options.accessKeyId + "/20260930/" + options.region + "/s3/aws4_request");
+              return url.toString();
+            },
+            file() { offers++; throw Error("unexpected-offer"); },
+            write: async () => { offers++; throw Error("unexpected-offer"); },
+          };
+        },
+      });
+      const scope = { target: "infra", backend: "a".repeat(64), namespace: store.namespace };
+      const owner = new GitHubControlOwnerBoundary({
+        ...scope, passphrase: "invented control passphrase with sufficient entropy",
+        owner_id: 123456, repository_id: 234567, environment_id: 1010,
+        token: "invented_owner_read_token_12345",
+      }, {
+        store: { read: store.read.bind(store), write: async () => {}, readVersion: async () => null },
+        get: async () => { offers++; throw Error("unexpected-offer"); }, now: () => 1800000000000,
+      });
+      const guard = new ControlConsumerGuard(scope, { store, owner, now: () => 1800000000000 });
+      for (const foreign of [true, false]) {
+        for (const layer of ["read", "write", "consumer", "owner"]) {
+          const value = foreign ? runInNewContext('Promise.reject(Error("invented-private-rejection"))')
+            : Object.defineProperty({}, "then", { get() { thenGetters++; throw Error("private-then-getter"); } });
+          const callback = () => value;
+          try {
+            if (layer === "read") await store.read("current", callback);
+            else if (layer === "write") await store.write("current", Uint8Array.from([1]), callback);
+            else if (layer === "consumer") await guard.check(undefined, callback);
+            else await owner.readOwnerAnchor(scope, callback);
+          } catch(error) {
+            const expected = layer === "read" ? "control-storage-read-failed" : layer === "write"
+              ? "control-storage-write-failed" : layer === "consumer" ? "control-consumer-guard-failed" : "invalid-control-owner-boundary";
+            if (error.message === expected) refused++;
+          }
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      console.log(JSON.stringify({ refused, offers, unhandled, thenGetters }));
+    `;
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect({ exit: child.exitCode, diagnostic: Buffer.from(child.stderr).toString() }).toEqual({
+      exit: 0,
+      diagnostic: "",
+    });
+    expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+      refused: 8,
+      offers: 0,
+      unhandled: 0,
+      thenGetters: 0,
+    });
+  });
+  test("original read refusal blocks each late routing/getter offer and never captures write", async () => {
+    const cases = [
+      ["presign", []],
+      ["file", ["file"]],
+      ["stream-getter", ["file"]],
+      ["getReader-getter", ["file", "stream"]],
+      ["read-getter", ["file", "stream", "getReader"]],
+      ["read", ["file", "stream", "getReader", "read"]],
+      ["release", ["file", "stream", "getReader", "read", "read"]],
+    ] as const;
+    for (const [phase, expected] of cases) {
+      const f = nativeOffers();
+      let live = true,
+        writeGetters = 0;
+      f.setHook((at) => {
+        if (at === phase) live = false;
+        if (at === "write-getter") writeGetters++;
+      });
+      await expect(
+        f.store.read("current", () => {
+          if (!live) throw new Error("private-expired");
+        }),
+      ).rejects.toThrow("control-storage-read-failed");
+      expect(f.offers).toEqual([...expected]);
+      expect(writeGetters).toBe(0);
+    }
+    const valid = nativeOffers();
+    valid.setHook((phase) => {
+      if (phase === "write-getter") throw new Error("read exposed mutation");
+    });
+    expect(await valid.store.read("current", () => {})).toEqual(Uint8Array.from([7]));
+  });
+  test("swallowed nested getter denials permanently fence the owning native read", async () => {
+    for (const phase of ["presign", "stream-getter", "getReader-getter", "read-getter"]) {
+      const f = nativeOffers();
+      f.setHook((at) => {
+        if (at === phase) void f.store.read("wrong-private-key").catch(() => {});
+      });
+      await expect(f.store.read("current", () => {})).rejects.toThrow(
+        "control-storage-read-failed",
+      );
+      expect(f.offers).not.toContain("read");
+    }
+  });
+  test("write getter expiry and swallowed reentry refuse the actual SDK mutation", async () => {
+    for (const nested of [false, true]) {
+      const f = nativeOffers();
+      let live = true;
+      f.setHook((phase) => {
+        if (phase !== "write-getter") return;
+        if (nested) void f.store.write("wrong-private-key", Uint8Array.from([1])).catch(() => {});
+        else live = false;
+      });
+      await expect(
+        f.store.write("current", Uint8Array.from([1]), () => {
+          if (!live) throw new Error("private-expired");
+        }),
+      ).rejects.toThrow("control-storage-write-failed");
+      expect(f.offers).toEqual([]);
+    }
+  });
+  test("read callbacks can only refuse, and expired or accessor absence never returns null", async () => {
+    for (const value of [
+      true,
+      false,
+      {},
+      Promise.resolve(),
+      Promise.reject(new Error("private-refusal")),
+    ]) {
+      const f = nativeOffers();
+      await expect(f.store.read("current", (() => value) as () => void)).rejects.toThrow(
+        "control-storage-read-failed",
+      );
+      expect(f.offers).toEqual([]);
+    }
+    const inherited = fake();
+    const inheritedError = new Error("private-absence");
+    Object.setPrototypeOf(
+      inheritedError,
+      Object.assign(Object.create(Error.prototype), { code: "NoSuchKey" }),
+    );
+    inherited.error(inheritedError);
+    await expect(
+      createControlStorage(configuration(), { createClient: inherited.factory }).read("current"),
+    ).rejects.toThrow("control-storage-read-failed");
+    const accessor = fake();
+    const error = new Error("private-absence");
+    let getterCalls = 0;
+    Object.defineProperty(error, "code", {
+      get() {
+        getterCalls++;
+        return "NoSuchKey";
+      },
+    });
+    accessor.error(error);
+    await expect(
+      createControlStorage(configuration(), { createClient: accessor.factory }).read("current"),
+    ).rejects.toThrow("control-storage-read-failed");
+    expect(getterCalls).toBe(0);
+    const late = fake();
+    let live = true;
+    late.error(
+      new Proxy(Object.assign(new Error("private-absence"), { code: "NoSuchKey" }), {
+        getOwnPropertyDescriptor(value, name) {
+          live = false;
+          return Reflect.getOwnPropertyDescriptor(value, name);
+        },
+      }),
+    );
+    await expect(
+      createControlStorage(configuration(), { createClient: late.factory }).read("current", () => {
+        if (!live) throw new Error("private-expired");
+      }),
+    ).rejects.toThrow("control-storage-read-failed");
+  });
+  test("cleanup reentry cannot turn an uncertain read into authenticated absence", async () => {
+    for (const phase of ["cancel", "release"]) {
+      const f = nativeOffers();
+      f.setHook((at) => {
+        if (at === "read") throw Object.assign(new Error("private-absence"), { code: "NoSuchKey" });
+        if (at === phase) void f.store.read("wrong-private-key").catch(() => {});
+      });
+      await expect(f.store.read("current", () => {})).rejects.toThrow(
+        "control-storage-read-failed",
+      );
+      expect(f.offers).toEqual(["file", "stream", "getReader", "read"]);
+    }
+  });
   test("captured denial fence runs after routing preparation immediately before the SDK mutation", async () => {
     const f = fake();
     const store = createControlStorage(configuration(), { createClient: f.factory });

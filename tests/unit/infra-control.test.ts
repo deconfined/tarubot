@@ -46,7 +46,13 @@ class MemoryStore implements ControlStore {
   failWrite = 0;
   corruptReadback = false;
   readError = false;
-  async read(key: string): Promise<Uint8Array | null> {
+  reads: { key: string; refusal: (() => void) | undefined }[] = [];
+  beforeRead = async (_key: string, _refusal: (() => void) | undefined) => {};
+  async read(key: string, refusal?: () => void): Promise<Uint8Array | null> {
+    refusal?.();
+    this.reads.push({ key, refusal });
+    await this.beforeRead(key, refusal);
+    refusal?.();
     if (this.readError) throw new Error("invented-private-storage-diagnostic");
     const data = this.data.get(key);
     if (data && this.corruptReadback && this.writes.at(-1) === key)
@@ -76,6 +82,55 @@ async function established() {
   await journal.finish(ticket, before);
   return { store, journal, snapshot: await journal.inspect(before), ticket };
 }
+
+describe("native infrastructure read fences", () => {
+  test("the original baseline proof reaches every structural reopen and cannot be refreshed after denial", async () => {
+    const f = await established();
+    const original = baselineRunFixture({ kind: "baseline", run });
+    const journal = new InfrastructureJournal(f.store, codec, {
+      verifyBaselineRun: original.verify,
+    });
+    f.store.reads.length = 0;
+    let captured: (() => void) | undefined;
+    f.store.beforeRead = async (_path, refusal) => {
+      if (refusal) {
+        captured = refusal;
+        original.clock.now += 30_000;
+      }
+    };
+    await expect(journal.inspect(before)).rejects.toThrow("invalid-infrastructure-baseline-run");
+    expect(f.store.reads.map((entry) => [entry.key, typeof entry.refusal])).toEqual([
+      ["current", "undefined"],
+      [`intents/${f.snapshot.generation}`, "undefined"],
+      [`baselines/${f.snapshot.generation}`, "undefined"],
+      [`completed/${f.snapshot.generation}`, "undefined"],
+      ["current", "function"],
+    ]);
+    expect(typeof captured).toBe("function");
+    original.clock.now -= 30_000;
+    await original.verify({ kind: "baseline", run });
+    expect(() => captured?.()).toThrow("invalid-infrastructure-baseline-run");
+  });
+  test("historical absence and exact readback keep the same verified predecessor fence", async () => {
+    const f = await established();
+    const original = baselineRunFixture({ kind: "baseline", run });
+    const journal = new InfrastructureJournal(f.store, codec, {
+      verifyBaselineRun: original.verify,
+    });
+    const snapshot = await journal.inspect(before);
+    f.store.reads.length = 0;
+    await journal.begin(snapshot, inputs, run, binding, "apply");
+    const guarded = f.store.reads.filter((entry) => entry.refusal !== undefined);
+    expect(guarded.some((entry) => entry.key.startsWith("intents/"))).toBe(true);
+    expect(guarded.filter((entry) => entry.key === "current").length).toBeGreaterThanOrEqual(2);
+    expect(f.store.reads.slice(-3).every((entry) => typeof entry.refusal === "function")).toBe(
+      true,
+    );
+    original.clock.now += 30_000;
+    for (const entry of guarded)
+      expect(() => entry.refusal?.()).toThrow("invalid-infrastructure-baseline-run");
+  });
+});
 
 describe("control-record encryption and evidence", () => {
   test("runtime privacy hides derived keys and preserves pre-hardening ciphertext and backend/path bindings", () => {

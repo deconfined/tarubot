@@ -37,6 +37,20 @@ const maxOperation = 60_000;
 const maxFreshAge = 30_000;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const sha = /^[a-f0-9]{64}$/u;
+const byteLength = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "byteLength",
+)?.get;
+const nativeSet = Uint8Array.prototype.set;
+const nativeThen = Promise.prototype.then;
+function copyBytes(value: Uint8Array, maximum: number): Uint8Array {
+  requireOwner(value instanceof Uint8Array && byteLength !== undefined);
+  const length = byteLength.call(value) as number;
+  requireOwner(length > 0 && length <= maximum);
+  const copy = new Uint8Array(length);
+  nativeSet.call(copy, value);
+  return copy;
+}
 
 /** Future owner-created configuration environments; this module creates/changes none. */
 export const controlOwnerEnvironments = Object.freeze({
@@ -47,6 +61,17 @@ export const controlOwnerEnvironments = Object.freeze({
 
 function requireOwner(value: unknown): asserts value {
   if (!value) throw new Error("invalid-control-owner-boundary");
+}
+function synchronousRefusal(callback: (() => void) | undefined): void {
+  requireOwner(callback === undefined || typeof callback === "function");
+  const result: unknown = callback?.();
+  try {
+    // Drain real native promises across realms without reading an arbitrary .then getter.
+    void Reflect.apply(nativeThen, result, [undefined, () => {}]);
+  } catch {
+    // Non-promise returns still refuse; no thenable callback is invoked or awaited.
+  }
+  requireOwner(result === undefined);
 }
 function object(value: unknown): Value {
   requireOwner(value !== null && typeof value === "object" && !Array.isArray(value));
@@ -210,48 +235,103 @@ interface CurrentRecord {
   physicalObserved: number;
 }
 interface Budget {
+  stop(): void;
   now(): number;
+  capture<T>(work: () => T): T;
   wait<T>(work: () => Promise<T>, whole?: boolean): Promise<T>;
   remaining(whole?: boolean): number;
 }
-function budget(clock: () => number): Budget {
-  const started = clock();
-  integer(started);
+type Hook = <T>(fence: () => void, work: () => T) => T;
+function budget(clock: () => number, refusal: (() => void) | undefined, hooks: Hook): Budget {
+  // Includes the first denial/clock and caller snapshot, rather than starting after them.
   const physicalStarted = performance.now();
-  let last = started;
-  const now = () => {
-    const at = clock();
-    integer(at);
-    requireOwner(
-      at >= last &&
-        at - started < maxOperation &&
-        performance.now() - physicalStarted < maxOperation,
-    );
-    last = at;
-    return at;
+  let started: number | undefined,
+    last: number | undefined,
+    fenced = false,
+    checking = false;
+  const fence = () => {
+    fenced = true;
   };
+  const now = () => {
+    let owns = false;
+    try {
+      requireOwner(!fenced && !checking);
+      checking = true;
+      owns = true;
+      return hooks(fence, () => {
+        synchronousRefusal(refusal);
+        const at = clock();
+        integer(at);
+        synchronousRefusal(refusal);
+        if (started === undefined) started = at;
+        requireOwner(
+          !fenced &&
+            checking &&
+            at >= (last ?? started) &&
+            at - started < maxOperation &&
+            performance.now() - physicalStarted < maxOperation,
+        );
+        last = at;
+        return at;
+      });
+    } catch {
+      fence();
+      throw new Error("invalid-control-owner-boundary");
+    } finally {
+      if (owns) checking = false;
+    }
+  };
+  const origin = now();
   const remaining = (whole = false) =>
     Math.min(
       whole ? maxOperation : 10_000,
-      maxOperation - (now() - started),
+      maxOperation - (now() - origin),
       maxOperation - (performance.now() - physicalStarted),
     );
   return {
+    stop: fence,
     now,
     remaining,
+    capture<T>(work: () => T): T {
+      now();
+      let owns = false;
+      try {
+        requireOwner(!fenced && !checking);
+        checking = true;
+        owns = true;
+        const value = hooks(fence, work);
+        requireOwner(!fenced && checking);
+        return value;
+      } catch {
+        fence();
+        throw new Error("invalid-control-owner-boundary");
+      } finally {
+        if (owns) checking = false;
+        now();
+      }
+    },
     async wait<T>(work: () => Promise<T>, whole = false): Promise<T> {
       const limit = remaining(whole);
       requireOwner(limit > 0);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const result = await Promise.race([
-          Promise.resolve().then(work),
+          Promise.resolve().then(() => {
+            now();
+            return work();
+          }),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("invalid-control-owner-boundary")), limit);
+            timer = setTimeout(() => {
+              fence();
+              reject(new Error("invalid-control-owner-boundary"));
+            }, limit);
           }),
         ]);
         now();
         return result;
+      } catch {
+        fence();
+        throw new Error("invalid-control-owner-boundary");
       } finally {
         clearTimeout(timer);
       }
@@ -260,7 +340,11 @@ function budget(clock: () => number): Budget {
 }
 
 /** Isolated HTTPS, fixed GitHub API origin/repository, no ambient proxy/token or redirects. */
-const directGet: GitHubReader = (input) =>
+const directGet = (
+  input: GitHubReadRequest,
+  beforeRead?: () => void,
+  capture?: <T>(work: () => T) => T,
+): Promise<GitHubReadResponse> =>
   new Promise((accept, reject) => {
     const url = new URL(input.url);
     if (
@@ -275,73 +359,142 @@ const directGet: GitHubReader = (input) =>
       return;
     }
     const agent = new Agent({ keepAlive: false });
-    const chunks: Buffer[] = [];
+    const chunks: Uint8Array[] = [];
     let size = 0,
-      finished = false;
+      finished = false,
+      fenced = false,
+      checking = false,
+      cleaned = false;
+    let request: ReturnType<typeof httpsRequest> | undefined;
+    let responseHandle: { destroy(): void } | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (response?: GitHubReadResponse) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      agent.destroy();
-      if (response) accept(response);
+      try {
+        agent.destroy();
+      } catch {
+        fenced = true;
+      }
+      if (response && !fenced) accept(response);
       else reject(new Error("invalid-control-owner-boundary"));
     };
-    const request = httpsRequest(
-      {
-        protocol: "https:",
-        hostname: "api.github.com",
-        servername: "api.github.com",
-        port: 443,
-        path: `${url.pathname}${url.search}`,
-        method: "GET",
-        headers: input.headers,
-        agent,
-        rejectUnauthorized: true,
-        maxHeaderSize: maxHeaders,
-      },
-      (response) => {
-        response.on("error", () => finish());
-        response.on("aborted", () => finish());
-        response.on("data", (chunk: Buffer) => {
-          size += chunk.length;
-          if (size > input.body_limit) {
-            finish();
-            response.destroy();
-            return;
-          }
-          chunks.push(Buffer.from(chunk));
-        });
-        response.on("end", () => {
-          if (!response.complete) {
-            finish();
-            return;
-          }
-          const headers: Record<string, string> = Object.create(null);
-          for (let index = 0; index < response.rawHeaders.length; index += 2) {
-            const name = response.rawHeaders[index]?.toLowerCase(),
-              value = response.rawHeaders[index + 1];
-            if (name === undefined || value === undefined) {
-              finish();
-              return;
-            }
-            headers[name] = Object.hasOwn(headers, name) ? `${headers[name]},${value}` : value;
-          }
-          finish({
-            status: response.statusCode ?? 0,
-            url: input.url,
-            headers,
-            body: Buffer.concat(chunks),
-          });
-        });
-      },
-    );
-    request.on("error", () => finish());
-    timer = setTimeout(() => {
+    const fail = () => {
+      fenced = true;
       finish();
-      request.destroy();
-    }, input.timeout_ms);
-    request.end();
+      if (cleaned) return;
+      cleaned = true;
+      // Accepted I/O cleanup can occur after refusal, but cannot resume or approve a read.
+      try {
+        responseHandle?.destroy();
+      } catch {}
+      try {
+        request?.destroy();
+      } catch {}
+    };
+    const guard = () => {
+      let owns = false;
+      try {
+        requireOwner(!finished && !fenced && !checking);
+        checking = true;
+        owns = true;
+        synchronousRefusal(beforeRead);
+        requireOwner(!finished && !fenced && checking);
+      } catch {
+        fenced = true;
+        throw new Error("invalid-control-owner-boundary");
+      } finally {
+        if (owns) checking = false;
+      }
+    };
+    const prepare = <T>(work: () => T): T => {
+      guard();
+      const value = capture ? capture(work) : work();
+      guard();
+      return value;
+    };
+    const options = {
+      protocol: "https:",
+      hostname: "api.github.com",
+      servername: "api.github.com",
+      port: 443,
+      path: `${url.pathname}${url.search}`,
+      method: "GET",
+      headers: input.headers,
+      agent,
+      rejectUnauthorized: true,
+      maxHeaderSize: maxHeaders,
+    };
+    try {
+      guard();
+    } catch {
+      fail();
+      return;
+    }
+    try {
+      request = httpsRequest(options, (response) => {
+        responseHandle = response;
+        try {
+          prepare(() => {
+            response.on("error", fail);
+            response.on("aborted", fail);
+            response.on("data", (chunk: Buffer) => {
+              try {
+                prepare(() => {
+                  const bytes = copyBytes(chunk, maxBody);
+                  size += bytes.length;
+                  requireOwner(size <= input.body_limit);
+                  chunks.push(bytes);
+                });
+              } catch {
+                fail();
+              }
+            });
+            response.on("end", () => {
+              try {
+                const result = prepare(() => {
+                  requireOwner(response.complete);
+                  const rawHeaders = response.rawHeaders;
+                  const headers: Record<string, string> = Object.create(null);
+                  for (let index = 0; index < rawHeaders.length; index += 2) {
+                    const name = rawHeaders[index]?.toLowerCase(),
+                      value = rawHeaders[index + 1];
+                    requireOwner(name !== undefined && value !== undefined);
+                    headers[name] = Object.hasOwn(headers, name)
+                      ? `${headers[name]},${value}`
+                      : value;
+                  }
+                  return {
+                    status: response.statusCode ?? 0,
+                    url: input.url,
+                    headers,
+                    body: Buffer.concat(chunks),
+                  };
+                });
+                guard();
+                finish(result);
+              } catch {
+                fail();
+              }
+            });
+          });
+        } catch {
+          fail();
+        }
+      });
+      request.on("error", fail);
+      const end = prepare(() => {
+        const method = request?.end;
+        requireOwner(typeof method === "function");
+        return Function.prototype.bind.call(method, request) as () => void;
+      });
+      timer = setTimeout(fail, input.timeout_ms);
+      guard();
+      end();
+    } catch {
+      fail();
+    }
   });
 
 /** Read-only implementation of current ControlConsumerBoundary; no raw/key/restore capability. */
@@ -351,8 +504,10 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
   readonly #rawRead: VersionedControlStore["read"];
   readonly #get: GitHubReader;
   readonly #clock: () => number;
+  readonly #native: boolean;
   readonly #revisions = new Map<string, string>();
   #lastRevision: string | undefined;
+  #hook: { fence(): void } | undefined;
   constructor(
     configuration: ControlOwnerBoundaryConfiguration,
     dependencies: {
@@ -418,7 +573,8 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       const store = dependencies.store,
         read = store.read,
         readVersion = store.readVersion;
-      const get = dependencies.get ?? directGet,
+      const capturedGet = dependencies.get,
+        get = capturedGet ?? directGet,
         clock = dependencies.now ?? Date.now;
       requireOwner(
         typeof read === "function" &&
@@ -430,11 +586,33 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       this.#scope = { target: c.target, backend: c.backend, namespace } as ControlConsumerScope;
       this.#rawRead = read.bind(store);
       this.#get = get;
+      this.#native = capturedGet === undefined;
       this.#clock = clock;
       Object.freeze(this);
     } catch {
       throw new Error("invalid-control-owner-boundary");
     }
+  }
+  #hooks<T>(fence: () => void, work: () => T): T {
+    if (this.#hook) {
+      this.#hook.fence();
+      fence();
+      throw new Error("invalid-control-owner-boundary");
+    }
+    const reservation = { fence };
+    this.#hook = reservation;
+    try {
+      return work();
+    } finally {
+      if (this.#hook === reservation) this.#hook = undefined;
+    }
+  }
+  #operation(refusal?: () => void): Budget {
+    if (this.#hook) {
+      this.#hook.fence();
+      throw new Error("invalid-control-owner-boundary");
+    }
+    return budget(this.#clock, refusal, (fence, work) => this.#hooks(fence, work));
   }
 
   #scopeRequest(input: unknown, completed: boolean): void {
@@ -473,53 +651,63 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
         input.body_limit === maxBody &&
         input.url.startsWith(`${api}${prefix}`),
     );
-    const response = await operation.wait(() =>
-      this.#get({
+    const response = await operation.wait(() => {
+      const captured = {
         ...input,
         headers: { ...input.headers },
         timeout_ms: Math.min(input.timeout_ms, operation.remaining()),
-      }),
-    );
-    requireOwner(
-      response.status === 200 &&
-        response.url === input.url &&
-        response.body instanceof Uint8Array &&
-        response.body.length > 0 &&
-        response.body.length <= maxBody,
-    );
-    const h: Record<string, string> = Object.create(null);
-    let size = 0;
-    for (const [name, value] of Object.entries(object(response.headers))) {
-      const lower = name.toLowerCase();
+      };
+      operation.now();
+      return this.#native
+        ? directGet(
+            captured,
+            () => {
+              operation.now();
+            },
+            (work) => operation.capture(work),
+          )
+        : this.#get(captured);
+    });
+    return operation.capture(() => {
+      const body = response.body;
       requireOwner(
-        /^[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(lower) &&
-          typeof value === "string" &&
-          !/[\r\n\0]/u.test(value) &&
-          !Object.hasOwn(h, lower),
+        response.status === 200 && response.url === input.url && body instanceof Uint8Array,
       );
-      size += Buffer.byteLength(name) + Buffer.byteLength(value) + 4;
-      requireOwner(size <= maxHeaders);
-      h[lower] = value;
-    }
-    requireOwner(
-      typeof h["content-type"] === "string" &&
-        /^application\/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?[ \t]*$/iu.test(
-          h["content-type"],
-        ),
-    );
-    for (const name of ["location", "link", "content-range"]) requireOwner(!Object.hasOwn(h, name));
-    requireOwner(
-      (h["content-encoding"] === undefined || h["content-encoding"] === "identity") &&
-        (h.age === undefined || h.age === "0"),
-    );
-    if (h["content-length"] !== undefined)
+      const h: Record<string, string> = Object.create(null);
+      let size = 0;
+      for (const [name, value] of Object.entries(object(response.headers))) {
+        const lower = name.toLowerCase();
+        requireOwner(
+          /^[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(lower) &&
+            typeof value === "string" &&
+            !/[\r\n\0]/u.test(value) &&
+            !Object.hasOwn(h, lower),
+        );
+        size += Buffer.byteLength(name) + Buffer.byteLength(value) + 4;
+        requireOwner(size <= maxHeaders);
+        h[lower] = value;
+      }
       requireOwner(
-        /^(0|[1-9][0-9]*)$/u.test(h["content-length"]) &&
-          Number(h["content-length"]) === response.body.length,
+        typeof h["content-type"] === "string" &&
+          /^application\/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?[ \t]*$/iu.test(
+            h["content-type"],
+          ),
       );
-    const bytes = Uint8Array.from(response.body);
-    const value = json(bytes);
-    return { value, response: { status: 200, url: input.url, headers: { ...h }, body: bytes } };
+      for (const name of ["location", "link", "content-range"])
+        requireOwner(!Object.hasOwn(h, name));
+      requireOwner(
+        (h["content-encoding"] === undefined || h["content-encoding"] === "identity") &&
+          (h.age === undefined || h.age === "0"),
+      );
+      if (h["content-length"] !== undefined)
+        requireOwner(
+          /^(0|[1-9][0-9]*)$/u.test(h["content-length"]) &&
+            Number(h["content-length"]) === byteLength?.call(body),
+        );
+      const bytes = copyBytes(body, maxBody);
+      const value = json(bytes);
+      return { value, response: { status: 200, url: input.url, headers: { ...h }, body: bytes } };
+    });
   }
   async #read(path: string, operation: Budget): Promise<unknown> {
     return (
@@ -645,10 +833,15 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
   }
 
   /** Current authority comes from two whole independent GET rounds, never missing objects/cache. */
-  async readOwnerAnchor(input: ControlConsumerScope): Promise<OwnerControlAnchor> {
+  async readOwnerAnchor(
+    input: ControlConsumerScope,
+    refusal?: () => void,
+  ): Promise<OwnerControlAnchor> {
+    let abandoned: Budget | undefined;
     try {
-      this.#scopeRequest(input, false);
-      const operation = budget(this.#clock);
+      const operation = this.#operation(refusal);
+      abandoned = operation;
+      operation.capture(() => this.#scopeRequest(input, false));
       const first = await this.#current(operation),
         final = await this.#current(operation);
       this.#same(first, final, operation);
@@ -668,6 +861,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
         expires_at: Math.min(first.observed + maxFreshAge, operation.now() + remaining),
       });
     } catch {
+      abandoned?.stop();
       throw new Error("invalid-control-owner-boundary");
     }
   }
@@ -675,11 +869,16 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
   /** Restore-only capabilities refuse; only completed encrypted metadata and final run are read. */
   async confirmCompletedRepair(
     input: ControlConsumerScope & { generation: string },
+    refusal?: () => void,
   ): Promise<void> {
+    let abandoned: Budget | undefined;
     try {
-      const request = snapshot(input) as ControlConsumerScope & { generation: string };
-      this.#scopeRequest(request, true);
-      const operation = budget(this.#clock);
+      const operation = this.#operation(refusal);
+      abandoned = operation;
+      const request = operation.capture(() => snapshot(input)) as ControlConsumerScope & {
+        generation: string;
+      };
+      operation.capture(() => this.#scopeRequest(request, true));
       const first = await this.#current(operation);
       requireOwner(
         first.record.repair.mode === "completed-repair" &&
@@ -771,14 +970,19 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
         "u",
       );
       const store: VersionedControlStore = {
-        read: async (path) => {
+        read: async (path, beforeRead) => {
           requireOwner(metadata.test(path));
-          const value = await operation.wait(() => this.#rawRead(path));
-          requireOwner(
-            value === null ||
-              (value instanceof Uint8Array && value.length > 0 && value.length <= 64 * 1024 * 1024),
+          // Every recursive recovery metadata read uses this ORIGINAL owner operation.
+          // No consumer check/GET is performed inside a stream checkpoint.
+          const fence = () => {
+            synchronousRefusal(beforeRead);
+            operation.now();
+            synchronousRefusal(beforeRead);
+          };
+          const value = await operation.wait(() => this.#rawRead(path, fence));
+          return operation.capture(() =>
+            value === null ? null : copyBytes(value, 64 * 1024 * 1024),
           );
-          return value === null ? null : Uint8Array.from(value);
         },
         write: denied,
         readVersion: denied,
@@ -800,6 +1004,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       const final = await this.#current(operation);
       this.#same(first, final, operation);
     } catch {
+      abandoned?.stop();
       throw new Error("invalid-control-owner-boundary");
     }
   }

@@ -5,6 +5,7 @@ import {
   guardedControlStore,
   type ControlConsumerBoundary,
   type ControlConsumerScope,
+  type ControlConsumerTicket,
   type OwnerControlAnchor,
 } from "../../scripts/control-consumer.js";
 import type { ControlStore } from "../../scripts/infra-control.js";
@@ -31,6 +32,7 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
     } as OwnerControlAnchor,
     values: new Map<string, Uint8Array>(),
     reads: [] as string[],
+    readGuards: [] as { path: string; refusal: (() => void) | undefined }[],
     writes: [] as string[],
     anchors: 0,
     confirmed: [] as (ControlConsumerScope & { generation: string })[],
@@ -40,9 +42,12 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
     beforeWrite: async (_path: string) => {},
   };
   const store: ControlStore = {
-    async read(path) {
+    async read(path, refusal) {
+      refusal?.();
       state.reads.push(path);
+      state.readGuards.push({ path, refusal });
       await state.beforeRead(path);
+      refusal?.();
       return state.values.get(path) ?? null;
     },
     async write(path, bytes) {
@@ -52,15 +57,19 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
     },
   };
   const owner: ControlConsumerBoundary = {
-    async readOwnerAnchor(request) {
+    async readOwnerAnchor(request, refusal) {
+      refusal?.();
       expect(request).toEqual(configuration);
       state.anchors++;
       await state.beforeAnchor(state.anchors);
+      refusal?.();
       return state.anchor;
     },
-    async confirmCompletedRepair(request) {
+    async confirmCompletedRepair(request, refusal) {
+      refusal?.();
       state.confirmed.push(structuredClone(request));
       await state.beforeConfirm();
+      refusal?.();
     },
   };
   const guard = new ControlConsumerGuard(configuration, { store, owner, now: () => now });
@@ -83,6 +92,205 @@ function fixture(target: ControlConsumerScope["target"] = "infra") {
 }
 
 describe("independently owner-anchored normal control consumers", () => {
+  test("original native tickets retain their refusal and a replacement fences the old authority", async () => {
+    const f = fixture();
+    let live = true;
+    const original = () => {
+      if (!live) throw new Error("private-original-denial");
+    };
+    const ticket = await f.guard.check(undefined, original);
+    const count = f.state.reads.length;
+    await expect(f.guard.check(ticket, () => {})).rejects.toThrow("control-consumer-guard-failed");
+    await expect(f.guard.check(ticket, original)).rejects.toThrow("control-consumer-guard-failed");
+    expect(f.state.reads).toHaveLength(count);
+    const second = await f.guard.check(undefined, original);
+    live = false;
+    await expect(f.guard.check(second)).rejects.toThrow("control-consumer-guard-failed");
+    live = true;
+    await expect(f.guard.check(second)).rejects.toThrow("control-consumer-guard-failed");
+  });
+  test("swallowed nested correct or copied-ticket checks fence the original callback phase", async () => {
+    for (const copied of [false, true]) {
+      const f = fixture();
+      let reenter = false;
+      let ticket: Awaited<ReturnType<ControlConsumerGuard["check"]>> | undefined;
+      const original = () => {
+        if (reenter) {
+          reenter = false;
+          void f.guard
+            .check(copied ? ({ ...ticket } as ControlConsumerTicket) : ticket)
+            .catch(() => {});
+        }
+      };
+      ticket = await f.guard.check(undefined, original);
+      const count = f.state.reads.length;
+      reenter = true;
+      await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+      await expect(f.guard.check(ticket)).rejects.toThrow("control-consumer-guard-failed");
+      expect(f.state.reads).toHaveLength(count);
+    }
+  });
+  test("incoming read and write refusals stop owner metadata offers without extending a shorter window", async () => {
+    for (const mutation of [false, true]) {
+      const f = fixture();
+      let live = true;
+      f.state.beforeAnchor = async () => {
+        live = false;
+      };
+      const store = guardedControlStore(f.store, f.guard);
+      const refusal = () => {
+        if (!live) throw new Error("private-short-window");
+      };
+      await expect(
+        mutation
+          ? store.write("current", Uint8Array.from([2]), refusal)
+          : store.read("current", refusal),
+      ).rejects.toThrow(
+        mutation ? "control-consumer-write-failed" : "control-consumer-read-failed",
+      );
+      expect(f.state.anchors).toBe(1);
+      expect(f.state.reads).toEqual([]);
+      expect(f.state.writes).toEqual([]);
+    }
+  });
+  test("a timed-out read permanently fences its retained native callback across a fresh check", async () => {
+    const f = fixture();
+    f.state.anchor.expires_at = instant + 80;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.state.beforeRead = async (path) => {
+      if (path === "current") await pending;
+    };
+    const store = guardedControlStore(f.store, f.guard);
+    await expect(store.read("current")).rejects.toThrow("control-consumer-read-failed");
+    const old = f.state.readGuards.find((entry) => entry.path === "current")?.refusal;
+    expect(typeof old).toBe("function");
+    await f.guard.check();
+    expect(() => old?.()).toThrow("invalid-control-consumer");
+    const count = f.state.reads.length;
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(f.state.reads).toHaveLength(count);
+    expect(() => old?.()).toThrow("invalid-control-consumer");
+  });
+  test("first clock and snapshot phases cannot swallow nested denial or grant Boolean approval", async () => {
+    for (const wrong of [false, true]) {
+      const f = fixture();
+      let guard: ControlConsumerGuard | undefined;
+      let nested = true;
+      guard = new ControlConsumerGuard(f.configuration, {
+        store: f.store,
+        owner: f.owner,
+        now: () => {
+          if (nested) {
+            nested = false;
+            void guard?.check(wrong ? ({} as ControlConsumerTicket) : undefined).catch(() => {});
+          }
+          return instant;
+        },
+      });
+      await expect(guard.check()).rejects.toThrow("control-consumer-guard-failed");
+      expect(f.state.anchors).toBe(0);
+      expect(f.state.reads).toEqual([]);
+    }
+    for (const value of [
+      true,
+      false,
+      {},
+      Promise.resolve(),
+      Promise.reject(new Error("private-refusal")),
+    ]) {
+      const f = fixture();
+      await expect(f.guard.check(undefined, (() => value) as () => void)).rejects.toThrow(
+        "control-consumer-guard-failed",
+      );
+      expect(f.state.anchors).toBe(0);
+    }
+  });
+  test("physical time starts before the first clock and owner snapshot", () => {
+    for (const phase of ["clock", "snapshot"]) {
+      const f = fixture();
+      const modulePath = new URL("../../scripts/control-consumer.ts", import.meta.url).pathname;
+      const program = `
+        import { performance } from "node:perf_hooks";
+        const input = ${JSON.stringify({ configuration: f.configuration, anchor: f.state.anchor, phase })};
+        let elapsed = 0, reads = 0, anchors = 0, clocks = 0, code;
+        Object.defineProperty(performance, "now", { value: () => elapsed });
+        const { ControlConsumerGuard } = await import(${JSON.stringify(modulePath)});
+        if (input.phase === "snapshot") Object.defineProperty(input.anchor, "backend", {
+          enumerable: true, get() { elapsed = 60000; return input.configuration.backend; },
+        });
+        const guard = new ControlConsumerGuard(input.configuration, {
+          store: { read: async () => { reads++; return null; }, write: async () => {} },
+          owner: { readOwnerAnchor: async () => { anchors++; return input.anchor; }, confirmCompletedRepair: async () => {} },
+          now: () => { if (input.phase === "clock" && ++clocks === 1) elapsed = 60000; return ${instant}; },
+        });
+        try { await guard.check(); code = "accepted"; } catch(error) { code = error.message; }
+        console.log(JSON.stringify({ reads, anchors, code }));
+      `;
+      const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.exitCode).toBe(0);
+      expect(Buffer.from(child.stderr).toString()).toBe("");
+      expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+        reads: 0,
+        anchors: phase === "clock" ? 0 : 1,
+        code: "control-consumer-guard-failed",
+      });
+    }
+  });
+  test("owned write bytes use intrinsic copying before the first await", async () => {
+    const f = fixture();
+    const bytes = Uint8Array.from([7, 8]);
+    let hooks = 0;
+    Object.defineProperty(bytes, "length", {
+      get() {
+        hooks++;
+        throw new Error("private-length");
+      },
+    });
+    Object.defineProperty(bytes, Symbol.iterator, {
+      get() {
+        hooks++;
+        throw new Error("private-iterator");
+      },
+    });
+    await guardedControlStore(f.store, f.guard).write("current", bytes);
+    expect(f.state.values.get("current")).toEqual(Uint8Array.from([7, 8]));
+    expect(hooks).toBe(0);
+  });
+  test("a late malformed read result permanently fences the callback offered to storage", async () => {
+    const f = fixture();
+    let retained: (() => void) | undefined;
+    const read = f.store.read;
+    const store: ControlStore = {
+      read: async (path, refusal) => {
+        if (path !== "current") return read(path, refusal);
+        retained = refusal;
+        refusal?.();
+        return {} as Uint8Array;
+      },
+      write: f.store.write,
+    };
+    const guard = new ControlConsumerGuard(f.configuration, {
+      store,
+      owner: f.owner,
+      now: () => instant,
+    });
+    await expect(guardedControlStore(store, guard).read("current")).rejects.toThrow(
+      "control-consumer-read-failed",
+    );
+    expect(typeof retained).toBe("function");
+    expect(() => retained?.()).toThrow("invalid-control-consumer");
+    await guard.check();
+    expect(() => retained?.()).toThrow("invalid-control-consumer");
+  });
   test("explicit never-repaired mode checks both absent markers twice without guessing", async () => {
     for (const target of ["infra", "staging", "production"] as const) {
       const f = fixture(target);

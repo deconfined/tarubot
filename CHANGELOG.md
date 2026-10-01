@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.26**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.27**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.27 — Retain control-read refusal boundaries
+
+- Carry the original preparation, writer and consumer refusal through ordinary journal reads and completed-repair metadata reads, including native request and stream callbacks.
+- Count synchronous capture and byte copying in the original operation window; expired, nested or abandoned work permanently refuses later offers and cannot turn refusal into object absence.
+- Capture native write methods before the final refusal check so a method getter cannot start a late write. Existing request volume and provisioning prerequisites remain; release activation stays fenced.
 
 ## 2.36.26 — Native target issuance adapters
 
