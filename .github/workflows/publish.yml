@@ -129,6 +129,8 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
+          # Refresh Alpine packages on each build even when the upstream Bun tag is unchanged.
+          no-cache-filters: base
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           provenance: mode=max

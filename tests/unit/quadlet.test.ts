@@ -218,9 +218,10 @@ describe("the unit", () => {
   test("mounts staging's five secrets as files only the bot's bun user reads", async () => {
     const { unit } = await staging();
     expect(valuesOf(unit, "Container", "Secret")).toEqual(STAGING_SECRETS.map(mountOf));
-    // uid and gid 1000 are the runtime image's bun user (oven/bun), which the bot runs as.
+    // Bun's official Alpine base keeps uid/gid 1000; runtime inherits it after package upgrades.
     const dockerfile = await read("Dockerfile");
-    expect(dockerfile).toMatch(/^FROM oven\/bun:[0-9.]+ AS runtime$/mu);
+    expect(dockerfile).toMatch(/^FROM oven\/bun:[0-9.]+-alpine AS base$/mu);
+    expect(dockerfile).toMatch(/^FROM base AS runtime$/mu);
     expect(dockerfile).toMatch(/^USER bun$/mu);
     // Podman mounts its per-container copy read-only only because the container is.
     expect(single(unit, "Container", "ReadOnly")).toBe("true");

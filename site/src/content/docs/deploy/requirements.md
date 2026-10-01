@@ -10,6 +10,8 @@ These pages are for people who run TaruBot themselves. A deployment is one bot p
 ## A host
 
 - **Docker Engine with Compose v2** on a Linux host, `amd64` or `arm64`. TaruBot ships as one published container image, `ghcr.io/deconfined/tarubot`, built for both. You don't need Bun, Node or a source checkout on the host.
+
+  The bot image uses Bun on Alpine Linux. Alpine is inside the container; your host can use another Linux distribution.
 - **An address the Lodestone accepts.** TaruBot reads character profiles, FC rosters and searches from the Lodestone itself, from the host's own address. Some cloud providers' addresses are refused: the Lodestone answers DigitalOcean's with HTTP 403, for example, so profile checks, claims and rosters all fail there. Test from the host before you commit to it:
 
   ```sh

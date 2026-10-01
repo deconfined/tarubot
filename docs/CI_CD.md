@@ -24,11 +24,13 @@ Merge with a merge commit after current CI/security checks and the owner's code-
 
 An unchanged application version passes CI without a new changelog or startup plan. Documentation, tests and pipeline revisions use their Git commit identity. Application changes may accumulate on `main`; increasing `package.json` declares a bot release and requires its changelog entry and matching startup plan. Versions cannot decrease.
 
-Only the first automatic push run with a new version publishes images. Maintenance merges, manual Publish dispatches and reruns verify without publishing, signing, moving `latest` or requesting deployment. The workflow refuses an existing version tag and serializes publication for each version. If a failed run already created that tag, fix the failure and release a new version rather than overwrite it.
+The first automatic push run publishes a version when its registry tag is absent, including after a maintenance fix completes a previously failed build. Maintenance merges for an existing version tag, manual Publish dispatches and reruns verify without publishing, signing, moving `latest` or requesting deployment. Publication is serialized for each version. If a failed run already created that tag, a changed runtime image needs a new release rather than overwriting it.
 
 ## Signed build provenance
 
 Publication scans both exact runtime child digests with checksum-pinned Trivy before signing the build-returned index digest. Fixable high/critical findings, scanner errors and registry errors block signing and promotion. Candidate tags can exist after failure; they do not authorize deployment.
+
+The bot uses Bun's official Alpine image, with available Alpine package upgrades applied in a shared base stage. CI and publication bypass that stage's cache so each build refreshes the packages. Build tests and the final runtime use that same patched base; Bash, GNU coreutils and util-linux helpers are installed only in the build/test stage for host/workflow tests.
 
 The default policy in [release-scan-exceptions.ts](../scripts/release-scan-exceptions.ts) is empty. Exceptions need reviewed exact finding fields, a reason, issue and bounded expiry. Signing and promotion recheck the policy after job waits. Only the attestation job receives OIDC/attestation permissions; it has no registry write permission and installs no repository dependencies. `latest` advances only after signing.
 
