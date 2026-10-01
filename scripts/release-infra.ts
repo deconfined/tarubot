@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { infrastructureJournal } from "./infra-control-cli.js";
+import { legacyTargetJournal } from "./infra-control-cli.js";
 import {
   stateEvidence,
   verifyAppliedPlan,
@@ -214,7 +214,7 @@ export async function automaticInfrastructure(
       const configuration = candidateConfiguration(
         read("values.tfvars.json") as Record<string, unknown>,
       );
-      const journal = deps.journal ?? infrastructureJournal(directory, env);
+      const journal = deps.journal ?? legacyTargetJournal(directory, env);
       preparation = journal.prepareTargetCandidates({
         targets: configuration.map((value) => value.target),
         release,
@@ -268,7 +268,7 @@ export async function automaticInfrastructure(
     .digest("hex");
   const binding = handoffBinding(directory, env);
   requireEvidence(env.DIGEST === digest && env.BINDING === binding);
-  const journal = deps.journal ?? infrastructureJournal(directory, env);
+  const journal = deps.journal ?? legacyTargetJournal(directory, env);
   const before = stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-before"));
   requireEvidence(isDeepStrictEqual(before, context.snapshot.state));
   fresh();

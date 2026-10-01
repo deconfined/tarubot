@@ -6,7 +6,7 @@ The [agreed threat model](THREAT_MODEL.md) governs this design: minimal complexi
 
 Production still uses Compose. Staging uses the reviewed Ansible host and bot playbooks, with a manually pinned host key. Infrastructure is dispatch-only: read-only Plan, then owner-approved Apply. The full-plan classifier is advisory; automatic Apply is disabled.
 
-The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Experimental infrastructure-control and target-proof tooling remains fenced pending simplification under the threat model. Host deployment uses ordinary Ansible and OpenSSH. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
+The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Manual infrastructure records use the protected job's authority, with encrypted baseline/pending records and persistence readback; real-backend acceptance remains outstanding. Experimental target-proof tooling remains fenced pending simplification under the threat model. Host deployment uses ordinary Ansible and OpenSSH. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
 
 ## Intended flow
 
@@ -60,7 +60,7 @@ Serialize infrastructure writers globally and host/enrollment/recovery operation
 
 ## Durable SSH trust
 
-The owner explicitly approves enrollment of a new, not-yet-enrolled host generation. Bind it to the instance and addresses from successfully applied state. Observe a consistent Ed25519 key and persist it before SSH authentication. TOFU's first-observation interception risk is accepted; DNSSEC does not retroactively remove it.
+The owner's approval of a new-host Infrastructure Apply also authorizes that host generation's first enrollment. Bind it to the instance and addresses from successfully applied state. Observe a consistent Ed25519 key and persist it before SSH authentication. TOFU's first-observation interception risk is accepted; DNSSEC does not retroactively remove it. Rebuilds and key changes still require explicit owner approval.
 
 Only enrollment writes the expected SSHFP algorithm 4, digest type 2 record. Validate DNSSEC with a standard local validating resolver; a remote server's AD bit alone is insufficient. Ordinary deployment requires a matching validated record and the durable enrolled key.
 

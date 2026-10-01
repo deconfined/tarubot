@@ -15,6 +15,8 @@
 #          own TOFU_VARS, and OpenTofu refuses the plan if the state changed since (a stale plan).
 #          It never plans. Owner-enabled encrypted control records persist intent before Apply and
 #          verify state/baseline completion after it. A pending operation blocks subsequent writes.
+#          The protected job and environment credentials authorize this work; records need no
+#          separate GitHub owner variable, API token or historical workflow proof.
 #          operation=baseline uses this same approval gate but establishes only the initial record.
 #
 # Each step runs one phase of ops/tofu/ci/tofu-ci.sh, which holds the scripts and, beside it, the
@@ -121,11 +123,7 @@ jobs:
       - name: Read durable control records
         env:
           CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
-          # Independent control-infra owner scope; IDs remain masked, never gate IDs or outputs.
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
+          # Read-only S3 credentials read private encrypted applied-input records.
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
@@ -197,10 +195,6 @@ jobs:
       - name: Read durable control records
         env:
           CONTROL_RECORDS_ENABLED: ${{ vars.TOFU_CONTROL_RECORDS_ENABLED }}
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
@@ -220,10 +214,6 @@ jobs:
       - name: Apply
         if: inputs.operation == 'apply' || inputs.operation == 'adopt'
         env:
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
@@ -234,10 +224,6 @@ jobs:
       - name: Verify adoption with read-only provider credentials
         if: inputs.operation == 'adopt'
         env:
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
@@ -247,10 +233,6 @@ jobs:
       - name: Establish initial baseline without provider changes
         if: inputs.operation == 'baseline'
         env:
-          CONTROL_OWNER_ID: ${{ secrets.CONTROL_OWNER_ID }}
-          CONTROL_REPOSITORY_ID: ${{ secrets.CONTROL_REPOSITORY_ID }}
-          CONTROL_OWNER_ENVIRONMENT_ID: ${{ secrets.CONTROL_OWNER_ENVIRONMENT_ID }}
-          CONTROL_OWNER_READ_TOKEN: ${{ secrets.CONTROL_OWNER_READ_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}

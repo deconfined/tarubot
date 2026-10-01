@@ -9,6 +9,8 @@ import {
   verifyDatabaseAdoption,
 } from "./database-adoption.js";
 import {
+  InfrastructureRecords,
+  RecordCodec,
   type InfrastructureJournal,
   privateDigest,
   stateEvidence,
@@ -31,32 +33,97 @@ function configuredId(value: string | undefined): number {
   return id;
 }
 
-/** Legacy injected lab transport; the runner factory below uses the scoped, guarded native store. */
+/** Small native S3 adapter; only bounded ciphertext is read and uncertain writes are never retried. */
 export class S3ControlStore implements ControlStore {
   constructor(private readonly client: Pick<Bun.S3Client, "file" | "write">) {}
   async read(key: string): Promise<Uint8Array | null> {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let complete = false;
+    let total = 0;
     try {
-      return new Uint8Array(await this.client.file(`${prefix}${key}`).arrayBuffer());
+      reader = this.client.file(`${prefix}${key}`).stream().getReader();
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        total += part.value.byteLength;
+        if (total > 2 * 1024 * 1024 + 32) throw new Error("control-storage-read-failed");
+        chunks.push(Uint8Array.from(part.value));
+      }
+      const result = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+      complete = true;
+      return result;
     } catch (error) {
       // Only an explicit missing key is absence; 403, timeout, missing bucket, etc. stop work.
-      if (error instanceof Error && "code" in error && error.code === "NoSuchKey") return null;
+      if (total === 0 && error instanceof Error && "code" in error && error.code === "NoSuchKey")
+        return null;
       throw new Error("control-storage-read-failed");
+    } finally {
+      if (reader) {
+        if (!complete) await reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
     }
   }
   async write(key: string, bytes: Uint8Array): Promise<void> {
     try {
-      await this.client.write(`${prefix}${key}`, bytes, {
+      const written = await this.client.write(`${prefix}${key}`, bytes, {
         type: "application/octet-stream",
         retry: 0,
       });
+      if (written !== bytes.length) throw new Error("control-storage-write-failed");
     } catch {
       throw new Error("control-storage-write-failed");
     }
   }
 }
 
-/** Shared transport/key factory; reviewed and automatic adapters have distinct authority gates. */
-export function infrastructureJournal(
+/** The reviewed manual workflow needs only its own S3 credentials and encryption passphrase. */
+export function infrastructureRecords(
+  directory: string,
+  environment: NodeJS.ProcessEnv,
+  createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
+): InfrastructureRecords {
+  try {
+    const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
+    const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
+    const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
+      backend,
+    )?.[1];
+    const passphrase = environment.TF_VAR_state_passphrase ?? "";
+    const accessKeyId = environment.AWS_ACCESS_KEY_ID;
+    const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
+    if (!bucket || !endpoint || !accessKeyId || !secretAccessKey || passphrase.length < 32) fail();
+    // Bun's hosted-style endpoint includes the bucket. Explicit options avoid ambient routing,
+    // session credentials and retries; the backend/key bytes also bind the encryption domain.
+    const url = new URL(endpoint);
+    url.hostname = `${bucket}.${url.hostname}`;
+    const client = createClient({
+      bucket,
+      endpoint: url.origin,
+      region: "us-east-1",
+      virtualHostedStyle: true,
+      accessKeyId,
+      secretAccessKey,
+      sessionToken: "",
+      retry: 0,
+    });
+    return new InfrastructureRecords(
+      new S3ControlStore(client),
+      new RecordCodec(passphrase, privateDigest({ backend, key: backendKey })),
+    );
+  } catch {
+    fail();
+  }
+}
+
+/** Dormant automatic target adapter only; never selected by the manual Infrastructure CLI. */
+export function legacyTargetJournal(
   directory: string,
   environment: NodeJS.ProcessEnv,
   /** Internal native/GitHub/clock test seams, never CLI/environment-selected authority overrides. */
@@ -107,7 +174,7 @@ export async function controlPhase(
   command: string,
   directory: string,
   environment: NodeJS.ProcessEnv,
-  suppliedJournal?: InfrastructureJournal,
+  suppliedJournal?: Pick<InfrastructureRecords, "inspect" | "begin" | "finish">,
 ): Promise<void> {
   const read = (name: string): unknown => JSON.parse(readFileSync(join(directory, name), "utf8"));
   const write = (name: string, value: unknown) =>
@@ -120,7 +187,7 @@ export async function controlPhase(
     return;
   }
   // Dependency injection is internal-only for invented tests, never a CLI/environment override.
-  const journal = suppliedJournal ?? infrastructureJournal(directory, environment);
+  const journal = suppliedJournal ?? infrastructureRecords(directory, environment);
   const state = stateEvidence(read("state.json"));
   if (command === "read") {
     const snapshot = await journal.inspect(state);

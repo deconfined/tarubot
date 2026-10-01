@@ -1,4 +1,4 @@
-import { verifyInventedBaselineRun, baselineRunFixture } from "../fixtures/infra/baseline-run.js";
+import { baselineRunFixture } from "../fixtures/infra/baseline-run.js";
 /** Invented encrypted storage/state only; fault injection never contacts a backend or provider. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   InfrastructureJournal,
+  InfrastructureRecords,
   RecordCodec,
   privateDigest,
   stateEvidence,
@@ -14,7 +15,8 @@ import {
 } from "../../scripts/infra-control.js";
 import {
   controlPhase,
-  infrastructureJournal,
+  infrastructureRecords,
+  legacyTargetJournal,
   S3ControlStore,
 } from "../../scripts/infra-control-cli.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
@@ -44,6 +46,7 @@ class MemoryStore implements ControlStore {
   data = new Map<string, Uint8Array>();
   writes: string[] = [];
   failWrite = 0;
+  loseAcknowledgement = 0;
   corruptReadback = false;
   readError = false;
   reads: { key: string; refusal: (() => void) | undefined }[] = [];
@@ -63,6 +66,8 @@ class MemoryStore implements ControlStore {
     this.writes.push(key);
     if (this.writes.length === this.failWrite) throw new Error("invented-private-write-diagnostic");
     this.data.set(key, Uint8Array.from(bytes));
+    if (this.writes.length === this.loseAcknowledgement)
+      throw new Error("invented-private-lost-acknowledgement");
   }
   put(key: string, value: unknown): void {
     this.data.set(key, codec.seal(key, value));
@@ -74,9 +79,7 @@ class MemoryStore implements ControlStore {
 }
 async function established() {
   const store = new MemoryStore();
-  const journal = new InfrastructureJournal(store, codec, {
-    verifyBaselineRun: verifyInventedBaselineRun,
-  });
+  const journal = new InfrastructureRecords(store, codec);
   const snapshot = await journal.inspect(before);
   const ticket = await journal.begin(snapshot, inputs, run, binding, "baseline");
   await journal.finish(ticket, before);
@@ -225,9 +228,7 @@ describe("single-writer journal transitions", () => {
   });
   test("baseline establishment is explicit; ordinary Apply cannot learn a missing baseline", async () => {
     const store = new MemoryStore();
-    const journal = new InfrastructureJournal(store, codec, {
-      verifyBaselineRun: verifyInventedBaselineRun,
-    });
+    const journal = new InfrastructureRecords(store, codec);
     const snapshot = await journal.inspect(before);
     expect(snapshot).toEqual({ generation: null, state: before, inputs: null });
     await expect(journal.begin(snapshot, inputs, run, binding, "apply")).rejects.toThrow();
@@ -328,6 +329,37 @@ describe("single-writer journal transitions", () => {
       // Normal discovery refuses this operation; there is no automatic recovery/Apply retry.
       expect((store.get("current") as { pending: string }).pending).toBe(ticket.generation);
     }
+  });
+  test("a lost pending-write acknowledgement stops Apply and a fresh reader refuses the pending operation", async () => {
+    const { store, journal, snapshot } = await established();
+    store.loseAcknowledgement = store.writes.length + 2;
+    let providerOffers = 0;
+    await expect(
+      journal.begin(snapshot, inputs, run, binding, "apply").then(() => providerOffers++),
+    ).rejects.toThrow();
+    expect(providerOffers).toBe(0);
+    expect((store.get("current") as { pending: string | null }).pending).not.toBeNull();
+    // A new runner sees the durable marker even though the original runner did not get an ACK.
+    const next = new InfrastructureRecords(store, codec);
+    await expect(next.inspect(before)).rejects.toThrow("invalid-control-record");
+    await expect(next.begin(snapshot, inputs, run, binding, "apply")).rejects.toThrow();
+  });
+  test("a lost final-clear acknowledgement stops the runner; durable completion is usable only with every verified link", async () => {
+    const { store, journal, snapshot } = await established();
+    const ticket = await journal.begin(snapshot, inputs, run, binding, "apply");
+    const written = store.writes.length;
+    store.loseAcknowledgement = written + 4;
+    await expect(journal.finish(ticket, after)).rejects.toThrow();
+    expect(store.writes).toHaveLength(written + 4); // No retry or attempted rollback of the clear.
+    expect(store.get("current")).toEqual({ baseline: ticket.generation, pending: null });
+    // The remote clear took effect despite its missing ACK. A later reader still validates
+    // completion against the actual state; this is not authority to retry the old Apply.
+    const next = new InfrastructureRecords(store, codec);
+    expect((await next.inspect(after)).generation).toBe(ticket.generation);
+    await expect(next.inspect(before)).rejects.toThrow();
+    await expect(next.finish(ticket, after)).rejects.toThrow();
+    store.data.delete(`completed/${ticket.generation}`);
+    await expect(next.inspect(after)).rejects.toThrow();
   });
   test("storage/record failures never become missing-baseline authority", async () => {
     const { store, journal } = await established();
@@ -455,9 +487,7 @@ describe("private phase adapter", () => {
   function runner() {
     const directory = mkdtempSync(join(scratch, "runner-"));
     const store = new MemoryStore();
-    const journal = new InfrastructureJournal(store, codec, {
-      verifyBaselineRun: verifyInventedBaselineRun,
-    });
+    const journal = new InfrastructureRecords(store, codec);
     const write = (name: string, value: unknown) =>
       writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
     writeFileSync(
@@ -565,7 +595,122 @@ describe("private phase adapter", () => {
   });
 });
 
-describe("scoped infrastructure journal factory", () => {
+describe("manual infrastructure records factory", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "infra-records-factory-test-"));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  test("an approved runner establishes and updates reusable inputs with only S3 credentials", async () => {
+    const directory = mkdtempSync(join(scratch, "runner-"));
+    writeFileSync(
+      join(directory, "backend.hcl"),
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n',
+      { mode: 0o600 },
+    );
+    const options: Bun.S3Options[] = [];
+    const objects = new Map<string, Uint8Array>();
+    const calls: string[] = [];
+    // This transport has no GitHub reader or approval callback: the protected workflow is the
+    // authority, while the actual record operations still exercise encryption and readback.
+    const records = infrastructureRecords(
+      directory,
+      {
+        AWS_ACCESS_KEY_ID: "invented-access",
+        AWS_SECRET_ACCESS_KEY: "invented-secret",
+        AWS_SESSION_TOKEN: "invented-unrelated-session",
+        TF_VAR_state_passphrase: passphrase,
+      },
+      (native) => {
+        options.push(native);
+        return {
+          file(key: string) {
+            calls.push(key);
+            return {
+              stream: () =>
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    const bytes = objects.get(key);
+                    if (bytes) {
+                      controller.enqueue(Uint8Array.from(bytes));
+                      controller.close();
+                    } else
+                      controller.error(Object.assign(new Error("absent"), { code: "NoSuchKey" }));
+                  },
+                }),
+            };
+          },
+          async write(key: string, bytes: Uint8Array) {
+            calls.push(key);
+            objects.set(key, Uint8Array.from(bytes));
+            return bytes.length;
+          },
+        } as unknown as Bun.S3Client;
+      },
+    );
+    expect(options).toEqual([
+      {
+        bucket: "state-bucket-example",
+        endpoint: "https://state-bucket-example.us-east-1.example.org",
+        region: "us-east-1",
+        virtualHostedStyle: true,
+        accessKeyId: "invented-access",
+        secretAccessKey: "invented-secret",
+        sessionToken: "",
+        retry: 0,
+      },
+    ]);
+    const first = await records.inspect(before);
+    const baseline = await records.begin(first, inputs, run, binding, "baseline");
+    await records.finish(baseline, before);
+    const updated = { ...inputs, root_keys: ["invented-new-key"] };
+    const ticket = await records.begin(
+      await records.inspect(before),
+      updated,
+      run,
+      binding,
+      "apply",
+    );
+    await records.finish(ticket, after);
+    expect(await records.inspect(after)).toEqual({
+      generation: ticket.generation,
+      state: after,
+      inputs: updated,
+    });
+    expect(calls.every((path) => path.startsWith("tarubot/control/v1/infra/"))).toBe(true);
+    expect(objects.has("tarubot/infra.tfstate")).toBe(false);
+    for (const bytes of objects.values())
+      expect(Buffer.from(bytes).toString()).not.toContain("invented-new-key");
+  });
+  test("missing storage credentials or malformed backend refuses before creating the S3 client", () => {
+    const directory = mkdtempSync(join(scratch, "invalid-"));
+    const backend =
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n';
+    writeFileSync(join(directory, "backend.hcl"), backend);
+    const environment = {
+      AWS_ACCESS_KEY_ID: "invented-access",
+      AWS_SECRET_ACCESS_KEY: "invented-secret",
+      TF_VAR_state_passphrase: passphrase,
+    };
+    let created = 0;
+    const client = () => {
+      created++;
+      throw new Error("unexpected-storage-construction");
+    };
+    for (const changed of [
+      { AWS_ACCESS_KEY_ID: "" },
+      { AWS_SECRET_ACCESS_KEY: "" },
+      { TF_VAR_state_passphrase: "short" },
+    ])
+      expect(() =>
+        infrastructureRecords(directory, { ...environment, ...changed }, client),
+      ).toThrow("invalid-control-evidence");
+    writeFileSync(join(directory, "backend.hcl"), backend.replace("https:", "http:"));
+    expect(() => infrastructureRecords(directory, environment, client)).toThrow(
+      "invalid-control-evidence",
+    );
+    expect(created).toBe(0);
+  });
+});
+
+describe("dormant target journal factory", () => {
   const scratch = mkdtempSync(join(tmpdir(), "infra-journal-factory-test-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
   const backend =
@@ -627,7 +772,7 @@ describe("scoped infrastructure journal factory", () => {
       ...baselineRunFixture({ kind: "baseline", run }).data,
       ...baselineRunFixture({ kind: "apply", run: nextRun }).data,
     };
-    const journal = infrastructureJournal(directory, environment(), {
+    const journal = legacyTargetJournal(directory, environment(), {
       now: () => observed,
       async get(request) {
         requests.push(structuredClone(request));
@@ -784,7 +929,7 @@ describe("scoped infrastructure journal factory", () => {
         changes.push({ [name]: value });
     for (const changed of changes)
       expect(() =>
-        infrastructureJournal(
+        legacyTargetJournal(
           directory,
           { ...environment(), ...changed },
           {
@@ -820,9 +965,12 @@ describe("Bun S3 transport boundary", () => {
     for (const code of ["NoSuchKey", "AccessDenied", "NoSuchBucket", "Timeout", "404"]) {
       const client = {
         file: () => ({
-          arrayBuffer: async () => {
-            throw Object.assign(new Error("invented-secret-diagnostic"), { code });
-          },
+          stream: () =>
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(Object.assign(new Error("invented-secret-diagnostic"), { code }));
+              },
+            }),
         }),
       };
       const store = new S3ControlStore(client as unknown as Bun.S3Client);
@@ -835,10 +983,19 @@ describe("Bun S3 transport boundary", () => {
     const client = {
       file: (key: string) => {
         calls.push(key);
-        return { arrayBuffer: async () => Uint8Array.from([1, 2]).buffer };
+        return {
+          stream: () =>
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(Uint8Array.from([1, 2]));
+                controller.close();
+              },
+            }),
+        };
       },
       write: async (...args: unknown[]) => {
         calls.push(args);
+        return (args[1] as Uint8Array).length;
       },
     };
     const store = new S3ControlStore(client as unknown as Bun.S3Client);
@@ -852,5 +1009,31 @@ describe("Bun S3 transport boundary", () => {
         { type: "application/octet-stream", retry: 0 },
       ],
     ]);
+  });
+  test("oversized and interrupted objects stop and release their reader; partial uploads are errors", async () => {
+    for (const failure of ["oversized", "interrupted"] as const) {
+      let reads = 0;
+      let canceled = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (++reads === 1)
+            controller.enqueue(new Uint8Array(failure === "oversized" ? 2 * 1024 * 1024 + 33 : 32));
+          else controller.error(Object.assign(new Error("private-error"), { code: "NoSuchKey" }));
+        },
+        cancel() {
+          canceled++;
+        },
+      });
+      const store = new S3ControlStore({
+        file: () => ({ stream: () => stream }),
+      } as unknown as Bun.S3Client);
+      await expect(store.read("current")).rejects.toThrow("control-storage-read-failed");
+      expect(stream.locked).toBe(false);
+      if (failure === "oversized") expect(canceled).toBe(1);
+    }
+    const partial = new S3ControlStore({ write: async () => 1 } as unknown as Bun.S3Client);
+    await expect(partial.write("current", new Uint8Array(32))).rejects.toThrow(
+      "control-storage-write-failed",
+    );
   });
 });

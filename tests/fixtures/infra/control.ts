@@ -1,10 +1,9 @@
-import { verifyInventedBaselineRun } from "./baseline-run.js";
 /** Phase-test transport: invented encrypted objects on disk, injected through the internal API. */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { controlPhase } from "../../../scripts/infra-control-cli.js";
 import {
-  InfrastructureJournal,
+  InfrastructureRecords,
   RecordCodec,
   privateDigest,
   type ControlStore,
@@ -32,12 +31,7 @@ const codec = new RecordCodec(
   privateDigest({ backend, key: "tarubot/infra.tfstate" }),
 );
 try {
-  await controlPhase(
-    command,
-    directory,
-    process.env,
-    new InfrastructureJournal(store, codec, { verifyBaselineRun: verifyInventedBaselineRun }),
-  );
+  await controlPhase(command, directory, process.env, new InfrastructureRecords(store, codec));
 } catch {
   process.exitCode = 1;
 }

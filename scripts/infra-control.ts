@@ -414,7 +414,137 @@ export class RecordCodec {
   }
 }
 
-/** One shared workflow group must enclose read→begin→provider Apply→finish, including recovery. */
+/**
+ * Private records for the reviewed Infrastructure workflow. The protected job and its environment
+ * credentials authorize work; these records detect stale inputs and interrupted operations.
+ * One Actions concurrency group must enclose inspect→begin→provider Apply→finish. Readback and
+ * refusing existing history keys are recovery checks, not a storage lock or conditional write.
+ */
+export class InfrastructureRecords {
+  readonly #store: ControlStore;
+  readonly #codec: RecordCodec;
+  constructor(store: ControlStore, codec: RecordCodec) {
+    this.#store = store;
+    this.#codec = codec;
+  }
+  async #read(path: string): Promise<unknown | null> {
+    const bytes = await this.#store.read(path);
+    return bytes === null ? null : this.#codec.open(path, encryptedBytes(bytes));
+  }
+  async #persist(path: string, value: unknown, historical = false): Promise<void> {
+    if (historical) requireRecord((await this.#store.read(path)) === null);
+    const bytes = this.#codec.seal(path, value);
+    await this.#store.write(path, bytes);
+    const readback = await this.#store.read(path);
+    requireRecord(readback !== null && Buffer.from(bytes).equals(encryptedBytes(readback)));
+  }
+  async #head(): Promise<Head | null> {
+    const value = await this.#read("current");
+    if (value === null) return null;
+    const head = exact(value, ["baseline", "pending"]);
+    if (head.baseline !== null) generation(head.baseline);
+    if (head.pending !== null) generation(head.pending);
+    requireRecord(head.baseline !== null || head.pending !== null);
+    return head as unknown as Head;
+  }
+  async #snapshot(state: StateEvidence): Promise<Snapshot> {
+    const current = await this.#head();
+    if (current === null) return { generation: null, state, inputs: null };
+    generation(current.baseline);
+    requireRecord(current.pending === null);
+    const id = current.baseline;
+    const intent = await this.#read(`intents/${id}`);
+    const baseline = await this.#read(`baselines/${id}`);
+    const completion = await this.#read(`completed/${id}`);
+    const linked = validateInfrastructureBaselineLinks({
+      generation: id,
+      current,
+      intent,
+      baseline,
+      completion,
+      state,
+    });
+    return { generation: id, state, inputs: linked.intent.inputs };
+  }
+  async inspect(state: StateEvidence): Promise<Snapshot> {
+    state = capturePrivate(state) as StateEvidence;
+    validateState(state);
+    return this.#snapshot(state);
+  }
+  async begin(
+    snapshot: Snapshot,
+    inputs: ObjectValue,
+    run: RunIdentity,
+    binding: string,
+    kind: "apply" | "baseline",
+  ): Promise<Ticket> {
+    const captured = capturePrivate({ snapshot, inputs, run, binding, kind }) as {
+      snapshot: Snapshot;
+      inputs: ObjectValue;
+      run: RunIdentity;
+      binding: string;
+      kind: "apply" | "baseline";
+    };
+    ({ snapshot, inputs, run, binding, kind } = captured);
+    exact(snapshot, ["generation", "state", "inputs"]);
+    validateState(snapshot.state);
+    requireRecord(isDeepStrictEqual(await this.#snapshot(snapshot.state), snapshot));
+    requireRecord(
+      kind === "baseline" ? snapshot.generation === null : snapshot.generation !== null,
+    );
+    const intent: Intent = {
+      generation: randomUUID(),
+      previous: snapshot.generation,
+      kind,
+      run,
+      binding,
+      inputs,
+      before: snapshot.state,
+    };
+    validateIntent(intent);
+    // Provider Apply may start only after BOTH writes and their exact readbacks succeed.
+    await this.#persist(`intents/${intent.generation}`, intent, true);
+    await this.#persist("current", { baseline: intent.previous, pending: intent.generation });
+    return { generation: intent.generation, binding };
+  }
+  async finish(ticket: Ticket, state: StateEvidence): Promise<void> {
+    const captured = capturePrivate({ ticket, state }) as { ticket: Ticket; state: StateEvidence };
+    ({ ticket, state } = captured);
+    exact(ticket, ["generation", "binding"]);
+    generation(ticket.generation);
+    digest(ticket.binding);
+    validateState(state);
+    const intent = await this.#read(`intents/${ticket.generation}`);
+    validateIntent(intent);
+    requireRecord(intent.binding === ticket.binding);
+    requireRecord(
+      isDeepStrictEqual(await this.#head(), {
+        baseline: intent.previous,
+        pending: intent.generation,
+      }),
+    );
+    requireRecord(state.lineage === intent.before.lineage);
+    // Baseline establishment changes no state; a real Apply must advance the same state lineage.
+    requireRecord(
+      intent.kind === "baseline"
+        ? isDeepStrictEqual(state, intent.before)
+        : state.serial > intent.before.serial,
+    );
+    const baseline: Baseline = { intent, state };
+    await this.#persist(`baselines/${intent.generation}`, baseline, true);
+    await this.#persist("current", { baseline: intent.generation, pending: intent.generation });
+    await this.#persist(
+      `completed/${intent.generation}`,
+      { generation: intent.generation, baseline: privateDigest(baseline) },
+      true,
+    );
+    await this.#persist("current", { baseline: intent.generation, pending: null });
+    // Reopen every completion link before returning a usable applied-input baseline.
+    requireRecord((await this.#snapshot(state)).generation === ticket.generation);
+  }
+}
+
+/** Dormant target-projection journal; the manual Infrastructure CLI uses InfrastructureRecords. */
 export class InfrastructureJournal {
   // Trusted dependency capabilities remain caller-owned; instance shadows cannot replace them.
   readonly #store: ControlStore;
