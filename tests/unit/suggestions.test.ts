@@ -1107,13 +1107,6 @@ describe("where suggestions go", () => {
         else process.env[key] = saved[key];
     }
   });
-
-  test("the Claude workflow never starts for a suggestion", async () => {
-    const workflow = await Bun.file(
-      new URL("../../.github/workflows/claude.yml", import.meta.url),
-    ).text();
-    expect(workflow).toContain(`!contains(github.event.issue.body, '${SUGGESTION_MARKER}')`);
-  });
 });
 
 /**

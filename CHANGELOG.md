@@ -1,6 +1,10 @@
 # Version history
 
-The current application version is **2.36.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.1 - Remove Claude Code from the pipeline.
+
+Opting for a different code review platform.
 
 ## 2.36.0 — The simple pipeline for staging
 
