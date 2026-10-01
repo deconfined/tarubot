@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.30**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.31**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.31 — Retain SSH preparation refusal
+
+- Count dependency, input, path and stream-channel capture in the original SSH preparation deadline, and carry synchronous refusal through scheduled trust reads and the actual native spawn.
+- Retain the original proof expiry without renewal; capture native arguments, environment and methods before the final check. Conflicting stream calls permanently fence the exchange and detach its pipes.
+- Give an accepted command its own bounded physical timer. Native descriptor, owner, enrollment and DNS composition remains pending; these transport fixes grant no host authority or activation.
 
 ## 2.36.30 — Bound ordinary journal owner checks
 

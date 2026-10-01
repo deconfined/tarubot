@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, types } from "node:util";
 import {
   canonicalEd25519,
   targetDescriptor,
@@ -19,6 +19,225 @@ import {
 
 function requireTransport(value: unknown): asserts value {
   if (!value) throw new Error("invalid-trust-ssh-transport");
+}
+const nativeThen = Promise.prototype.then;
+const nativeSet = Uint8Array.prototype.set;
+const nativeLength = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "byteLength",
+)?.get;
+/** Refused callback promises never leak their private rejection or extend preparation. */
+function drain(value: unknown): void {
+  try {
+    void Reflect.apply(nativeThen, value, [undefined, () => {}]);
+  } catch {
+    /* A non-native thenable or ordinary value remains a refusal. */
+  }
+}
+function bytes(value: unknown, limit: number, check: () => void = () => {}): Uint8Array {
+  check();
+  requireTransport(types.isUint8Array(value) && typeof nativeLength === "function");
+  const length: unknown = Reflect.apply(nativeLength, value, []);
+  requireTransport(typeof length === "number" && length <= limit);
+  const result = new Uint8Array(length);
+  Reflect.apply(nativeSet, result, [value]);
+  check();
+  requireTransport(Reflect.apply(nativeLength, value, []) === length);
+  return result;
+}
+/** Plain command/proof snapshots cannot execute accessors or replace binary bytes by iteration. */
+function snapshot(value: unknown, check: () => void): unknown {
+  let nodes = 0,
+    size = 0;
+  const ancestors = new Set<object>();
+  const copy = (input: unknown, depth: number): unknown => {
+    check();
+    requireTransport(++nodes <= 4096 && depth <= 16);
+    if (input === undefined || input === null || typeof input === "boolean") return input;
+    if (typeof input === "number") {
+      requireTransport(Number.isFinite(input));
+      return input;
+    }
+    if (typeof input === "string") {
+      size += Buffer.byteLength(input);
+      requireTransport(size <= 65_536);
+      return input;
+    }
+    if (types.isUint8Array(input)) return bytes(input, 8 * 1024 * 1024, check);
+    requireTransport(input !== null && typeof input === "object" && !ancestors.has(input));
+    requireTransport(Object.getOwnPropertySymbols(input).length === 0);
+    check();
+    const properties = Object.getOwnPropertyDescriptors(input);
+    check();
+    ancestors.add(input);
+    let result: unknown;
+    if (Array.isArray(input)) {
+      const length: unknown = properties.length?.value;
+      requireTransport(
+        typeof length === "number" &&
+          Number.isInteger(length) &&
+          length >= 0 &&
+          length <= 64 &&
+          Object.keys(properties).length === length + 1,
+      );
+      result = Array.from({ length }, (_, index) => {
+        const item = properties[String(index)];
+        requireTransport(item?.enumerable && Object.hasOwn(item, "value"));
+        return copy(item.value, depth + 1);
+      });
+    } else {
+      const prototype = Object.getPrototypeOf(input);
+      check();
+      requireTransport(prototype === Object.prototype || prototype === null);
+      const object: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(properties)) {
+        requireTransport(item.enumerable && Object.hasOwn(item, "value"));
+        size += Buffer.byteLength(key);
+        requireTransport(size <= 65_536);
+        Object.defineProperty(object, key, {
+          enumerable: true,
+          value: copy(item.value, depth + 1),
+        });
+      }
+      result = object;
+    }
+    ancestors.delete(input);
+    return result;
+  };
+  return copy(value, 0);
+}
+/** Only denial is transferable. This local preparation window creates no enrollment authority. */
+class Preparation {
+  #fenced = false;
+  #offered = false;
+  #checking = false;
+  #started = 0;
+  #last = 0;
+  #expires = Number.POSITIVE_INFINITY;
+  constructor(
+    readonly physical: number,
+    readonly budget: number,
+    readonly now: () => number,
+    readonly denial?: () => void,
+  ) {}
+  fence(): void {
+    this.#fenced = true;
+  }
+  offered(): void {
+    this.#offered = true;
+  }
+  assertNotFenced(): void {
+    requireTransport(!this.#fenced);
+  }
+  initial(): void {
+    requireTransport(
+      !this.#fenced && !this.#offered && performance.now() - this.physical < this.budget,
+    );
+  }
+  tick(): number {
+    // A completed preparation never renews authority, and its obsolete callbacks cannot
+    // truncate a command that already started under a valid pin/authority observation.
+    requireTransport(!this.#offered);
+    let owned = false;
+    try {
+      this.initial();
+      requireTransport(!this.#checking);
+      this.#checking = true;
+      owned = true;
+      const refuse = () => {
+        if (this.denial === undefined) return;
+        requireTransport(typeof this.denial === "function");
+        const result = this.denial();
+        if (result !== undefined) {
+          this.fence();
+          drain(result);
+        }
+        requireTransport(result === undefined && !this.#fenced && this.#checking);
+      };
+      refuse();
+      const value: unknown = this.now();
+      if (typeof value !== "number") {
+        this.fence();
+        drain(value);
+      }
+      requireTransport(typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+      this.initial();
+      refuse();
+      requireTransport(this.#checking && !this.#fenced);
+      if (this.#started === 0) this.#started = value;
+      requireTransport(
+        value >= this.#last &&
+          value - this.#started < this.budget &&
+          value < this.#expires &&
+          performance.now() - this.physical < this.#expires - this.#started,
+      );
+      this.#last = value;
+      return value;
+    } catch {
+      this.fence();
+      throw new Error("trusted-ssh-failed");
+    } finally {
+      if (owned) this.#checking = false;
+    }
+  }
+  bind(expiry: number): void {
+    requireTransport(Number.isSafeInteger(expiry));
+    this.#expires = Math.min(this.#expires, expiry);
+    this.tick();
+  }
+  remaining(): number {
+    const value = this.tick();
+    return Math.min(
+      this.budget - (value - this.#started),
+      this.budget - (performance.now() - this.physical),
+      this.#expires - value,
+      this.#expires - this.#started - (performance.now() - this.physical),
+    );
+  }
+  async read<T>(work: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      let end = performance.now() + this.remaining(),
+        rejectDeadline: (error: Error) => void = () => {};
+      const timeout = new Promise<never>((_, reject) => {
+        rejectDeadline = reject;
+      });
+      const schedule = () => {
+        end = Math.min(end, performance.now() + this.remaining());
+        clearTimeout(timer);
+        timer = setTimeout(
+          () => {
+            this.fence();
+            rejectDeadline(new Error("trusted-ssh-failed"));
+          },
+          Math.max(0, end - performance.now()),
+        );
+      };
+      schedule();
+      const result = await Promise.race([
+        Promise.resolve().then(() => {
+          this.tick();
+          const pending = work();
+          try {
+            this.tick();
+            schedule();
+          } catch (error) {
+            drain(pending);
+            throw error;
+          }
+          return pending;
+        }),
+        timeout,
+      ]);
+      this.tick();
+      return result;
+    } catch {
+      this.fence();
+      throw new Error("trusted-ssh-failed");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 /** Cleanup failure must use the same public-safe refusal as an earlier transport failure. */
 function removePrivate(directory: string | undefined, failure: string): void {
@@ -42,69 +261,146 @@ export interface TrustProcessResult {
   stdout: Uint8Array;
   stderr: Uint8Array;
 }
-export type TrustProcessRunner = (request: TrustProcessRequest) => Promise<TrustProcessResult>;
+export type TrustProcessRunner = (
+  request: TrustProcessRequest,
+  beforeSpawn?: () => void,
+) => Promise<TrustProcessResult>;
 
 /** Bounded private subprocesses never inherit Actions tokens, SSH agents, proxies or tool config. */
-const execute: TrustProcessRunner = (request) =>
-  new Promise((accept, reject) => {
-    const output: Buffer[] = [];
-    const diagnostic: Buffer[] = [];
-    let size = 0;
-    let refused = false;
-    const child = spawn(request.executable, request.args, {
-      cwd: request.directory,
-      env: {
-        PATH: "/usr/bin:/bin",
-        HOME: request.directory,
-        LANG: "C",
-        LC_ALL: "C",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+function execute(
+  request: TrustProcessRequest,
+  beforeSpawn?: () => void,
+  accepted?: () => void,
+): Promise<TrustProcessResult> {
+  return new Promise((accept, reject) => {
+    let child: ReturnType<typeof spawn> | undefined,
+      timer: ReturnType<typeof setTimeout> | undefined;
+    let finished = false,
+      refused = false,
+      size = 0;
+    const output: Buffer[] = [],
+      diagnostic: Buffer[] = [];
     const stop = () => {
       refused = true;
-      child.kill("SIGKILL");
+      for (const cancel of [
+        () => child?.stdin?.destroy(),
+        () => child?.stdout?.destroy(),
+        () => child?.stderr?.destroy(),
+        () => child?.kill("SIGKILL"),
+      ]) {
+        try {
+          cancel();
+        } catch {
+          /* An unknown process outcome never authorizes a retry. */
+        }
+      }
     };
-    const timer = setTimeout(stop, request.timeout_ms);
-    const collect = (buffers: Buffer[], value: Buffer) => {
-      size += value.length;
-      if (size > request.output_limit) stop();
-      else buffers.push(value);
+    const finish = (value?: TrustProcessResult) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (value && !refused) accept(value);
+      else {
+        stop();
+        reject(new Error("trust-ssh-process-failed"));
+      }
     };
-    child.stdout.on("data", (value: Buffer) => collect(output, value));
-    child.stderr.on("data", (value: Buffer) => collect(diagnostic, value));
-    child.stdin.on("error", () => {
-      // A closed input pipe is evidence of a failed transport, never a reason to retry it.
-      stop();
-    });
-    child.on("error", () => {
-      clearTimeout(timer);
-      reject(new Error("trust-ssh-process-failed"));
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      if (refused) reject(new Error("trust-ssh-process-failed"));
-      else
-        accept({ code, signal, stdout: Buffer.concat(output), stderr: Buffer.concat(diagnostic) });
-    });
-    child.stdin.end(request.input);
+    try {
+      const executable = request.executable,
+        args = [...request.args],
+        directory = request.directory;
+      const options = {
+        cwd: directory,
+        env: { PATH: "/usr/bin:/bin", HOME: directory, LANG: "C", LC_ALL: "C" },
+        stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
+      };
+      const offer = spawn;
+      // Captured argv/environment/native binding precede the ORIGINAL last preparation guard.
+      beforeSpawn?.();
+      child = offer(executable, args, options);
+      const commandPhysical = performance.now();
+      accepted?.();
+      const check = () =>
+        requireTransport(
+          !finished && !refused && performance.now() - commandPhysical < request.timeout_ms,
+        );
+      timer = setTimeout(
+        () => finish(),
+        Math.max(0, request.timeout_ms - (performance.now() - commandPhysical)),
+      );
+      const collect = (buffers: Buffer[], chunk: Buffer) => {
+        if (finished) return;
+        try {
+          check();
+          const copied = bytes(chunk, request.output_limit - size, check);
+          size += copied.byteLength;
+          buffers.push(Buffer.from(copied));
+          check();
+        } catch {
+          finish();
+        }
+      };
+      check();
+      requireTransport(child.stdout && child.stderr && child.stdin);
+      child.stdout.on("data", (value: Buffer) => collect(output, value));
+      check();
+      child.stderr.on("data", (value: Buffer) => collect(diagnostic, value));
+      check();
+      child.stdin.on("error", () => finish());
+      check();
+      child.on("error", () => finish());
+      check();
+      child.on("close", (code, signal) => {
+        if (finished) return;
+        try {
+          check();
+          const stdout = Buffer.concat(output);
+          check();
+          const stderr = Buffer.concat(diagnostic);
+          check();
+          finish({
+            code,
+            signal,
+            stdout,
+            stderr,
+          });
+        } catch {
+          finish();
+        }
+      });
+      const end = child.stdin.end.bind(child.stdin);
+      check();
+      end(request.input);
+      check();
+    } catch {
+      finish();
+    }
   });
+}
 
 /** Paths are literal OpenSSH option values; disallow tokens/quoting and private-file symlinks. */
-function privatePath(value: string, directory: boolean): string {
+function privatePath(value: string, directory: boolean, check: () => void = () => {}): string {
+  check();
   requireTransport(/^\/[A-Za-z0-9_./-]+$/u.test(value) && resolve(value) === value);
   const components = value.split("/").filter(Boolean);
   let current = "";
   for (const part of components) {
     current += `/${part}`;
-    requireTransport(!lstatSync(current).isSymbolicLink());
+    check();
+    const component = lstatSync(current);
+    check();
+    requireTransport(!component.isSymbolicLink());
+    check();
   }
+  check();
   const stat = lstatSync(value);
+  check();
   requireTransport(
     (directory ? stat.isDirectory() : stat.isFile() && stat.nlink === 1) &&
       stat.uid === process.getuid?.() &&
       (stat.mode & 0o077) === 0,
   );
+  check();
   return value;
 }
 function instant(now: () => number): number {
@@ -113,15 +409,19 @@ function instant(now: () => number): number {
   return value;
 }
 function processResult(value: TrustProcessResult, limit: number): TrustProcessResult {
+  requireTransport(value !== null && typeof value === "object");
+  const properties = Object.getOwnPropertyDescriptors(value);
+  for (const key of ["code", "signal", "stdout", "stderr"])
+    requireTransport(properties[key] && Object.hasOwn(properties[key], "value"));
+  const code: unknown = properties.code?.value,
+    signal: unknown = properties.signal?.value;
   requireTransport(
-    value &&
-      (value.code === null || (Number.isInteger(value.code) && value.code >= 0)) &&
-      (value.signal === null || typeof value.signal === "string") &&
-      value.stdout instanceof Uint8Array &&
-      value.stderr instanceof Uint8Array &&
-      value.stdout.length + value.stderr.length <= limit,
+    (code === null || (typeof code === "number" && Number.isInteger(code) && code >= 0)) &&
+      (signal === null || typeof signal === "string"),
   );
-  return value;
+  const stdout = bytes(properties.stdout?.value, limit);
+  const stderr = bytes(properties.stderr?.value, limit - stdout.byteLength);
+  return { code: code as number | null, signal: signal as string | null, stdout, stderr };
 }
 function scanResult(result: TrustProcessResult, address: string): Observation {
   processResult(result, 8192);
@@ -241,6 +541,11 @@ export async function observeSshHost(
 }
 
 export type ConnectionProof = TrustSnapshot & { expires_at: number };
+/** A guard can only refuse; the future operational factory must separately retain native authority. */
+export type TrustConnectionReader = (
+  descriptor: TargetDescriptor,
+  denial?: () => void,
+) => Promise<ConnectionProof>;
 export interface SshCommand {
   descriptor: TargetDescriptor;
   address_family: "ipv4" | "ipv6";
@@ -260,31 +565,46 @@ const shellArgument = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
  */
 export async function trustedSsh(
   request: SshCommand,
-  connectionTrust: (descriptor: TargetDescriptor) => Promise<ConnectionProof>,
+  connectionTrust: TrustConnectionReader,
   dependencies: {
     run?: TrustProcessRunner;
     now?: () => number;
     /** A stricter preparation budget is allowed; this cannot extend the sixty-second bound. */
     preparation_timeout_ms?: number;
+    denial?: () => void;
   } = {},
 ): Promise<Uint8Array> {
   let directory: string | undefined;
-  let preparationTimer: ReturnType<typeof setTimeout> | undefined;
+  const physicalStarted = performance.now();
+  let preparation: Preparation | undefined;
   try {
-    // Capture trusted capabilities before any await; replacing a dependency must not reroute SSH.
-    const run = dependencies.run ?? execute;
+    // The physical origin precedes request reflection and every dependency/clock hook.
+    const initial = () => requireTransport(performance.now() - physicalStarted < 60_000);
+    request = snapshot(request, initial) as SshCommand;
+    initial();
+    const customRun = dependencies.run;
+    initial();
     const now = dependencies.now ?? Date.now;
+    initial();
     const preparationBudget = dependencies.preparation_timeout_ms ?? 60_000;
+    initial();
+    const denial = dependencies.denial;
+    initial();
     requireTransport(
-      typeof run === "function" &&
+      (customRun === undefined || typeof customRun === "function") &&
         typeof now === "function" &&
         typeof connectionTrust === "function" &&
         Number.isInteger(preparationBudget) &&
         preparationBudget > 0 &&
-        preparationBudget <= 60_000,
+        preparationBudget <= 60_000 &&
+        (denial === undefined || typeof denial === "function"),
     );
-    // Callback awaits may run arbitrary asynchronous work; never reread mutable caller inputs.
-    request = structuredClone(request);
+    preparation = new Preparation(physicalStarted, preparationBudget, now, denial);
+    const original = preparation;
+    const check = () => {
+      original.tick();
+    };
+    check();
     const descriptor = targetDescriptor(request.descriptor);
     requireTransport(request.address_family === "ipv4" || request.address_family === "ipv6");
     requireTransport(/^[a-z_][a-z0-9_-]{0,31}$/u.test(request.user));
@@ -310,28 +630,20 @@ export async function trustedSsh(
       request.input === undefined ||
         (request.input instanceof Uint8Array && request.input.length <= 8 * 1024 * 1024),
     );
-    // structuredClone retains SharedArrayBuffer storage. Copy bytes into an ordinary private
-    // buffer so a caller cannot rewrite validated stdin while the trust proof is awaited.
-    if (request.input !== undefined) request.input = Uint8Array.from(request.input);
-    privatePath(request.work_root, true);
-    const identity = privatePath(request.identity_file, false);
-    privatePath(resolve(identity, ".."), true);
-    directory = mkdtempSync(join(request.work_root, "ssh-connect-"));
-    const started = instant(now);
-    const physicalStarted = performance.now();
-    const physicalDeadline = physicalStarted + preparationBudget;
-    const proof = structuredClone(
-      await Promise.race([
-        Promise.resolve().then(() => connectionTrust(structuredClone(descriptor))),
-        new Promise<never>((_, reject) => {
-          preparationTimer = setTimeout(
-            () => reject(new Error("trusted-ssh-failed")),
-            preparationBudget,
-          );
-        }),
-      ]),
+    // Binary stdin was copied intrinsically before the first callback could mutate it.
+    privatePath(request.work_root, true, check);
+    const identity = privatePath(request.identity_file, false, check);
+    privatePath(resolve(identity, ".."), true, check);
+    const rawProof = await original.read(() =>
+      connectionTrust(snapshot(descriptor, check) as TargetDescriptor, check),
     );
-    clearTimeout(preparationTimer);
+    check();
+    const expiry = Object.getOwnPropertyDescriptor(rawProof, "expires_at");
+    check();
+    requireTransport(expiry && Object.hasOwn(expiry, "value") && typeof expiry.value === "number");
+    original.bind(expiry.value);
+    const proof = snapshot(rawProof, check) as ConnectionProof;
+    requireTransport(proof.expires_at === expiry.value);
     const enrolled = targetDescriptor(proof.descriptor);
     const {
       applied_generation: _currentGeneration,
@@ -351,11 +663,19 @@ export async function trustedSsh(
     const key = canonicalEd25519(proof.key);
     requireTransport(isDeepStrictEqual(key.sshfp, proof.sshfp));
     requireTransport(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(proof.generation));
+    check();
+    privatePath(request.work_root, true, check);
+    check();
+    directory = mkdtempSync(join(request.work_root, "ssh-connect-"));
+    check();
     const alias = `tarubot-${descriptor.target}-${proof.generation}`;
     const hosts = join(directory, "known_hosts");
     const pin = `${alias} ${key.key}\n`;
+    check();
     writeFileSync(hosts, pin, { mode: 0o600, flag: "wx" });
+    check();
     requireTransport(readFileSync(hosts, "utf8") === pin);
+    check();
     const options = [
       "BatchMode=yes",
       "StrictHostKeyChecking=yes",
@@ -407,41 +727,44 @@ export async function trustedSsh(
       `${request.user}@${descriptor.addresses[request.address_family]}`,
       request.command.map(shellArgument).join(" "),
     ];
-    // A proof callback cannot replace the originally validated private paths while it is awaited.
-    privatePath(request.work_root, true);
-    privatePath(identity, false);
-    privatePath(resolve(identity, ".."), true);
-    privatePath(directory, true);
-    privatePath(hosts, false);
+    // Only synchronous pin/path/argv work follows the final authority await.
+    privatePath(request.work_root, true, check);
+    privatePath(identity, false, check);
+    privatePath(resolve(identity, ".."), true, check);
+    privatePath(directory, true, check);
+    privatePath(hosts, false, check);
+    check();
     requireTransport(readFileSync(hosts, "utf8") === pin);
-    const preparedAt = instant(now);
-    requireTransport(
-      preparedAt >= started &&
-        preparedAt - started < preparationBudget &&
-        performance.now() < physicalDeadline &&
-        performance.now() < physicalStarted + proof.expires_at - started &&
-        preparedAt < proof.expires_at,
-    );
-    // This is the last synchronous check before spawning SSH. DNS's AD bit is deliberately never
-    // delegated to OpenSSH: it must compare the one durable known_hosts key even for secure SSHFP.
-    const result = processResult(
-      await run({
-        executable: "/usr/bin/ssh",
-        args,
-        directory,
-        timeout_ms: request.timeout_ms,
-        output_limit: 1024 * 1024,
-        input: request.input ?? null,
-      }),
-      1024 * 1024,
-    );
+    check();
+    const offered: TrustProcessRequest = {
+      executable: "/usr/bin/ssh",
+      args,
+      directory,
+      timeout_ms: request.timeout_ms,
+      output_limit: 1024 * 1024,
+      input: request.input ?? null,
+    };
+    check();
+    const pending = customRun
+      ? customRun(offered, check)
+      : execute(offered, check, () => original.offered());
+    try {
+      original.assertNotFenced();
+    } catch (error) {
+      drain(pending);
+      throw error;
+    }
+    // A trusted one-argument seam accepts the request when invoked. Guard-aware/native seams
+    // must make their actual synchronous offer before returning; no later authority refresh.
+    original.offered();
+    const result = processResult(await pending, 1024 * 1024);
     requireTransport(result.code === 0 && result.signal === null);
-    return Uint8Array.from(result.stdout);
+    return bytes(result.stdout, 1024 * 1024);
   } catch {
     // No host names, addresses, key material, remote text, private paths or process diagnostics.
     throw new Error("trusted-ssh-failed");
   } finally {
-    clearTimeout(preparationTimer);
+    preparation?.fence();
     removePrivate(directory, "trusted-ssh-failed");
   }
 }

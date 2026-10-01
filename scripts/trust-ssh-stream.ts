@@ -9,7 +9,7 @@ import { performance } from "node:perf_hooks";
 import { targetDescriptor, type TargetDescriptor } from "./ssh-trust.js";
 import {
   trustedSsh,
-  type ConnectionProof,
+  type TrustConnectionReader,
   type SshCommand,
   type TrustProcessRequest,
 } from "./trust-ssh.js";
@@ -22,6 +22,14 @@ const typedArrayByteLength = Object.getOwnPropertyDescriptor(
   "byteLength",
 )?.get;
 const setBytes = Uint8Array.prototype.set;
+const nativeThen = Promise.prototype.then;
+function drain(value: unknown): void {
+  try {
+    void Reflect.apply(nativeThen, value, [undefined, () => {}]);
+  } catch {
+    /* Cleanup/refusal values never authorize another exchange. */
+  }
+}
 function valid(value: unknown): asserts value {
   if (!value) throw new Error("invalid-trusted-ssh-stream");
 }
@@ -35,10 +43,11 @@ function copyChunk(value: unknown, remaining: number): Uint8Array {
   return bytes;
 }
 /** Snapshot only plain command/configuration data; streams and dependency functions are capabilities. */
-function snapshot(value: unknown): unknown {
+function snapshot(value: unknown, check: () => void = () => {}): unknown {
   let nodes = 0;
   let bytes = 0;
   const copy = (input: unknown, depth: number): unknown => {
+    check();
     valid(++nodes <= 4096 && depth <= 8);
     if (input === null || typeof input === "boolean" || typeof input === "number") return input;
     if (typeof input === "string") {
@@ -48,18 +57,27 @@ function snapshot(value: unknown): unknown {
     }
     valid(input !== null && typeof input === "object");
     valid(Object.getOwnPropertySymbols(input).length === 0);
+    check();
     const properties = Object.getOwnPropertyDescriptors(input);
+    check();
     if (Array.isArray(input)) {
-      valid(input.length <= 32 && Object.keys(properties).length === input.length + 1);
-      return Array.from({ length: input.length }, (_, index) => {
+      const length: unknown = properties.length?.value;
+      valid(
+        typeof length === "number" &&
+          Number.isInteger(length) &&
+          length >= 0 &&
+          length <= 32 &&
+          Object.keys(properties).length === length + 1,
+      );
+      return Array.from({ length }, (_, index) => {
         const property = properties[String(index)];
         valid(property?.enumerable && Object.hasOwn(property, "value"));
         return copy(property.value, depth + 1);
       });
     }
-    valid(
-      Object.getPrototypeOf(input) === Object.prototype || Object.getPrototypeOf(input) === null,
-    );
+    const prototype = Object.getPrototypeOf(input);
+    check();
+    valid(prototype === Object.prototype || prototype === null);
     valid(Object.keys(properties).length <= 32);
     const result: Record<string, unknown> = {};
     for (const [key, property] of Object.entries(properties)) {
@@ -101,7 +119,7 @@ export interface TrustedSshStreamResult {
   stderr_bytes: number;
 }
 export interface TrustedSshStream {
-  run(request: TrustedSshStreamRequest): Promise<TrustedSshStreamResult>;
+  run(request: TrustedSshStreamRequest, denial?: () => void): Promise<TrustedSshStreamResult>;
 }
 export interface TrustStreamSpawnRequest {
   executable: "/usr/bin/ssh";
@@ -111,16 +129,27 @@ export interface TrustStreamSpawnRequest {
 /** Trusted offline subprocess seam, captured once; never accepted in an exchange/frame. */
 export type TrustStreamSpawner = (
   request: TrustStreamSpawnRequest,
+  beforeSpawn?: () => void,
 ) => ChildProcessWithoutNullStreams;
-const nativeSpawn: TrustStreamSpawner = (request) =>
-  spawn(request.executable, request.args, {
-    cwd: request.directory,
-    env: { PATH: "/usr/bin:/bin", HOME: request.directory, LANG: "C", LC_ALL: "C" },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+const nativeSpawn: TrustStreamSpawner = (request, beforeSpawn) => {
+  const executable = request.executable,
+    args = [...request.args],
+    directory = request.directory;
+  const options = {
+    cwd: directory,
+    env: { PATH: "/usr/bin:/bin", HOME: directory, LANG: "C", LC_ALL: "C" },
+    stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
+  };
+  const offer = spawn;
+  beforeSpawn?.();
+  return offer(executable, args, options);
+};
 
-function configuration(value: TrustedSshStreamConfiguration): TrustedSshStreamConfiguration {
-  const data = snapshot(value) as Record<string, unknown>;
+function configuration(
+  value: TrustedSshStreamConfiguration,
+  check: () => void,
+): TrustedSshStreamConfiguration {
+  const data = snapshot(value, check) as Record<string, unknown>;
   valid(
     Object.keys(data).every((key) =>
       [
@@ -163,13 +192,29 @@ interface Channels {
   stdout: WritableStreamDefaultWriter<Uint8Array>;
   stderr: WritableStreamDefaultWriter<Uint8Array>;
 }
-function clock(now: () => number, timeout: number): () => void {
-  const started = now();
+function clock(
+  now: () => number,
+  timeout: number,
+  physical: number,
+  refuse: () => void,
+): () => void {
+  const first: unknown = now();
+  if (typeof first !== "number") {
+    refuse();
+    drain(first);
+  }
+  const started = first as number;
   valid(Number.isSafeInteger(started) && started > 0);
-  const deadline = performance.now() + timeout;
+  const deadline = physical + timeout;
+  valid(performance.now() < deadline);
   let previous = started;
   return () => {
-    const current = now();
+    const raw: unknown = now();
+    if (typeof raw !== "number") {
+      refuse();
+      drain(raw);
+    }
+    const current = raw as number;
     valid(
       Number.isSafeInteger(current) &&
         current >= previous &&
@@ -186,15 +231,22 @@ async function exchange(
   channels: Channels,
   spawnProcess: TrustStreamSpawner,
   now: () => number,
+  beforeSpawn: () => void,
+  accepted: () => void,
+  activeGuard: () => void,
+  exposeStop: (stop: () => void) => void,
 ): Promise<TrustedSshStreamResult> {
   let child: ChildProcessWithoutNullStreams | undefined;
   let active = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const counts = { input_bytes: 0, stdout_bytes: 0, stderr_bytes: 0 };
-  const checkTime = clock(now, prepared.timeout_ms);
+  let checkTime: () => void = () => {};
   const check = () => {
     valid(active);
+    activeGuard();
     checkTime();
+    activeGuard();
+    valid(active);
   };
   const stop = () => {
     active = false;
@@ -212,14 +264,22 @@ async function exchange(
       }
     }
   };
+  exposeStop(stop);
   try {
-    check();
     valid(prepared.executable === "/usr/bin/ssh");
-    child = spawnProcess({
+    const request: TrustStreamSpawnRequest = {
       executable: "/usr/bin/ssh",
       args: [...prepared.args],
       directory: prepared.directory,
-    });
+    };
+    beforeSpawn();
+    child = spawnProcess(request, beforeSpawn);
+    const commandPhysical = performance.now();
+    activeGuard();
+    valid(active);
+    accepted();
+    checkTime = clock(now, prepared.timeout_ms, commandPhysical, stop);
+    check();
     const process = child;
     // Streams/errors are observed immediately; an input error is never permission to retry.
     const closed = new Promise<number>((accept, reject) => {
@@ -237,7 +297,9 @@ async function exchange(
       if (channels.input) {
         for (;;) {
           check();
-          const next = await channels.input.read();
+          const read = channels.input.read.bind(channels.input);
+          check();
+          const next = await read();
           check();
           if (next.done) break;
           const bytes = copyChunk(next.value, inputLimit - counts.input_bytes);
@@ -245,7 +307,9 @@ async function exchange(
           valid(counts.input_bytes <= inputLimit);
           // The write callback includes backpressure; caller-shared bytes are already detached.
           await new Promise<void>((accept, reject) => {
-            process.stdin.write(bytes, (error) => {
+            const write = process.stdin.write.bind(process.stdin);
+            check();
+            write(bytes, (error) => {
               if (error) reject(new Error("trusted-ssh-stream-failed"));
               else accept();
             });
@@ -253,8 +317,9 @@ async function exchange(
           check();
         }
       }
+      const end = process.stdin.end.bind(process.stdin);
       check();
-      process.stdin.end();
+      end();
     };
     const output = async (
       source: typeof process.stdout,
@@ -266,7 +331,9 @@ async function exchange(
         const bytes = copyChunk(chunk, outputLimit - counts.stdout_bytes - counts.stderr_bytes);
         counts[counter] += bytes.byteLength;
         valid(counts.stdout_bytes + counts.stderr_bytes <= outputLimit);
-        await destination.write(bytes);
+        const write = destination.write.bind(destination);
+        check();
+        await write(bytes);
         check();
       }
       check();
@@ -281,10 +348,13 @@ async function exchange(
       completed,
       stdinError,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          stop();
-          reject(new Error("trusted-ssh-stream-failed"));
-        }, prepared.timeout_ms);
+        timer = setTimeout(
+          () => {
+            stop();
+            reject(new Error("trusted-ssh-stream-failed"));
+          },
+          Math.max(0, prepared.timeout_ms - (performance.now() - commandPhysical)),
+        );
       }),
     ]);
     check();
@@ -300,47 +370,118 @@ async function exchange(
 
 class Transport implements TrustedSshStream {
   readonly #configuration: TrustedSshStreamConfiguration;
-  readonly #trust: (descriptor: TargetDescriptor) => Promise<ConnectionProof>;
+  readonly #trust: TrustConnectionReader;
   readonly #spawn: TrustStreamSpawner;
   readonly #now: () => number;
   #busy = false;
   #fenced = false;
+  #stopActive: (() => void) | undefined;
   constructor(
     value: TrustedSshStreamConfiguration,
     dependencies: {
-      connectionTrust: (descriptor: TargetDescriptor) => Promise<ConnectionProof>;
+      connectionTrust: TrustConnectionReader;
       spawn?: TrustStreamSpawner;
       now?: () => number;
     },
   ) {
-    this.#configuration = configuration(value);
+    const physical = performance.now();
+    const initial = () => valid(performance.now() - physical < 60_000);
+    this.#configuration = configuration(value, initial);
+    initial();
     this.#trust = dependencies.connectionTrust;
+    initial();
     this.#spawn = dependencies.spawn ?? nativeSpawn;
+    initial();
     this.#now = dependencies.now ?? Date.now;
+    initial();
     valid(
       typeof this.#trust === "function" &&
         typeof this.#spawn === "function" &&
         typeof this.#now === "function",
     );
+    valid(performance.now() - physical < (this.#configuration.preparation_timeout_ms ?? 60_000));
     Object.freeze(this);
   }
-  async run(value: TrustedSshStreamRequest): Promise<TrustedSshStreamResult> {
-    let owns = false;
+  async run(value: TrustedSshStreamRequest, denial?: () => void): Promise<TrustedSshStreamResult> {
+    // Channel/descriptor/dependency hooks cannot renew the invocation's original origin.
+    const physical = performance.now();
+    let owns = false,
+      success = false,
+      checking = false;
+    let phase: "preparing" | "running" | "finished" = "preparing";
+    let started = 0,
+      previous = 0,
+      expiry = Number.POSITIVE_INFINITY;
     const channels: Partial<Channels> = {};
-    let success = false;
     let outcome: TrustedSshStreamResult | undefined;
+    const config = this.#configuration;
+    const budget = config.preparation_timeout_ms ?? 60_000;
+    const active = () => valid(owns && this.#busy && !this.#fenced);
+    const initial = () => {
+      active();
+      valid(phase === "preparing" && performance.now() - physical < budget);
+    };
+    const preparation = () => {
+      // Obsolete preparation callbacks refuse without cancelling an already accepted command.
+      valid(phase === "preparing");
+      let reserved = false;
+      try {
+        initial();
+        valid(!checking);
+        checking = true;
+        reserved = true;
+        const refuse = () => {
+          if (denial === undefined) return;
+          valid(typeof denial === "function");
+          const result = denial();
+          if (result !== undefined) {
+            this.#fenced = true;
+            drain(result);
+          }
+          valid(result === undefined);
+          active();
+          valid(checking);
+        };
+        refuse();
+        const raw: unknown = this.#now();
+        if (typeof raw !== "number") {
+          this.#fenced = true;
+          drain(raw);
+        }
+        valid(typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0);
+        initial();
+        refuse();
+        active();
+        valid(checking);
+        if (started === 0) started = raw;
+        valid(
+          raw >= previous &&
+            raw - started < budget &&
+            raw < expiry &&
+            performance.now() - physical < expiry - started,
+        );
+        previous = raw;
+      } catch {
+        this.#fenced = true;
+        this.#stopActive?.();
+        throw new Error("trusted-ssh-stream-failed");
+      } finally {
+        if (reserved) checking = false;
+      }
+    };
     try {
       valid(!this.#busy && !this.#fenced);
       this.#busy = true;
       owns = true;
+      initial();
       const properties = Object.getOwnPropertyDescriptors(value);
-      valid(
-        Object.getOwnPropertySymbols(value).length === 0 &&
-          Object.keys(properties).sort().join("\0") === "command\0input\0stderr\0stdout",
-      );
+      initial();
+      valid(Object.getOwnPropertySymbols(value).length === 0);
+      initial();
+      valid(Object.keys(properties).sort().join("\0") === "command\0input\0stderr\0stdout");
       for (const property of Object.values(properties))
         valid(property.enumerable && Object.hasOwn(property, "value"));
-      const command = snapshot(properties.command?.value) as string[];
+      const command = snapshot(properties.command?.value, initial) as string[];
       const input = properties.input?.value as ReadableStream<Uint8Array> | null;
       const stdout = properties.stdout?.value as WritableStream<Uint8Array>;
       const stderr = properties.stderr?.value as WritableStream<Uint8Array>;
@@ -351,44 +492,88 @@ class Transport implements TrustedSshStream {
           stdout !== stderr,
       );
       const all = input === null ? [stdout, stderr] : [input, stdout, stderr];
-      valid(all.every((stream) => !stream.locked && !usedChannels.has(stream)));
+      for (const stream of all) {
+        initial();
+        const locked = stream.locked;
+        initial();
+        valid(!locked && !usedChannels.has(stream));
+      }
       for (const stream of all) usedChannels.add(stream);
-      channels.input = input?.getReader() ?? null;
-      channels.stdout = stdout.getWriter();
-      channels.stderr = stderr.getWriter();
+      initial();
+      const getReader = input?.getReader.bind(input);
+      initial();
+      channels.input = getReader?.() ?? null;
+      initial();
+      const stdoutWriter = stdout.getWriter.bind(stdout);
+      initial();
+      channels.stdout = stdoutWriter();
+      initial();
+      const stderrWriter = stderr.getWriter.bind(stderr);
+      initial();
+      channels.stderr = stderrWriter();
+      initial();
+      preparation();
       const capturedChannels = channels as Channels;
-      const config = this.#configuration;
       const request: SshCommand = { ...config, command };
-      await trustedSsh(request, this.#trust, {
-        now: this.#now,
-        preparation_timeout_ms: config.preparation_timeout_ms ?? 60_000,
-        run: async (prepared) => {
-          outcome = await exchange(prepared, capturedChannels, this.#spawn, this.#now);
-          // The shared guarded lifetime must clean its pin after any known remote exit status.
-          // Legacy trustedSsh still rejects nonzero results from its own public runner.
-          return { code: 0, signal: null, stdout: new Uint8Array(), stderr: new Uint8Array() };
+      await trustedSsh(
+        request,
+        async (descriptor, originalDenial) => {
+          preparation();
+          const proof = await this.#trust(descriptor, originalDenial);
+          preparation();
+          const expires = Object.getOwnPropertyDescriptor(proof, "expires_at");
+          preparation();
+          valid(expires && Object.hasOwn(expires, "value") && Number.isSafeInteger(expires.value));
+          expiry = Math.min(expiry, expires.value as number);
+          preparation();
+          return proof;
         },
-      });
+        {
+          now: this.#now,
+          preparation_timeout_ms: budget,
+          denial: preparation,
+          run: async (prepared, beforeSpawn) => {
+            valid(typeof beforeSpawn === "function");
+            outcome = await exchange(
+              prepared,
+              capturedChannels,
+              this.#spawn,
+              this.#now,
+              beforeSpawn,
+              () => {
+                active();
+                phase = "running";
+              },
+              active,
+              (stop) => {
+                this.#stopActive = stop;
+              },
+            );
+            return { code: 0, signal: null, stdout: new Uint8Array(), stderr: new Uint8Array() };
+          },
+        },
+      );
+      active();
       valid(outcome);
       success = true;
     } catch {
-      if (owns) this.#fenced = true;
+      // A swallowed conflicting invocation fences the SAME owner even when it never reserved.
+      this.#fenced = true;
+      this.#stopActive?.();
     } finally {
       if (!success) {
-        // Cancellation/abort acknowledgements may never settle; private channels are never reused.
         for (const cancel of [
           () => channels.input?.cancel(),
           () => channels.stdout?.abort(),
           () => channels.stderr?.abort(),
         ]) {
           try {
-            void cancel()?.catch(() => {});
+            drain(cancel());
           } catch {
-            /* Attempt the other independent cancellations; public refusal stays fixed. */
+            /* Independent cleanup continues; no channel is reused. */
           }
         }
       }
-      if (owns) this.#busy = false;
       let releaseFailed = false;
       for (const channel of [channels.input, channels.stdout, channels.stderr]) {
         try {
@@ -398,11 +583,18 @@ class Transport implements TrustedSshStream {
         }
       }
       if (releaseFailed) {
-        if (owns) this.#fenced = true;
+        this.#fenced = true;
+        this.#stopActive?.();
         success = false;
       }
+      if (owns) {
+        this.#busy = false;
+        this.#stopActive = undefined;
+        phase = "finished";
+      }
     }
-    if (!success || outcome === undefined) throw new Error("trusted-ssh-stream-failed");
+    if (this.#fenced || !success || outcome === undefined)
+      throw new Error("trusted-ssh-stream-failed");
     return outcome;
   }
 }
@@ -411,7 +603,7 @@ class Transport implements TrustedSshStream {
 export function createTrustedSshStream(
   configuration: TrustedSshStreamConfiguration,
   dependencies: {
-    connectionTrust: (descriptor: TargetDescriptor) => Promise<ConnectionProof>;
+    connectionTrust: TrustConnectionReader;
     spawn?: TrustStreamSpawner;
     now?: () => number;
   },

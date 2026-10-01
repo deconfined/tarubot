@@ -474,7 +474,7 @@ describe("private channel and uncertain-process fencing", () => {
       expect(readdirSync(config.work_root)).toEqual(["invented-identity"]);
     }
   });
-  test("channels cannot be reused even through another factory, and concurrent calls do not reroute the first", async () => {
+  test("channels cannot be reused and a conflicting call fences the original invocation", async () => {
     const config = configuration();
     const fake = subprocess(
       'process.stdin.resume();process.stdin.on("end",()=>process.stdout.write("ok"));',
@@ -498,10 +498,11 @@ describe("private channel and uncertain-process fencing", () => {
     const first = transport.run(r.value);
     await refused(transport.run(request().value));
     release?.();
-    expect((await first).code).toBe(0);
+    await refused(first);
     await refused(createTrustedSshStream(config, deps).run(r.value));
-    expect(fake.calls).toHaveLength(1);
-    expect(confirmations).toBe(1);
+    expect(fake.calls).toHaveLength(0);
+    // The conflicting call fences the queued reader before its actual offer.
+    expect(confirmations).toBe(0);
   });
   test("wall-clock rollback during I/O stops a running exchange", async () => {
     const config = configuration();
@@ -572,6 +573,280 @@ describe("legacy transport shares the stricter preparation boundary", () => {
       await Bun.sleep(40);
       expect(runs).toBe(0);
       expect(readdirSync(config.work_root)).toEqual(["invented-identity"]);
+    }
+  });
+});
+
+const streamModule = new URL("../../scripts/trust-ssh-stream.ts", import.meta.url).href;
+function isolatedStream(source: string): void {
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+    env: { TZ: "UTC" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect({ code: child.exitCode, diagnostic: Buffer.from(child.stderr).toString() }).toEqual({
+    code: 0,
+    diagnostic: "",
+  });
+  expect(child.stdout.byteLength).toBe(0);
+}
+
+describe("original streaming preparation and active fences", () => {
+  test("channel, input, dependency and first-clock hooks cannot precede a renewed preparation", () => {
+    const config = configuration();
+    config.preparation_timeout_ms = 50;
+    isolatedStream(`
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+      const input=${JSON.stringify({ config, proof: proof() })};
+      for(const phase of ["channel","input","clock","dependency"]){
+        elapsed=0;let trust=0,offers=0,first=true;
+        const deps={now:()=>{if(phase==="clock"&&first){first=false;elapsed=60;}return ${instant};},spawn:()=>{offers++;throw Error("unexpected-native-offer");},connectionTrust:async()=>{trust++;return input.proof;}};
+        if(phase==="dependency")Object.defineProperty(deps,"spawn",{get(){elapsed=60;return ()=>{offers++;throw Error("private");};}});
+        const stdout=new WritableStream(),stderr=new WritableStream();
+        if(phase==="channel"){const get=stdout.getWriter.bind(stdout);Object.defineProperty(stdout,"getWriter",{value(){elapsed=60;return get();}});}
+        const plain={command:["/bin/true"],input:null,stdout,stderr};
+        const request=phase==="input"?new Proxy(plain,{ownKeys(value){elapsed=60;return Reflect.ownKeys(value);}}):plain;
+        let code;try{await createTrustedSshStream(input.config,deps).run(request);code="accepted";}catch(error){code=error.message;}
+        if(code!==(phase==="dependency"?"invalid-trusted-ssh-stream":"trusted-ssh-stream-failed")||trust||offers)process.exit(1);
+      }
+    `);
+  });
+  test("proof physical expiry includes channel capture before trustedSsh begins", () => {
+    const config = configuration();
+    config.preparation_timeout_ms = 1000;
+    isolatedStream(`
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+      const input=${JSON.stringify({ config, proof: proof() })};input.proof.expires_at=${instant}+20;
+      let offers=0,trust=0;
+      const stdout=new WritableStream(),stderr=new WritableStream();const get=stdout.getWriter.bind(stdout);
+      Object.defineProperty(stdout,"getWriter",{value(){elapsed=60;return get();}});
+      const transport=createTrustedSshStream(input.config,{now:()=>${instant},spawn:()=>{offers++;throw Error("private");},connectionTrust:async()=>{trust++;return input.proof;}});
+      try{await transport.run({command:["/bin/true"],input:null,stdout,stderr});process.exit(1);}
+      catch(error){if(error.message!=="trusted-ssh-stream-failed")process.exit(2);}
+      if(trust!==1||offers)process.exit(3);
+    `);
+  });
+  test("swallowed correct and malformed nested calls fence input/clock/channel/read hooks", async () => {
+    for (const phase of ["clock", "input", "channel", "reader"] as const)
+      for (const malformed of [false, true]) {
+        const config = configuration();
+        let trust = 0,
+          offers = 0,
+          first = true;
+        let transport: ReturnType<typeof createTrustedSshStream>;
+        const nested = () => {
+          if (!first) return;
+          first = false;
+          const wrong = malformed
+            ? ({ command: [] } as unknown as TrustedSshStreamRequest)
+            : request().value;
+          void transport.run(wrong).catch(() => {});
+        };
+        transport = createTrustedSshStream(config, {
+          now: () => {
+            if (phase === "clock") nested();
+            return instant;
+          },
+          spawn: () => {
+            offers++;
+            throw Error("private");
+          },
+          connectionTrust: async () => {
+            trust++;
+            if (phase === "reader") nested();
+            return proof();
+          },
+        });
+        const r = request();
+        if (phase === "channel") {
+          const get = r.value.stdout.getWriter.bind(r.value.stdout);
+          Object.defineProperty(r.value.stdout, "getWriter", {
+            value() {
+              nested();
+              return get();
+            },
+          });
+        }
+        const value =
+          phase === "input"
+            ? new Proxy(r.value, {
+                ownKeys(v) {
+                  nested();
+                  return Reflect.ownKeys(v);
+                },
+              })
+            : r.value;
+        await refused(transport.run(value));
+        expect(trust).toBe(phase === "reader" ? 1 : 0);
+        expect(offers).toBe(0);
+        await refused(transport.run(request().value));
+      }
+  });
+  test("the retained reader guard refuses any next read after the original timeout", async () => {
+    const config = configuration();
+    config.preparation_timeout_ms = 20;
+    let offers = 0,
+      processOffers = 0,
+      resume!: () => void;
+    const held = new Promise<void>((r) => {
+      resume = r;
+    });
+    const transport = createTrustedSshStream(config, {
+      now: () => instant,
+      spawn: () => {
+        processOffers++;
+        throw Error("private");
+      },
+      connectionTrust: async (_descriptor, denial) => {
+        expect(typeof denial).toBe("function");
+        denial?.();
+        offers++;
+        await held;
+        denial?.();
+        offers++;
+        return proof();
+      },
+    });
+    await refused(transport.run(request().value));
+    expect(offers).toBe(1);
+    resume();
+    await Bun.sleep(5);
+    expect(offers).toBe(1);
+    expect(processOffers).toBe(0);
+  });
+  test("a swallowed nested call after accepted spawn destroys every pipe and stops delivery", async () => {
+    const config = configuration();
+    const r = request();
+    let writes = 0;
+    let transport: ReturnType<typeof createTrustedSshStream>;
+    r.value.stdout = new WritableStream({
+      write() {
+        writes++;
+        void transport.run(request().value).catch(() => {});
+      },
+    });
+    const fake = subprocess('setInterval(()=>process.stdout.write("private-frame"),5);');
+    transport = createTrustedSshStream(config, {
+      now: () => instant,
+      spawn: fake.run,
+      connectionTrust: async () => proof(),
+    });
+    await refused(transport.run(r.value));
+    expect(fake.calls).toHaveLength(1);
+    expect(writes).toBe(1);
+    const child = presentChild(children.at(-1));
+    expect(child.stdin.destroyed).toBe(true);
+    expect(child.stdout.destroyed).toBe(true);
+    expect(child.stderr.destroyed).toBe(true);
+    await refused(transport.run(request().value));
+    expect(fake.calls).toHaveLength(1);
+  });
+  test("cleanup hooks cannot swallow a conflicting invocation into successful delivery", async () => {
+    const config = configuration();
+    const r = request();
+    let transport: ReturnType<typeof createTrustedSshStream>;
+    const get = r.value.stdout.getWriter.bind(r.value.stdout);
+    Object.defineProperty(r.value.stdout, "getWriter", {
+      value() {
+        const writer = get(),
+          release = writer.releaseLock.bind(writer);
+        Object.defineProperty(writer, "releaseLock", {
+          value() {
+            void transport.run(request().value).catch(() => {});
+            release();
+          },
+        });
+        return writer;
+      },
+    });
+    const fake = subprocess(
+      'process.stdin.resume();process.stdin.on("end",()=>process.stdout.write("ok"));',
+    );
+    transport = createTrustedSshStream(config, {
+      now: () => instant,
+      spawn: fake.run,
+      connectionTrust: async () => proof(),
+    });
+    await refused(transport.run(r.value));
+    expect(fake.calls).toHaveLength(1);
+    await refused(transport.run(request().value));
+    expect(fake.calls).toHaveLength(1);
+  });
+  test("strict per-invocation refusal and clock rejection drain cross-realm native promises", () => {
+    const config = configuration();
+    isolatedStream(`
+      import vm from "node:vm";
+      const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+      const input=${JSON.stringify({ config, proof: proof() })};let unhandled=0;
+      process.on("unhandledRejection",()=>unhandled++);
+      for(const phase of ["clock","denial"]){
+        let trust=0,offers=0,thenReads=0;const value=vm.runInNewContext('Promise.reject(Error("private"))');
+        Object.defineProperty(value,"then",{get(){thenReads++;throw Error("private");}});
+        const transport=createTrustedSshStream(input.config,{now:()=>phase==="clock"?value:${instant},spawn:()=>{offers++;throw Error("private");},connectionTrust:async()=>{trust++;return input.proof;}});
+        try{await transport.run({command:["/bin/true"],input:null,stdout:new WritableStream(),stderr:new WritableStream()},()=>phase==="denial"?value:undefined);process.exit(1);}
+        catch(error){if(error.message!=="trusted-ssh-stream-failed")process.exit(2);}
+        if(trust||offers||thenReads)process.exit(3);
+      }
+      await new Promise(r=>setTimeout(r,5));if(unhandled)process.exit(4);
+    `);
+  });
+});
+function presentChild(
+  value: ChildProcessWithoutNullStreams | undefined,
+): ChildProcessWithoutNullStreams {
+  if (!value) throw Error("missing-invented-child");
+  return value;
+}
+
+describe("default streaming native offer and command epoch", () => {
+  test("native argv expiry blocks spawn, while accepted long commands use their own original epoch", () => {
+    const config = configuration();
+    config.preparation_timeout_ms = 50;
+    config.timeout_ms = 1000;
+    for (const phase of ["argv-expiry", "valid-long", "first-command-clock"] as const) {
+      isolatedStream(`
+        import {spyOn} from "bun:test";
+        import * as cp from "node:child_process";
+        import {EventEmitter} from "node:events";
+        import {PassThrough} from "node:stream";
+        import {performance} from "node:perf_hooks";
+        let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+        const input=${JSON.stringify({ config, proof: proof(), phase })};input.proof.expires_at=${instant}+20;
+        let wall=${instant},offers=0,kills=0,captures=0,spawned=false,first=true,obsolete,obsoleteRefused=false;
+        const fake=spyOn(cp,"spawn").mockImplementation((executable,args,options)=>{
+          offers++;spawned=true;
+          if(executable!=="/usr/bin/ssh"||options.env.PATH!=="/usr/bin:/bin"||Object.keys(options.env).sort().join(",")!=="HOME,LANG,LC_ALL,PATH")throw Error("invalid-native-request");
+          const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>{kills++;};
+          if(input.phase!=="first-command-clock")queueMicrotask(()=>{
+            elapsed=100;wall+=100;
+            try{obsolete();}catch{obsoleteRefused=true;}
+            child.stdout.end(Buffer.from("ok"));child.stderr.end();child.emit("close",0,null);
+          });
+          return child;
+        });
+        const native=await import("node:child_process");if(native.spawn!==fake||cp.spawn!==fake)throw Error("fake native spawn not installed");
+        const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+        const iterator=Array.prototype[Symbol.iterator];
+        const transport=createTrustedSshStream(input.config,{
+          now:()=>{if(input.phase==="first-command-clock"&&spawned&&first){first=false;elapsed=1000;}return wall;},
+          connectionTrust:async(_descriptor,denial)=>{
+            obsolete=denial;
+            if(input.phase==="argv-expiry")Array.prototype[Symbol.iterator]=function(){if(this[0]==="-F"&&this.includes("StrictHostKeyChecking=yes")&&++captures===2){elapsed=20;wall+=20;}return iterator.call(this);};
+            return input.proof;
+          }
+        });
+        let output="",code;
+        try{const result=await transport.run({command:["/bin/true"],input:null,stdout:new WritableStream({write(bytes){output+=Buffer.from(bytes).toString();}}),stderr:new WritableStream()});code=result.code;}
+        catch(error){code=error.message;}
+        finally{Array.prototype[Symbol.iterator]=iterator;}
+        if(input.phase==="argv-expiry"){if(code!=="trusted-ssh-stream-failed"||offers!==0||captures!==2)process.exit(1);}
+        else if(input.phase==="valid-long"){if(code!==0||offers!==1||output!=="ok"||kills!==0||!obsoleteRefused)process.exit(2);}
+        else if(code!=="trusted-ssh-stream-failed"||offers!==1||kills===0||output!=="")process.exit(3);
+      `);
     }
   });
 });

@@ -562,3 +562,257 @@ describe("durable-trust SSH connection", () => {
     }
   });
 });
+
+const processModule = new URL("../../scripts/trust-ssh.ts", import.meta.url).href;
+function isolatedProcess(source: string): void {
+  // Installing the fake native transport is verified before importing or invoking SSH code.
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+    env: { TZ: "UTC" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect({ code: child.exitCode, diagnostic: Buffer.from(child.stderr).toString() }).toEqual({
+    code: 0,
+    diagnostic: "",
+  });
+  expect(child.stdout.byteLength).toBe(0);
+}
+describe("SSH original preparation window", () => {
+  test("first clock, dependency and input reflection costs precede every trust/native offer", () => {
+    const request = command();
+    isolatedProcess(`
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      const input=${JSON.stringify({ request, proof: proof() })};
+      for(const phase of ["clock","dependency","input"]){
+        elapsed=0;let trust=0,offers=0,first=true;
+        const request=phase==="input"?new Proxy(input.request,{ownKeys(value){elapsed=60;return Reflect.ownKeys(value);}}):input.request;
+        const deps={preparation_timeout_ms:50,now:()=>{if(phase==="clock"&&first){first=false;elapsed=60;}return ${time};},run:async()=>{offers++;throw Error("private");}};
+        if(phase==="dependency")Object.defineProperty(deps,"run",{get(){elapsed=60;return async()=>{offers++;throw Error("private");};}});
+        try{await trustedSsh(request,async()=>{trust++;return input.proof;},deps);process.exit(1);}
+        catch(error){if(error.message!=="trusted-ssh-failed")process.exit(2);}
+        if(trust||offers)process.exit(3);
+      }
+    `);
+  });
+  test("the same guard reaches the actual reader and stops its late next read after timeout", async () => {
+    const request = command();
+    let offers = 0,
+      processOffers = 0,
+      resume!: () => void;
+    const held = new Promise<void>((r) => {
+      resume = r;
+    });
+    await expect(
+      trustedSsh(
+        request,
+        async (_descriptor, refusal) => {
+          expect(typeof refusal).toBe("function");
+          refusal?.();
+          offers++;
+          await held;
+          refusal?.();
+          offers++;
+          return proof();
+        },
+        {
+          now: () => time,
+          preparation_timeout_ms: 20,
+          run: async () => {
+            processOffers++;
+            return result();
+          },
+        },
+      ),
+    ).rejects.toThrow("trusted-ssh-failed");
+    expect(offers).toBe(1);
+    resume();
+    await Bun.sleep(5);
+    expect(offers).toBe(1);
+    expect(processOffers).toBe(0);
+    expect(readdirSync(request.work_root)).toEqual(["invented-identity"]);
+  });
+  test("clock callbacks cannot swallow a nested original-guard denial", async () => {
+    const request = command();
+    let original: (() => void) | undefined,
+      reenter = false,
+      offers = 0;
+    await expect(
+      trustedSsh(
+        request,
+        async (_descriptor, refusal) => {
+          original = refusal;
+          reenter = true;
+          return proof();
+        },
+        {
+          now: () => {
+            if (reenter) {
+              reenter = false;
+              try {
+                original?.();
+              } catch {
+                /* Permanent outer denial. */
+              }
+            }
+            return time;
+          },
+          run: async () => {
+            offers++;
+            return result();
+          },
+        },
+      ),
+    ).rejects.toThrow("trusted-ssh-failed");
+    expect(offers).toBe(0);
+  });
+  test("the refusal is checked after a clock callback and rejects Boolean approval values", async () => {
+    for (const fault of ["clock", "false", "true"] as const) {
+      const request = command();
+      let denied = false,
+        trustOffers = 0;
+      await expect(
+        trustedSsh(
+          request,
+          async () => {
+            trustOffers++;
+            return proof();
+          },
+          {
+            now: () => {
+              denied = true;
+              return time;
+            },
+            denial: (() => {
+              if (fault === "clock" && denied) throw Error("private");
+              return fault === "clock" ? undefined : fault === "true";
+            }) as () => void,
+          },
+        ),
+      ).rejects.toThrow("trusted-ssh-failed");
+      expect(trustOffers).toBe(0);
+    }
+  });
+  test("rejected cross-realm clock/refusal promises drain without evaluating a caller then", () => {
+    const request = command();
+    isolatedProcess(`
+      import vm from "node:vm";
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      const input=${JSON.stringify({ request, proof: proof() })};let unhandled=0;
+      process.on("unhandledRejection",()=>unhandled++);
+      for(const phase of ["clock","denial"]){
+        let trust=0,offers=0,thenReads=0;
+        const value=vm.runInNewContext('Promise.reject(Error("private"))');
+        Object.defineProperty(value,"then",{get(){thenReads++;throw Error("private");}});
+        try{await trustedSsh(input.request,async()=>{trust++;return input.proof;},{now:()=>phase==="clock"?value:${time},denial:()=>phase==="denial"?value:undefined,run:async()=>{offers++;}});process.exit(1);}
+        catch(error){if(error.message!=="trusted-ssh-failed")process.exit(2);}
+        if(trust||offers||thenReads)process.exit(3);
+      }
+      await new Promise(r=>setTimeout(r,5));if(unhandled)process.exit(4);
+    `);
+  });
+  test("a late metadata return cannot offer another path read, pin write or native process", () => {
+    const request = command();
+    isolatedProcess(`
+      import {spyOn} from "bun:test";
+      import * as fs from "node:fs";
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const input=${JSON.stringify({ request, proof: proof() })};let metadata=0,writes=0,trust=0,offers=0;
+      const original=fs.lstatSync;
+      const patched=spyOn(fs,"lstatSync").mockImplementation((...args)=>{metadata++;const stat=original(...args);elapsed=50;return stat;});
+      const write=spyOn(fs,"writeFileSync").mockImplementation(()=>{writes++;throw Error("unexpected-write");});
+      const transport=await import("node:fs");if(transport.lstatSync!==patched||transport.writeFileSync!==write)throw Error("fake filesystem not installed");
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      try{await trustedSsh(input.request,async()=>{trust++;return input.proof;},{now:()=>${time},preparation_timeout_ms:50,run:async()=>{offers++;}});process.exit(1);}
+      catch(error){if(error.message!=="trusted-ssh-failed")process.exit(2);}
+      if(metadata!==1||writes||trust||offers)process.exit(3);
+    `);
+  });
+  test("the default native spawn sees the last guard and valid commands outlive observation expiry", () => {
+    const request = command();
+    isolatedProcess(`
+      import {spyOn} from "bun:test";
+      import * as cp from "node:child_process";
+      import {EventEmitter} from "node:events";
+      import {PassThrough} from "node:stream";
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const input=${JSON.stringify({ request, proof: proof() })};let wall=${time},offers=0;
+      input.proof.expires_at=wall+20;input.request.timeout_ms=1000;
+      const fake=spyOn(cp,"spawn").mockImplementation((executable,args,options)=>{
+        offers++;if(executable!=="/usr/bin/ssh"||options.env.PATH!=="/usr/bin:/bin"||Object.keys(options.env).sort().join(",")!=="HOME,LANG,LC_ALL,PATH")throw Error("invalid-native-request");
+        const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>{};
+        queueMicrotask(()=>{elapsed=100;wall+=100;child.stdout.write(Buffer.from("ok"));child.stdout.end();child.stderr.end();child.emit("close",0,null);});
+        return child;
+      });
+      const transport=await import("node:child_process");if(transport.spawn!==fake||cp.spawn!==fake)throw Error("fake native spawn not installed");
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      const output=await trustedSsh(input.request,async()=>input.proof,{now:()=>wall,preparation_timeout_ms:50});
+      if(offers!==1||Buffer.from(output).toString()!=="ok")process.exit(1);
+    `);
+  });
+  test("actual byte limits ignore iterators/shadowed lengths while copying private input/output", async () => {
+    const request = command();
+    const original = new Uint8Array([1, 2, 3]);
+    let iteratorCalls = 0;
+    Object.defineProperty(original, Symbol.iterator, {
+      value: function* () {
+        iteratorCalls++;
+        yield 99;
+      },
+    });
+    request.input = original;
+    const output = await trustedSsh(request, async () => proof(), {
+      now: () => time,
+      run: async (prepared) => {
+        expect(prepared.input).toEqual(new Uint8Array([1, 2, 3]));
+        const stdout = new Uint8Array([4, 5]);
+        Object.defineProperty(stdout, Symbol.iterator, {
+          value: function* () {
+            iteratorCalls++;
+            yield 99;
+          },
+        });
+        return { code: 0, signal: null, stdout, stderr: new Uint8Array() };
+      },
+    });
+    expect(output).toEqual(new Uint8Array([4, 5]));
+    expect(iteratorCalls).toBe(0);
+    const oversized = new Uint8Array(1_048_577);
+    Object.defineProperty(oversized, "length", { value: 1 });
+    await expect(
+      trustedSsh(command(), async () => proof(), {
+        now: () => time,
+        run: async () => ({ code: 0, signal: null, stdout: oversized, stderr: new Uint8Array() }),
+      }),
+    ).rejects.toThrow("trusted-ssh-failed");
+  });
+});
+
+describe("default SSH native offer", () => {
+  test("argv capture cannot move the final native spawn past original proof expiry", () => {
+    const request = command();
+    isolatedProcess(`
+      import {spyOn} from "bun:test";
+      import * as cp from "node:child_process";
+      import {performance} from "node:perf_hooks";
+      let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const input=${JSON.stringify({ request, proof: proof() })};input.proof.expires_at=${time}+20;
+      let wall=${time},offers=0,captures=0;
+      const fake=spyOn(cp,"spawn").mockImplementation(()=>{offers++;throw Error("unexpected-native-offer");});
+      const transport=await import("node:child_process");if(transport.spawn!==fake||cp.spawn!==fake)throw Error("fake native spawn not installed");
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      const iterator=Array.prototype[Symbol.iterator];
+      try{
+        await trustedSsh(input.request,async()=>{
+          Array.prototype[Symbol.iterator]=function(){if(this[0]==="-F"&&this.includes("StrictHostKeyChecking=yes")){captures++;elapsed=20;wall+=20;}return iterator.call(this);};
+          return input.proof;
+        },{now:()=>wall,preparation_timeout_ms:50});process.exit(1);
+      }catch(error){if(error.message!=="trusted-ssh-failed")process.exit(2);}
+      finally{Array.prototype[Symbol.iterator]=iterator;}
+      if(captures!==1||offers!==0)process.exit(3);
+    `);
+  });
+});
