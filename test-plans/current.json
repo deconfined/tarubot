@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.37 original host exchange deadlines",
-  "objective": "Verify retained original current-host and private framing deadlines through synchronous hooks, stream locking, held acknowledgements and bounded public work. Preserve phase evidence and framing behavior; release activation remains fenced and the disposable guest remains stopped.",
+  "title": "Session: 2.36.38 measured paused host controller",
+  "objective": "Build and verify a new local controller image from pinned public artifacts, independently derive its complete closure, and rehearse only an owned paused synthetic child. No real host or bot operation occurs; release activation remains fenced and the disposable guest remains stopped.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Verify pre-hook original anchors, min-only ends, held-wait timer shortening, zero late native offers or byte writes, narrow Promise clock drainage and same-proof public assertions using invented responses and local pinned controller fixtures; contact no real host or provider.",
+    "Verify archive and import closure, actual image configuration, opaque native capabilities, fixed paused-child lifecycle, kernel worker registration and cleanup using invented inputs and new local engine resources; publish no image and contact no real host or provider.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

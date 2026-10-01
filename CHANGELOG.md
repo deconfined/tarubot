@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.37**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.38**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.38 — Measure a local paused host controller
+
+- Add a deterministic controller recipe using pinned public Python image layers and a closed wheel set. Independently derive the complete root filesystem and execution configuration, then compare the actual built image before issuing an opaque artifact capability.
+- Prepare and inspect an owned native controller child under fixed engine options, import roots and phase mounts. Keep the driver paused before play parsing; registered workers require native credentials, live pidfds and a private fork barrier.
+- Expose build, prepare, inspect and stop only. Declarations and inspection data confer no command authority; protected event, evaluated-input and real destination integration remain pending, with release activation fenced.
 
 ## 2.36.37 — Retain original host exchange deadlines
 

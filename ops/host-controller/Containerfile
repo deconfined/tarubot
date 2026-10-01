@@ -1,0 +1,10 @@
+# Build only from the owned minimal context produced by host-controller.ts. No frontend,
+# resolver, build argument, secret or SSH mount contributes executable bytes.
+FROM --platform=linux/amd64 docker.io/library/python@sha256:1aaa65a85fda306ffb8b910824d4e93bdce61e212c7e87168123ea3073b41a1a
+COPY . /build/
+RUN /usr/local/bin/python3.12 -I -S -B /build/assemble.py
+USER 10000:10000
+WORKDIR /
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/python3.12", "-I", "-S", "-B", "/opt/tarubot/controller/launcher.py"]
+CMD []
