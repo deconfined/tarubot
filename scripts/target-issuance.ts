@@ -13,7 +13,15 @@ import type { AppliedTargetProducer } from "./target-descriptor.js";
 import type { GitHubReader, GitHubReadResponse } from "./trust-run.js";
 import {
   assertTargetIssuanceRunProof,
+  captureTargetHistoryHook,
+  requireTargetHistoryEntry as requireHistoryEntry,
   createTargetIssuanceRunReader,
+  qualifyTargetIssuanceRunProof,
+  inspectQualifiedTargetIssuanceRunData,
+  fenceQualifiedTargetIssuanceRunData,
+  retireTargetIssuanceRunProof,
+  type QualifiedTargetIssuanceRunData,
+  type TargetIssuanceRunHistory,
   type TargetIssuanceRunProof,
 } from "./target-issuance-run.js";
 
@@ -39,6 +47,7 @@ const maxHeaders = 16_384;
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const nativeByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength")?.get;
 const nativeSet = Uint8Array.prototype.set;
+const nativeThen = Promise.prototype.then;
 
 /** Intrinsic length/set ignore own length, iterator and subarray hooks before allocation. */
 function byteSnapshot(value: Uint8Array): Uint8Array {
@@ -50,6 +59,13 @@ function byteSnapshot(value: Uint8Array): Uint8Array {
   return copy;
 }
 
+function requireTargetHistoryEntry(): void {
+  try {
+    requireHistoryEntry();
+  } catch {
+    throw new Error("invalid-target-issuance");
+  }
+}
 function requireIssuance(value: unknown): asserts value {
   if (!value) throw new Error("invalid-target-issuance");
 }
@@ -679,8 +695,170 @@ interface HistoricalState {
   physical: number;
   fenced: boolean;
   checking: boolean;
+  qualifying: boolean;
+  handoffPhysical: number;
+  signature: Readonly<{ header: Value; claims: Value; iat: number; nbf: number; exp: number }>;
 }
 const historicalProofs = new WeakMap<HistoricalTargetIssuanceProof, HistoricalState>();
+declare const historicalDataBrand: unique symbol;
+export type QualifiedHistoricalTargetIssuanceData = Readonly<{ [historicalDataBrand]: true }>;
+export interface HistoricalTargetIssuanceHistory {
+  readonly schema: 1;
+  readonly purpose: "tarubot-target-issuance-history-data-v1";
+  readonly context: TargetIssuanceContext;
+  readonly statement: TargetIssuanceStatementV2;
+  /** Verified historical signature facts. exp is not a fresh/live bearer lifetime. */
+  readonly signature: Readonly<{
+    header: Readonly<Value>;
+    claims: Readonly<Value>;
+    iat: number;
+    nbf: number;
+    exp: number;
+  }>;
+  readonly source: TargetIssuanceRunHistory;
+}
+const historicalData = new WeakMap<
+  QualifiedHistoricalTargetIssuanceData,
+  {
+    history: HistoricalTargetIssuanceHistory;
+    run: QualifiedTargetIssuanceRunData;
+    fenced: boolean;
+  }
+>();
+let historicalHandoff: HistoricalState | undefined;
+function historicalHandoffTick(saved: HistoricalState, anchor: number): void {
+  requireIssuance(
+    !saved.fenced &&
+      saved.checking &&
+      saved.qualifying &&
+      performance.now() < saved.handoffPhysical,
+  );
+  const before = Math.min(anchor, performance.now());
+  const at: unknown = captureTargetHistoryHook(
+    () => saved.clock(),
+    () => {
+      saved.fenced = true;
+    },
+  );
+  if (typeof at !== "number") {
+    try {
+      void Reflect.apply(nativeThen, at, [undefined, () => {}]);
+    } catch {
+      /* Not a native Promise. */
+    }
+  }
+  integer(at);
+  requireIssuance(at >= saved.last && at < saved.wall);
+  saved.last = at;
+  saved.handoffPhysical = Math.min(saved.handoffPhysical, before + saved.wall - at);
+  requireIssuance(
+    !saved.fenced &&
+      saved.checking &&
+      saved.qualifying &&
+      performance.now() < saved.handoffPhysical,
+  );
+}
+/** Retires BOTH original proof identities. It never turns historical facts into approval. */
+export function qualifyHistoricalTargetIssuanceProof(
+  value: HistoricalTargetIssuanceProof,
+  expected: { statement: TargetIssuanceStatementV2; context: TargetIssuanceContext },
+): QualifiedHistoricalTargetIssuanceData {
+  let saved: HistoricalState | undefined;
+  let owns = false;
+  let child: QualifiedTargetIssuanceRunData | undefined;
+  let result: QualifiedHistoricalTargetIssuanceData | undefined;
+  const anchor = performance.now();
+  try {
+    requireTargetHistoryEntry();
+    if (historicalHandoff) {
+      historicalHandoff.fenced = true;
+      throw new Error("invalid-target-issuance");
+    }
+    saved = historicalProofs.get(value);
+    requireIssuance(saved && !saved.fenced && !saved.checking && !saved.qualifying);
+    saved.checking = true;
+    owns = true;
+    saved.qualifying = true;
+    historicalHandoff = saved;
+    historicalHandoffTick(saved, anchor);
+    const state = saved;
+    const captured = captureTargetHistoryHook(
+      () => exact(captureTargetIssuance(expected), ["statement", "context"]),
+      () => {
+        state.fenced = true;
+      },
+    );
+    const statement = targetIssuanceStatement(captured.statement),
+      c = context(captured.context, statement);
+    requireIssuance(
+      isDeepStrictEqual(statement, saved.statement) && isDeepStrictEqual(c, saved.context),
+    );
+    assertTargetIssuanceRunProof(saved.run, saved.statement, saved.iat);
+    historicalHandoffTick(saved, anchor);
+    // This child handoff is the last dependent-proof action. Final checks use only
+    // the SAME original temporal/phase scope; no retired authority is rebound.
+    child = qualifyTargetIssuanceRunProof(saved.run, saved.statement, saved.iat);
+    const source = inspectQualifiedTargetIssuanceRunData(child);
+    const history = freeze({
+      schema: 1 as const,
+      purpose: "tarubot-target-issuance-history-data-v1" as const,
+      context: saved.context,
+      statement: saved.statement,
+      signature: saved.signature,
+      source,
+    });
+    historicalHandoffTick(saved, anchor);
+    result = Object.freeze({}) as QualifiedHistoricalTargetIssuanceData;
+    historicalData.set(result, { history, run: child, fenced: false });
+    return result;
+  } catch {
+    if (result) fenceQualifiedHistoricalTargetIssuanceData(result);
+    if (child) fenceQualifiedTargetIssuanceRunData(child);
+    throw new Error("invalid-target-issuance");
+  } finally {
+    if (saved) {
+      saved.fenced = true;
+      if (owns) saved.checking = false;
+      retireTargetIssuanceRunProof(saved.run);
+    }
+    if (historicalHandoff === saved) historicalHandoff = undefined;
+  }
+}
+/** Callback-free immutable DATA; copied JSON does not carry the native origin brand. */
+export function inspectQualifiedHistoricalTargetIssuanceData(
+  value: QualifiedHistoricalTargetIssuanceData,
+): HistoricalTargetIssuanceHistory {
+  requireTargetHistoryEntry();
+  if (historicalHandoff) {
+    historicalHandoff.fenced = true;
+    throw new Error("invalid-target-issuance");
+  }
+  const saved = historicalData.get(value);
+  requireIssuance(saved && !saved.fenced);
+  inspectQualifiedTargetIssuanceRunData(saved.run);
+  return saved.history;
+}
+export function fenceQualifiedHistoricalTargetIssuanceData(
+  value: QualifiedHistoricalTargetIssuanceData,
+): void {
+  requireTargetHistoryEntry();
+  if (historicalHandoff) historicalHandoff.fenced = true;
+  const saved = historicalData.get(value);
+  if (saved) {
+    saved.fenced = true;
+    fenceQualifiedTargetIssuanceRunData(saved.run);
+  }
+}
+export function retireHistoricalTargetIssuanceProof(value: HistoricalTargetIssuanceProof): void {
+  requireTargetHistoryEntry();
+  if (historicalHandoff) historicalHandoff.fenced = true;
+  const saved = historicalProofs.get(value);
+  if (saved) {
+    saved.fenced = true;
+    retireTargetIssuanceRunProof(saved.run);
+  }
+}
+
 /** Separate short-lived attribution capability. A v1 receipt, Boolean or serialized echo fails. */
 export function assertHistoricalTargetIssuanceProof(
   value: unknown,
@@ -689,14 +867,25 @@ export function assertHistoricalTargetIssuanceProof(
   let saved: HistoricalState | undefined;
   let reserved = false;
   try {
+    requireTargetHistoryEntry();
+    if (historicalHandoff) {
+      historicalHandoff.fenced = true;
+      throw new Error("invalid-target-issuance");
+    }
     requireIssuance(value !== null && typeof value === "object");
     saved = historicalProofs.get(value as HistoricalTargetIssuanceProof);
-    requireIssuance(saved && !saved.fenced && !saved.checking);
+    requireIssuance(saved && !saved.fenced && !saved.checking && !saved.qualifying);
     // Reserve before caller snapshots or clocks can reenter. A nested denial fences this
     // outer assertion; only its owning finally may release the active reservation.
     saved.checking = true;
     reserved = true;
-    const data = exact(captureTargetIssuance(expected), ["statement", "context"]);
+    const state = saved;
+    const data = captureTargetHistoryHook(
+      () => exact(captureTargetIssuance(expected), ["statement", "context"]),
+      () => {
+        state.fenced = true;
+      },
+    );
     const statement = targetIssuanceStatement(data.statement),
       c = context(data.context, statement);
     requireIssuance(
@@ -705,8 +894,15 @@ export function assertHistoricalTargetIssuanceProof(
         isDeepStrictEqual(statement, saved.statement) &&
         isDeepStrictEqual(c, saved.context),
     );
-    const at = saved.clock();
+    const before = performance.now();
+    const at = captureTargetHistoryHook(
+      () => state.clock(),
+      () => {
+        state.fenced = true;
+      },
+    );
     integer(at);
+    saved.handoffPhysical = Math.min(saved.handoffPhysical, before + saved.wall - at);
     requireIssuance(
       !saved.fenced &&
         saved.checking &&
@@ -730,9 +926,31 @@ export async function withinHistoricalTargetIssuanceProof<T>(
   expected: { statement: TargetIssuanceStatementV2; context: TargetIssuanceContext },
   work: () => Promise<T>,
 ): Promise<T> {
-  const captured = captureTargetIssuance(expected) as typeof expected;
-  assertHistoricalTargetIssuanceProof(proof, captured);
+  requireTargetHistoryEntry();
   const state = historicalProofs.get(proof);
+  let owns = false;
+  let captured: typeof expected;
+  try {
+    requireIssuance(state && !state.fenced && !state.checking && !state.qualifying);
+    state.checking = true;
+    owns = true;
+    const saved = state;
+    captured = captureTargetHistoryHook(
+      () => captureTargetIssuance(expected),
+      () => {
+        saved.fenced = true;
+      },
+    ) as typeof expected;
+    requireIssuance(!state.fenced && state.checking);
+  } catch {
+    if (state) state.fenced = true;
+    throw new Error("invalid-target-issuance");
+  } finally {
+    if (state && owns) state.checking = false;
+  }
+  // Work is outside the synchronous snapshot reservation: legitimate same-proof
+  // self-assertion remains supported, while a snapshot hook cannot issue child DATA.
+  assertHistoricalTargetIssuanceProof(proof, captured);
   requireIssuance(state);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -766,6 +984,7 @@ export class HistoricalTargetIssuanceVerifier {
     dependencies: { get?: GitHubReader; now?: () => number } = {},
   ) {
     try {
+      requireTargetHistoryEntry();
       const c = exact(captureTargetIssuance(configuration), [
         "owner_id",
         "repository_id",
@@ -811,6 +1030,7 @@ export class HistoricalTargetIssuanceVerifier {
     jwt: string;
   }): Promise<HistoricalTargetIssuanceProof> {
     try {
+      requireTargetHistoryEntry();
       const data = exact(captureTargetIssuance(input), ["statement", "context", "jwt"]),
         statement = targetIssuanceStatement(data.statement),
         c = context(data.context, statement);
@@ -825,9 +1045,11 @@ export class HistoricalTargetIssuanceVerifier {
       let fenced = false;
       const wall = Math.min(started + proofAge, statement.valid_until),
         physicalExpiry = physical + wall - started;
+      let handoffPhysical = physicalExpiry;
       const tick = () => {
         try {
           requireIssuance(!fenced);
+          const before = performance.now();
           const at = this.#clock();
           integer(at);
           requireIssuance(
@@ -837,6 +1059,7 @@ export class HistoricalTargetIssuanceVerifier {
               performance.now() < physicalExpiry,
           );
           last = at;
+          handoffPhysical = Math.min(handoffPhysical, before + wall - at);
           return at;
         } catch (error) {
           fenced = true;
@@ -966,6 +1189,9 @@ export class HistoricalTargetIssuanceVerifier {
         physical: physicalExpiry,
         fenced: false,
         checking: false,
+        qualifying: false,
+        handoffPhysical,
+        signature: freeze({ header, claims, iat, nbf, exp }),
       });
       assertHistoricalTargetIssuanceProof(proof, { statement, context: c });
       return proof;

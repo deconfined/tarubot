@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 import { generateKeyPairSync, sign, constants } from "node:crypto";
 import {
   HistoricalTargetIssuanceVerifier,
+  qualifyHistoricalTargetIssuanceProof,
+  inspectQualifiedHistoricalTargetIssuanceData,
+  type QualifiedHistoricalTargetIssuanceData,
   assertHistoricalTargetIssuanceProof,
   withinHistoricalTargetIssuanceProof,
   prepareTargetIssuance,
@@ -18,6 +21,10 @@ import {
   type TargetIssuanceStatementV2,
   type TargetIssuanceMintWindow,
 } from "../../scripts/target-issuance.js";
+import {
+  qualifyTargetIssuanceRunProof,
+  type TargetIssuanceRunProof,
+} from "../../scripts/target-issuance-run.js";
 import type { GitHubReader, GitHubReadRequest } from "../../scripts/trust-run.js";
 
 const instant = 1_800_000_000_000;
@@ -980,4 +987,156 @@ describe("historical current-JWKS attribution", () => {
       expect(text).not.toContain("fetch(");
     }
   });
+});
+
+describe("one-way historical signature/source DATA", () => {
+  test("genuine expired historical JWT facts and all source observations survive only as immutable DATA", async () => {
+    for (const mode of ["apply", "no-changes"] as const) {
+      const f = cryptoFixture(mode),
+        proof = await f.verifier.verify(f.input);
+      const count = f.calls.length;
+      const data = qualifyHistoricalTargetIssuanceProof(proof, scope(f));
+      const history = inspectQualifiedHistoricalTargetIssuanceData(data);
+      expect(history.signature.iat).toBe(issued + 2000);
+      expect(history.signature.nbf).toBe(Number(claims(f).nbf) * 1000);
+      expect(history.signature.exp).toBe(Number(claims(f).exp) * 1000);
+      expect(history.signature.exp).toBeLessThan(instant);
+      expect(history.signature.claims.aud).toBe(targetIssuanceAudience(f.statement));
+      expect(history.signature.header.alg).toBe("RS256");
+      expect(history.source.observations.length).toBe(count - 1);
+      expect(history.context).toEqual(f.context);
+      expect(f.calls.length).toBe(count);
+      expect(JSON.stringify(history)).not.toContain(f.input.jwt);
+      expect(JSON.stringify(history)).not.toContain(f.configuration.token);
+      expect(Object.isFrozen(history.signature.claims)).toBe(true);
+      expect(() => assertHistoricalTargetIssuanceProof(data, scope(f))).toThrow(failure);
+      expect(() => assertHistoricalTargetIssuanceProof(proof, scope(f))).toThrow(failure);
+      await expect(
+        withinHistoricalTargetIssuanceProof(proof, scope(f), async () => "forbidden"),
+      ).rejects.toThrow(failure);
+      expect(() => qualifyHistoricalTargetIssuanceProof(proof, scope(f))).toThrow(failure);
+      expect(() =>
+        inspectQualifiedHistoricalTargetIssuanceData({} as QualifiedHistoricalTargetIssuanceData),
+      ).toThrow(failure);
+      f.clock.now += 86_400_000;
+      expect(inspectQualifiedHistoricalTargetIssuanceData(data).statement.valid_until).toBe(
+        f.statement.valid_until,
+      );
+    }
+  });
+  test("cross-layer swallowed nested handoff, copied input, and prior observed physical residual cannot deliver DATA", async () => {
+    const f = cryptoFixture(),
+      proof = await f.verifier.verify(f.input);
+    const hostile = new Proxy(scope(f), {
+      ownKeys(target) {
+        try {
+          qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.statement);
+        } catch {
+          /* Deliberately swallowed. */
+        }
+        return Reflect.ownKeys(target);
+      },
+    });
+    expect(() => qualifyHistoricalTargetIssuanceProof(proof, hostile)).toThrow(failure);
+    expect(() => assertHistoricalTargetIssuanceProof(proof, scope(f))).toThrow(failure);
+    const g = cryptoFixture(),
+      original = await g.verifier.verify(g.input);
+    g.clock.now += 29_980;
+    assertHistoricalTargetIssuanceProof(original, scope(g));
+    const end = performance.now() + 60;
+    while (performance.now() < end) {
+      /* Genuine original proof residual cannot restart. */
+    }
+    expect(() => qualifyHistoricalTargetIssuanceProof(original, scope(g))).toThrow(failure);
+    const h = cryptoFixture(),
+      cap = await h.verifier.verify(h.input);
+    expect(() => qualifyHistoricalTargetIssuanceProof({ ...cap }, scope(h))).toThrow(failure);
+    expect(() =>
+      qualifyHistoricalTargetIssuanceProof(cap, {
+        ...scope(h),
+        context: { ...h.context, backend: "f".repeat(64) },
+      }),
+    ).toThrow(failure);
+    expect(() => assertHistoricalTargetIssuanceProof(cap, scope(h))).toThrow(failure);
+  });
+});
+
+test("historical within reserves its snapshot before a hook can issue child DATA and still permits work self-assert", async () => {
+  const f = cryptoFixture(),
+    proof = await f.verifier.verify(f.input);
+  let child: QualifiedHistoricalTargetIssuanceData | undefined,
+    work = 0,
+    nested = 0;
+  const hostile = new Proxy(scope(f), {
+    ownKeys(target) {
+      nested++;
+      try {
+        child = qualifyHistoricalTargetIssuanceProof(proof, scope(f));
+      } catch {
+        /* Deliberately swallowed. */
+      }
+      return Reflect.ownKeys(target);
+    },
+  });
+  await expect(
+    withinHistoricalTargetIssuanceProof(proof, hostile, async () => {
+      work++;
+      return "forbidden";
+    }),
+  ).rejects.toThrow(failure);
+  expect(nested).toBeGreaterThan(0);
+  expect(child).toBeUndefined();
+  expect(work).toBe(0);
+  expect(() => assertHistoricalTargetIssuanceProof(proof, scope(f))).toThrow(failure);
+  const g = cryptoFixture(),
+    original = await g.verifier.verify(g.input);
+  expect(
+    await withinHistoricalTargetIssuanceProof(original, scope(g), async () => {
+      assertHistoricalTargetIssuanceProof(original, scope(g));
+      return "same-proof self-assert remains valid";
+    }),
+  ).toBe("same-proof self-assert remains valid");
+});
+
+test("ordinary historical assertion snapshots and raw clocks refuse swallowed cross-layer handoff", async () => {
+  const f = cryptoFixture(),
+    proof = await f.verifier.verify(f.input);
+  let nested = 0;
+  const hostile = new Proxy(scope(f), {
+    ownKeys(target) {
+      nested++;
+      try {
+        qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.statement);
+      } catch {
+        /* Deliberately swallowed. */
+      }
+      return Reflect.ownKeys(target);
+    },
+  });
+  expect(() => assertHistoricalTargetIssuanceProof(proof, hostile)).toThrow(failure);
+  expect(nested).toBeGreaterThan(0);
+  const g = cryptoFixture();
+  let armed = false,
+    caught = 0;
+  const verifier = new HistoricalTargetIssuanceVerifier(g.configuration, {
+    get: g.get,
+    now: () => {
+      if (armed) {
+        armed = false;
+        caught++;
+        try {
+          qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, g.statement);
+        } catch {
+          /* Deliberately swallowed. */
+        }
+      }
+      return g.clock.now;
+    },
+  });
+  const original = await verifier.verify(g.input),
+    before = g.calls.length;
+  armed = true;
+  expect(() => assertHistoricalTargetIssuanceProof(original, scope(g))).toThrow(failure);
+  expect(caught).toBe(1);
+  expect(g.calls.length).toBe(before);
 });

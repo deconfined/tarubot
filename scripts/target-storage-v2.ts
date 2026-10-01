@@ -24,6 +24,12 @@ import {
   assertHistoricalTargetIssuanceProof,
   captureTargetIssuance,
   HistoricalTargetIssuanceVerifier,
+  qualifyHistoricalTargetIssuanceProof,
+  inspectQualifiedHistoricalTargetIssuanceData,
+  fenceQualifiedHistoricalTargetIssuanceData,
+  retireHistoricalTargetIssuanceProof,
+  type QualifiedHistoricalTargetIssuanceData,
+  type HistoricalTargetIssuanceHistory,
   withinHistoricalTargetIssuanceProof,
   type ContentReceiptV2,
   type HistoricalTargetIssuanceProof,
@@ -31,6 +37,10 @@ import {
   type TargetIssuanceContext,
   type TargetIssuanceStatementV2,
 } from "./target-issuance.js";
+import {
+  captureTargetHistoryHook,
+  requireTargetHistoryEntry as requireHistoryEntry,
+} from "./target-issuance-run.js";
 import type { GitHubReader } from "./trust-run.js";
 
 type Value = Record<string, unknown>;
@@ -100,6 +110,43 @@ export type AuthenticatedTargetContentV2 = Readonly<{
 }>;
 export interface TargetContentV2Consumer extends Metadata {
   consume(release: ReleaseIdentity): Promise<AuthenticatedTargetContentV2>;
+  /** One-way history handoff from this exact consumer; it retires the original authority. */
+  qualify(
+    content: AuthenticatedTargetContentV2,
+    release: ReleaseIdentity,
+  ): Promise<QualifiedTargetContentHistoryV2>;
+}
+declare const contentHistoryBrand: unique symbol;
+export type QualifiedTargetContentHistoryV2 = Readonly<{ [contentHistoryBrand]: true }>;
+export interface TargetContentHistoryV2 {
+  readonly schema: 1;
+  readonly purpose: "tarubot-target-content-history-data-v1";
+  readonly context: TargetIssuanceContext;
+  readonly content: ReturnType<typeof targetContentV2>;
+  readonly statement: TargetIssuanceStatementV2;
+  readonly receipt: ContentReceiptV2;
+  /** Original artifact expiry only. Inspection never grants a fresh authority epoch. */
+  readonly valid_until: number;
+  readonly storage: Readonly<{
+    binding: string;
+    namespace: string;
+    read_policy: "serialized-immutable-latest-object";
+  }>;
+  readonly objects: Readonly<{
+    bootstrap: Readonly<{
+      path: string;
+      size: number;
+      ciphertext_digest: string;
+      identical_reads: 3;
+    }>;
+    content: Readonly<{
+      path: string;
+      size: number;
+      ciphertext_digest: string;
+      identical_reads: 3;
+    }>;
+  }>;
+  readonly historical: HistoricalTargetIssuanceHistory;
 }
 const maximum = 65_568;
 const budget = 60_000;
@@ -110,12 +157,23 @@ const arrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const byteLength = Object.getOwnPropertyDescriptor(arrayPrototype, "byteLength")?.get;
 const nativeSet = Uint8Array.prototype.set;
 const nativeThen = Promise.prototype.then;
+// Denial-only cleanup never consults a withheld reader/stream's own method getters.
+const nativeReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
+const nativeReaderRelease = ReadableStreamDefaultReader.prototype.releaseLock;
+const nativeStreamCancel = ReadableStream.prototype.cancel;
 /** Refused clock/native work promises are drained without reading an inherited then getter. */
 function drain(value: unknown): void {
   try {
     void Reflect.apply(nativeThen, value, [undefined, () => {}]);
   } catch {
     /* Non-native values still fail the fixed synchronous/native promise contract. */
+  }
+}
+function requireTargetHistoryEntry(): void {
+  try {
+    requireHistoryEntry();
+  } catch {
+    throw new Error("invalid-target-storage-v2");
   }
 }
 function valid(value: unknown): asserts value {
@@ -199,6 +257,7 @@ class Operation {
   #authorityWait: (<T>(work: () => Promise<T>) => Promise<T>) | undefined;
   #bounds = new Set<{ end: number; rearm?: () => void; reject?: () => void }>();
   #anchors: number[] = [];
+  #historyFence: (() => void) | undefined;
   constructor(now: () => number) {
     const physical = performance.now();
     this.#originPhysical = physical;
@@ -228,7 +287,9 @@ class Operation {
       valid(!this.#checking);
       this.#checking = true;
       owned = true;
-      const now: unknown = this.#now();
+      const deny =
+        this.#historyFence ?? (this.#authority === undefined ? undefined : () => this.stop());
+      const now: unknown = deny ? captureTargetHistoryHook(() => this.#now(), deny) : this.#now();
       if (typeof now !== "number") {
         this.stop();
         drain(now);
@@ -324,6 +385,31 @@ class Operation {
     } catch (error) {
       drain(value);
       throw error;
+    } finally {
+      this.#anchors.pop();
+    }
+  }
+  beginHistory(fence: () => void): void {
+    valid(this.#historyFence === undefined);
+    this.#historyFence = fence;
+  }
+  /** Synchronous SDK getter/call scope only: failed public reentry cannot be swallowed. */
+  hook<T>(work: () => T): T {
+    return this.#historyFence ? captureTargetHistoryHook(work, this.#historyFence) : work();
+  }
+  /** Only terminal history handoff uses this pure barrier after dependent proofs retire.
+   * No authority rebinding or native offer is allowed in this final synchronous scope. */
+  historyCapture<T>(work: () => T): T {
+    const before = performance.now();
+    this.#anchors.push(before);
+    try {
+      this.clock(before);
+      const value = work();
+      this.clock(before);
+      return value;
+    } catch {
+      this.stop();
+      throw new Error("invalid-target-storage-v2");
     } finally {
       this.#anchors.pop();
     }
@@ -596,36 +682,44 @@ class NativeStore implements Metadata {
   }
   async read(path: string, op: Operation): Promise<Uint8Array | null> {
     let observed = false;
+    let readerOwned: unknown, streamOwned: unknown;
+    let released = false;
     try {
       const key = this.#key(path);
       op.guard();
       const beforeRoute = performance.now();
-      this.#route(key);
+      op.hook(() => this.#route(key));
       // All routing work precedes the LAST guard immediately before the actual SDK offer.
       op.guard(beforeRoute);
       const beforeFile = performance.now();
-      const file = this.#file(key, { retry: 0 });
+      const file = op.hook(() => this.#file(key, { retry: 0 }));
       op.guard(beforeFile);
       const beforeStream = performance.now();
-      const streamMethod = file.stream;
+      const streamMethod = op.hook(() => file.stream);
       valid(typeof streamMethod === "function");
-      const openStream = streamMethod.bind(file);
+      const openStream = op.hook(() => streamMethod.bind(file));
       op.guard(beforeStream);
       const beforeOpen = performance.now();
-      const stream = openStream();
+      const stream = op.hook(() => {
+        streamOwned = openStream();
+        return streamOwned as ReadableStream<Uint8Array>;
+      });
       op.guard(beforeOpen);
       const beforeReader = performance.now();
-      const readerMethod = stream.getReader;
+      const readerMethod = op.hook(() => stream.getReader);
       valid(typeof readerMethod === "function");
-      const openReader = readerMethod.bind(stream);
+      const openReader = op.hook(() => readerMethod.bind(stream));
       op.guard(beforeReader);
       const beforeOpenReader = performance.now();
-      const reader = openReader();
+      const reader = op.hook(() => {
+        readerOwned = openReader();
+        return readerOwned as ReadableStreamDefaultReader<Uint8Array>;
+      });
       op.guard(beforeOpenReader);
       const beforeMethods = performance.now();
-      const read = reader.read.bind(reader),
-        cancel = reader.cancel.bind(reader),
-        release = reader.releaseLock.bind(reader);
+      const read = op.hook(() => reader.read.bind(reader)),
+        cancel = op.hook(() => reader.cancel.bind(reader)),
+        release = op.hook(() => reader.releaseLock.bind(reader));
       op.guard(beforeMethods);
       const chunks: Uint8Array[] = [];
       let size = 0;
@@ -634,13 +728,13 @@ class NativeStore implements Metadata {
         for (;;) {
           const chunk = await op.wait(() => {
             op.guard();
-            return read();
+            return op.hook(() => read());
           }, nativeDeadline - performance.now());
-          const done = op.capture(() => chunk.done);
+          const done = op.capture(() => op.hook(() => chunk.done));
           valid(typeof done === "boolean");
           if (done) break;
           const copy = op.capture(() => {
-            const value = chunk.value;
+            const value = op.hook(() => chunk.value);
             valid(value instanceof Uint8Array);
             return bytes(value, 0, maximum - size);
           });
@@ -651,7 +745,7 @@ class NativeStore implements Metadata {
         }
       } catch (error) {
         try {
-          drain(cancel());
+          drain(op.hook(() => cancel()));
         } catch {
           /* Keep the original denial. */
         }
@@ -659,7 +753,13 @@ class NativeStore implements Metadata {
       } finally {
         try {
           const beforeRelease = performance.now();
-          drain(release());
+          drain(
+            op.hook(() => {
+              const result = release();
+              released = true;
+              return result;
+            }),
+          );
           op.guard(beforeRelease);
         } catch {
           op.stop();
@@ -675,21 +775,46 @@ class NativeStore implements Metadata {
       }
       op.guard();
       const beforeReopenRoute = performance.now();
-      this.#route(key);
+      op.hook(() => this.#route(key));
       op.guard(beforeReopenRoute);
       return result;
     } catch (error) {
-      const absent = op.capture(
-        () => !observed && error instanceof Error && "code" in error && error.code === "NoSuchKey",
+      const absent = op.capture(() =>
+        op.hook(
+          () =>
+            !observed && error instanceof Error && "code" in error && error.code === "NoSuchKey",
+        ),
       );
       if (absent) {
         const key = this.#key(path);
         const beforeRoute = performance.now();
-        this.#route(key);
+        op.hook(() => this.#route(key));
         op.guard(beforeRoute);
         return null;
       }
       throw new Error("invalid-target-storage-v2");
+    } finally {
+      if (!released) {
+        released = true;
+        if (readerOwned !== undefined) {
+          try {
+            drain(Reflect.apply(nativeReaderCancel, readerOwned, []));
+          } catch {
+            /* Keep the original refusal. */
+          }
+          try {
+            Reflect.apply(nativeReaderRelease, readerOwned, []);
+          } catch {
+            /* Unknown cleanup never permits delivery. */
+          }
+        } else if (streamOwned !== undefined) {
+          try {
+            drain(Reflect.apply(nativeStreamCancel, streamOwned, []));
+          } catch {
+            /* Denial-only resource cleanup. */
+          }
+        }
+      }
     }
   }
   async write(path: string, value: Uint8Array, op: Operation): Promise<void> {
@@ -788,6 +913,7 @@ class Producer implements TargetContentV2Producer {
     let op: Operation | undefined,
       owns = false;
     try {
+      requireTargetHistoryEntry();
       valid(!this.#busy && !this.#fenced);
       this.#busy = true;
       owns = true;
@@ -867,6 +993,7 @@ class Producer implements TargetContentV2Producer {
     let state: Publication | undefined,
       owns = false;
     try {
+      requireTargetHistoryEntry();
       valid(!this.#fenced && this.#busy && !this.#transition);
       this.#transition = true;
       owns = true;
@@ -931,8 +1058,51 @@ interface ResultState {
   expected: TargetIssuanceContext;
   statement: TargetIssuanceStatementV2;
   checking: boolean;
+  phase: "active" | "qualifying" | "retired";
+  owner: object;
+  content: ReturnType<typeof targetContentV2>;
+  receipt: ContentReceiptV2;
+  bootstrapPath: string;
+  bootstrapBytes: Uint8Array;
+  ciphertext: Uint8Array;
 }
 const results = new WeakMap<AuthenticatedTargetContentV2, ResultState>();
+const contentHistories = new WeakMap<
+  QualifiedTargetContentHistoryV2,
+  {
+    history: TargetContentHistoryV2;
+    child: QualifiedHistoricalTargetIssuanceData;
+    // Complete original ciphertext stays private. No version IDs are synthesized.
+    bootstrapBytes: Uint8Array;
+    ciphertext: Uint8Array;
+    fenced: boolean;
+  }
+>();
+function freezeContentHistory<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) freezeContentHistory(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+/** Callback-free immutable historical DATA. It supplies no current-job or SSH authority. */
+export function inspectQualifiedTargetContentHistoryV2(
+  value: QualifiedTargetContentHistoryV2,
+): TargetContentHistoryV2 {
+  requireTargetHistoryEntry();
+  const saved = contentHistories.get(value);
+  valid(saved && !saved.fenced);
+  inspectQualifiedHistoricalTargetIssuanceData(saved.child);
+  return saved.history;
+}
+export function fenceQualifiedTargetContentHistoryV2(value: QualifiedTargetContentHistoryV2): void {
+  requireTargetHistoryEntry();
+  const saved = contentHistories.get(value);
+  if (saved) {
+    saved.fenced = true;
+    fenceQualifiedHistoricalTargetIssuanceData(saved.child);
+  }
+}
 /** Only the original native result may reach a later bridge; serialized/copied inspection fails. */
 function authenticatedContext(
   value: unknown,
@@ -941,14 +1111,18 @@ function authenticatedContext(
   let state: ResultState | undefined,
     owns = false;
   try {
+    requireTargetHistoryEntry();
     valid(value !== null && typeof value === "object");
     state = results.get(value as AuthenticatedTargetContentV2);
-    valid(state && !state.checking);
+    valid(state && !state.checking && state.phase === "active");
     state.checking = true;
     owns = true;
     const saved = state;
     const captured = state.op.capture(() =>
-      captureTargetIssuance(expected),
+      captureTargetHistoryHook(
+        () => captureTargetIssuance(expected),
+        () => saved.op.stop(),
+      ),
     ) as TargetIssuanceContext;
     valid(isDeepStrictEqual(captured, state.expected));
     state.op.guard();
@@ -997,6 +1171,7 @@ class Consumer implements TargetContentV2Consumer {
   readonly #c: Captured;
   readonly #issuance: TargetIssuanceConfiguration;
   readonly #get: GitHubReader | undefined;
+  #handoff: ResultState | undefined;
   constructor(c: Captured, issuance: TargetIssuanceConfiguration, get: GitHubReader | undefined) {
     this.#c = c;
     this.#issuance = captureTargetIssuance(issuance) as TargetIssuanceConfiguration;
@@ -1007,9 +1182,119 @@ class Consumer implements TargetContentV2Consumer {
     this.binding = m.binding;
     Object.freeze(this);
   }
+  async qualify(
+    value: AuthenticatedTargetContentV2,
+    release: ReleaseIdentity,
+  ): Promise<QualifiedTargetContentHistoryV2> {
+    let saved: ResultState | undefined;
+    let owns = false;
+    let child: QualifiedHistoricalTargetIssuanceData | undefined;
+    let result: QualifiedTargetContentHistoryV2 | undefined;
+    try {
+      requireTargetHistoryEntry();
+      if (this.#handoff) {
+        this.#handoff.op.stop();
+        this.#handoff.phase = "retired";
+        throw new Error("invalid-target-storage-v2");
+      }
+      saved = results.get(value);
+      valid(saved && saved.owner === this && !saved.checking && saved.phase === "active");
+      saved.checking = true;
+      owns = true;
+      saved.phase = "qualifying";
+      this.#handoff = saved;
+      const state = saved;
+      const stop = () => {
+        state.phase = "retired";
+        state.op.stop();
+      };
+      state.op.beginHistory(stop);
+      const expected = state.op.capture(() =>
+        captureTargetHistoryHook(
+          () => context(this.#c, releaseIdentity(captureTargetIssuance(release))),
+          stop,
+        ),
+      );
+      valid(isDeepStrictEqual(expected, state.expected) && state.phase === "qualifying");
+      state.op.guard();
+      // Reopen the SAME independently resolved paths under the original proof before
+      // retirement. Storage is latest-only, with immutable writes/external serialization.
+      const bootstrap = await this.#c.store.read(state.bootstrapPath, state.op);
+      valid(isDeepStrictEqual(bootstrap, state.bootstrapBytes));
+      const content = await this.#c.store.read(state.receipt.path, state.op);
+      valid(isDeepStrictEqual(content, state.ciphertext));
+      state.op.guard();
+      valid(state.phase === "qualifying" && state.checking);
+      const base = state.op.capture(() =>
+        freezeContentHistory({
+          schema: 1 as const,
+          purpose: "tarubot-target-content-history-data-v1" as const,
+          context: state.expected,
+          content: state.content,
+          statement: state.statement,
+          receipt: state.receipt,
+          valid_until: Math.min(state.content.expires_at, state.statement.valid_until),
+          storage: {
+            binding: this.binding,
+            namespace: this.namespace,
+            read_policy: "serialized-immutable-latest-object" as const,
+          },
+          objects: {
+            bootstrap: {
+              path: state.bootstrapPath,
+              size: state.bootstrapBytes.length,
+              ciphertext_digest: targetContentV2Digest(state.bootstrapBytes),
+              identical_reads: 3 as const,
+            },
+            content: {
+              path: state.receipt.path,
+              size: state.ciphertext.length,
+              ciphertext_digest: targetContentV2Digest(state.ciphertext),
+              identical_reads: 3 as const,
+            },
+          },
+        }),
+      );
+      // All reads/assertions completed above. From here the original pure operation
+      // counts child capture cost, but the retired historical proof is never consulted.
+      state.op.historyCapture(() => {
+        child = qualifyHistoricalTargetIssuanceProof(state.proof, {
+          statement: state.statement,
+          context: state.expected,
+        });
+        return child;
+      });
+      valid(child);
+      const historical = inspectQualifiedHistoricalTargetIssuanceData(child);
+      const history = state.op.historyCapture(() => freezeContentHistory({ ...base, historical }));
+      valid(state.phase === "qualifying" && state.checking);
+      result = Object.freeze({}) as QualifiedTargetContentHistoryV2;
+      contentHistories.set(result, {
+        history,
+        child,
+        bootstrapBytes: state.bootstrapBytes,
+        ciphertext: state.ciphertext,
+        fenced: false,
+      });
+      return result;
+    } catch {
+      if (result) fenceQualifiedTargetContentHistoryV2(result);
+      if (child) fenceQualifiedHistoricalTargetIssuanceData(child);
+      throw new Error("invalid-target-storage-v2");
+    } finally {
+      if (saved) {
+        saved.phase = "retired";
+        if (owns) saved.checking = false;
+        saved.op.stop();
+        retireHistoricalTargetIssuanceProof(saved.proof);
+      }
+      if (this.#handoff === saved) this.#handoff = undefined;
+    }
+  }
   async consume(value: ReleaseIdentity): Promise<AuthenticatedTargetContentV2> {
     let op: Operation | undefined;
     try {
+      requireTargetHistoryEntry();
       op = new Operation(this.#c.now);
       const operation = op,
         release = op.capture(() => releaseIdentity(captureTargetIssuance(value))),
@@ -1093,6 +1378,13 @@ class Consumer implements TargetContentV2Consumer {
         expected: c,
         statement: bootstrap.statement,
         checking: false,
+        phase: "active",
+        owner: this,
+        content,
+        receipt,
+        bootstrapPath: path,
+        bootstrapBytes,
+        ciphertext,
       });
       assertAuthenticatedTargetContentV2(result, c);
       return result;
@@ -1107,6 +1399,7 @@ export function createTargetContentV2Producer(
   dependencies: Dependencies = {},
 ): TargetContentV2Producer {
   try {
+    requireTargetHistoryEntry();
     return new Producer(capture(config, dependencySnapshot(dependencies, false), true));
   } catch {
     throw new Error("invalid-target-storage-v2");
@@ -1119,6 +1412,7 @@ export function createTargetContentV2Consumer(
   dependencies: Dependencies & { get?: GitHubReader } = {},
 ): TargetContentV2Consumer {
   try {
+    requireTargetHistoryEntry();
     const capturedDependencies = dependencySnapshot(dependencies, true),
       get = capturedDependencies.get;
     valid(get === undefined || typeof get === "function");

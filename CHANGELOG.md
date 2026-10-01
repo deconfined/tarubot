@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.39**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.40**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.40 — Qualify target descriptor history
+
+- Add a one-way handoff from the authenticated target-content consumer to immutable historical data. Retain the original content, receipt, source execution and issuance evidence while permanently retiring the temporary read proofs.
+- Preserve original content and statement expiry, exact encrypted path and readback commitments. Historical token times remain attribution evidence; qualified data supplies no current host, command or deployment authority.
+- Keep the protected runtime and workflow activation fenced while enrollment, journal qualification and a practical fresh-per-command authority model remain pending.
 
 ## 2.36.39 — Bind a protected denial controller
 

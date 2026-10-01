@@ -58,8 +58,231 @@ interface ProofState {
   physical: number;
   fenced: boolean;
   checking: boolean;
+  qualifying: boolean;
+  handoffPhysical: number;
+  observations: readonly TargetIssuanceRunObservation[];
+  identities: Readonly<Record<string, unknown>>;
+  observation: Readonly<{
+    started_at: number;
+    completed_at: number;
+    wall_end: number;
+    physical_started: number;
+    physical_end: number;
+  }>;
 }
 const proofs = new WeakMap<TargetIssuanceRunProof, ProofState>();
+/** Complete owned parsed REST responses, in original offer order. No credential headers. */
+export interface TargetIssuanceRunObservation {
+  readonly sequence: number;
+  readonly url: string;
+  readonly canonical_json: string;
+}
+declare const runDataBrand: unique symbol;
+export type QualifiedTargetIssuanceRunData = Readonly<{ [runDataBrand]: true }>;
+export interface TargetIssuanceRunHistory {
+  readonly schema: 1;
+  readonly purpose: "tarubot-target-issuance-run-history-data-v1";
+  readonly statement: TargetIssuanceStatementV2;
+  readonly seal: Readonly<{ started: number; completed: number }>;
+  readonly identities: Readonly<Record<string, unknown>>;
+  readonly observations: readonly TargetIssuanceRunObservation[];
+  readonly observation: ProofState["observation"];
+}
+const runData = new WeakMap<
+  QualifiedTargetIssuanceRunData,
+  { history: TargetIssuanceRunHistory; fenced: boolean }
+>();
+let activeHandoff: ProofState | undefined;
+const nativeHistoryThen = Promise.prototype.then;
+const historyHooks: Array<{ deny: () => void; refused: boolean }> = [];
+/** Shared synchronous refusal scope only. It cannot issue native evidence or DATA. */
+export function captureTargetHistoryHook<T>(work: () => T, deny: () => void): T {
+  const scope = { deny, refused: false };
+  historyHooks.push(scope);
+  let value: T | undefined;
+  try {
+    value = work();
+    requireRun(!scope.refused);
+    return value;
+  } catch (error) {
+    try {
+      void Reflect.apply(nativeHistoryThen, value, [undefined, () => {}]);
+    } catch {
+      /* Non-Promise. */
+    }
+    throw error;
+  } finally {
+    historyHooks.pop();
+  }
+}
+/** Every public native history/proof entry refuses swallowed cross-layer hook reentry. */
+export function requireTargetHistoryEntry(): void {
+  if (historyHooks.length === 0) return;
+  for (const scope of historyHooks) {
+    scope.refused = true;
+    try {
+      scope.deny();
+    } catch {
+      /* Another owning original must still be fenced. */
+    }
+  }
+  throw new Error("invalid-target-issuance-run");
+}
+
+// These inputs are already owned JSON parser results, never caller objects. Keeping the
+// full canonical response avoids weakening evidence to a receipt/hash-only projection.
+function canonicalResponse(value: unknown): string {
+  const encode = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(encode);
+    if (item !== null && typeof item === "object") {
+      const output: Value = {};
+      for (const key of Object.keys(item).sort())
+        Object.defineProperty(output, key, {
+          value: encode((item as Value)[key]),
+          enumerable: true,
+        });
+      return output;
+    }
+    return item;
+  };
+  return JSON.stringify(encode(value));
+}
+function freezeHistory<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) freezeHistory(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+function handoffTick(saved: ProofState, anchor: number): void {
+  requireRun(
+    !saved.fenced &&
+      saved.checking &&
+      saved.qualifying &&
+      performance.now() < saved.handoffPhysical,
+  );
+  const before = Math.min(anchor, performance.now());
+  const at: unknown = captureTargetHistoryHook(
+    () => saved.clock(),
+    () => {
+      saved.fenced = true;
+    },
+  );
+  if (typeof at !== "number") {
+    try {
+      void Reflect.apply(nativeHistoryThen, at, [undefined, () => {}]);
+    } catch {
+      /* Not a native Promise. */
+    }
+  }
+  integer(at);
+  requireRun(at >= saved.last && at < saved.wall);
+  saved.last = at;
+  saved.handoffPhysical = Math.min(saved.handoffPhysical, before + saved.wall - at);
+  requireRun(
+    !saved.fenced &&
+      saved.checking &&
+      saved.qualifying &&
+      performance.now() < saved.handoffPhysical,
+  );
+}
+/** One-way history qualification. The native original is retired even if delivery fails. */
+export function qualifyTargetIssuanceRunProof(
+  value: TargetIssuanceRunProof,
+  expected: TargetIssuanceStatementV2,
+  signedIat?: number,
+): QualifiedTargetIssuanceRunData {
+  let saved: ProofState | undefined;
+  let owns = false;
+  let data: QualifiedTargetIssuanceRunData | undefined;
+  const anchor = performance.now();
+  try {
+    requireTargetHistoryEntry();
+    if (activeHandoff) {
+      activeHandoff.fenced = true;
+      throw new Error("invalid-target-issuance-run");
+    }
+    saved = proofs.get(value);
+    requireRun(saved && !saved.fenced && !saved.checking && !saved.qualifying);
+    saved.qualifying = true;
+    saved.checking = true;
+    owns = true;
+    activeHandoff = saved;
+    handoffTick(saved, anchor);
+    const state = saved;
+    const statement = captureTargetHistoryHook(
+      () => targetIssuanceStatement(expected),
+      () => {
+        state.fenced = true;
+      },
+    );
+    requireRun(isDeepStrictEqual(statement, saved.statement));
+    if (signedIat !== undefined) {
+      integer(signedIat);
+      requireRun(
+        signedIat >= statement.issued_at - 1000 &&
+          signedIat < statement.issued_at + age &&
+          signedIat >= saved.seal.started - 1000 &&
+          signedIat <= saved.seal.completed + 1000 &&
+          statement.valid_until <= signedIat + 86_400_000,
+      );
+    }
+    // Qualification alone has a bounded aggregate; ordinary 1MiB response acceptance
+    // and the original REST sequence remain unchanged.
+    requireRun(
+      saved.observations.reduce((sum, row) => sum + Buffer.byteLength(row.canonical_json), 0) <=
+        4_194_304,
+    );
+    const history = freezeHistory({
+      schema: 1 as const,
+      purpose: "tarubot-target-issuance-run-history-data-v1" as const,
+      statement: saved.statement,
+      seal: saved.seal,
+      identities: saved.identities,
+      observations: saved.observations,
+      observation: saved.observation,
+    });
+    handoffTick(saved, anchor);
+    data = Object.freeze({}) as QualifiedTargetIssuanceRunData;
+    runData.set(data, { history, fenced: false });
+    return data;
+  } catch {
+    if (data) fenceQualifiedTargetIssuanceRunData(data);
+    throw new Error("invalid-target-issuance-run");
+  } finally {
+    if (saved) {
+      saved.fenced = true;
+      if (owns) saved.checking = false;
+    }
+    if (activeHandoff === saved) activeHandoff = undefined;
+  }
+}
+/** Callback-free DATA inspection: neither this view nor a copy is a live proof. */
+export function inspectQualifiedTargetIssuanceRunData(
+  value: QualifiedTargetIssuanceRunData,
+): TargetIssuanceRunHistory {
+  requireTargetHistoryEntry();
+  if (activeHandoff) {
+    activeHandoff.fenced = true;
+    throw new Error("invalid-target-issuance-run");
+  }
+  const saved = runData.get(value);
+  requireRun(saved && !saved.fenced);
+  return saved.history;
+}
+/** Denial-only retirement; no raw fact constructor or authority-restoring API. */
+export function fenceQualifiedTargetIssuanceRunData(value: QualifiedTargetIssuanceRunData): void {
+  requireTargetHistoryEntry();
+  if (activeHandoff) activeHandoff.fenced = true;
+  const saved = runData.get(value);
+  if (saved) saved.fenced = true;
+}
+export function retireTargetIssuanceRunProof(value: TargetIssuanceRunProof): void {
+  requireTargetHistoryEntry();
+  if (activeHandoff) activeHandoff.fenced = true;
+  const saved = proofs.get(value);
+  if (saved) saved.fenced = true;
+}
 /** Parsed times stay inside the native capability. Caller timestamps cannot create evidence. */
 export function assertTargetIssuanceRunProof(
   value: unknown,
@@ -69,17 +292,35 @@ export function assertTargetIssuanceRunProof(
   let saved: ProofState | undefined;
   let reserved = false;
   try {
+    requireTargetHistoryEntry();
+    if (activeHandoff) {
+      activeHandoff.fenced = true;
+      throw new Error("invalid-target-issuance-run");
+    }
     requireRun(value !== null && typeof value === "object");
     saved = proofs.get(value as TargetIssuanceRunProof);
-    requireRun(saved && !saved.fenced && !saved.checking);
+    requireRun(saved && !saved.fenced && !saved.checking && !saved.qualifying);
     // Caller snapshot traps and clocks may catch a nested denial. Reserve first and
     // retain that permanent fence throughout this assertion's own reservation.
     saved.checking = true;
     reserved = true;
-    const statement = targetIssuanceStatement(expected);
+    const state = saved;
+    const statement = captureTargetHistoryHook(
+      () => targetIssuanceStatement(expected),
+      () => {
+        state.fenced = true;
+      },
+    );
     requireRun(!saved.fenced && saved.checking && isDeepStrictEqual(saved.statement, statement));
-    const at = saved.clock();
+    const before = performance.now();
+    const at = captureTargetHistoryHook(
+      () => state.clock(),
+      () => {
+        state.fenced = true;
+      },
+    );
     integer(at);
+    saved.handoffPhysical = Math.min(saved.handoffPhysical, before + saved.wall - at);
     requireRun(
       !saved.fenced &&
         saved.checking &&
@@ -225,6 +466,7 @@ class Reader {
   }
   async read(input: TargetIssuanceStatementV2): Promise<TargetIssuanceRunProof> {
     try {
+      requireTargetHistoryEntry();
       const s = targetIssuanceStatement(input);
       requireRun(
         s.issuer.repository_owner_id === this.#config.owner_id &&
@@ -234,15 +476,19 @@ class Reader {
         started = this.#clock();
       integer(started);
       let last = started;
+      const observations: TargetIssuanceRunObservation[] = [];
       const wall = Math.min(started + age, s.valid_until),
         physicalExpiry = physical + wall - started;
+      let handoffPhysical = physicalExpiry;
       const tick = () => {
+        const before = performance.now();
         const at = this.#clock();
         integer(at);
         requireRun(
           at >= last && at >= s.issued_at && at < wall && performance.now() < physicalExpiry,
         );
         last = at;
+        handoffPhysical = Math.min(handoffPhysical, before + wall - at);
         return at;
       };
       const read = async (path: string) => {
@@ -277,6 +523,14 @@ class Reader {
           ]);
           tick();
           const result = targetIssuanceResponse(response, url);
+          tick();
+          observations.push(
+            Object.freeze({
+              sequence: observations.length + 1,
+              url,
+              canonical_json: canonicalResponse(result),
+            }),
+          );
           tick();
           return result;
         } finally {
@@ -634,6 +888,24 @@ class Reader {
         physical: physicalExpiry,
         fenced: false,
         checking: false,
+        qualifying: false,
+        handoffPhysical,
+        observations: Object.freeze(observations),
+        identities: freezeHistory({
+          repository: firstRepo,
+          run: firstRun,
+          main: firstMain,
+          gate: firstGate,
+          policies: firstPolicies,
+          jobs: firstJobs,
+        }),
+        observation: Object.freeze({
+          started_at: started,
+          completed_at: last,
+          wall_end: wall,
+          physical_started: physical,
+          physical_end: physicalExpiry,
+        }),
       });
       assertTargetIssuanceRunProof(proof, s);
       return proof;
@@ -647,6 +919,7 @@ export function createTargetIssuanceRunReader(
   dependencies: { get?: GitHubReader; now?: () => number } = {},
 ): ReadTargetIssuanceRun {
   try {
+    requireTargetHistoryEntry();
     const reader = new Reader(configuration, dependencies);
     return reader.read.bind(reader);
   } catch {

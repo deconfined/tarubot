@@ -5,17 +5,25 @@ import { privateDigest } from "../../scripts/infra-control.js";
 import type { AppliedTargetEnvelope } from "../../scripts/target-descriptor.js";
 import {
   assertAuthenticatedTargetContentV2,
+  inspectQualifiedTargetContentHistoryV2,
+  type QualifiedTargetContentHistoryV2,
   createTargetContentV2Consumer,
   createTargetContentV2Producer,
   withinAuthenticatedTargetContentV2,
   type TargetContentV2StorageConfiguration,
 } from "../../scripts/target-storage-v2.js";
 import {
+  qualifyHistoricalTargetIssuanceProof,
+  type HistoricalTargetIssuanceProof,
   targetIssuanceAudience,
   targetIssuancePins as pins,
   type ContentReceiptV2,
   type TargetIssuanceStatementV2,
 } from "../../scripts/target-issuance.js";
+import {
+  qualifyTargetIssuanceRunProof,
+  type TargetIssuanceRunProof,
+} from "../../scripts/target-issuance-run.js";
 import type { GitHubReader } from "../../scripts/trust-run.js";
 const instant = 1_800_000_000_000,
   api = "https://api.github.com/repos/deconfined/tarubot",
@@ -412,6 +420,10 @@ async function sealed(
   return { ...f, s, c, producer, publication, i, consumer, context };
 }
 const failure = "invalid-target-storage-v2";
+function present<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("missing-invented-fixture");
+  return value;
+}
 describe("dedicated native v2 content/bootstrap persistence", () => {
   test("actual historical verifier consumes both targets and modes with original opaque result", async () => {
     for (const target of ["staging", "production"] as const)
@@ -1290,4 +1302,232 @@ test("native materialization assertion and within capture expected context under
       "invalid-target-storage-v2",
     );
   }
+});
+
+describe("connected native target history DATA handoff", () => {
+  test("both target/mode combinations retain full history and original absolute expiry while all live proofs retire", async () => {
+    for (const target of ["staging", "production"] as const)
+      for (const mode of ["apply", "no-changes"] as const) {
+        const f = await sealed(mode, target),
+          original = await f.consumer.consume(f.release);
+        const getCount = f.i.calls.length,
+          readCount = f.s.calls.filter((row) => row.method === "read").length;
+        const qualified = await f.consumer.qualify(original, f.release);
+        const history = inspectQualifiedTargetContentHistoryV2(qualified);
+        expect(history.context).toEqual(f.context);
+        expect(history.content.envelope).toEqual(f.envelope);
+        expect(history.receipt).toEqual(f.publication.receipt);
+        expect(history.valid_until).toBe(
+          Math.min(history.content.expires_at, history.statement.valid_until),
+        );
+        expect(history.objects.content.path).toBe(history.receipt.path);
+        expect(history.objects.content.ciphertext_digest).toBe(history.receipt.ciphertext_digest);
+        expect(history.objects.bootstrap.identical_reads).toBe(3);
+        expect(history.objects.content.identical_reads).toBe(3);
+        expect(history.historical.source.observations.length).toBe(getCount - 1);
+        expect(history.historical.signature.exp).toBeLessThan(f.clock.now);
+        expect(f.i.calls.length).toBe(getCount);
+        expect(f.s.calls.filter((row) => row.method === "read").length).toBe(readCount + 2);
+        const serialized = JSON.stringify(history);
+        expect(serialized).not.toContain(f.i.jwt);
+        expect(serialized).not.toContain(f.c.descriptor_v2_passphrase);
+        expect(serialized).not.toContain(f.c.credentials.secretAccessKey);
+        expect(Object.isFrozen(history.content.envelope)).toBe(true);
+        expect(() => assertAuthenticatedTargetContentV2(qualified, f.context)).toThrow(failure);
+        expect(() => assertAuthenticatedTargetContentV2(original, f.context)).toThrow(failure);
+        await expect(
+          withinAuthenticatedTargetContentV2(original, f.context, async () => "forbidden"),
+        ).rejects.toThrow(failure);
+        await expect(f.consumer.qualify(original, f.release)).rejects.toThrow(failure);
+        expect(() =>
+          inspectQualifiedTargetContentHistoryV2({} as QualifiedTargetContentHistoryV2),
+        ).toThrow(failure);
+        f.clock.now += 86_400_000;
+        expect(JSON.stringify(inspectQualifiedTargetContentHistoryV2(qualified))).toBe(serialized);
+      }
+  });
+  test("changed original ciphertext, cross-factory input, or changed release cannot be qualified", async () => {
+    for (const mutation of ["bootstrap", "content", "factory", "release"] as const) {
+      const f = await sealed(),
+        original = await f.consumer.consume(f.release);
+      if (mutation === "bootstrap" || mutation === "content") {
+        const path =
+          mutation === "content"
+            ? f.publication.receipt.path
+            : present([...f.s.records.keys()].find((key) => key.includes("bootstrap")));
+        const physical = [...f.s.records.keys()].find((key) => key.endsWith(path)) ?? path;
+        const bytes = present(f.s.records.get(physical));
+        bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 1;
+      }
+      const consumer =
+        mutation === "factory"
+          ? createTargetContentV2Consumer(f.c, f.i.configuration, {
+              createClient: f.s.createClient,
+              get: f.i.get,
+              now: () => f.clock.now,
+            })
+          : f.consumer;
+      const release =
+        mutation === "release" ? { ...f.release, digest: `sha256:${"f".repeat(64)}` } : f.release;
+      await expect(consumer.qualify(original, release)).rejects.toThrow(failure);
+      expect(() => assertAuthenticatedTargetContentV2(original, f.context)).toThrow(failure);
+    }
+  });
+  test("swallowed cross-layer handoff and nested consume hooks stop the parent before another native offer", async () => {
+    for (const nested of ["run", "history", "consume", "assert"] as const) {
+      const f = await sealed(),
+        original = await f.consumer.consume(f.release);
+      const before = f.s.calls.length;
+      const hostile = new Proxy(f.release, {
+        ownKeys(target) {
+          try {
+            if (nested === "run")
+              qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.i.statement);
+            else if (nested === "history")
+              qualifyHistoricalTargetIssuanceProof({} as HistoricalTargetIssuanceProof, {
+                statement: f.i.statement,
+                context: f.context,
+              });
+            else if (nested === "consume") void f.consumer.consume(f.release).catch(() => {});
+            else assertAuthenticatedTargetContentV2(original, f.context);
+          } catch {
+            /* Deliberately swallowed. */
+          }
+          return Reflect.ownKeys(target);
+        },
+      });
+      await expect(f.consumer.qualify(original, hostile)).rejects.toThrow(failure);
+      expect(f.s.calls.length).toBe(before);
+      expect(() => assertAuthenticatedTargetContentV2(original, f.context)).toThrow(failure);
+    }
+  });
+});
+
+test("target history SDK hook reentry and an expired first reopen cannot offer later reads", async () => {
+  for (const hook of ["presign", "file", "stream", "expiry"] as const) {
+    const f = await sealed(),
+      original = await f.consumer.consume(f.release);
+    const before = f.s.calls.length;
+    let nested = 0;
+    const swallowed = () => {
+      nested++;
+      try {
+        qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.i.statement);
+      } catch {
+        /* Deliberately swallowed. */
+      }
+    };
+    if (hook === "presign") f.s.route(swallowed);
+    else if (hook === "file") f.s.read(swallowed);
+    else if (hook === "stream")
+      f.s.stream(() => {
+        swallowed();
+        return undefined;
+      });
+    else
+      f.s.read(() => {
+        f.clock.now += 30_000;
+      });
+    await expect(f.consumer.qualify(original, f.release)).rejects.toThrow(failure);
+    expect(f.s.calls.length - before).toBe(hook === "presign" ? 0 : 1);
+    if (hook !== "expiry") expect(nested).toBe(1);
+    expect(() => assertAuthenticatedTargetContentV2(original, f.context)).toThrow(failure);
+  }
+});
+
+test("withheld native reader is owned and canceled even when getReader swallows a nested handoff refusal", async () => {
+  const f = await sealed(),
+    original = await f.consumer.consume(f.release);
+  let stream: ReadableStream<Uint8Array> | undefined;
+  let cancels = 0;
+  f.s.stream((key) => {
+    const value = present(f.s.records.get(key));
+    stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.from(value));
+      },
+      cancel() {
+        cancels++;
+      },
+    });
+    const owned = stream;
+    Object.defineProperty(owned, "getReader", {
+      value: () => {
+        const reader = ReadableStream.prototype.getReader.call(owned);
+        try {
+          qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.i.statement);
+        } catch {
+          /* Deliberately swallowed. */
+        }
+        return reader;
+      },
+    });
+    return owned;
+  });
+  await expect(f.consumer.qualify(original, f.release)).rejects.toThrow(failure);
+  expect(present(stream).locked).toBe(false);
+  expect(cancels).toBe(1);
+  expect(() => assertAuthenticatedTargetContentV2(original, f.context)).toThrow(failure);
+});
+
+test("history qualification cannot restart a previously observed parent physical residual", async () => {
+  const f = await sealed(),
+    original = await f.consumer.consume(f.release);
+  f.clock.now += 29_980;
+  assertAuthenticatedTargetContentV2(original, f.context);
+  const end = performance.now() + 60;
+  while (performance.now() < end) {
+    /* Frozen wall spends the same original residual. */
+  }
+  const before = f.s.calls.length;
+  await expect(f.consumer.qualify(original, f.release)).rejects.toThrow(failure);
+  expect(f.s.calls.length).toBe(before);
+});
+
+test("ordinary native content snapshot and pure clock cannot hide an unknown cross-layer handoff", async () => {
+  const f = await sealed(),
+    original = await f.consumer.consume(f.release);
+  let nested = 0;
+  const hostile = new Proxy(f.context, {
+    ownKeys(target) {
+      nested++;
+      try {
+        qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.i.statement);
+      } catch {
+        /* Deliberately swallowed. */
+      }
+      return Reflect.ownKeys(target);
+    },
+  });
+  expect(() => assertAuthenticatedTargetContentV2(original, hostile)).toThrow(failure);
+  expect(nested).toBeGreaterThan(0);
+  const g = await sealed();
+  let armed = false,
+    caught = 0;
+  const consumer = createTargetContentV2Consumer(g.c, g.i.configuration, {
+    createClient: g.s.createClient,
+    get: g.i.get,
+    now: () => {
+      if (armed) {
+        armed = false;
+        caught++;
+        try {
+          qualifyHistoricalTargetIssuanceProof({} as HistoricalTargetIssuanceProof, {
+            statement: g.i.statement,
+            context: g.context,
+          });
+        } catch {
+          /* Deliberately swallowed. */
+        }
+      }
+      return g.clock.now;
+    },
+  });
+  const cap = await consumer.consume(g.release),
+    before = g.s.calls.length;
+  armed = true;
+  expect(() => assertAuthenticatedTargetContentV2(cap, g.context)).toThrow(failure);
+  expect(caught).toBe(1);
+  expect(g.s.calls.length).toBe(before);
+  await expect(consumer.qualify(cap, g.release)).rejects.toThrow(failure);
 });

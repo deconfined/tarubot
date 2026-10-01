@@ -2,6 +2,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   createTargetIssuanceRunReader,
+  qualifyTargetIssuanceRunProof,
+  inspectQualifiedTargetIssuanceRunData,
+  type QualifiedTargetIssuanceRunData,
   assertTargetIssuanceRunProof,
   type TargetIssuanceRunProof,
 } from "../../scripts/target-issuance-run.js";
@@ -227,8 +230,8 @@ function fixture(mode: "apply" | "no-changes" = "apply") {
   };
 }
 
-function present<T>(value: T | undefined): T {
-  if (value === undefined) throw new Error("missing-invented-fixture");
+function present<T>(value: T | null | undefined): T {
+  if (value === undefined || value === null) throw new Error("missing-invented-fixture");
   return value;
 }
 function runConfiguration(f: ReturnType<typeof fixture>) {
@@ -665,4 +668,122 @@ describe("native historical target issuance execution", () => {
       expect(() => assertTargetIssuanceRunProof(proof, f.statement)).toThrow(failure);
     }
   });
+});
+
+describe("one-way native run history DATA", () => {
+  test("retains complete ordered original observations without extra GETs or a live proof", async () => {
+    for (const mode of ["apply", "no-changes"] as const) {
+      const f = fixture(mode);
+      const read = createTargetIssuanceRunReader(runConfiguration(f), {
+        get: f.get,
+        now: () => f.clock.now,
+      });
+      const proof = await read(f.statement);
+      const count = f.calls.length;
+      const data = qualifyTargetIssuanceRunProof(proof, f.statement, issued + 2000);
+      const history = inspectQualifiedTargetIssuanceRunData(data);
+      expect(f.calls.length).toBe(count);
+      expect(history.observations.length).toBe(count);
+      expect(history.observations.map((row) => row.url)).toEqual(f.calls.map((row) => row.url));
+      expect(history.observations.map((row) => row.sequence)).toEqual(
+        f.calls.map((_, index) => index + 1),
+      );
+      expect(history.statement).toEqual(f.statement);
+      expect(history.seal).toEqual({
+        started: Date.parse(present(present(f.seal.steps[0]).started_at)),
+        completed: Date.parse(present(present(f.seal.steps[0]).completed_at)),
+      });
+      expect(history.observation.started_at).toBe(instant);
+      const before = JSON.stringify(history);
+      present(f.plan.steps[0]).name = "invented later source mutation";
+      f.repository.owner.login = "invented later owner";
+      expect(JSON.stringify(inspectQualifiedTargetIssuanceRunData(data))).toBe(before);
+      expect(Object.isFrozen(history.identities)).toBe(true);
+      expect(JSON.stringify(history)).not.toContain(f.configuration.token);
+      expect(() => assertTargetIssuanceRunProof(data, f.statement)).toThrow(failure);
+      expect(() => assertTargetIssuanceRunProof(proof, f.statement)).toThrow(failure);
+      expect(() => qualifyTargetIssuanceRunProof(proof, f.statement)).toThrow(failure);
+      expect(() =>
+        inspectQualifiedTargetIssuanceRunData({} as QualifiedTargetIssuanceRunData),
+      ).toThrow(failure);
+      // Historical DATA inspection has no borrowed proof clock or authority epoch.
+      f.clock.now += 86_400_000;
+      expect(inspectQualifiedTargetIssuanceRunData(data).statement.valid_until).toBe(
+        f.statement.valid_until,
+      );
+    }
+  });
+  test("wrong context, swallowed unknown nested qualification, and observed short expiry retire the original", async () => {
+    const f = fixture();
+    const proof = await createTargetIssuanceRunReader(runConfiguration(f), {
+      get: f.get,
+      now: () => f.clock.now,
+    })(f.statement);
+    const hostile = new Proxy(f.statement, {
+      ownKeys(target) {
+        try {
+          qualifyTargetIssuanceRunProof({} as TargetIssuanceRunProof, f.statement);
+        } catch {
+          /* Deliberately swallowed. */
+        }
+        return Reflect.ownKeys(target);
+      },
+    });
+    expect(() => qualifyTargetIssuanceRunProof(proof, hostile)).toThrow(failure);
+    expect(() => assertTargetIssuanceRunProof(proof, f.statement)).toThrow(failure);
+    const g = fixture();
+    const original = await createTargetIssuanceRunReader(runConfiguration(g), {
+      get: g.get,
+      now: () => g.clock.now,
+    })(g.statement);
+    g.clock.now += 29_980;
+    assertTargetIssuanceRunProof(original, g.statement);
+    const end = performance.now() + 60;
+    while (performance.now() < end) {
+      /* Frozen wall consumes the already observed residual. */
+    }
+    expect(() => qualifyTargetIssuanceRunProof(original, g.statement)).toThrow(failure);
+    expect(g.calls.length).toBe(f.calls.length);
+    const h = fixture();
+    const cap = await createTargetIssuanceRunReader(runConfiguration(h), {
+      get: h.get,
+      now: () => h.clock.now,
+    })(h.statement);
+    expect(() =>
+      qualifyTargetIssuanceRunProof(cap, {
+        ...h.statement,
+        valid_until: h.statement.valid_until - 1,
+      }),
+    ).toThrow(failure);
+    expect(() => assertTargetIssuanceRunProof(cap, h.statement)).toThrow(failure);
+  });
+});
+
+test("run history retention keeps ordinary large responses and bounds only qualification aggregate", async () => {
+  const f = fixture();
+  Object.defineProperty(f.main, "invented_extra", { value: "x".repeat(70_000), enumerable: true });
+  const proof = await createTargetIssuanceRunReader(runConfiguration(f), {
+    get: f.get,
+    now: () => f.clock.now,
+  })(f.statement);
+  const history = inspectQualifiedTargetIssuanceRunData(
+    qualifyTargetIssuanceRunProof(proof, f.statement),
+  );
+  const main = present(history.observations.find((row) => row.url.endsWith("/branches/main")));
+  expect(
+    (JSON.parse(main.canonical_json) as { invented_extra: string }).invented_extra.length,
+  ).toBe(70_000);
+  const g = fixture();
+  for (const row of [g.gate, g.policies, g.main])
+    Object.defineProperty(row, "invented_extra", { value: "y".repeat(800_000), enumerable: true });
+  const cap = await createTargetIssuanceRunReader(runConfiguration(g), {
+    get: g.get,
+    now: () => g.clock.now,
+  })(g.statement);
+  // Existing 1MiB responses still verify normally; a new oversized handoff is denied.
+  expect(() => assertTargetIssuanceRunProof(cap, g.statement)).not.toThrow();
+  const count = g.calls.length;
+  expect(() => qualifyTargetIssuanceRunProof(cap, g.statement)).toThrow(failure);
+  expect(g.calls.length).toBe(count);
+  expect(() => assertTargetIssuanceRunProof(cap, g.statement)).toThrow(failure);
 });
