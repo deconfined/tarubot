@@ -24,7 +24,7 @@
  *   private file, and so does every jq error on plan or apply output, the prepare phase masks
  *   every identifying value in TOFU_VARS before anything else prints and reads the replace input
  *   from the event payload (a step's env: prints unmasked), diagnostics print through a filter
- *   that no digit, '/', '@' or '=' survives, no host key is ever fetched or printed, and the guards
+ *   that no digit, '/', '@' or '=' survives, first host keys stay in encrypted records, and the guards
  *   refuse deletes, replaces and access-list removals nobody asked for. The state passphrase, the
  *   only key to that public artifact, must be at least 32 characters, in the script and the module.
  * - The pinned OpenTofu: one install phase, used by ci.yml and infra.yml, whose version and
@@ -53,6 +53,7 @@ import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
 import { z } from "zod";
 import { handoffBinding } from "../../scripts/infra-policy.js";
+import { hostRecordCodec } from "../../scripts/infra-control-cli.js";
 
 /** A repository path, resolved relative to this test. */
 const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
@@ -365,6 +366,7 @@ describe("infra.yml's shape", () => {
       ["Read durable control records", "control_read"],
       ["Fetch the saved plan", null],
       ["Compare with the reviewed plan", "compare"],
+      ["Install first-host enrollment tools", null],
       ["Apply", "apply"],
       ["Verify adoption with read-only provider credentials", "verify_adoption"],
       ["Establish initial baseline without provider changes", "baseline"],
@@ -654,7 +656,7 @@ describe("public-log hygiene", () => {
     expect(jqProgram("summary.jq")).toContain(address);
   });
 
-  test("no host key is fetched or printed; Apply names each built host and the README step", () => {
+  test("first-host enrollment stays private and its tools install only in the approved Apply job", () => {
     expect(infraText).not.toMatch(
       /ssh-keyscan|known_hosts|ssh-ed25519|TARGET_HOST|host_key|ssh-keygen/u,
     );
@@ -662,9 +664,12 @@ describe("public-log hygiene", () => {
       /ssh-keyscan|known_hosts|ssh-ed25519|TARGET_HOST|host_key|ssh-keygen/u,
     );
     expect(phaseOf("apply")).toContain(
-      `line="built \${BASH_REMATCH[1]} (\${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"`,
+      `line="built \${BASH_REMATCH[1]} (\${BASH_REMATCH[2]}): durable first-host enrollment completed"`,
     );
-    expect(read("ops/tofu/README.md")).toContain("## Pinning a new host key");
+    const tools = stepOf(apply, "Install first-host enrollment tools");
+    expect(tools.if).toBe("inputs.operation == 'apply'");
+    expect(tools.run).toContain("unbound dnsutils dns-root-data openssh-client");
+    expect(plan.steps.some((s) => s.name === tools.name)).toBe(false);
     // Only the apply's counts print from its output, and only numbers.
     expect(jqProgram("applied.jq")).toContain("\\(.add | numbers) added");
   });
@@ -882,10 +887,10 @@ describe("ops/tofu", () => {
       expect({ bad, ok: hash.test(bad) }).toEqual({ bad, ok: false });
   });
 
-  test("no host key, private key, fingerprint record or key generator anywhere in the module", () => {
+  test("OpenTofu renders no host key, private key, fingerprint record or key generator", () => {
     for (const file of TOFU) {
-      // The test file asserts these words are absent from every rendering.
-      if (file === "ops/tofu/tests/main.tftest.hcl") continue;
+      // Enrollment runs after Apply; these checks concern the infrastructure/cloud-init renderings.
+      if (!file.endsWith(".tf") && !file.endsWith(".tftpl")) continue;
       const text = read(file);
       for (const word of [
         "tls_private_key",
@@ -1197,7 +1202,7 @@ const change = (
   address: string,
   actions: string[],
   fields: {
-    before?: object;
+    before?: object | null;
     after?: object | null;
     after_unknown?: object;
     importing?: object;
@@ -1412,6 +1417,14 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     for (const path of ["bin", "temp", "stub"]) mkdirSync(join(dir, path), { recursive: true });
     cpSync(root("tests/fixtures/infra/tofu"), join(dir, "bin", "tofu"));
     chmodSync(join(dir, "bin", "tofu"), 0o755);
+    // Every controller call uses the real record engines with invented filesystem/native helpers.
+    // Even disabled-record preflight must never make a native S3, provider, SSH or DNS request.
+    const wrapper = join(dir, "bin", "bun");
+    writeFileSync(
+      wrapper,
+      `#!/usr/bin/env bash\nset -euo pipefail\nif [[ $1 == */scripts/infra-control-cli.ts ]]; then\n  exec "\${TEST_REAL_BUN:?}" "\${CONTROL_FIXTURE:?}" "\${@:2}"\nfi\nexec "\${TEST_REAL_BUN:?}" "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
     for (const name of ["env", "output", "summary", "path"]) writeFileSync(join(dir, name), "");
     const event = (replace: string) =>
       writeFileSync(
@@ -1438,6 +1451,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
             GITHUB_RUN_ATTEMPT: "1",
             // Prepare also invokes the real Bun validator before the injected controller phase.
             TEST_REAL_BUN: process.execPath,
+            CONTROL_FIXTURE: root("tests/fixtures/infra/control.ts"),
             ...env,
           },
           stdin: "ignore",
@@ -1499,12 +1513,6 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     );
     writeFileSync(join(r.dir, "stub", "plan.json"), JSON.stringify(full));
     writeFileSync(join(r.dir, "stub", "state.json"), JSON.stringify(state));
-    const wrapper = join(r.dir, "bin", "bun");
-    writeFileSync(
-      wrapper,
-      `#!/usr/bin/env bash\nset -euo pipefail\nif [[ $1 == */scripts/infra-control-cli.ts ]]; then\n  exec "\${TEST_REAL_BUN:?}" "\${CONTROL_FIXTURE:?}" "\${@:2}"\nfi\nexec "\${TEST_REAL_BUN:?}" "$@"\n`,
-    );
-    chmodSync(wrapper, 0o755);
     const credentials = {
       ...STATE,
       CONTROL_RECORDS_ENABLED: "true",
@@ -1546,18 +1554,37 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       name: "host",
       index: "staging",
       provider_name: "registry.opentofu.org/linode/linode",
-      values: { id: "200", label: "example-staging" },
+      values: {
+        id: "200",
+        label: "example-staging",
+        ipv4: ["198.51.100.10"],
+        ipv6: "2001:db8::10/128",
+      },
     };
+    const dns = (["a", "aaaa"] as const).map((name) => ({
+      address: `cloudflare_dns_record.${name}["staging"]`,
+      mode: "managed",
+      type: "cloudflare_dns_record",
+      name,
+      index: "staging",
+      provider_name: "registry.opentofu.org/cloudflare/cloudflare",
+      values: {
+        zone_id: current.cloudflare_zone_id,
+        name: (current.hosts as Record<string, { fqdn: string }>).staging?.fqdn,
+        type: name === "a" ? "A" : "AAAA",
+        content: name === "a" ? "198.51.100.10" : "2001:db8::10",
+        proxied: false,
+      },
+    }));
+    const resources = [managed, ...dns];
     const candidate = {
       ...full,
       variables: planned(current),
-      resource_changes: [
-        {
-          ...managed,
-          change: { actions: ["create"], before: null, after: managed.values, after_unknown: {} },
-        },
-      ],
-      planned_values: { ...full.planned_values, root_module: { resources: [managed] } },
+      resource_changes: resources.map((resource) => ({
+        ...resource,
+        change: { actions: ["create"], before: null, after: resource.values, after_unknown: {} },
+      })),
+      planned_values: { ...full.planned_values, root_module: { resources } },
     };
     writeFileSync(
       join(r.dir, "event.json"),
@@ -1586,20 +1613,112 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       ...credentials,
       DIGEST: lastOutput("digest"),
       BINDING: lastOutput("binding"),
-      APPROVED: 'create linode_instance.host["staging"]',
+      APPROVED: resources
+        .map((resource) => `create ${resource.address}`)
+        .sort()
+        .join("\n"),
     };
     expect(r.phase("compare", reviewedApply).code).toBe(0);
+    // A lost DNS acknowledgement leaves both durable pending records. Removing that host from
+    // later inputs does not hide the fixed pending index, and a retry offers no provider Apply.
+    const uncertain = runner();
+    for (const path of ["stub", "temp"])
+      cpSync(join(r.dir, path), join(uncertain.dir, path), { recursive: true });
+    cpSync(join(r.dir, "event.json"), join(uncertain.dir, "event.json"));
+    writeFileSync(join(uncertain.dir, "stub", "fail-enrollment-dns"), "1");
+    expect(uncertain.phase("apply", reviewedApply).code).toBe(1);
+    const appliedCalls = () =>
+      readdirSync(join(uncertain.dir, "stub", "calls")).filter((name) =>
+        uncertain.file(`stub/calls/${name}`).includes("\napply\n"),
+      ).length;
+    expect(appliedCalls()).toBe(1);
+    writeFileSync(
+      join(uncertain.dir, "temp", "tofu", "values.tfvars.json"),
+      JSON.stringify(values),
+    );
+    writeFileSync(join(uncertain.dir, "temp", "tofu", "plan.json"), JSON.stringify(full));
+    writeFileSync(
+      join(uncertain.dir, "temp", "tofu", "verified.binding"),
+      handoffBinding(join(uncertain.dir, "temp", "tofu"), {
+        ...STATE,
+        GITHUB_SHA: "1".repeat(40),
+        GITHUB_RUN_ID: "1234",
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_EVENT_PATH: join(uncertain.dir, "event.json"),
+      }),
+    );
+    expect(uncertain.phase("apply", reviewedApply).code).toBe(1);
+    expect(appliedCalls()).toBe(1);
+    expect(uncertain.phase("control_read", credentials).code).toBe(1);
+    const privateCodec = hostRecordCodec(
+      PREPARED.STATE_BUCKET,
+      PREPARED.STATE_ENDPOINT,
+      STATE.TF_VAR_state_passphrase,
+    );
+    const pending = privateCodec.open(
+      "hosts/pending",
+      readFileSync(join(uncertain.dir, "stub", "control-objects", "hosts/pending")),
+    );
+    expect(pending).toEqual({ schema: 1, targets: ["staging"] });
+    expect(uncertain.file("stub/enrollment-stages")).toBe(
+      "verify-instance\nscan-key\npublish-sshfp\n",
+    );
     const result = r.phase("apply", reviewedApply);
     expect(result.code).toBe(0);
     expect(result.out).toContain("Applied state verified and durable baseline completed.");
+    expect(result.out).toContain("durable first-host enrollment completed");
+    expect(r.file("stub/enrollment-stages")).toBe(
+      "verify-instance\nscan-key\npublish-sshfp\nvalidate-dnssec\n",
+    );
+    const trust = privateCodec.open(
+      "hosts/staging",
+      readFileSync(join(r.dir, "stub", "control-objects", "hosts/staging")),
+    ) as {
+      status: string;
+      host: { generation: string; instanceId: number };
+      observed: { key: string };
+    };
+    expect(trust.status).toBe("complete");
+    expect(trust.host.instanceId).toBe(200);
+    expect(trust.host.generation).toBe(
+      JSON.parse(r.file("temp/tofu/control-ticket.json")).generation,
+    );
+    for (const marker of [
+      trust.observed.key,
+      "198.51.100.10",
+      "2001:db8::10",
+      "staging.example.org",
+    ])
+      expect(result.out + result.err).not.toContain(marker);
     expect(r.phase("control_read", credentials).code).toBe(0);
     expect(JSON.parse(r.file("temp/tofu/baseline-inputs.json"))).toEqual(current);
 
-    // Even a stale/no-write provider error leaves an intent; no fresh run silently clears it.
+    // Attempting another new host for the already enrolled target stops BEFORE a provider call.
+    const beforeConflict = readdirSync(join(r.dir, "stub", "calls")).length;
+    expect(r.phase("apply", reviewedApply).code).toBe(1);
+    expect(readdirSync(join(r.dir, "stub", "calls"))).toHaveLength(beforeConflict);
+    // A non-creation provider error still leaves Infra pending; no fresh run silently clears it.
+    const update = {
+      ...candidate,
+      resource_changes: resources.map((resource) => ({
+        ...resource,
+        change: {
+          actions: ["no-op"],
+          before: resource.values,
+          after: resource.values,
+          after_unknown: {},
+        },
+      })),
+    };
+    const hostUpdate = update.resource_changes[0];
+    if (!hostUpdate) throw new Error("missing-invented-host");
+    hostUpdate.change.actions = ["update"];
+    writeFileSync(join(r.dir, "stub", "plan.json"), JSON.stringify(update));
     expect(r.phase("plan", credentials).code).toBe(0);
     expect(r.phase("summarize", credentials).code).toBe(0);
     const retry = {
       ...reviewedApply,
+      APPROVED: 'update linode_instance.host["staging"]',
       DIGEST: lastOutput("digest"),
       BINDING: lastOutput("binding"),
     };
@@ -1817,24 +1936,30 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(odd.file("temp/tofu/summary.stderr")).toContain("203.0.113.");
   });
 
-  test("compare checks the fetched plan's digest and changes, and apply applies it, printing counts and built hosts only", () => {
+  test("compare binds the saved plan; disabled records refuse new hosts before an ordinary Apply", () => {
     // The Apply job: prepare, then the saved plan as the artifact left it, then compare and apply.
     const r = runner();
     r.phase("prepare", PREPARED);
+    expect(r.phase("control_read").code).toBe(0);
     const saved = "an encrypted saved plan";
     writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), saved);
     const digest = new Bun.CryptoHasher("sha256").update(saved).digest("hex");
     const extra = JSON.parse(EXAMPLE).db_allow_extra as string[];
     /** The fetched plan as `tofu show -json` reads it, planned with the given values. */
+    let creating = true;
     const savedPlan = (values: Record<string, unknown>) =>
       writeFileSync(
         join(r.dir, "stub", "plan.json"),
         JSON.stringify({
           variables: planned(values),
           resource_changes: [
-            change('linode_instance.host["staging"]', ["create"], {
-              after_unknown: { ipv4: true, ipv6: true },
-            }),
+            {
+              ...change('linode_instance.host["staging"]', [creating ? "create" : "update"], {
+                ...(creating ? { before: null } : {}),
+                after_unknown: { ipv4: true, ipv6: true },
+              }),
+              mode: "managed",
+            },
             change('linode_database_access_controls.db["primary"]', ["update"], {
               before: { allow_list: extra },
               after: {},
@@ -1846,7 +1971,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     savedPlan(example());
     // Plan's binding includes its full private show, reconstructed independently by Compare.
     cpSync(join(r.dir, "stub", "plan.json"), join(r.dir, "temp", "tofu", "plan.json"));
-    const list =
+    let list =
       'create linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -0';
     const reviewed = {
       DIGEST: digest,
@@ -1950,14 +2075,39 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       join(r.dir, "stub", "apply.jsonl"),
       `${JSON.stringify({ type: "change_summary", changes: { add: 4, change: 1, import: 0, remove: 0 } })}\n`,
     );
+    const refusal = r.phase("apply", writeTokens);
+    expect(refusal.code).toBe(1);
+    expect(refusal.out).toContain("Infrastructure control evidence or persistence failed");
+    expect(
+      readdirSync(join(r.dir, "stub", "calls")).every(
+        (name) => !r.file(`stub/calls/${name}`).includes("\napply\n"),
+      ),
+    ).toBe(true);
+    creating = false;
+    savedPlan(example());
+    cpSync(join(r.dir, "stub", "plan.json"), join(r.dir, "temp", "tofu", "plan.json"));
+    list = list
+      .replace("create linode_instance", "update linode_instance")
+      .split("\n")
+      .sort()
+      .join("\n");
+    reviewed.APPROVED = list;
+    reviewed.BINDING = handoffBinding(join(r.dir, "temp", "tofu"), {
+      TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase,
+      GITHUB_SHA: "1".repeat(40),
+      GITHUB_RUN_ID: "1234",
+      GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_EVENT_PATH: join(r.dir, "event.json"),
+    });
+    expect(r.phase("compare", reviewed)).toEqual({
+      code: 0,
+      out: "The saved plan is the reviewed one.\n",
+      err: "",
+    });
     const applied = r.phase("apply", writeTokens);
     expect(applied).toEqual({
       code: 0,
-      out: [
-        "applied: 4 added, 1 changed, 0 imported, 0 destroyed",
-        "built staging (staging): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)",
-        "",
-      ].join("\n"),
+      out: ["applied: 4 added, 1 changed, 0 imported, 0 destroyed", ""].join("\n"),
       err: "",
     });
     // The apply named the fetched file and nothing that could make it a new plan.

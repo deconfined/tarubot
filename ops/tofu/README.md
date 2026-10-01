@@ -28,8 +28,8 @@ The user data carries only public keys, root's optional password hash and the ho
 The provider refuses a Linode without a root password or keys, so each Linode gets a random throwaway password, which the user data replaces with the hash or locks. cloud-init stays the only writer of root's keys.
 
 It never builds:
-- **SSH host keys.** Each host makes its own Ed25519 key at first boot, and the owner pins it from their own machine ([Pinning a new host key](#pinning-a-new-host-key)). State holds no private key.
-- **SSH fingerprint records** in DNS.
+- **SSH host keys.** Each host makes its own Ed25519 key at first boot. State holds no private key. The approved Apply job's first-enrollment step observes and persists the public key separately; the current manual Host path still uses [owner pinning](#pinning-a-new-host-key) until the replacement path is accepted.
+- **SSH fingerprint records** in OpenTofu. The first-enrollment step publishes SSHFP after persisting the observed key.
 - **New database clusters.** Existing-cluster adoption is opt-in and import-only. Provider reads of adopted clusters include computed sensitive admin credentials, so encrypted state and private runner evidence hold them; they never become inputs, outputs or public artifacts.
 
 User data takes effect only when a Linode is created (`ignore_changes = [metadata]`). Changing the template, a key or the hash never plans a rebuild; a [rebuild](#rebuilding-a-host) is always deliberate.
@@ -63,6 +63,8 @@ The four secrets marked "both" must hold the same value in each environment:
 The `_READ_` and `_WRITE_` names keep each provider phase to its own kind: Plan and the separate post-adoption verification read only `_READ_` secrets; the saved-plan Apply step reads only `_WRITE_` ones (`tests/unit/infra.test.ts` checks). The owner supplies the additional read-only secrets in `infra` before enabling adoption.
 
 Plan and Apply also compare a passphrase-keyed binding of the saved plan, private backend/settings, workflow commit/run and policy code. A backend mismatch is refused before provider writes, and Apply rechecks the binding after Compare. The full-plan policy in `scripts/infra-policy.ts` is currently **advisory**: it never removes the `infra` approval requirement or enables auto-apply. Without an independently persisted applied-input baseline it cannot grant a safe decision. See the [pipeline specification](../../docs/PIPELINE.md) for the intended flow and outstanding acceptance.
+
+Before enabling `TOFU_CONTROL_RECORDS_ENABLED`, the owner verifies native bucket versioning, retention of noncurrent control-record versions and encrypted record readback against the intended backend. Keep the bucket's version history during recovery; restoring only its newest objects can discard the first observed host key or an unresolved operation. New-host creation requires enabled durable records. The owner's Apply approval includes first enrollment for that new generation: verify the applied instance and addresses, persist a consistent Ed25519 key, publish SSHFP, then validate A, AAAA and SSHFP with the runner's packaged local Unbound resolver. Infrastructure remains pending until enrollment succeeds. An interrupted run requires owner-fenced reconciliation before another mutation; it does not silently retry or learn a replacement key. Rebuild and key rotation remain explicit recovery operations.
 
 ### `TOFU_VARS`
 
@@ -152,13 +154,15 @@ It is two applies, so that adopting the existing access list can't change it.
 
    Anything else means a value is wrong: reject the Apply job, fix `TOFU_VARS` and dispatch again. Approve the Apply job only for exactly that line.
 
-2. **Staging.** Add the `staging` entry to `hosts`, in both environments. Dispatch `operation=apply`: the Plan job must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
+2. **Durable baseline.** Complete the private-backend persistence, version-history and interruption checks, then enable `TOFU_CONTROL_RECORDS_ENABLED` in both environments. With the imported inputs unchanged, dispatch `operation=baseline` and approve only a complete no-change plan. Host creation refuses a missing baseline or disabled records.
+
+3. **Staging.** Add the `staging` entry to `hosts`, in both environments. Dispatch `operation=apply`: the Plan job must show creates for `linode_firewall.host["staging"]`, `linode_instance.host["staging"]` and the two records, plus one access-list update that only adds entries:
 
    ```
    update linode_database_access_controls.db["primary"] +2 -0
    ```
 
-   Approve the Apply job, check production's readiness, then [pin the new host's key](#pinning-a-new-host-key).
+   Approval also authorizes this new generation's first enrollment. Require successful durable enrollment, check production's readiness, then [pin the same new host's key](#pinning-a-new-host-key) for the current manual Host path.
 
 ### Adopt an existing cluster after the access-list baseline
 
@@ -168,7 +172,7 @@ The exact saved plan must contain only the expected cluster imports with no-op r
 
 ## Pinning a new host key
 
-After every build or rebuild, the owner pins the new host's key from their own machine, trusting it on first use. The workflow never prints a host key: scanners index keys by address, so a key in a public log would lead to the address and the name.
+For the current manual Host path, the owner pins a new host's key from their own machine, trusting it on first use. The replacement path will read the durable enrolled key directly. The workflow never prints a host key: scanners index keys by address, so a key in a public log would lead to the address and the name.
 
 ```sh
 ssh-keyscan -q -t ed25519 <name> 2>/dev/null | cut -d' ' -f2- | gh secret set TARGET_HOST_KEY --env <role>
@@ -182,7 +186,9 @@ Until the new key is pinned, every run for that host fails at its first connecti
 
 ## Rebuilding a host
 
-Dispatch `operation=apply` with `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal`: the old addresses leave the access list and the new ones join it. The Plan job shows a `replace` of the instance, updates of its two records and `+2 -2` on the access list. Approve the Apply job, then pin the new key.
+Host replacement is currently refused before Apply: first enrollment handles newly created hosts only, and must never reuse an old generation's trust. An owner-fenced recovery path for rebuilds and key rotation remains an acceptance requirement. Do not remove a trust record or change a host key to work around that refusal.
+
+The `replace=linode_instance.host["<key>"]`, `allow_destroy` and `allow_access_removal` inputs can still produce a reviewable plan: the old addresses leave the access list and the new ones join it. They do not authorize applying a replacement until the trust-recovery path is implemented and reviewed.
 
 The workflow reads `replace` from the dispatch's event payload, never from a step's `env:`, which GitHub prints unmasked, and refuses any other value without echoing it. So a host name or address typed there by mistake stays out of the public log.
 

@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { createControlJournal } from "./control-journals.js";
 import { handoffBinding, classifyPlan } from "./infra-policy.js";
 import {
+  HostEnrollmentRecords,
+  plannedNewHostTargets,
+  projectNewAppliedHosts,
+} from "./host-enrollment.js";
+import {
   guardDatabaseClusters,
   requireDatabaseAdoption,
   verifyDatabaseAdoption,
@@ -90,20 +95,49 @@ export function infrastructureRecords(
   createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
 ): InfrastructureRecords {
   try {
-    const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
-    const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
-    const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
-      backend,
-    )?.[1];
-    const passphrase = environment.TF_VAR_state_passphrase ?? "";
-    const accessKeyId = environment.AWS_ACCESS_KEY_ID;
-    const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
-    if (!bucket || !endpoint || !accessKeyId || !secretAccessKey || passphrase.length < 32) fail();
-    // Bun's hosted-style endpoint includes the bucket. Explicit options avoid ambient routing,
-    // session credentials and retries; the backend/key bytes also bind the encryption domain.
-    const url = new URL(endpoint);
-    url.hostname = `${bucket}.${url.hostname}`;
-    const client = createClient({
+    const { backend, bucket, endpoint } = backendStorage(directory);
+    return new InfrastructureRecords(
+      nativeStore(bucket, endpoint, environment, createClient),
+      new RecordCodec(
+        environment.TF_VAR_state_passphrase ?? "",
+        privateDigest({ backend, key: backendKey }),
+      ),
+    );
+  } catch {
+    fail();
+  }
+}
+
+/** The same private storage identity is sufficient for later Host reads; no tfvars are needed. */
+function backendStorage(directory: string) {
+  const backend = readFileSync(join(directory, "backend.hcl"), "utf8");
+  const bucket = /^bucket\s*= "([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])"$/mu.exec(backend)?.[1];
+  const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
+    backend,
+  )?.[1];
+  if (!bucket || !endpoint) fail();
+  return { backend, bucket, endpoint };
+}
+function nativeStore(
+  bucket: string,
+  endpoint: string,
+  environment: NodeJS.ProcessEnv,
+  createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
+): S3ControlStore {
+  const accessKeyId = environment.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
+  if (
+    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(bucket) ||
+    !/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(endpoint)
+  )
+    fail();
+  if (!accessKeyId || !secretAccessKey || (environment.TF_VAR_state_passphrase ?? "").length < 32)
+    fail();
+  const url = new URL(endpoint);
+  url.hostname = `${bucket}.${url.hostname}`;
+  // Hosted-style routing includes the bucket; do not adopt ambient endpoint/session settings.
+  return new S3ControlStore(
+    createClient({
       bucket,
       endpoint: url.origin,
       region: "us-east-1",
@@ -112,10 +146,32 @@ export function infrastructureRecords(
       secretAccessKey,
       sessionToken: "",
       retry: 0,
-    });
-    return new InfrastructureRecords(
-      new S3ControlStore(client),
-      new RecordCodec(passphrase, privateDigest({ backend, key: backendKey })),
+    }),
+  );
+}
+export function hostRecordCodec(bucket: string, endpoint: string, passphrase: string): RecordCodec {
+  return new RecordCodec(
+    passphrase,
+    privateDigest({
+      schema: 1,
+      purpose: "tarubot-host-enrollment-v1",
+      bucket,
+      endpoint: new URL(endpoint).origin,
+      namespace: prefix,
+      stateKey: backendKey,
+    }),
+  );
+}
+/** Native factory accepts the stable bucket/endpoint, so stock Host needs no infrastructure inputs. */
+export function hostEnrollmentRecords(
+  bucket: string,
+  endpoint: string,
+  environment: NodeJS.ProcessEnv,
+): HostEnrollmentRecords {
+  try {
+    return new HostEnrollmentRecords(
+      nativeStore(bucket, endpoint, environment),
+      hostRecordCodec(bucket, endpoint, environment.TF_VAR_state_passphrase ?? ""),
     );
   } catch {
     fail();
@@ -175,6 +231,7 @@ export async function controlPhase(
   directory: string,
   environment: NodeJS.ProcessEnv,
   suppliedJournal?: Pick<InfrastructureRecords, "inspect" | "begin" | "finish">,
+  suppliedEnrollment?: Pick<HostEnrollmentRecords, "requireNoPending" | "inspect" | "enroll">,
 ): Promise<void> {
   const read = (name: string): unknown => JSON.parse(readFileSync(join(directory, name), "utf8"));
   const write = (name: string, value: unknown) =>
@@ -184,6 +241,19 @@ export async function controlPhase(
       fail();
     write("control-context.json", { enabled: false });
     write("baseline-inputs.json", null);
+    return;
+  }
+  if (command === "enrollment_check") {
+    const { bucket, endpoint } = backendStorage(directory);
+    const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+    // The fixed index blocks a pending target even if later inputs omit or rename it.
+    await enrollment.requireNoPending();
+    const event = readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8");
+    if (!["apply", "adopt"].includes(JSON.parse(event).inputs?.operation)) fail();
+    const targets = plannedNewHostTargets(read("plan.json"), read("values.tfvars.json"));
+    const context = read("control-context.json") as { enabled?: unknown };
+    if (targets.length > 0 && context.enabled !== true) fail();
+    for (const target of targets) if ((await enrollment.inspect(target)) !== null) fail();
     return;
   }
   // Dependency injection is internal-only for invented tests, never a CLI/environment override.
@@ -222,8 +292,9 @@ export async function controlPhase(
     );
     write("control-ticket.json", ticket);
     if (command === "baseline") await journal.finish(ticket, state);
-  } else if (command === "finish") {
+  } else if (command === "finish" || command === "enroll") {
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
+    if (command === "enroll" && event.inputs?.operation !== "apply") fail();
     if (event.inputs?.operation === "adopt")
       verifyDatabaseAdoption(
         read("plan.json"),
@@ -234,7 +305,38 @@ export async function controlPhase(
       );
     else if (event.inputs?.operation !== "apply") fail();
     verifyAppliedPlan(read("plan.json"), read("applied-state.json"));
-    await journal.finish(read("control-ticket.json") as Ticket, state);
+    const ticket = read("control-ticket.json") as Ticket;
+    if (command === "finish") await journal.finish(ticket, state);
+    else {
+      const inputs = read("values.tfvars.json");
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+          ticket.generation,
+        ) ||
+        Object.keys(ticket).sort().join(",") !== "binding,generation" ||
+        ticket.binding !== binding ||
+        state.lineage !== context.snapshot.state.lineage ||
+        state.serial <= context.snapshot.state.serial
+      )
+        fail();
+      const { bucket, endpoint } = backendStorage(directory);
+      const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+      await enrollment.enroll(
+        projectNewAppliedHosts(read("plan.json"), read("applied-state.json"), inputs, {
+          generation: ticket.generation,
+          state,
+          run: { commit: environment.GITHUB_SHA ?? "", run: environment.GITHUB_RUN_ID ?? "" },
+          binding,
+        }),
+        {
+          linodeToken: environment.LINODE_TOKEN ?? "",
+          cloudflareToken: environment.CLOUDFLARE_API_TOKEN ?? "",
+        },
+        // Both pending records stay live through enrollment and exact Infra completion readback.
+        // This is the reviewed Apply sequence, not a caller-supplied approval mechanism.
+        () => journal.finish(ticket, state),
+      );
+    }
   } else fail();
 }
 

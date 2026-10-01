@@ -26,8 +26,8 @@
 # inside TOFU_VARS before anything else prints (GitHub masks a secret only where its whole value
 # appears), plan and apply write to private files under $RUNNER_TEMP/tofu, and diagnostics print
 # filtered. The runner prints each step's env: unmasked, so the replace input never goes there:
-# prepare reads it from the event payload. Apply prints no host key either: after a build the
-# owner pins it from their own machine (README.md, "Pinning a new host key").
+# prepare reads it from the event payload. After a verified new-host Apply, first-key enrollment
+# and SSHFP publication use private durable records; no key or address is printed.
 #
 # The saved plan is the one file that leaves a job: a one-day artifact, which anyone signed in to
 # GitHub can download from this public repository. It is only ever OpenTofu's own encrypted file
@@ -211,6 +211,11 @@ jobs:
           BINDING: ${{ needs.plan.outputs.binding }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
         run: bash ops/tofu/ci/tofu-ci.sh compare
+      - name: Install first-host enrollment tools
+        if: inputs.operation == 'apply'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends unbound dnsutils dns-root-data openssh-client
       - name: Apply
         if: inputs.operation == 'apply' || inputs.operation == 'adopt'
         env:

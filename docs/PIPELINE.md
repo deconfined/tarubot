@@ -70,7 +70,7 @@ A rebuild or legitimate rotation requires owner-fenced recovery and a new approv
 
 ## Recovery
 
-Keep small encrypted, private, versioned records for operation intent/outcome, the applied-input baseline and enrolled trust. Persist intent and its pending reference before a mutation; confirm persistence by readback. A new baseline/generation is usable only after its operation has verified completion; pending operations block it. Use unique generations and preserve history.
+Keep small encrypted, private, versioned records for operation intent/outcome, the applied-input baseline and enrolled trust. Persist intent and its pending reference before a mutation; confirm persistence by readback. A new baseline/generation is usable only after its operation has verified completion; pending operations block it. Use unique generations and preserve history. The private bucket must have native object versioning enabled and retain noncurrent control-record versions; verify this against the intended backend before enabling durable records. Recover the related versions together, including the first observed host key.
 
 A canceled runner, lost acknowledgement, pending operation or conflicting readback does not establish whether the remote effect occurred. Stop competing writers, inspect actual provider/state/host outcomes and reconcile the related records before another mutation. Do not blindly retry, overwrite history, delete a pending marker or restore only the newest object to clear an error. Versioning and readback are recovery aids, not a lock or protection against unrestricted authorized deletion.
 

@@ -311,6 +311,9 @@ apply() {
   if [[ $operation == adopt ]]; then
     control_enabled || fail "Cluster adoption requires a completed durable baseline."
   fi
+  # A previous uncertain enrollment blocks every later mutation, even with changed inputs.
+  # New hosts also require enabled records and an unused target before provider creation.
+  control_call enrollment_check
   if control_enabled; then
     # Reload persisted state immediately before intent creation; changes since Plan are refused.
     control_state
@@ -319,9 +322,8 @@ apply() {
   local rc=0 action address line
   # The saved plan alone, with no option that could change it: OpenTofu applies exactly what it
   # holds, and refuses it as "Saved plan is stale" if the state changed since the Plan job read it.
-  # Prints only the apply's counts, the filtered diagnostics on a failure, and one line per host
-  # built or rebuilt: no key, name, address or ID. The owner then pins the new host's key from
-  # their own machine.
+  # Prints only counts and filtered diagnostics. Infra remains pending through new-host enrollment,
+  # with literal addresses and the first public key kept in private encrypted records.
   tofu -chdir="$module" apply -input=false -json "$d/plan.bin" >"$d/apply.jsonl" 2>"$d/apply.stderr" || rc=$?
   jq -rR -f "$here/applied.jq" "$d/apply.jsonl" 2>/dev/null || true
   if ((rc != 0)); then
@@ -344,12 +346,16 @@ apply() {
     control_state
     cmp -s -- "$d/state.json" "$d/applied-evidence-state.json" ||
       fail "State changed during Apply verification; the durable operation remains pending."
-    control_call finish
+    # No host authentication occurs here. Persist TOFU before SSHFP publication and complete
+    # enrollment after provider readback and local DNSSEC validation. The combined command finishes
+    # the Infra baseline only then, while the host pending index still blocks a later Host reader.
+    control_call enroll
     echo "Applied state verified and durable baseline completed."
+    echo "New-host enrollment checked; durable trust contains no pending operation."
   fi
   while read -r action address _; do
-    if [[ $action =~ ^(create|replace)$ && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
-      line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): pin its host key from your own machine (ops/tofu/README.md, Pinning a new host key)"
+    if [[ $action == create && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
+      line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): durable first-host enrollment completed"
       echo "$line"
       echo "- $line" >>"$GITHUB_STEP_SUMMARY"
     fi
