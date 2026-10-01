@@ -68,7 +68,7 @@ function copyBytes(value: unknown, maximum: number, check: () => void): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 /** Plain bounded snapshots reserve their original operation before any reflection hook. */
-function snapshot(value: unknown, check: () => void): unknown {
+function snapshot(value: unknown, check: (before?: number) => void): unknown {
   let nodes = 0,
     size = 0;
   const ancestors = new Set<object>();
@@ -88,8 +88,9 @@ function snapshot(value: unknown, check: () => void): unknown {
     requireDns(input !== null && typeof input === "object" && !ancestors.has(input));
     requireDns(Object.getOwnPropertySymbols(input).length === 0);
     check();
+    const beforeProperties = performance.now();
     const properties = Object.getOwnPropertyDescriptors(input);
-    check();
+    check(beforeProperties);
     ancestors.add(input);
     let result: unknown;
     if (Array.isArray(input)) {
@@ -138,6 +139,7 @@ class ValidationWindow {
   #remainingCaptured = false;
   #queryPhysicalEnd = Number.POSITIVE_INFINITY;
   #queryWallEnd = Number.POSITIVE_INFINITY;
+  #anchors: number[] = [];
   constructor(
     readonly physical: number,
     readonly now: () => number,
@@ -154,14 +156,17 @@ class ValidationWindow {
       !this.#fenced && performance.now() < Math.min(this.#physicalEnd, this.#queryPhysicalEnd),
     );
   }
-  tick(): number {
+  tick(anchor = performance.now()): number {
     let owns = false;
+    const beforeHooks = Math.min(anchor, performance.now(), ...this.#anchors);
     try {
+      requireDns(Number.isFinite(beforeHooks) && beforeHooks >= 0);
       this.#live();
       requireDns(!this.#checking);
       this.#checking = true;
       owns = true;
       const refuse = () => {
+        this.#live();
         if (this.denial !== undefined) {
           requireDns(typeof this.denial === "function");
           const value = this.denial();
@@ -174,27 +179,37 @@ class ValidationWindow {
         this.#live();
         requireDns(this.#checking);
       };
-      const clock = () => {
-        refuse();
+      const observe = () => {
+        this.#live();
         const value: unknown = this.now();
         if (typeof value !== "number") {
           this.fence();
           drain(value);
         }
         requireDns(typeof value === "number" && Number.isSafeInteger(value) && value > 0);
-        refuse();
+        this.#live();
+        requireDns(this.#checking);
         if (this.#started === 0) {
           this.#started = value;
-          this.#wallEnd = value + 60_000;
+          this.#wallEnd = Math.min(this.#wallEnd, value + 60_000);
         }
         requireDns(value >= this.#previous && value < Math.min(this.#wallEnd, this.#queryWallEnd));
         this.#previous = value;
+        // Project every observation before another hook. All total/caller/query caps retain
+        // this cluster's earliest physical instant when the trusted wall clock later freezes.
+        this.#physicalEnd = Math.min(this.#physicalEnd, beforeHooks + this.#wallEnd - value);
+        this.#queryPhysicalEnd = Math.min(
+          this.#queryPhysicalEnd,
+          beforeHooks + this.#queryWallEnd - value,
+        );
+        this.#live();
         return value;
       };
-      let value = clock();
+      refuse();
+      let value = observe();
       if (this.remainingMs !== undefined) {
+        this.#live();
         requireDns(typeof this.remainingMs === "function");
-        const before = performance.now();
         const remaining: unknown = this.remainingMs();
         if (typeof remaining !== "number") {
           this.fence();
@@ -203,18 +218,20 @@ class ValidationWindow {
         requireDns(
           typeof remaining === "number" && Number.isSafeInteger(remaining) && remaining > 0,
         );
-        // The first smaller cap includes all work before the callback; later caps only shrink.
+        // First external cap includes all earlier capture; subsequent captures only shrink.
         this.#physicalEnd = Math.min(
           this.#physicalEnd,
-          (this.#remainingCaptured ? before : this.physical) + remaining,
+          (this.#remainingCaptured ? beforeHooks : this.physical) + remaining,
         );
         this.#wallEnd = Math.min(this.#wallEnd, value + remaining);
         this.#remainingCaptured = true;
-        refuse();
-        value = clock();
+        this.#live();
+        requireDns(this.#checking);
       }
+      refuse();
+      // The final trusted time-only sample follows both refusal and remaining hooks.
+      value = observe();
       this.#live();
-      requireDns(this.#checking);
       return value;
     } catch {
       this.fence();
@@ -223,8 +240,8 @@ class ValidationWindow {
       if (owns) this.#checking = false;
     }
   }
-  remaining(): number {
-    const value = this.tick();
+  remaining(before?: number): number {
+    const value = this.tick(before);
     const remaining = Math.floor(
       Math.min(
         22_000,
@@ -239,7 +256,7 @@ class ValidationWindow {
   }
   query(): number {
     requireDns(this.#queryPhysicalEnd === Number.POSITIVE_INFINITY && this.#previous > 0);
-    this.#queryPhysicalEnd = performance.now() + 22_000;
+    this.#queryPhysicalEnd = Math.min(this.#queryPhysicalEnd, performance.now() + 22_000);
     const value = this.#previous;
     this.#queryWallEnd = value + 22_000;
     this.tick();
@@ -247,9 +264,19 @@ class ValidationWindow {
   }
   offer<T>(work: () => T): T {
     this.tick();
-    const value = work();
-    this.tick();
-    return value;
+    const beforeWork = performance.now();
+    this.#anchors.push(beforeWork);
+    let value: T | undefined;
+    try {
+      value = work();
+      this.tick(beforeWork);
+      return value;
+    } catch (error) {
+      drain(value);
+      throw error;
+    } finally {
+      this.#anchors.pop();
+    }
   }
 }
 function exact(value: unknown, keys: string[]): Record<string, unknown> {
@@ -405,8 +432,9 @@ export type ValidatorExecutor = (
 function execute(
   request: ValidatorExecution,
   beforeExecute: () => void,
-  remaining: () => number,
+  remaining: (before?: number) => number,
 ): ReturnType<ValidatorExecutor> {
+  const beforeCapture = performance.now();
   const argv = [...request.argv],
     cwd = request.cwd,
     env = { ...request.env };
@@ -420,12 +448,13 @@ function execute(
     maxBuffer: request.maxBuffer,
   } as const;
   const offer = Bun.spawnSync.bind(Bun);
-  beforeExecute();
-  const timeout = Math.min(request.timeout, remaining());
+  Reflect.apply(beforeExecute, undefined, [beforeCapture]);
+  const timeout = Math.min(request.timeout, remaining(beforeCapture));
   const result = offer(argv, { ...options, timeout });
   beforeExecute();
+  const beforeProperties = performance.now();
   const properties = Object.getOwnPropertyDescriptors(result);
-  beforeExecute();
+  Reflect.apply(beforeExecute, undefined, [beforeProperties]);
   for (const key of ["exitCode", "stdout", "stderr"])
     requireDns(properties[key] && Object.hasOwn(properties[key], "value"));
   requireDns(properties.signalCode === undefined || Object.hasOwn(properties.signalCode, "value"));
@@ -551,12 +580,12 @@ export class LocalDnssecValidator {
       this.#active = window;
       owns = true;
       const original = window;
-      const check = () => {
-        original.tick();
+      const check = (before?: number) => {
+        original.tick(before);
       };
       check();
-      descriptor = snapshot(descriptor, check) as TargetDescriptor;
-      expected = snapshot(expected, check) as Sshfp;
+      descriptor = original.offer(() => snapshot(descriptor, check)) as TargetDescriptor;
+      expected = original.offer(() => snapshot(expected, check)) as Sshfp;
       const d = targetDescriptor(descriptor);
       const o = this.#options;
       const p = exact(o.pin, [
@@ -722,16 +751,15 @@ export class LocalDnssecValidator {
       check();
       const result =
         this.#run === undefined
-          ? execute(request, check, () => original.remaining())
-          : this.#run(request, check);
+          ? execute(request, check, (before) => original.remaining(before))
+          : (original.offer(() => this.#run?.(request, check)) as ReturnType<ValidatorExecutor>);
       if (types.isPromise(result)) {
         original.fence();
         drain(result);
         throw new Error("invalid-local-dnssec");
       }
       check();
-      const properties = Object.getOwnPropertyDescriptors(result);
-      check();
+      const properties = original.offer(() => Object.getOwnPropertyDescriptors(result));
       for (const key of ["exitCode", "signalCode", "stdout", "stderr"])
         requireDns(properties[key] && Object.hasOwn(properties[key], "value"));
       const stdout = copyBytes(properties.stdout?.value, 32768, check);

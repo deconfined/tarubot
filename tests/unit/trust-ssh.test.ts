@@ -816,3 +816,88 @@ describe("default SSH native offer", () => {
     `);
   });
 });
+
+describe("sticky SSH preparation caps", () => {
+  test("final refusal and simultaneous short-clock work stop every next reader/process offer", () => {
+    const request = command();
+    isolatedProcess(`
+      import {performance} from "node:perf_hooks";let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});
+      const input=${JSON.stringify({ request, proof: proof() })};input.proof.expires_at=${time}+120000;
+      for(const phase of ["final-denial","seen-short","slow-short"]){
+        elapsed=0;let wall=${time},calls=0,trust=0,next=0,spawn=0;
+        const denial=()=>{if(phase==="final-denial"&&++calls===2)wall+=60000;};
+        const now=()=>wall;
+        const reader=async(_descriptor,guard)=>{
+          trust++;wall+=59980;
+          if(phase==="slow-short")elapsed+=60;
+          guard();
+          if(phase==="seen-short"){elapsed+=60;guard();}
+          next++;return input.proof;
+        };
+        let failed=false;try{await trustedSsh(input.request,reader,{now,denial,run:async()=>{spawn++;return {code:0,signal:null,stdout:new Uint8Array(),stderr:new Uint8Array()};}});}catch(error){failed=error.message==="trusted-ssh-failed";}
+        if(!failed||next||spawn||trust!==(phase==="final-denial"?0:1))throw Error("late preparation offer");
+      }
+    `);
+  });
+  test("a short observation inside a held reader rearms the original timer", async () => {
+    const request = command();
+    let wall = time,
+      offers = 0;
+    const start = performance.now();
+    await expect(
+      trustedSsh(
+        request,
+        async (_descriptor, guard) => {
+          wall += 59_980;
+          guard?.();
+          offers++;
+          return await new Promise<ConnectionProof>(() => {});
+        },
+        {
+          now: () => wall,
+          run: async () => {
+            throw Error("unexpected-native-offer");
+          },
+        },
+      ),
+    ).rejects.toThrow("trusted-ssh-failed");
+    expect(offers).toBe(1);
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(readdirSync(request.work_root)).toEqual(["invented-identity"]);
+  });
+  test("owned native argv capture counts simultaneous wall shortening and physical cost", () => {
+    const request = command();
+    isolatedProcess(`
+      import {spyOn} from "bun:test";import * as cp from "node:child_process";import {performance} from "node:perf_hooks";
+      let elapsed=0,wall=${time},offers=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const patched=spyOn(cp,"spawn").mockImplementation(()=>{offers++;throw Error("unexpected-native-offer");});
+      const imported=await import("node:child_process");if(imported.spawn!==patched)throw Error("mock not installed");
+      const {trustedSsh}=await import(${JSON.stringify(processModule)});const input=${JSON.stringify({ request, proof: proof() })};input.proof.expires_at=${time}+120000;
+      const iterator=Array.prototype[Symbol.iterator];let enabled=false;
+      Array.prototype[Symbol.iterator]=function(){if(enabled&&this[0]==="-F"&&this.includes("StrictHostKeyChecking=yes")){enabled=false;wall+=59980;elapsed+=60;}return iterator.call(this);};
+      let failed=false;try{await trustedSsh(input.request,async()=>{enabled=true;return input.proof;},{now:()=>wall});}catch(error){failed=error.message==="trusted-ssh-failed";}finally{Array.prototype[Symbol.iterator]=iterator;}
+      if(!failed||offers!==0)throw Error("expired native SSH offered");
+    `);
+  });
+});
+
+test("proof reflection and guard-aware runner hooks retain their actual pre-hook anchor", () => {
+  const request = command();
+  isolatedProcess(`
+    import {performance} from "node:perf_hooks";let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+    const {trustedSsh}=await import(${JSON.stringify(processModule)});
+    const input=${JSON.stringify({ request, proof: proof() })};
+    for(const phase of ["expiry","ownKeys","prototype","runner"]){
+      elapsed=0;let wall=${time},offers=0,trapped=false;
+      const expire=()=>{if(!trapped){trapped=true;wall+=29980;elapsed+=60;}};
+      const proxy=new Proxy(input.proof,{
+        getOwnPropertyDescriptor(value,key){if(phase==="expiry"&&key==="expires_at")expire();return Reflect.getOwnPropertyDescriptor(value,key);},
+        ownKeys(value){if(phase==="ownKeys")expire();return Reflect.ownKeys(value);},
+        getPrototypeOf(value){if(phase==="prototype")expire();return Reflect.getPrototypeOf(value);},
+      });
+      let refused=false;try{await trustedSsh(input.request,async()=>proxy,{now:()=>wall,run:async(_request,guard)=>{if(phase==="runner")expire();guard();offers++;throw Error("invented-stop");}});}catch(error){refused=error.message==="trusted-ssh-failed";}
+      if(!refused||offers!==0||!trapped)throw Error("late reflection/runner native offer");
+    }
+  `);
+});

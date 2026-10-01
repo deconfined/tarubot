@@ -46,7 +46,7 @@ function bytes(value: unknown, limit: number, check: () => void = () => {}): Uin
   return result;
 }
 /** Plain command/proof snapshots cannot execute accessors or replace binary bytes by iteration. */
-function snapshot(value: unknown, check: () => void): unknown {
+function snapshot(value: unknown, check: (before?: number) => void): unknown {
   let nodes = 0,
     size = 0;
   const ancestors = new Set<object>();
@@ -67,8 +67,9 @@ function snapshot(value: unknown, check: () => void): unknown {
     requireTransport(input !== null && typeof input === "object" && !ancestors.has(input));
     requireTransport(Object.getOwnPropertySymbols(input).length === 0);
     check();
+    const beforeProperties = performance.now();
     const properties = Object.getOwnPropertyDescriptors(input);
-    check();
+    check(beforeProperties);
     ancestors.add(input);
     let result: unknown;
     if (Array.isArray(input)) {
@@ -114,14 +115,27 @@ class Preparation {
   #started = 0;
   #last = 0;
   #expires = Number.POSITIVE_INFINITY;
+  #physicalEnd: number;
+  #bounds = new Set<{ end: number; rearm?: () => void; reject?: () => void }>();
+  #anchors: number[] = [];
   constructor(
     readonly physical: number,
     readonly budget: number,
     readonly now: () => number,
     readonly denial?: () => void,
-  ) {}
+  ) {
+    this.#physicalEnd = physical + budget;
+  }
   fence(): void {
+    if (this.#fenced) return;
     this.#fenced = true;
+    for (const bound of this.#bounds) {
+      try {
+        bound.reject?.();
+      } catch {
+        /* A failed accepted-I/O cleanup cannot spare another original held scope. */
+      }
+    }
   }
   offered(): void {
     this.#offered = true;
@@ -130,49 +144,67 @@ class Preparation {
     requireTransport(!this.#fenced);
   }
   initial(): void {
-    requireTransport(
-      !this.#fenced && !this.#offered && performance.now() - this.physical < this.budget,
-    );
+    const physical = performance.now();
+    requireTransport(!this.#fenced && !this.#offered && physical < this.#physicalEnd);
+    for (const bound of this.#bounds) requireTransport(physical < bound.end);
   }
-  tick(): number {
-    // A completed preparation never renews authority, and its obsolete callbacks cannot
-    // truncate a command that already started under a valid pin/authority observation.
+  tick(anchor = performance.now()): number {
+    // Retired preparation refuses without truncating an already accepted command.
     requireTransport(!this.#offered);
     let owned = false;
+    const beforeHooks = Math.min(anchor, performance.now(), ...this.#anchors);
     try {
+      requireTransport(Number.isFinite(beforeHooks) && beforeHooks >= 0);
       this.initial();
       requireTransport(!this.#checking);
       this.#checking = true;
       owned = true;
       const refuse = () => {
-        if (this.denial === undefined) return;
-        requireTransport(typeof this.denial === "function");
-        const result = this.denial();
-        if (result !== undefined) {
-          this.fence();
-          drain(result);
+        this.initial();
+        if (this.denial !== undefined) {
+          requireTransport(typeof this.denial === "function");
+          const result = this.denial();
+          if (result !== undefined) {
+            this.fence();
+            drain(result);
+          }
+          requireTransport(result === undefined);
         }
-        requireTransport(result === undefined && !this.#fenced && this.#checking);
+        this.initial();
+        requireTransport(this.#checking);
+      };
+      const observe = () => {
+        this.initial();
+        const value: unknown = this.now();
+        if (typeof value !== "number") {
+          this.fence();
+          drain(value);
+        }
+        requireTransport(typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+        this.initial();
+        requireTransport(this.#checking);
+        // The FIRST sample owns the epoch. Each sample projects its short remainder before
+        // another caller hook, from the physical instant preceding the entire hook cluster.
+        if (this.#started === 0) this.#started = value;
+        requireTransport(
+          value >= this.#last && value - this.#started < this.budget && value < this.#expires,
+        );
+        this.#last = value;
+        this.#physicalEnd = Math.min(
+          this.#physicalEnd,
+          beforeHooks + this.budget - (value - this.#started),
+          beforeHooks + this.#expires - value,
+          this.physical + this.#expires - this.#started,
+        );
+        this.initial();
+        for (const bound of this.#bounds) bound.rearm?.();
+        return value;
       };
       refuse();
-      const value: unknown = this.now();
-      if (typeof value !== "number") {
-        this.fence();
-        drain(value);
-      }
-      requireTransport(typeof value === "number" && Number.isSafeInteger(value) && value > 0);
-      this.initial();
+      observe();
       refuse();
-      requireTransport(this.#checking && !this.#fenced);
-      if (this.#started === 0) this.#started = value;
-      requireTransport(
-        value >= this.#last &&
-          value - this.#started < this.budget &&
-          value < this.#expires &&
-          performance.now() - this.physical < this.#expires - this.#started,
-      );
-      this.#last = value;
-      return value;
+      // TIME ONLY after the final refusal; no caller hook follows the final offer cap.
+      return observe();
     } catch {
       this.fence();
       throw new Error("trusted-ssh-failed");
@@ -185,57 +217,118 @@ class Preparation {
     this.#expires = Math.min(this.#expires, expiry);
     this.tick();
   }
-  remaining(): number {
-    const value = this.tick();
-    return Math.min(
-      this.budget - (value - this.#started),
-      this.budget - (performance.now() - this.physical),
-      this.#expires - value,
-      this.#expires - this.#started - (performance.now() - this.physical),
+  available(): number {
+    this.initial();
+    const physical = performance.now();
+    const remaining = Math.floor(
+      Math.min(
+        this.budget - (this.#last - this.#started),
+        this.#expires - this.#last,
+        this.#physicalEnd - physical,
+        ...[...this.#bounds].map((bound) => bound.end - physical),
+      ),
     );
+    requireTransport(remaining > 0);
+    return remaining;
+  }
+  remaining(): number {
+    this.tick();
+    return this.available();
+  }
+  scope<T>(work: () => T): T {
+    const before = performance.now();
+    this.#anchors.push(before);
+    try {
+      this.initial();
+      return work();
+    } finally {
+      this.#anchors.pop();
+    }
+  }
+  capture<T>(work: () => T): T {
+    const before = performance.now();
+    this.#anchors.push(before);
+    let value: T | undefined;
+    try {
+      this.initial();
+      value = work();
+      this.tick(before);
+      return value;
+    } catch (error) {
+      drain(value);
+      throw error;
+    } finally {
+      this.#anchors.pop();
+    }
   }
   async read<T>(work: () => Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound: { end: number; rearm?: () => void; reject?: () => void } = { end: Infinity };
+    this.#bounds.add(bound);
     try {
-      let end = performance.now() + this.remaining(),
-        rejectDeadline: (error: Error) => void = () => {};
+      bound.end = performance.now() + this.remaining();
+      let rejectDeadline: (error: Error) => void = () => {};
       const timeout = new Promise<never>((_, reject) => {
         rejectDeadline = reject;
       });
-      const schedule = () => {
-        end = Math.min(end, performance.now() + this.remaining());
+      drain(timeout);
+      bound.reject = () => rejectDeadline(new Error("trusted-ssh-failed"));
+      const arm = () => {
+        bound.end = Math.min(bound.end, this.#physicalEnd);
         clearTimeout(timer);
-        timer = setTimeout(
-          () => {
-            this.fence();
-            rejectDeadline(new Error("trusted-ssh-failed"));
-          },
-          Math.max(0, end - performance.now()),
-        );
+        const left = bound.end - performance.now();
+        if (left <= 0) {
+          this.fence();
+          throw new Error("trusted-ssh-failed");
+        }
+        timer = setTimeout(() => this.fence(), left);
       };
-      schedule();
-      const result = await Promise.race([
-        Promise.resolve().then(() => {
-          this.tick();
-          const pending = work();
+      bound.rearm = arm;
+      arm();
+      // An owned box crosses the race, keeping native fulfillment under the SAME bounds.
+      const pending = new Promise<{ value: T }>((accept, reject) => {
+        queueMicrotask(() => {
+          let offered: unknown;
           try {
             this.tick();
-            schedule();
-          } catch (error) {
-            drain(pending);
-            throw error;
+            offered = this.capture(work);
+            this.tick();
+            arm();
+            Reflect.apply(nativeThen, offered, [
+              (value: T) => {
+                try {
+                  this.tick();
+                  const box = Object.create(null) as { value: T };
+                  Object.defineProperty(box, "value", { value, enumerable: true });
+                  this.initial();
+                  accept(Object.freeze(box));
+                } catch {
+                  this.fence();
+                  reject(new Error("trusted-ssh-failed"));
+                }
+              },
+              () => {
+                this.fence();
+                reject(new Error("trusted-ssh-failed"));
+              },
+            ]);
+          } catch {
+            this.fence();
+            drain(offered);
+            reject(new Error("trusted-ssh-failed"));
           }
-          return pending;
-        }),
-        timeout,
-      ]);
+        });
+      });
+      const result = await Promise.race([pending, timeout]);
       this.tick();
-      return result;
+      this.initial();
+      return result.value;
     } catch {
       this.fence();
       throw new Error("trusted-ssh-failed");
     } finally {
       clearTimeout(timer);
+      this.#bounds.delete(bound);
     }
   }
 }
@@ -306,6 +399,7 @@ function execute(
       }
     };
     try {
+      const beforeCapture = performance.now();
       const executable = request.executable,
         args = [...request.args],
         directory = request.directory;
@@ -316,7 +410,7 @@ function execute(
       };
       const offer = spawn;
       // Captured argv/environment/native binding precede the ORIGINAL last preparation guard.
-      beforeSpawn?.();
+      if (beforeSpawn) Reflect.apply(beforeSpawn, undefined, [beforeCapture]);
       child = offer(executable, args, options);
       const commandPhysical = performance.now();
       accepted?.();
@@ -379,7 +473,11 @@ function execute(
 }
 
 /** Paths are literal OpenSSH option values; disallow tokens/quoting and private-file symlinks. */
-function privatePath(value: string, directory: boolean, check: () => void = () => {}): string {
+function privatePath(
+  value: string,
+  directory: boolean,
+  check: (before?: number) => void = () => {},
+): string {
   check();
   requireTransport(/^\/[A-Za-z0-9_./-]+$/u.test(value) && resolve(value) === value);
   const components = value.split("/").filter(Boolean);
@@ -387,14 +485,16 @@ function privatePath(value: string, directory: boolean, check: () => void = () =
   for (const part of components) {
     current += `/${part}`;
     check();
+    const beforeComponent = performance.now();
     const component = lstatSync(current);
-    check();
+    check(beforeComponent);
     requireTransport(!component.isSymbolicLink());
     check();
   }
   check();
+  const beforeStat = performance.now();
   const stat = lstatSync(value);
-  check();
+  check(beforeStat);
   requireTransport(
     (directory ? stat.isDirectory() : stat.isFile() && stat.nlink === 1) &&
       stat.uid === process.getuid?.() &&
@@ -601,8 +701,8 @@ export async function trustedSsh(
     );
     preparation = new Preparation(physicalStarted, preparationBudget, now, denial);
     const original = preparation;
-    const check = () => {
-      original.tick();
+    const check = (before?: number) => {
+      original.tick(before);
     };
     check();
     const descriptor = targetDescriptor(request.descriptor);
@@ -638,11 +738,17 @@ export async function trustedSsh(
       connectionTrust(snapshot(descriptor, check) as TargetDescriptor, check),
     );
     check();
-    const expiry = Object.getOwnPropertyDescriptor(rawProof, "expires_at");
-    check();
-    requireTransport(expiry && Object.hasOwn(expiry, "value") && typeof expiry.value === "number");
-    original.bind(expiry.value);
-    const proof = snapshot(rawProof, check) as ConnectionProof;
+    const expiry = original.capture(() => {
+      const expiry = Object.getOwnPropertyDescriptor(rawProof, "expires_at");
+      requireTransport(
+        expiry && Object.hasOwn(expiry, "value") && typeof expiry.value === "number",
+      );
+      // Bind the newly learned expiry inside the SAME pre-descriptor capture. Its shorter
+      // original proof cap cannot receive a fresh physical remainder after a slow trap.
+      original.bind(expiry.value);
+      return expiry;
+    });
+    const proof = original.capture(() => snapshot(rawProof, check)) as ConnectionProof;
     requireTransport(proof.expires_at === expiry.value);
     const enrolled = targetDescriptor(proof.descriptor);
     const {
@@ -666,16 +772,19 @@ export async function trustedSsh(
     check();
     privatePath(request.work_root, true, check);
     check();
+    const beforeMkdir = performance.now();
     directory = mkdtempSync(join(request.work_root, "ssh-connect-"));
-    check();
+    check(beforeMkdir);
     const alias = `tarubot-${descriptor.target}-${proof.generation}`;
     const hosts = join(directory, "known_hosts");
     const pin = `${alias} ${key.key}\n`;
     check();
+    const beforePin = performance.now();
     writeFileSync(hosts, pin, { mode: 0o600, flag: "wx" });
-    check();
+    check(beforePin);
+    const beforeReadback = performance.now();
     requireTransport(readFileSync(hosts, "utf8") === pin);
-    check();
+    check(beforeReadback);
     const options = [
       "BatchMode=yes",
       "StrictHostKeyChecking=yes",
@@ -734,8 +843,9 @@ export async function trustedSsh(
     privatePath(directory, true, check);
     privatePath(hosts, false, check);
     check();
+    const beforeFinalReadback = performance.now();
     requireTransport(readFileSync(hosts, "utf8") === pin);
-    check();
+    check(beforeFinalReadback);
     const offered: TrustProcessRequest = {
       executable: "/usr/bin/ssh",
       args,
@@ -746,7 +856,7 @@ export async function trustedSsh(
     };
     check();
     const pending = customRun
-      ? customRun(offered, check)
+      ? original.scope(() => customRun(offered, check))
       : execute(offered, check, () => original.offered());
     try {
       original.assertNotFenced();

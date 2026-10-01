@@ -224,24 +224,35 @@ function directGet(
   input: GitHubReadRequest,
   check: () => void,
   capture: <T>(work: () => T) => T,
+  watch: (expire: () => void, limit: number) => () => void,
 ): Promise<GitHubReadResponse> {
   return new Promise((accept, reject) => {
     let agent: Agent | undefined;
     let request: ReturnType<typeof httpsRequest> | undefined;
     let response: import("node:http").IncomingMessage | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelDeadline: () => void = () => {};
     let finished = false;
     const chunks: Buffer[] = [];
     let size = 0;
     const finish = (error?: unknown, value?: GitHubReadResponse) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
-      if (error !== undefined) {
-        request?.destroy();
-        response?.destroy();
+      cancelDeadline();
+      for (const close of [
+        () => {
+          if (error !== undefined) request?.destroy();
+        },
+        () => {
+          if (error !== undefined) response?.destroy();
+        },
+        () => agent?.destroy(),
+      ]) {
+        try {
+          close();
+        } catch {
+          /* Keep the fixed refusal and close every accepted handle. */
+        }
       }
-      agent?.destroy();
       if (error !== undefined) reject(new Error("trust-run-read-failed"));
       else if (value) accept(value);
     };
@@ -281,6 +292,7 @@ function directGet(
       };
       // Route, headers and Agent preparation cannot move the original authorization barrier.
       check();
+      cancelDeadline = watch(() => finish(new Error("trust-run-read-failed")), input.timeout_ms);
       request = httpsRequest(options, (incoming) => {
         response = incoming;
         if (finished) {
@@ -349,7 +361,6 @@ function directGet(
       check();
       on("error", () => finish(new Error("trust-run-read-failed")));
       check();
-      timer = setTimeout(() => finish(new Error("trust-run-read-failed")), input.timeout_ms);
       const end = request.end.bind(request);
       check();
       end();
@@ -366,51 +377,104 @@ class Operation {
   #last = 0;
   #checking = false;
   #fenced = false;
+  #physicalEnd: number;
+  #bounds = new Set<{ end: number; rearm?: () => void; reject?: () => void }>();
+  readonly #capture: <T>(work: () => T) => T;
+  #anchors: number[] = [];
   constructor(
     readonly physical: number,
     readonly budget: number,
     readonly now: () => number,
     readonly denial?: () => void,
-    readonly capture: <T>(work: () => T) => T = (work) => work(),
-  ) {}
+    capture: <T>(work: () => T) => T = (work) => work(),
+  ) {
+    this.#physicalEnd = physical + budget;
+    this.#capture = capture;
+  }
+  #scope<T>(work: () => T): T {
+    const before = performance.now();
+    this.#anchors.push(before);
+    let value: T | undefined;
+    try {
+      this.assertAlive();
+      value = work();
+      this.assertAlive();
+      if (!this.#checking) this.tick(before);
+      return value;
+    } catch (error) {
+      drain(value);
+      throw error;
+    } finally {
+      this.#anchors.pop();
+    }
+  }
+  readonly capture = <T>(work: () => T): T => this.#scope(() => this.#capture(work));
   fence(): void {
+    if (this.#fenced) return;
     this.#fenced = true;
+    for (const bound of this.#bounds) {
+      try {
+        bound.reject?.();
+      } catch {
+        /* A failed accepted-I/O cleanup cannot spare another original held scope. */
+      }
+    }
   }
   assertAlive(): void {
-    requireRun(!this.#fenced && performance.now() - this.physical < this.budget);
+    const physical = performance.now();
+    requireRun(!this.#fenced && physical < this.#physicalEnd);
+    for (const bound of this.#bounds) requireRun(physical < bound.end);
   }
-  tick(): number {
+  tick(anchor = performance.now()): number {
     let owned = false;
+    const beforeHooks = Math.min(anchor, performance.now(), ...this.#anchors);
     try {
-      requireRun(!this.#fenced && !this.#checking);
+      requireRun(Number.isFinite(beforeHooks) && beforeHooks >= 0);
+      this.assertAlive();
+      requireRun(!this.#checking);
       this.#checking = true;
       owned = true;
-      requireRun(performance.now() - this.physical < this.budget);
       const refuse = () => {
-        if (this.denial === undefined) return;
-        requireRun(typeof this.denial === "function");
-        const result = this.denial();
-        if (result !== undefined) {
-          this.fence();
-          drain(result);
+        this.assertAlive();
+        if (this.denial !== undefined) {
+          requireRun(typeof this.denial === "function");
+          const result = this.denial();
+          if (result !== undefined) {
+            this.fence();
+            drain(result);
+          }
+          requireRun(result === undefined);
         }
-        requireRun(result === undefined && !this.#fenced && this.#checking);
+        this.assertAlive();
+        requireRun(this.#checking);
+      };
+      const observe = () => {
+        this.assertAlive();
+        const value: unknown = this.now();
+        if (typeof value !== "number") {
+          this.fence();
+          drain(value);
+        }
+        identifier(value);
+        this.assertAlive();
+        requireRun(this.#checking);
+        if (this.#started === 0) this.#started = value;
+        requireRun(value >= this.#last && value - this.#started < this.budget);
+        this.#last = value;
+        // A newly observed short wall end counts this entire hook cluster and remains
+        // sticky when subsequent clocks freeze. Neither final refusal nor later GET renews it.
+        this.#physicalEnd = Math.min(
+          this.#physicalEnd,
+          beforeHooks + this.budget - (value - this.#started),
+        );
+        this.assertAlive();
+        for (const bound of this.#bounds) bound.rearm?.();
+        return value;
       };
       refuse();
-      const value: unknown = this.now();
-      if (typeof value !== "number") {
-        this.fence();
-        drain(value);
-      }
-      identifier(value);
-      requireRun(
-        !this.#fenced && this.#checking && performance.now() - this.physical < this.budget,
-      );
+      observe();
       refuse();
-      if (this.#started === 0) this.#started = value;
-      requireRun(value >= this.#last && value - this.#started < this.budget);
-      this.#last = value;
-      return value;
+      return observe();
     } catch {
       this.fence();
       throw new Error("invalid-trust-run-evidence");
@@ -418,64 +482,128 @@ class Operation {
       if (owned) this.#checking = false;
     }
   }
-  remaining(): number {
-    const value = this.tick();
-    return Math.min(
-      this.budget - (value - this.#started),
-      this.budget - (performance.now() - this.physical),
+  available(): number {
+    this.assertAlive();
+    const physical = performance.now();
+    const result = Math.floor(
+      Math.min(
+        this.budget - (this.#last - this.#started),
+        this.#physicalEnd - physical,
+        ...[...this.#bounds].map((bound) => bound.end - physical),
+      ),
     );
+    requireRun(result > 0);
+    return result;
+  }
+  remaining(): number {
+    this.tick();
+    return this.available();
+  }
+  /** Native held reads share the same shrink-only end and are cancelled on permanent fence. */
+  watch(expire: () => void, limit: number): () => void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound: { end: number; rearm?: () => void; reject?: () => void } = {
+      end: performance.now() + Math.min(limit, this.available()),
+      reject: expire,
+    };
+    this.#bounds.add(bound);
+    const cancel = () => {
+      clearTimeout(timer);
+      this.#bounds.delete(bound);
+    };
+    const arm = () => {
+      bound.end = Math.min(bound.end, this.#physicalEnd);
+      clearTimeout(timer);
+      const left = bound.end - performance.now();
+      if (left <= 0) {
+        this.fence();
+        throw new Error("invalid-trust-run-evidence");
+      }
+      timer = setTimeout(() => this.fence(), left);
+    };
+    bound.rearm = arm;
+    try {
+      arm();
+      return cancel;
+    } catch {
+      cancel();
+      this.fence();
+      throw new Error("invalid-trust-run-evidence");
+    }
   }
   async within<T>(work: () => Promise<T>, limit = this.budget): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound: { end: number; rearm?: () => void; reject?: () => void } = { end: Infinity };
+    this.#bounds.add(bound);
     try {
-      const remaining = Math.min(limit, this.remaining());
-      requireRun(remaining > 0);
-      let end = performance.now() + remaining;
+      bound.end = performance.now() + Math.min(limit, this.remaining());
       let rejectDeadline: (reason: Error) => void = () => {};
-      const schedule = () => {
-        // Caller work may consume wall/physical time synchronously before returning its
-        // promise. Shorten the same timer; never restart or extend the original deadline.
-        end = Math.min(end, performance.now() + this.remaining());
-        clearTimeout(timer);
-        timer = setTimeout(
-          () => {
-            this.fence();
-            rejectDeadline(new Error("invalid-trust-run-evidence"));
-          },
-          Math.max(0, end - performance.now()),
-        );
-      };
       const timeout = new Promise<never>((_, reject) => {
         rejectDeadline = reject;
       });
-      schedule();
-      const result = await Promise.race([
-        Promise.resolve().then(() => {
-          this.tick();
-          const pending = work();
+      drain(timeout);
+      bound.reject = () => rejectDeadline(new Error("invalid-trust-run-evidence"));
+      const arm = () => {
+        bound.end = Math.min(bound.end, this.#physicalEnd);
+        clearTimeout(timer);
+        const left = bound.end - performance.now();
+        if (left <= 0) {
+          this.fence();
+          throw new Error("invalid-trust-run-evidence");
+        }
+        timer = setTimeout(() => this.fence(), left);
+      };
+      bound.rearm = arm;
+      arm();
+      const pending = new Promise<{ value: T }>((accept, reject) => {
+        queueMicrotask(() => {
+          let offered: unknown;
           try {
             this.tick();
-            schedule();
-          } catch (error) {
-            drain(pending);
-            throw error;
+            offered = this.#scope(work);
+            this.tick();
+            arm();
+            this.capture(() =>
+              Reflect.apply(nativeThen, offered, [
+                (value: T) => {
+                  try {
+                    this.tick();
+                    const box = Object.create(null) as { value: T };
+                    Object.defineProperty(box, "value", { value, enumerable: true });
+                    this.assertAlive();
+                    accept(Object.freeze(box));
+                  } catch {
+                    this.fence();
+                    reject(new Error("invalid-trust-run-evidence"));
+                  }
+                },
+                () => {
+                  this.fence();
+                  reject(new Error("invalid-trust-run-evidence"));
+                },
+              ]),
+            );
+          } catch {
+            this.fence();
+            drain(offered);
+            reject(new Error("invalid-trust-run-evidence"));
           }
-          return pending;
-        }),
-        timeout,
-      ]);
+        });
+      });
+      const box = await Promise.race([pending, timeout]);
       this.tick();
-      return result;
+      this.assertAlive();
+      return box.value;
     } catch {
       this.fence();
       throw new Error("invalid-trust-run-evidence");
     } finally {
       clearTimeout(timer);
+      this.#bounds.delete(bound);
     }
   }
 }
 
-/** Descriptor reads capture each dependency once, without executing an accessor. */
 function dependency(value: unknown, name: string, check: () => void): unknown {
   check();
   const d = Object.getOwnPropertyDescriptor(object(value), name);
@@ -634,6 +762,7 @@ async function readCore(
                   operation.tick();
                 },
                 operation.capture,
+                (expire, limit) => operation.watch(expire, limit),
               ),
         );
       }, input.timeout_ms);

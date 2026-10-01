@@ -1098,3 +1098,196 @@ describe("dedicated native v2 content/bootstrap persistence", () => {
     }
   });
 });
+
+describe("sticky original v2 storage deadlines", () => {
+  test("route and file hooks cannot renew an observed or simultaneous short cap", async () => {
+    for (const simultaneous of [true, false]) {
+      const f = fixture(),
+        s = native();
+      let reads = 0;
+      const block = () => {
+        const end = performance.now() + 60;
+        while (performance.now() < end) {
+          /* Hold the wall frozen and starve timers. */
+        }
+      };
+      s.route(() => {
+        if (f.clock.now === instant) {
+          f.clock.now += 59_980;
+          if (simultaneous) block();
+        }
+      });
+      s.read(() => {
+        reads++;
+        if (!simultaneous) block();
+      });
+      const producer = createTargetContentV2Producer(config(), {
+        createClient: s.createClient,
+        now: () => f.clock.now,
+      });
+      await expect(
+        producer.sealContent({ envelope: f.envelope, expires_at: instant + 86_400_000 }),
+      ).rejects.toThrow("invalid-target-storage-v2");
+      expect(reads).toBe(simultaneous ? 0 : 1);
+      expect(s.records.size).toBe(0);
+      const offers = s.calls.length;
+      await expect(
+        producer.sealContent({ envelope: f.envelope, expires_at: instant + 86_400_000 }),
+      ).rejects.toThrow("invalid-target-storage-v2");
+      expect(s.calls.length).toBe(offers);
+    }
+  });
+  test("a response observation shortens a held stream read's original timer", async () => {
+    const f = fixture(),
+      s = native();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    s.stream(
+      () =>
+        new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value;
+          },
+        }),
+    );
+    const producer = createTargetContentV2Producer(config(), {
+      createClient: s.createClient,
+      now: () => f.clock.now,
+    });
+    const physical = performance.now();
+    const pending = producer.sealContent({
+      envelope: f.envelope,
+      expires_at: instant + 86_400_000,
+    });
+    await Bun.sleep(2);
+    f.clock.now += 59_980;
+    controller.enqueue(new Uint8Array(32));
+    await expect(pending).rejects.toThrow("invalid-target-storage-v2");
+    expect(performance.now() - physical).toBeLessThan(300);
+    expect(s.calls).toHaveLength(1);
+    expect(s.records.size).toBe(0);
+  });
+  test("the idle publication and held bootstrap write share the original shortened end", async () => {
+    const f = fixture(),
+      s = native();
+    let writes = 0;
+    const producer = createTargetContentV2Producer(config(), {
+      createClient: s.createClient,
+      now: () => f.clock.now,
+    });
+    const publication = await producer.sealContent({
+      envelope: f.envelope,
+      expires_at: instant + 86_400_000,
+    });
+    const i = issuance(publication.receipt);
+    f.clock.now = instant + 3000;
+    s.write(async () => {
+      writes++;
+      f.clock.now = instant + 59_980;
+      await new Promise<void>(() => {});
+    });
+    const physical = performance.now();
+    await expect(
+      producer.sealBootstrap({
+        publication: publication.publication,
+        statement: i.statement,
+        jwt: i.jwt,
+      }),
+    ).rejects.toThrow("invalid-target-storage-v2");
+    expect(performance.now() - physical).toBeLessThan(300);
+    expect(writes).toBe(1);
+    const offered = s.calls.length;
+    await expect(
+      producer.sealBootstrap({
+        publication: publication.publication,
+        statement: i.statement,
+        jwt: i.jwt,
+      }),
+    ).rejects.toThrow("invalid-target-storage-v2");
+    expect(s.calls.length).toBe(offered);
+  });
+});
+
+test("native stream result getters cannot offer another read after simultaneous short expiry", async () => {
+  const f = fixture(),
+    s = native();
+  let reads = 0,
+    values = 0;
+  const producer = createTargetContentV2Producer(config(), {
+    now: () => f.clock.now,
+    createClient: (options) => {
+      const client = s.createClient(options);
+      return {
+        presign: client.presign.bind(client),
+        write: client.write.bind(client),
+        file: () => ({
+          stream: () => ({
+            getReader: () => ({
+              read: async () => {
+                reads++;
+                return {
+                  get done() {
+                    f.clock.now += 59_980;
+                    const end = performance.now() + 60;
+                    while (performance.now() < end) {
+                      /* Original scope already shortened. */
+                    }
+                    return false;
+                  },
+                  get value() {
+                    values++;
+                    return new Uint8Array(32);
+                  },
+                };
+              },
+              cancel: async () => {},
+              releaseLock: () => {},
+            }),
+          }),
+        }),
+      } as unknown as Bun.S3Client;
+    },
+  });
+  await expect(
+    producer.sealContent({ envelope: f.envelope, expires_at: instant + 86_400_000 }),
+  ).rejects.toThrow("invalid-target-storage-v2");
+  expect(reads).toBe(1);
+  expect(values).toBe(0);
+  expect(s.records.size).toBe(0);
+});
+
+test("native materialization assertion and within capture expected context under original proof", async () => {
+  for (const method of ["assert", "within"] as const) {
+    const f = await sealed(),
+      value = await f.consumer.consume(f.release);
+    let trapped = false,
+      offers = 0;
+    const expected = new Proxy(f.context, {
+      ownKeys(context) {
+        if (!trapped) {
+          trapped = true;
+          f.clock.now += 29_980;
+          const end = performance.now() + 60;
+          while (performance.now() < end) {
+            /* Original historical proof cannot renew after caller capture. */
+          }
+        }
+        return Reflect.ownKeys(context);
+      },
+    });
+    if (method === "assert")
+      expect(() => assertAuthenticatedTargetContentV2(value, expected)).toThrow(
+        "invalid-target-storage-v2",
+      );
+    else
+      await expect(
+        withinAuthenticatedTargetContentV2(value, expected, async () => {
+          offers++;
+        }),
+      ).rejects.toThrow("invalid-target-storage-v2");
+    expect(trapped).toBe(true);
+    expect(offers).toBe(0);
+    expect(() => assertAuthenticatedTargetContentV2(value, f.context)).toThrow(
+      "invalid-target-storage-v2",
+    );
+  }
+});

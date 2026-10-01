@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.35 shortened journal deadlines",
-  "objective": "Verify that original owner and consumer deadlines only shorten through clock observations, held waits and terminal read phases. Evidence and request counts stay unchanged; release activation remains fenced and the disposable guest remains stopped.",
+  "title": "Session: 2.36.36 original transport deadlines",
+  "objective": "Verify retained original SSH, enrollment, DNS and target-storage deadlines across synchronous hooks and held native waits. Preserve proof identities, request counts and accepted-command lifetime; release activation remains fenced and the disposable guest remains stopped.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Verify sticky original wall/physical and ticket limits, final trusted-time observations, held-wait timer shortening, saved-bound result checks and permanent refusal using invented responses; contact no host or provider.",
+    "Verify FIRST/final clocks, min-only original physical ends, synchronous-only hook anchors, held-wait timer shortening and conservative historical-read bounds with invented responses and harmless local fixtures; contact no real host or provider.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [

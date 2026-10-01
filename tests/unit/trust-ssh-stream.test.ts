@@ -850,3 +850,50 @@ describe("default streaming native offer and command epoch", () => {
     }
   });
 });
+
+describe("sticky streaming preparation caps", () => {
+  test("final refusal and a frozen observed short reader cap prevent native spawn", () => {
+    const config = configuration();
+    config.preparation_timeout_ms = 60_000;
+    isolatedStream(`
+      import {performance} from "node:perf_hooks";let elapsed=0;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+      const input=${JSON.stringify({ config, proof: proof() })};input.proof.expires_at=${instant}+120000;
+      for(const phase of ["final-denial","short-reader"]){
+        elapsed=0;let wall=${instant},calls=0,trust=0,next=0,offers=0;
+        const transport=createTrustedSshStream(input.config,{now:()=>wall,spawn:()=>{offers++;throw Error("unexpected-native-offer");},connectionTrust:async(_d,guard)=>{trust++;wall+=59980;guard();elapsed+=60;guard();next++;return input.proof;}});
+        let refused=false;try{await transport.run({command:["/bin/true"],input:null,stdout:new WritableStream(),stderr:new WritableStream()},()=>{if(phase==="final-denial"&&++calls===2)wall+=60000;});}catch(error){refused=error.message==="trusted-ssh-stream-failed";}
+        if(!refused||next||offers||trust!==(phase==="final-denial"?0:1))throw Error("late streaming preparation offered");
+      }
+    `);
+  });
+  test("default native argv capture cannot renew a simultaneous short wall and physical end", () => {
+    const config = configuration();
+    isolatedStream(`
+      import {spyOn} from "bun:test";import * as cp from "node:child_process";import {performance} from "node:perf_hooks";
+      let elapsed=0,wall=${instant},offers=0,captures=0,enabled=false;Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const patched=spyOn(cp,"spawn").mockImplementation(()=>{offers++;throw Error("unexpected-native-offer");});
+      const imported=await import("node:child_process");if(imported.spawn!==patched)throw Error("mock not installed");
+      const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+      const input=${JSON.stringify({ config, proof: proof() })};input.proof.expires_at=${instant}+120000;
+      const iterator=Array.prototype[Symbol.iterator];Array.prototype[Symbol.iterator]=function(){if(enabled&&this[0]==="-F"&&this.includes("StrictHostKeyChecking=yes")&&++captures===2){enabled=false;wall+=59980;elapsed+=60;}return iterator.call(this);};
+      const transport=createTrustedSshStream(input.config,{now:()=>wall,connectionTrust:async()=>{enabled=true;return input.proof;}});
+      let refused=false;try{await transport.run({command:["/bin/true"],input:null,stdout:new WritableStream(),stderr:new WritableStream()});}catch(error){refused=error.message==="trusted-ssh-stream-failed";}finally{Array.prototype[Symbol.iterator]=iterator;}
+      if(!refused||offers!==0||captures!==2)throw Error("late streaming native spawn offered");
+    `);
+  });
+});
+
+test("stream proof expiry reflection keeps its newly learned original cap anchored", () => {
+  const config = configuration();
+  isolatedStream(`
+    import {performance} from "node:perf_hooks";let elapsed=0,wall=${instant},offers=0,trapped=false;
+    Object.defineProperty(performance,"now",{value:()=>elapsed});
+    const {createTrustedSshStream}=await import(${JSON.stringify(streamModule)});
+    const input=${JSON.stringify({ config, proof: proof() })};
+    const proxy=new Proxy(input.proof,{getOwnPropertyDescriptor(value,key){if(key==="expires_at"&&!trapped){trapped=true;wall+=29980;elapsed+=60;}return Reflect.getOwnPropertyDescriptor(value,key);}});
+    const transport=createTrustedSshStream(input.config,{now:()=>wall,connectionTrust:async()=>proxy,spawn:()=>{offers++;throw Error("invented-stop");}});
+    let refused=false;try{await transport.run({command:["/bin/true"],input:null,stdout:new WritableStream(),stderr:new WritableStream()});}catch(error){refused=error.message==="trusted-ssh-stream-failed";}
+    if(!refused||offers!==0||!trapped)throw Error("late streaming reflection offered");
+  `);
+});

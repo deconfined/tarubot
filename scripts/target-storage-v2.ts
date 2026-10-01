@@ -104,10 +104,20 @@ export interface TargetContentV2Consumer extends Metadata {
 const maximum = 65_568;
 const budget = 60_000;
 const nativeBudget = 20_000;
+const historicalBudget = 30_000;
 const label = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const arrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const byteLength = Object.getOwnPropertyDescriptor(arrayPrototype, "byteLength")?.get;
 const nativeSet = Uint8Array.prototype.set;
+const nativeThen = Promise.prototype.then;
+/** Refused clock/native work promises are drained without reading an inherited then getter. */
+function drain(value: unknown): void {
+  try {
+    void Reflect.apply(nativeThen, value, [undefined, () => {}]);
+  } catch {
+    /* Non-native values still fail the fixed synchronous/native promise contract. */
+  }
+}
 function valid(value: unknown): asserts value {
   if (!value) throw new Error("invalid-target-storage-v2");
 }
@@ -187,41 +197,70 @@ class Operation {
   #checking = false;
   #authority: (() => void) | undefined;
   #authorityWait: (<T>(work: () => Promise<T>) => Promise<T>) | undefined;
+  #bounds = new Set<{ end: number; rearm?: () => void; reject?: () => void }>();
+  #anchors: number[] = [];
   constructor(now: () => number) {
     const physical = performance.now();
     this.#originPhysical = physical;
     this.#now = now;
-    const wall = now();
+    const wall: unknown = now();
+    if (typeof wall !== "number") {
+      this.stop();
+      drain(wall);
+    }
     integer(wall);
     this.#originWall = wall;
     this.#last = wall;
     this.#wall = wall + budget;
     this.#physical = physical + budget;
-    this.clock();
+    this.clock(physical);
   }
-  clock(): number {
+  #live(): void {
+    const physical = performance.now();
+    valid(this.#active && physical < this.#physical);
+    for (const bound of this.#bounds) valid(physical < bound.end);
+  }
+  clock(anchor = performance.now()): number {
+    const beforeHooks = Math.min(anchor, performance.now(), ...this.#anchors);
+    let owned = false;
     try {
-      valid(this.#active && !this.#checking);
+      this.#live();
+      valid(!this.#checking);
       this.#checking = true;
-      const now = this.#now();
+      owned = true;
+      const now: unknown = this.#now();
+      if (typeof now !== "number") {
+        this.stop();
+        drain(now);
+      }
       integer(now);
-      valid(
-        this.#active && now >= this.#last && now < this.#wall && performance.now() < this.#physical,
-      );
+      this.#live();
+      valid(this.#checking && now >= this.#last && now < this.#wall);
       this.#last = now;
+      // Every observed short remainder is projected from BEFORE the caller hook and
+      // remains sticky during later frozen-wall route/KDF/stream/body work.
+      this.#physical = Math.min(this.#physical, beforeHooks + this.#wall - now);
+      this.#live();
+      for (const bound of this.#bounds) bound.rearm?.();
       return now;
     } catch {
       this.stop();
       throw new Error("invalid-target-storage-v2");
     } finally {
-      this.#checking = false;
+      if (owned) this.#checking = false;
     }
   }
-  guard(): void {
+  guard(anchor = performance.now()): void {
+    const beforeHooks = Math.min(anchor, performance.now(), ...this.#anchors);
+    valid(Number.isFinite(beforeHooks) && beforeHooks >= 0);
     try {
-      this.clock();
+      this.clock(beforeHooks);
+      this.#live();
       this.#authority?.();
-      this.clock();
+      this.#live();
+      // Dependent authority can only refuse. The final trusted TIME observation counts its
+      // cost, with no recursive authority assertion or new clock epoch after this sample.
+      this.clock(beforeHooks);
     } catch {
       this.stop();
       throw new Error("invalid-target-storage-v2");
@@ -238,7 +277,6 @@ class Operation {
     const now = this.clock();
     valid(until > now);
     this.#wall = Math.min(this.#wall, until);
-    // A later restriction cannot renew physical time already spent while wall time was frozen.
     this.#physical = Math.min(
       this.#physical,
       this.#originPhysical + (until - this.#originWall),
@@ -246,41 +284,157 @@ class Operation {
     );
     this.guard();
   }
-  remaining(): number {
-    this.guard();
-    const n = Math.min(this.#wall - this.#last, this.#physical - performance.now());
+  available(): number {
+    this.#live();
+    const physical = performance.now();
+    const n = Math.floor(
+      Math.min(
+        this.#wall - this.#last,
+        this.#physical - physical,
+        ...[...this.#bounds].map((bound) => bound.end - physical),
+      ),
+    );
     valid(n > 0);
     return n;
   }
+  remaining(): number {
+    this.guard();
+    return this.available();
+  }
   stop(): void {
+    if (!this.#active) return;
     this.#active = false;
+    for (const bound of this.#bounds) {
+      try {
+        bound.reject?.();
+      } catch {
+        /* A failed accepted-I/O cleanup cannot spare another original held scope. */
+      }
+    }
+  }
+  capture<T>(work: () => T): T {
+    const before = performance.now();
+    this.#anchors.push(before);
+    let value: T | undefined;
+    try {
+      this.#live();
+      value = work();
+      this.guard(before);
+      return value;
+    } catch (error) {
+      drain(value);
+      throw error;
+    } finally {
+      this.#anchors.pop();
+    }
+  }
+  /** The idle publication watchdog belongs to this original operation, never a later mint. */
+  watch(expire: () => void): () => void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound: { end: number; rearm?: () => void; reject?: () => void } = { end: Infinity };
+    this.#bounds.add(bound);
+    const cancel = () => {
+      clearTimeout(timer);
+      this.#bounds.delete(bound);
+    };
+    try {
+      this.guard();
+      bound.end = this.#physical;
+      bound.reject = expire;
+      bound.rearm = () => {
+        bound.end = Math.min(bound.end, this.#physical);
+        clearTimeout(timer);
+        const left = bound.end - performance.now();
+        if (left <= 0) {
+          this.stop();
+          throw new Error("invalid-target-storage-v2");
+        }
+        timer = setTimeout(() => this.stop(), left);
+        timer.unref();
+      };
+      bound.rearm();
+      return cancel;
+    } catch {
+      cancel();
+      this.stop();
+      throw new Error("invalid-target-storage-v2");
+    }
   }
   async wait<T>(work: () => Promise<T>, limit = nativeBudget): Promise<T> {
-    const remaining = Math.min(limit, this.remaining());
-    valid(remaining > 0);
-    const physical = performance.now() + remaining;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound: { end: number; rearm?: () => void; reject?: () => void } = { end: Infinity };
+    this.#bounds.add(bound);
     try {
-      const result = await Promise.race([
-        Promise.resolve().then(() => {
-          this.guard();
-          return this.#authorityWait ? this.#authorityWait(work) : work();
-        }),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
+      bound.end = performance.now() + Math.min(limit, this.remaining());
+      let expire: (reason: Error) => void = () => {};
+      const timeout = new Promise<never>((_, reject) => {
+        expire = reject;
+      });
+      drain(timeout);
+      bound.reject = () => expire(new Error("invalid-target-storage-v2"));
+      const arm = () => {
+        bound.end = Math.min(bound.end, this.#physical);
+        clearTimeout(timer);
+        const left = bound.end - performance.now();
+        if (left <= 0) {
+          this.stop();
+          throw new Error("invalid-target-storage-v2");
+        }
+        timer = setTimeout(() => this.stop(), left);
+      };
+      bound.rearm = arm;
+      arm();
+      const pending = new Promise<{ value: T }>((accept, reject) => {
+        queueMicrotask(() => {
+          let offered: unknown;
+          try {
+            this.guard();
+            const ownedWork = () => this.capture(work);
+            offered = this.#authorityWait ? this.#authorityWait(ownedWork) : ownedWork();
+            this.guard();
+            arm();
+            Reflect.apply(nativeThen, offered, [
+              (value: T) => {
+                try {
+                  this.guard();
+                  const box = Object.create(null) as { value: T };
+                  Object.defineProperty(box, "value", { value, enumerable: true });
+                  this.#live();
+                  accept(Object.freeze(box));
+                } catch {
+                  this.stop();
+                  reject(new Error("invalid-target-storage-v2"));
+                }
+              },
+              (error: unknown) => {
+                try {
+                  this.guard();
+                  reject(error);
+                } catch {
+                  this.stop();
+                  reject(new Error("invalid-target-storage-v2"));
+                }
+              },
+            ]);
+          } catch {
             this.stop();
+            drain(offered);
             reject(new Error("invalid-target-storage-v2"));
-          }, remaining);
-        }),
-      ]);
+          }
+        });
+      });
+      const box = await Promise.race([pending, timeout]);
       this.guard();
-      valid(performance.now() < physical);
-      return result;
+      this.#live();
+      return box.value;
     } catch (error) {
+      // Complete NoSuchKey before any bytes remains a guarded absence, not an abandoned
+      // read. The owning producer/consumer fences every other failed effect at its boundary.
       this.guard();
       throw error;
     } finally {
       clearTimeout(timer);
+      this.#bounds.delete(bound);
     }
   }
 }
@@ -445,25 +599,34 @@ class NativeStore implements Metadata {
     try {
       const key = this.#key(path);
       op.guard();
+      const beforeRoute = performance.now();
       this.#route(key);
       // All routing work precedes the LAST guard immediately before the actual SDK offer.
-      op.guard();
+      op.guard(beforeRoute);
+      const beforeFile = performance.now();
       const file = this.#file(key, { retry: 0 });
-      op.guard();
+      op.guard(beforeFile);
+      const beforeStream = performance.now();
       const streamMethod = file.stream;
       valid(typeof streamMethod === "function");
       const openStream = streamMethod.bind(file);
-      op.guard();
+      op.guard(beforeStream);
+      const beforeOpen = performance.now();
       const stream = openStream();
-      op.guard();
+      op.guard(beforeOpen);
+      const beforeReader = performance.now();
       const readerMethod = stream.getReader;
       valid(typeof readerMethod === "function");
       const openReader = readerMethod.bind(stream);
-      op.guard();
+      op.guard(beforeReader);
+      const beforeOpenReader = performance.now();
       const reader = openReader();
+      op.guard(beforeOpenReader);
+      const beforeMethods = performance.now();
       const read = reader.read.bind(reader),
         cancel = reader.cancel.bind(reader),
         release = reader.releaseLock.bind(reader);
+      op.guard(beforeMethods);
       const chunks: Uint8Array[] = [];
       let size = 0;
       const nativeDeadline = performance.now() + nativeBudget;
@@ -473,8 +636,14 @@ class NativeStore implements Metadata {
             op.guard();
             return read();
           }, nativeDeadline - performance.now());
-          if (chunk.done) break;
-          const copy = bytes(chunk.value, 0, maximum - size);
+          const done = op.capture(() => chunk.done);
+          valid(typeof done === "boolean");
+          if (done) break;
+          const copy = op.capture(() => {
+            const value = chunk.value;
+            valid(value instanceof Uint8Array);
+            return bytes(value, 0, maximum - size);
+          });
           observed ||= copy.length > 0;
           size += copy.length;
           chunks.push(copy);
@@ -482,18 +651,21 @@ class NativeStore implements Metadata {
         }
       } catch (error) {
         try {
-          void cancel().catch(() => {});
+          drain(cancel());
         } catch {
           /* Keep the original denial. */
         }
         throw error;
       } finally {
         try {
-          release();
+          const beforeRelease = performance.now();
+          drain(release());
+          op.guard(beforeRelease);
         } catch {
           op.stop();
         }
       }
+      op.guard();
       valid(size >= 32);
       const result = new Uint8Array(size);
       let offset = 0;
@@ -501,14 +673,20 @@ class NativeStore implements Metadata {
         nativeSet.call(result, chunk, offset);
         offset += chunk.length;
       }
-      this.#route(key);
       op.guard();
+      const beforeReopenRoute = performance.now();
+      this.#route(key);
+      op.guard(beforeReopenRoute);
       return result;
     } catch (error) {
-      if (!observed && error instanceof Error && "code" in error && error.code === "NoSuchKey") {
+      const absent = op.capture(
+        () => !observed && error instanceof Error && "code" in error && error.code === "NoSuchKey",
+      );
+      if (absent) {
         const key = this.#key(path);
+        const beforeRoute = performance.now();
         this.#route(key);
-        op.guard();
+        op.guard(beforeRoute);
         return null;
       }
       throw new Error("invalid-target-storage-v2");
@@ -519,7 +697,9 @@ class NativeStore implements Metadata {
     const key = this.#key(path),
       copy = bytes(value);
     op.guard();
+    const beforeRoute = performance.now();
     this.#route(key);
+    op.guard(beforeRoute);
     const write = this.#write;
     await op.wait(() => {
       op.guard();
@@ -579,7 +759,7 @@ interface Publication {
   codec: Codec;
   receipt: ContentReceiptV2;
   phase: "prepared" | "sealing" | "done";
-  timer: ReturnType<typeof setTimeout>;
+  cancelDeadline: () => void;
 }
 const publications = new WeakMap<TargetContentV2Publication, Publication>();
 class Producer implements TargetContentV2Producer {
@@ -613,7 +793,7 @@ class Producer implements TargetContentV2Producer {
       owns = true;
       op = new Operation(this.#c.now);
       op.bindAuthority(() => valid(!this.#fenced));
-      const r = exact(captureTargetIssuance(request), ["envelope", "expires_at"]),
+      const r = op.capture(() => exact(captureTargetIssuance(request), ["envelope", "expires_at"])),
         envelope = r.envelope as AppliedTargetEnvelope;
       const issued = op.clock(),
         release = releaseIdentity(envelope?.release),
@@ -659,14 +839,16 @@ class Producer implements TargetContentV2Producer {
       );
       await persist(this.#c.store, path, ciphertext, op);
       op.guard();
-      const publication = Object.freeze({}) as TargetContentV2Publication,
-        savedOp = op;
-      const timer = setTimeout(() => {
-        savedOp.stop();
-        this.#deny();
-      }, op.remaining());
-      timer.unref();
-      publications.set(publication, { owner: this, op, codec, receipt, phase: "prepared", timer });
+      const publication = Object.freeze({}) as TargetContentV2Publication;
+      const cancelDeadline = op.watch(() => this.#deny());
+      publications.set(publication, {
+        owner: this,
+        op,
+        codec,
+        receipt,
+        phase: "prepared",
+        cancelDeadline,
+      });
       return Object.freeze({ receipt, publication });
     } catch {
       if (owns) {
@@ -690,6 +872,7 @@ class Producer implements TargetContentV2Producer {
       owns = true;
       // Capture the opaque identity separately; ordinary JSON snapshots deliberately cannot copy it.
       valid(request !== null && typeof request === "object");
+      const beforeDescriptors = performance.now();
       const descriptors = Object.getOwnPropertyDescriptors(request);
       valid(!this.#fenced && this.#transition);
       valid(
@@ -702,16 +885,18 @@ class Producer implements TargetContentV2Producer {
       state = publications.get(descriptors.publication?.value as TargetContentV2Publication);
       valid(state && state.owner === this && state.phase === "prepared");
       state.phase = "sealing";
-      state.op.guard();
+      state.op.guard(beforeDescriptors);
       const c = context(this.#c, state.receipt.release),
-        bootstrap = targetBootstrapV2(
-          {
-            schema: 2,
-            purpose: "tarubot-applied-target-bootstrap-v2",
-            statement: descriptors.statement?.value,
-            jwt: descriptors.jwt?.value,
-          },
-          c,
+        bootstrap = state.op.capture(() =>
+          targetBootstrapV2(
+            {
+              schema: 2,
+              purpose: "tarubot-applied-target-bootstrap-v2",
+              statement: descriptors.statement?.value,
+              jwt: descriptors.jwt?.value,
+            },
+            c,
+          ),
         );
       valid(isDeepStrictEqual(bootstrap.statement.content_receipt, state.receipt));
       valid(
@@ -725,12 +910,12 @@ class Producer implements TargetContentV2Producer {
       await persist(this.#c.store, path, ciphertext, state.op);
       state.op.guard();
       state.phase = "done";
-      clearTimeout(state.timer);
+      state.cancelDeadline();
       state.op.stop();
       this.#busy = false;
     } catch {
       if (state) {
-        clearTimeout(state.timer);
+        state.cancelDeadline();
         state.op.stop();
       }
       this.#deny();
@@ -749,32 +934,42 @@ interface ResultState {
 }
 const results = new WeakMap<AuthenticatedTargetContentV2, ResultState>();
 /** Only the original native result may reach a later bridge; serialized/copied inspection fails. */
-export function assertAuthenticatedTargetContentV2(
+function authenticatedContext(
   value: unknown,
   expected: TargetIssuanceContext,
-): asserts value is AuthenticatedTargetContentV2 {
+): { state: ResultState; captured: TargetIssuanceContext } {
   let state: ResultState | undefined,
     owns = false;
   try {
     valid(value !== null && typeof value === "object");
     state = results.get(value as AuthenticatedTargetContentV2);
-    valid(state);
-    valid(!state.checking);
+    valid(state && !state.checking);
     state.checking = true;
     owns = true;
-    valid(isDeepStrictEqual(captureTargetIssuance(expected), state.expected));
+    const saved = state;
+    const captured = state.op.capture(() =>
+      captureTargetIssuance(expected),
+    ) as TargetIssuanceContext;
+    valid(isDeepStrictEqual(captured, state.expected));
     state.op.guard();
-    assertHistoricalTargetIssuanceProof(state.proof, {
-      statement: state.statement,
-      context: state.expected,
+    assertHistoricalTargetIssuanceProof(saved.proof, {
+      statement: saved.statement,
+      context: saved.expected,
     });
     state.op.guard();
+    return { state, captured };
   } catch {
     state?.op.stop();
     throw new Error("invalid-target-storage-v2");
   } finally {
     if (state && owns) state.checking = false;
   }
+}
+export function assertAuthenticatedTargetContentV2(
+  value: unknown,
+  expected: TargetIssuanceContext,
+): asserts value is AuthenticatedTargetContentV2 {
+  authenticatedContext(value, expected);
 }
 /** Delivery/work is bounded by the SAME original operation and proof; no refresh or new proof. */
 export async function withinAuthenticatedTargetContentV2<T>(
@@ -783,10 +978,7 @@ export async function withinAuthenticatedTargetContentV2<T>(
   work: () => Promise<T>,
 ): Promise<T> {
   try {
-    const captured = captureTargetIssuance(expected) as TargetIssuanceContext;
-    assertAuthenticatedTargetContentV2(value, captured);
-    const state = results.get(value);
-    valid(state);
+    const { state, captured } = authenticatedContext(value, expected);
     const result = await state.op.wait(() => {
       assertAuthenticatedTargetContentV2(value, captured);
       return work();
@@ -820,7 +1012,7 @@ class Consumer implements TargetContentV2Consumer {
     try {
       op = new Operation(this.#c.now);
       const operation = op,
-        release = releaseIdentity(captureTargetIssuance(value)),
+        release = op.capture(() => releaseIdentity(captureTargetIssuance(value))),
         c = context(this.#c, release),
         codec = new Codec(this.#c.config, this.binding, op),
         path = targetBootstrapV2Path(this.target, release);
@@ -834,6 +1026,10 @@ class Consumer implements TargetContentV2Consumer {
         op.clock() >= bootstrap.statement.issued_at && op.clock() < bootstrap.statement.valid_until,
       );
       op.restrict(bootstrap.statement.valid_until);
+      // The native historical verifier has its own fixed thirty-second observation age.
+      // Restrict this SAME earlier operation before invoking it: bootstrap/KDF/capture work
+      // is conservatively counted, and its supplied pure clock cannot renew a short proof.
+      op.restrict(op.clock() + historicalBudget);
       const verifier = new HistoricalTargetIssuanceVerifier(this.#issuance, {
         ...(this.#get === undefined ? {} : { get: this.#get }),
         now: () => operation.clock(),

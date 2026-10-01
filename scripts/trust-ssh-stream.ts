@@ -132,6 +132,7 @@ export type TrustStreamSpawner = (
   beforeSpawn?: () => void,
 ) => ChildProcessWithoutNullStreams;
 const nativeSpawn: TrustStreamSpawner = (request, beforeSpawn) => {
+  const beforeCapture = performance.now();
   const executable = request.executable,
     args = [...request.args],
     directory = request.directory;
@@ -141,7 +142,7 @@ const nativeSpawn: TrustStreamSpawner = (request, beforeSpawn) => {
     stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
   };
   const offer = spawn;
-  beforeSpawn?.();
+  if (beforeSpawn) Reflect.apply(beforeSpawn, undefined, [beforeCapture]);
   return offer(executable, args, options);
 };
 
@@ -412,6 +413,7 @@ class Transport implements TrustedSshStream {
     let started = 0,
       previous = 0,
       expiry = Number.POSITIVE_INFINITY;
+    let physicalEnd = physical + (this.#configuration.preparation_timeout_ms ?? 60_000);
     const channels: Partial<Channels> = {};
     let outcome: TrustedSshStreamResult | undefined;
     const config = this.#configuration;
@@ -419,9 +421,9 @@ class Transport implements TrustedSshStream {
     const active = () => valid(owns && this.#busy && !this.#fenced);
     const initial = () => {
       active();
-      valid(phase === "preparing" && performance.now() - physical < budget);
+      valid(phase === "preparing" && performance.now() < physicalEnd);
     };
-    const preparation = () => {
+    const preparation = (anchor = performance.now()) => {
       // Obsolete preparation callbacks refuse without cancelling an already accepted command.
       valid(phase === "preparing");
       let reserved = false;
@@ -430,37 +432,49 @@ class Transport implements TrustedSshStream {
         valid(!checking);
         checking = true;
         reserved = true;
+        const beforeHooks = Math.min(anchor, performance.now());
+        valid(Number.isFinite(beforeHooks) && beforeHooks >= 0);
         const refuse = () => {
-          if (denial === undefined) return;
-          valid(typeof denial === "function");
-          const result = denial();
-          if (result !== undefined) {
-            this.#fenced = true;
-            drain(result);
+          initial();
+          if (denial !== undefined) {
+            valid(typeof denial === "function");
+            const result = denial();
+            if (result !== undefined) {
+              this.#fenced = true;
+              drain(result);
+            }
+            valid(result === undefined);
           }
-          valid(result === undefined);
-          active();
+          initial();
           valid(checking);
         };
+        const observe = () => {
+          initial();
+          const raw: unknown = this.#now();
+          if (typeof raw !== "number") {
+            this.#fenced = true;
+            drain(raw);
+          }
+          valid(typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0);
+          initial();
+          valid(checking);
+          if (started === 0) started = raw;
+          valid(raw >= previous && raw - started < budget && raw < expiry);
+          previous = raw;
+          // Carry the pre-refusal instant through BOTH samples; a later frozen clock never
+          // renews a short wall/proof remainder observed before channel/native captures.
+          physicalEnd = Math.min(
+            physicalEnd,
+            beforeHooks + budget - (raw - started),
+            beforeHooks + expiry - raw,
+            physical + expiry - started,
+          );
+          initial();
+        };
         refuse();
-        const raw: unknown = this.#now();
-        if (typeof raw !== "number") {
-          this.#fenced = true;
-          drain(raw);
-        }
-        valid(typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0);
-        initial();
+        observe();
         refuse();
-        active();
-        valid(checking);
-        if (started === 0) started = raw;
-        valid(
-          raw >= previous &&
-            raw - started < budget &&
-            raw < expiry &&
-            performance.now() - physical < expiry - started,
-        );
-        previous = raw;
+        observe();
       } catch {
         this.#fenced = true;
         this.#stopActive?.();
@@ -521,11 +535,11 @@ class Transport implements TrustedSshStream {
           preparation();
           const proof = await this.#trust(descriptor, originalDenial);
           preparation();
+          const beforeExpiry = performance.now();
           const expires = Object.getOwnPropertyDescriptor(proof, "expires_at");
-          preparation();
           valid(expires && Object.hasOwn(expires, "value") && Number.isSafeInteger(expires.value));
           expiry = Math.min(expiry, expires.value as number);
-          preparation();
+          preparation(beforeExpiry);
           return proof;
         },
         {

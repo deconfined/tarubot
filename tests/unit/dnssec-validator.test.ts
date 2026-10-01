@@ -818,3 +818,71 @@ describe("original measured DNS preparation and refusal", () => {
     );
   });
 });
+
+describe("sticky measured DNS deadline projections", () => {
+  test("final refusal cannot leave a stale total wall observation", () => {
+    isolatedValidation(
+      `
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});let calls=0,offers=0;
+      const validator=new LocalDnssecValidator(options,()=>{offers++;return response;});
+      let refused=false;try{await validator.validate(target,sshfp,()=>{if(++calls===2)wall+=60000;});}catch(error){refused=error.message==="invalid-local-dnssec";}
+      if(!refused||offers!==0)throw Error("last refusal offered DNS");
+    `,
+      fixture(),
+    );
+  });
+  test("each observed total cap and synchronous metadata cost remains physical", () => {
+    isolatedValidation(
+      `
+      import {spyOn} from "bun:test";import * as fs from "node:fs";
+      const actual=fs.lstatSync;let metadata=0,offers=0;
+      const patched=spyOn(fs,"lstatSync").mockImplementation((...args)=>{metadata++;const result=actual(...args);if(metadata===1){wall+=59980;elapsed+=60;}return result;});
+      const imported=await import("node:fs");if(imported.lstatSync!==patched)throw Error("mock not installed");
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      let refused=false;try{await new LocalDnssecValidator(options,()=>{offers++;return response;}).validate(target,sshfp);}catch(error){refused=error.message==="invalid-local-dnssec";}
+      if(!refused||offers!==0||metadata!==1)throw Error("late next metadata/resolver offer");
+    `,
+      fixture(),
+    );
+  });
+  test("native method capture counts query/caller short caps before spawn", () => {
+    isolatedValidation(
+      `
+      import {spyOn} from "bun:test";let offers=0,phase;
+      const patched=spyOn(Bun,"spawnSync").mockImplementation(()=>{offers++;return response;});
+      Object.defineProperty(patched,"bind",{get(){wall+=21980;elapsed+=60;return Function.prototype.bind;}});
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      for(phase of ["query","caller"]){
+        elapsed=0;wall=${now};offers=0;
+        let refused=false;try{await new LocalDnssecValidator(options).validate(target,sshfp,undefined,phase==="caller"?()=>22000:undefined);}catch(error){refused=error.message==="invalid-local-dnssec";}
+        if(!refused||offers!==0)throw Error("late native resolver offered");
+      }
+    `,
+      fixture(),
+    );
+  });
+  test("first short clock cannot invoke another refusal or remaining callback after expiry", () => {
+    isolatedValidation(
+      `
+      const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});
+      let calls=0,refusals=0,remaining=0,offers=0;
+      options.now=()=>{calls++;if(calls===3){wall+=59980;elapsed+=60;}return wall;};
+      let refused=false;try{await new LocalDnssecValidator(options,()=>{offers++;return response;}).validate(target,sshfp,()=>{refusals++;},()=>{remaining++;return 60000;});}catch(error){refused=error.message==="invalid-local-dnssec";}
+      if(!refused||offers!==0||calls!==3||refusals!==3||remaining!==1)throw Error("expired sample reached a later callback");
+    `,
+      fixture(),
+    );
+  });
+});
+
+test("returned native-shaped DNS result reflection cannot renew query expiry", () => {
+  isolatedValidation(
+    `
+    const {LocalDnssecValidator}=await import(${JSON.stringify(validatorModule)});let offers=0,traps=0;
+    const validator=new LocalDnssecValidator(options,()=>{offers++;return new Proxy(response,{ownKeys(value){traps++;wall+=21980;elapsed+=60;return Reflect.ownKeys(value);}});});
+    let refused=false;try{await validator.validate(target,sshfp);}catch(error){refused=error.message==="invalid-local-dnssec";}
+    if(!refused||offers!==1||traps!==1)throw Error("late DNS result delivered");
+  `,
+    fixture(),
+  );
+});

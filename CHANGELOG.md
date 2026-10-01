@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.35**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.36**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.36 — Retain original transport deadlines
+
+- Retain every shorter observed wall and physical deadline through SSH preparation, native enrollment reads, DNS validation and authenticated target storage. Synchronous callback work counts from before its hooks, and held native waits immediately inherit tighter bounds.
+- Restrict the same storage consumer operation before historical issuance verification to a retained 30-second read allowance before the verifier starts. Preserve the original overall and external limits, exact routes, bytes and proof identities without renewing the historical verifier.
+- Preserve DNS total/query limits, genuine native and legacy enrollment request counts, and accepted SSH commands' separate lifetime. These offline fixes add no host authority or workflow activation.
 
 ## 2.36.35 — Retain shortened journal deadlines
 

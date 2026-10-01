@@ -492,7 +492,7 @@ describe("pinned read-only trust workflow success", () => {
     });
     expect(proof.observed_at).toBe(instant + 59_500);
     expect(f.seen[0]?.timeout_ms).toBe(10_000);
-    expect(f.seen.slice(1).every((r) => r.timeout_ms === 500)).toBe(true);
+    expect(f.seen.slice(1).every((r) => r.timeout_ms > 0 && r.timeout_ms <= 500)).toBe(true);
 
     const late = fixture();
     await refusal(
@@ -1071,5 +1071,194 @@ describe("native trust HTTP offer barriers", () => {
         if(headerReads!==headersExpected)process.exit(4);
       `);
       }
+  });
+});
+
+/** All time/HTTP data below is invented; real native requests remain replaced before import. */
+describe("sticky original enrollment deadlines", () => {
+  test("a final refusal wall jump cannot offer the first legacy or native GET", async () => {
+    for (const native of [false, true]) {
+      const probe = nativeFixture();
+      let calls = 0,
+        firstOffer = 0;
+      const get: GitHubReader = async () => {
+        firstOffer = calls;
+        throw Error("invented-stop");
+      };
+      const denial = () => {
+        calls++;
+      };
+      if (native)
+        await expect(
+          createTrustEnrollmentRunVerifier(probe.configuration, { get, now: () => instant }).verify(
+            probe.nativeRequest,
+            denial,
+          ),
+        ).rejects.toThrow("invalid-trust-run-evidence");
+      else
+        await expect(
+          readTrustRun(probe.request, { owner_id: owner.id, get, now: () => instant }, denial),
+        ).rejects.toThrow("invalid-trust-run-evidence");
+      expect(firstOffer).toBeGreaterThan(0);
+      let wall = instant,
+        offers = 0;
+      calls = 0;
+      const refuse = () => {
+        if (++calls === firstOffer) wall += native ? 30_000 : 60_000;
+      };
+      const stopped: GitHubReader = async () => {
+        offers++;
+        throw Error("invented-stop");
+      };
+      if (native)
+        await expect(
+          createTrustEnrollmentRunVerifier(probe.configuration, {
+            get: stopped,
+            now: () => wall,
+          }).verify(probe.nativeRequest, refuse),
+        ).rejects.toThrow("invalid-trust-run-evidence");
+      else
+        await expect(
+          readTrustRun(
+            probe.request,
+            { owner_id: owner.id, get: stopped, now: () => wall },
+            refuse,
+          ),
+        ).rejects.toThrow("invalid-trust-run-evidence");
+      expect(offers).toBe(0);
+    }
+  });
+  test("an observed short bound remains physical and synchronous within work cannot renew it", async () => {
+    for (const simultaneous of [false, true]) {
+      const f = nativeFixture();
+      let wall = instant,
+        delivered = false;
+      const verifier = createTrustEnrollmentRunVerifier(f.configuration, {
+        get: f.get,
+        now: () => wall,
+      });
+      const proof = await verifier.verify(f.nativeRequest);
+      if (!simultaneous) {
+        wall += 29_980;
+        expect(verifier.remaining(proof, f.nativeRequest)).toBeLessThanOrEqual(20);
+      }
+      const block = () => {
+        const end = performance.now() + 60;
+        while (performance.now() < end) {
+          /* Starve native timers under a frozen wall. */
+        }
+      };
+      if (!simultaneous) block();
+      await expect(
+        verifier
+          .within(proof, f.nativeRequest, () => {
+            if (simultaneous) {
+              wall += 29_980;
+              block();
+            }
+            return Promise.resolve("invented-result");
+          })
+          .then(() => {
+            delivered = true;
+          }),
+      ).rejects.toThrow("invalid-trust-run-evidence");
+      expect(delivered).toBe(false);
+      expect(f.seen).toHaveLength(14);
+      expect(() => verifier.assert(proof, f.nativeRequest)).toThrow("invalid-trust-run-evidence");
+    }
+  });
+  test("a later proof callback rearms a held original wait instead of its old timeout", async () => {
+    const f = nativeFixture();
+    let wall = instant,
+      resume!: () => void;
+    const verifier = createTrustEnrollmentRunVerifier(f.configuration, {
+      get: f.get,
+      now: () => wall,
+    });
+    const proof = await verifier.verify(f.nativeRequest);
+    const held = new Promise<void>((accept) => {
+      resume = accept;
+    });
+    const physical = performance.now();
+    const pending = verifier.within(proof, f.nativeRequest, () => held);
+    await Bun.sleep(2);
+    wall += 29_980;
+    verifier.assert(proof, f.nativeRequest);
+    await expect(pending).rejects.toThrow("invalid-trust-run-evidence");
+    expect(performance.now() - physical).toBeLessThan(250);
+    resume();
+    await Bun.sleep(2);
+    expect(() => verifier.assert(proof, f.nativeRequest)).toThrow("invalid-trust-run-evidence");
+    expect(f.seen).toHaveLength(14);
+  });
+  test("native method capture cannot spend a newly short cap before actual end", () => {
+    const f = nativeFixture();
+    for (const simultaneous of [false, true])
+      isolated(`
+      import {spyOn} from "bun:test";import * as https from "node:https";
+      import {EventEmitter} from "node:events";import {performance} from "node:perf_hooks";
+      let elapsed=0,wall=${instant},offers=0,ends=0,destroys=0;
+      Object.defineProperty(performance,"now",{value:()=>elapsed});
+      const fake=spyOn(https,"request").mockImplementation(()=>{
+        offers++;const h=new EventEmitter();h.destroy=()=>{destroys++;};
+        Object.defineProperty(h,"on",{get(){wall+=29980;if(${simultaneous})elapsed+=60;return EventEmitter.prototype.on;}});
+        Object.defineProperty(h,"end",{get(){if(!${simultaneous})elapsed+=60;return ()=>{ends++;};}});return h;
+      });
+      const native=await import("node:https");if(native.request!==fake)throw Error("mock not installed");
+      const {createTrustEnrollmentRunVerifier}=await import(${JSON.stringify(trustModule)});
+      const input=${JSON.stringify({ configuration: f.configuration, request: f.nativeRequest })};
+      let refused=false;try{await createTrustEnrollmentRunVerifier(input.configuration,{now:()=>wall}).verify(input.request);}catch(error){refused=error.message==="invalid-trust-run-evidence";}
+      if(!refused||offers!==1||ends!==0||destroys===0)throw Error("late native end offered");
+    `);
+  });
+});
+
+describe("native held enrollment timer shrink", () => {
+  test("a response callback shrinks and cancels the actual held request", () => {
+    const f = nativeFixture();
+    isolated(`
+      import {spyOn} from "bun:test";import * as https from "node:https";import {EventEmitter} from "node:events";
+      let wall=${instant},offers=0,ends=0,destroys=0;
+      const patched=spyOn(https,"request").mockImplementation((_options,accept)=>{
+        offers++;const h=new EventEmitter();h.destroy=()=>{destroys++;};
+        h.end=()=>{ends++;queueMicrotask(()=>{wall+=29980;const response=new EventEmitter();response.destroy=()=>{destroys++;};accept(response);});};return h;
+      });
+      const imported=await import("node:https");if(imported.request!==patched)throw Error("mock not installed");
+      const {createTrustEnrollmentRunVerifier}=await import(${JSON.stringify(trustModule)});
+      const input=${JSON.stringify({ configuration: f.configuration, request: f.nativeRequest })};
+      const started=performance.now();let refused=false;
+      try{await createTrustEnrollmentRunVerifier(input.configuration,{now:()=>wall}).verify(input.request);}catch(error){refused=error.message==="invalid-trust-run-evidence";}
+      if(!refused||offers!==1||ends!==1||destroys===0||performance.now()-started>300)throw Error("held native deadline did not shrink");
+    `);
+  });
+  test("remaining samples trusted time after its final refusal", async () => {
+    const baseline = nativeFixture();
+    let refusals = 0,
+      active = false;
+    const original = createTrustEnrollmentRunVerifier(baseline.configuration, {
+      get: baseline.get,
+      now: () => instant,
+    });
+    const probe = await original.verify(baseline.nativeRequest, () => {
+      if (active) refusals++;
+    });
+    active = true;
+    original.remaining(probe, baseline.nativeRequest);
+    const finalRefusal = refusals;
+    expect(finalRefusal).toBeGreaterThan(0);
+    const f = nativeFixture();
+    let wall = instant,
+      enabled = false,
+      count = 0;
+    const verifier = createTrustEnrollmentRunVerifier(f.configuration, {
+      get: f.get,
+      now: () => wall,
+    });
+    const proof = await verifier.verify(f.nativeRequest, () => {
+      if (enabled && ++count === finalRefusal) wall += 10_000;
+    });
+    enabled = true;
+    expect(verifier.remaining(proof, f.nativeRequest)).toBeLessThanOrEqual(20_000);
+    expect(f.seen).toHaveLength(14);
   });
 });
