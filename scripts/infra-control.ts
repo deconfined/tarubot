@@ -9,6 +9,13 @@ import {
 } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
+  assertControlJournalOperationController,
+  assertControlJournalPublicEntry,
+  withinControlJournalOperation,
+  type ControlJournalOperation,
+  type ControlJournalOperationController,
+} from "./control-consumer.js";
+import {
   assertInfrastructureBaselineRunProof,
   withinInfrastructureBaselineRunProof,
   type InfrastructureBaselineRunRequest,
@@ -412,6 +419,7 @@ export class InfrastructureJournal {
   // Trusted dependency capabilities remain caller-owned; instance shadows cannot replace them.
   readonly #store: ControlStore;
   readonly #storeRead: ControlStore["read"];
+  readonly #operationController: ControlJournalOperationController | undefined;
   readonly #codec: RecordCodec;
   readonly #verify: VerifyInfrastructureBaselineRun | undefined;
   readonly #clock: () => number;
@@ -420,9 +428,16 @@ export class InfrastructureJournal {
   constructor(
     store: ControlStore,
     codec: RecordCodec,
-    dependencies: { verifyBaselineRun?: VerifyInfrastructureBaselineRun; now?: () => number } = {},
+    dependencies: {
+      verifyBaselineRun?: VerifyInfrastructureBaselineRun;
+      now?: () => number;
+      operationController?: ControlJournalOperationController;
+    } = {},
   ) {
     this.#store = store;
+    this.#operationController = dependencies.operationController;
+    if (this.#operationController)
+      assertControlJournalOperationController(this.#operationController, store);
     const read = store.read;
     requireRecord(typeof read === "function");
     this.#storeRead = read.bind(store);
@@ -434,29 +449,43 @@ export class InfrastructureJournal {
     requireRecord(typeof clock === "function");
     this.#clock = clock;
   }
-  async #read(path: string, denial?: () => void): Promise<unknown | null> {
-    const bytes = await this.#readBytes(path, null, denial);
+  #capture<T>(context: ControlJournalOperation | undefined, work: () => T): T {
+    return context ? context.capture(work) : work();
+  }
+  async #read(
+    context: ControlJournalOperation | undefined,
+    path: string,
+    denial?: () => void,
+  ): Promise<unknown | null> {
+    const bytes = await this.#readBytes(context, path, null, denial);
     return bytes === null ? null : this.#codec.open(path, encryptedBytes(bytes));
   }
-  #readFence(boundary: ExecutionBoundary | null, denial?: () => void): (() => void) | undefined {
-    if (boundary === null && denial === undefined) return undefined;
+  #readFence(
+    context: ControlJournalOperation | undefined,
+    boundary: ExecutionBoundary | null,
+    denial?: () => void,
+  ): (() => void) | undefined {
+    if (context === undefined && boundary === null && denial === undefined) return undefined;
     return () => {
+      context?.assert();
       requireRecord(denial?.() === undefined);
       if (boundary) assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
       // An execution assertion's clock can consume the shorter candidate preparation.
+      context?.assert();
       requireRecord(denial?.() === undefined);
     };
   }
   async #readBytes(
+    context: ControlJournalOperation | undefined,
     path: string,
     boundary: ExecutionBoundary | null = null,
     denial?: () => void,
   ): Promise<Uint8Array | null> {
-    const fence = this.#readFence(boundary, denial);
+    const fence = this.#readFence(context, boundary, denial);
     fence?.();
     const bytes = await this.#within(boundary, () => {
       fence?.();
-      return this.#storeRead(path, fence);
+      return context ? context.store.read(path, fence) : this.#storeRead(path, fence);
     });
     fence?.();
     return bytes;
@@ -470,6 +499,7 @@ export class InfrastructureJournal {
     });
   }
   async #persist(
+    context: ControlJournalOperation | undefined,
     path: string,
     value: unknown,
     historical = false,
@@ -478,9 +508,10 @@ export class InfrastructureJournal {
   ): Promise<void> {
     // Refusing an existing history key is a safety check, NOT atomic conditional creation.
     denial?.();
-    if (historical) requireRecord((await this.#readBytes(path, boundary, denial)) === null);
+    if (historical)
+      requireRecord((await this.#readBytes(context, path, boundary, denial)) === null);
     denial?.();
-    const bytes = this.#codec.seal(path, value);
+    const bytes = this.#capture(context, () => this.#codec.seal(path, value));
     denial?.();
     const beforeWrite =
       boundary === null && denial === undefined
@@ -489,17 +520,22 @@ export class InfrastructureJournal {
             denial?.();
             if (boundary) assertInfrastructureBaselineRunProof(boundary.proof, boundary.request);
           };
-    await this.#within(boundary, () => this.#store.write(path, bytes, beforeWrite));
+    await this.#within(boundary, () =>
+      (context?.store ?? this.#store).write(path, bytes, beforeWrite),
+    );
     denial?.();
-    const readback = await this.#readBytes(path, boundary, denial);
+    const readback = await this.#readBytes(context, path, boundary, denial);
     denial?.();
     requireRecord(
       readback !== null && Buffer.from(bytes).equals(Buffer.from(encryptedBytes(readback))),
     );
     denial?.();
   }
-  async #head(denial?: () => void): Promise<Head | null> {
-    const value = await this.#read("current", denial);
+  async #head(
+    context: ControlJournalOperation | undefined,
+    denial?: () => void,
+  ): Promise<Head | null> {
+    const value = await this.#read(context, "current", denial);
     if (value === null) return null;
     const h = exact(value, ["baseline", "pending"]);
     if (h.baseline !== null) generation(h.baseline);
@@ -511,6 +547,7 @@ export class InfrastructureJournal {
     validateIntent(value);
   }
   async #structural(
+    context: ControlJournalOperation | undefined,
     state: StateEvidence,
     boundary: ExecutionBoundary | null = null,
     denial?: () => void,
@@ -518,7 +555,7 @@ export class InfrastructureJournal {
     const records = new Map<string, Uint8Array>();
     const read = async (path: string) => {
       denial?.();
-      const value = await this.#readBytes(path, boundary, denial);
+      const value = await this.#readBytes(context, path, boundary, denial);
       denial?.();
       if (value === null) return null;
       const bytes = encryptedBytes(value);
@@ -560,8 +597,12 @@ export class InfrastructureJournal {
     };
   }
   /** Missing baseline is review-required; missing referenced history or any pending intent stops. */
-  async #inspection(state: StateEvidence, denial?: () => void) {
-    const first = await this.#structural(state, null, denial);
+  async #inspection(
+    context: ControlJournalOperation | undefined,
+    state: StateEvidence,
+    denial?: () => void,
+  ) {
+    const first = await this.#structural(context, state, null, denial);
     if (first.request === null)
       return { snapshot: first.snapshot, boundary: null, links: null, records: first.records };
     const verify = this.#verify;
@@ -574,7 +615,10 @@ export class InfrastructureJournal {
       proof = await Promise.race([
         Promise.resolve().then(() => {
           denial?.();
-          return verify(capturePrivate(first.request) as InfrastructureBaselineRunRequest, denial);
+          return verify(
+            capturePrivate(first.request) as InfrastructureBaselineRunRequest,
+            this.#readFence(context, null, denial),
+          );
         }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("invalid-control-record")), 60_000);
@@ -586,7 +630,7 @@ export class InfrastructureJournal {
     denial?.();
     assertInfrastructureBaselineRunProof(proof, first.request);
     const boundary = { proof, request: first.request };
-    const final = await this.#structural(state, boundary, denial);
+    const final = await this.#structural(context, state, boundary, denial);
     requireRecord(
       isDeepStrictEqual(first.snapshot, final.snapshot) &&
         isDeepStrictEqual(first.records, final.records),
@@ -601,9 +645,17 @@ export class InfrastructureJournal {
     };
   }
   async inspect(state: StateEvidence): Promise<Snapshot> {
-    state = capturePrivate(state) as StateEvidence;
+    return withinControlJournalOperation(this.#operationController, this.#store, (context) =>
+      this.#inspect(context, state),
+    );
+  }
+  async #inspect(
+    context: ControlJournalOperation | undefined,
+    state: StateEvidence,
+  ): Promise<Snapshot> {
+    state = this.#capture(context, () => capturePrivate(state)) as StateEvidence;
     validateState(state);
-    return (await this.#inspection(state)).snapshot;
+    return (await this.#inspection(context, state)).snapshot;
   }
   async begin(
     snapshot: Snapshot,
@@ -612,7 +664,21 @@ export class InfrastructureJournal {
     binding: string,
     kind: "apply" | "baseline",
   ): Promise<Ticket> {
-    const captured = capturePrivate({ snapshot, inputs, run, binding, kind }) as {
+    return withinControlJournalOperation(this.#operationController, this.#store, (context) =>
+      this.#begin(context, snapshot, inputs, run, binding, kind),
+    );
+  }
+  async #begin(
+    context: ControlJournalOperation | undefined,
+    snapshot: Snapshot,
+    inputs: ObjectValue,
+    run: RunIdentity,
+    binding: string,
+    kind: "apply" | "baseline",
+  ): Promise<Ticket> {
+    const captured = this.#capture(context, () =>
+      capturePrivate({ snapshot, inputs, run, binding, kind }),
+    ) as {
       snapshot: Snapshot;
       inputs: ObjectValue;
       run: RunIdentity;
@@ -624,7 +690,7 @@ export class InfrastructureJournal {
     digest(binding);
     object(inputs);
     validateState(snapshot.state);
-    const inspected = await this.#inspection(snapshot.state);
+    const inspected = await this.#inspection(context, snapshot.state);
     requireRecord(isDeepStrictEqual(inspected.snapshot, snapshot));
     requireRecord(
       kind === "baseline" ? snapshot.generation === null : snapshot.generation !== null,
@@ -639,9 +705,10 @@ export class InfrastructureJournal {
       before: snapshot.state,
     };
     this.#validateIntent(intent);
-    await this.#persist(`intents/${intent.generation}`, intent, true, inspected.boundary);
+    await this.#persist(context, `intents/${intent.generation}`, intent, true, inspected.boundary);
     // A crash after this reference is persisted requires owner reconciliation, even before Apply.
     await this.#persist(
+      context,
       "current",
       { baseline: snapshot.generation, pending: intent.generation },
       false,
@@ -664,18 +731,43 @@ export class InfrastructureJournal {
       ),
       phase: "writing",
     };
+    context?.onFailure(() => {
+      writer.phase = "fenced";
+    });
     this.#writers.set(ticket, writer);
     this.#generations.set(ticket.generation, writer);
-    return ticket;
+    return context ? context.retain(ticket) : ticket;
   }
   async finish(ticket: Ticket, state: StateEvidence): Promise<void> {
+    try {
+      return await withinControlJournalOperation(
+        this.#operationController,
+        this.#store,
+        (context) => this.#finishEntry(context, ticket, state),
+      );
+    } catch (error) {
+      // A first-clock refusal can precede private helper entry. It still consumes the exact
+      // native writer's transition, so a later deferred projection cannot resurrect it.
+      const writer = this.#writers.get(ticket);
+      if (writer) writer.phase = "fenced";
+      throw error;
+    }
+  }
+  async #finishEntry(
+    context: ControlJournalOperation | undefined,
+    ticket: Ticket,
+    state: StateEvidence,
+  ): Promise<void> {
     // A compatible serialized/manual finish grants no current-ticket projection. Matching
     // legacy attempts also fence pending data already prepared by this journal instance.
     const native = this.#writers.get(ticket);
     const nativePhase = native?.phase;
     if (native) native.phase = "fenced";
     requireRecord(nativePhase !== "projecting");
-    const captured = capturePrivate({ ticket, state }) as { ticket: Ticket; state: StateEvidence };
+    const captured = this.#capture(context, () => capturePrivate({ ticket, state })) as {
+      ticket: Ticket;
+      state: StateEvidence;
+    };
     ({ ticket, state } = captured);
     const writer = this.#generations.get(ticket.generation);
     if (writer) {
@@ -683,9 +775,10 @@ export class InfrastructureJournal {
       writer.phase = "fenced";
       requireRecord(phase !== "projecting");
     }
-    await this.#finish(ticket, state);
+    await this.#finish(context, ticket, state);
   }
   async #finish(
+    context: ControlJournalOperation | undefined,
     ticket: Ticket,
     state: StateEvidence,
     denial?: () => void,
@@ -695,12 +788,12 @@ export class InfrastructureJournal {
     generation(ticket.generation);
     digest(ticket.binding);
     validateState(state);
-    const intent = await this.#read(`intents/${ticket.generation}`, denial);
+    const intent = await this.#read(context, `intents/${ticket.generation}`, denial);
     this.#validateIntent(intent);
     requireRecord(intent.binding === ticket.binding);
     if (expectedIntent) requireRecord(isDeepStrictEqual(intent, expectedIntent));
     requireRecord(
-      isDeepStrictEqual(await this.#head(denial), {
+      isDeepStrictEqual(await this.#head(context, denial), {
         baseline: intent.previous,
         pending: intent.generation,
       }),
@@ -713,8 +806,9 @@ export class InfrastructureJournal {
         : state.serial > intent.before.serial,
     );
     const baseline: Baseline = { intent, state };
-    await this.#persist(`baselines/${intent.generation}`, baseline, true, null, denial);
+    await this.#persist(context, `baselines/${intent.generation}`, baseline, true, null, denial);
     await this.#persist(
+      context,
       "current",
       { baseline: intent.generation, pending: intent.generation },
       false,
@@ -722,6 +816,7 @@ export class InfrastructureJournal {
       denial,
     );
     await this.#persist(
+      context,
       `completed/${intent.generation}`,
       { generation: intent.generation, baseline: privateDigest(baseline) },
       true,
@@ -729,6 +824,7 @@ export class InfrastructureJournal {
       denial,
     );
     await this.#persist(
+      context,
       "current",
       { baseline: intent.generation, pending: null },
       false,
@@ -738,7 +834,7 @@ export class InfrastructureJournal {
     // Reopen all links, not merely the last write, before downstream use is permitted.
     // This current writer JOB has not finished yet. Structural reopen supplies no downstream
     // authority; subsequent ordinary inspect/begin independently require its final success.
-    const reopened = await this.#structural(state, null, denial);
+    const reopened = await this.#structural(context, state, null, denial);
     requireRecord(reopened.snapshot.generation === ticket.generation);
     denial?.();
     return reopened;
@@ -750,12 +846,17 @@ export class InfrastructureJournal {
     producer: AppliedTargetProducer;
     expires_at?: number;
   }): TargetCandidatePreparation {
+    assertControlJournalPublicEntry(this.#operationController, this.#store);
     return prepareTargetCandidates(input, { now: this.#clock });
   }
-  async #reopenPredecessor(writer: CurrentWriter, denial: () => void): Promise<void> {
+  async #reopenPredecessor(
+    context: ControlJournalOperation | undefined,
+    writer: CurrentWriter,
+    denial: () => void,
+  ): Promise<void> {
     for (const [path, expected] of writer.predecessorBytes) {
       denial();
-      const value = await this.#readBytes(path, null, denial);
+      const value = await this.#readBytes(context, path, null, denial);
       denial();
       requireRecord(Buffer.from(encryptedBytes(value)).equals(Buffer.from(expected)));
       denial();
@@ -763,12 +864,13 @@ export class InfrastructureJournal {
     denial();
   }
   async #reopenProjection(
+    context: ControlJournalOperation | undefined,
     state: StateEvidence,
     records: Map<string, Uint8Array>,
     boundary: ExecutionBoundary | null,
     denial: () => void,
   ): Promise<void> {
-    const reopened = await this.#structural(state, boundary, denial);
+    const reopened = await this.#structural(context, state, boundary, denial);
     requireRecord(isDeepStrictEqual(reopened.records, records));
     denial();
   }
@@ -850,6 +952,20 @@ export class InfrastructureJournal {
     preparation: TargetCandidatePreparation,
     value: TargetProjectionEvidence & { expected_snapshot: Snapshot },
   ): Promise<readonly PendingTargetCandidate[]> {
+    try {
+      assertControlJournalPublicEntry(this.#operationController, this.#store);
+    } catch {
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
+    // Deferred native baseline proofs retain their original24 refusal, never a closed whole-method cap.
+    return this.#inspectTargetCandidates(undefined, preparation, value);
+  }
+  async #inspectTargetCandidates(
+    context: ControlJournalOperation | undefined,
+    preparation: TargetCandidatePreparation,
+    value: TargetProjectionEvidence & { expected_snapshot: Snapshot },
+  ): Promise<readonly PendingTargetCandidate[]> {
     let stopped = false;
     try {
       const data = reserveTargetCandidatePreparation(preparation);
@@ -858,13 +974,10 @@ export class InfrastructureJournal {
         assertTargetCandidatePreparation(preparation);
         checkWriter();
       };
-      const captured = exact(capturePrivate(value), [
-        "expected_snapshot",
-        "plan",
-        "applied_show",
-        "state_readback",
-        "state_reopened",
-      ]);
+      const captured = exact(
+        this.#capture(context, () => capturePrivate(value)),
+        ["expected_snapshot", "plan", "applied_show", "state_readback", "state_reopened"],
+      );
       denial();
       const evidence = {
         plan: captured.plan,
@@ -875,7 +988,7 @@ export class InfrastructureJournal {
       const observed = stateEvidence(evidence.state_readback);
       requireRecord(isDeepStrictEqual(stateEvidence(evidence.state_reopened), observed));
       const inspected = await withinTargetCandidatePreparation(preparation, () =>
-        this.#inspection(observed, denial),
+        this.#inspection(context, observed, denial),
       );
       denial();
       requireRecord(
@@ -893,8 +1006,12 @@ export class InfrastructureJournal {
       const stopWriter = () => {
         stopped = true;
       };
+      context?.onFailure(() => {
+        stopped = true;
+        fenceTargetCandidatePreparation(preparation);
+      });
       const beforeSeal = () =>
-        this.#reopenProjection(observed, inspected.records, boundary, denial);
+        this.#reopenProjection(undefined, observed, inspected.records, boundary, denial);
       return this.#targetCandidates(
         preparation,
         data,
@@ -922,6 +1039,22 @@ export class InfrastructureJournal {
     preparation: TargetCandidatePreparation,
     value: TargetProjectionEvidence,
   ): Promise<readonly PendingTargetCandidate[]> {
+    try {
+      assertControlJournalPublicEntry(this.#operationController, this.#store);
+    } catch {
+      const writer = this.#writers.get(ticket);
+      if (writer) writer.phase = "fenced";
+      fenceTargetCandidatePreparation(preparation);
+      throw new Error("invalid-target-candidate");
+    }
+    return this.#finishTargetCandidates(undefined, ticket, preparation, value);
+  }
+  async #finishTargetCandidates(
+    context: ControlJournalOperation | undefined,
+    ticket: Ticket,
+    preparation: TargetCandidatePreparation,
+    value: TargetProjectionEvidence,
+  ): Promise<readonly PendingTargetCandidate[]> {
     const writer = this.#writers.get(ticket);
     if (!writer) {
       fenceTargetCandidatePreparation(preparation);
@@ -934,6 +1067,10 @@ export class InfrastructureJournal {
       throw new Error("invalid-target-candidate");
     }
     writer.phase = "projecting";
+    context?.onFailure(() => {
+      writer.phase = "fenced";
+      fenceTargetCandidatePreparation(preparation);
+    });
     try {
       const data = reserveTargetCandidatePreparation(preparation);
       const originalTicket = () => {
@@ -948,7 +1085,7 @@ export class InfrastructureJournal {
         assertTargetCandidatePreparation(preparation);
         checkWriter();
       };
-      const capturedTicket = capturePrivate(ticket) as Ticket;
+      const capturedTicket = this.#capture(context, () => capturePrivate(ticket)) as Ticket;
       requireRecord(
         isDeepStrictEqual(capturedTicket, writer.original) &&
           writer.intent.kind === "apply" &&
@@ -958,19 +1095,17 @@ export class InfrastructureJournal {
           }) &&
           writer.predecessor,
       );
-      const evidence = exact(capturePrivate(value), [
-        "plan",
-        "applied_show",
-        "state_readback",
-        "state_reopened",
-      ]) as unknown as TargetProjectionEvidence;
+      const evidence = exact(
+        this.#capture(context, () => capturePrivate(value)),
+        ["plan", "applied_show", "state_readback", "state_reopened"],
+      ) as unknown as TargetProjectionEvidence;
       denial();
       const observed = stateEvidence(evidence.state_readback);
       requireRecord(isDeepStrictEqual(stateEvidence(evidence.state_reopened), observed));
       const reopened = await withinTargetCandidatePreparation(preparation, async () => {
-        await this.#reopenPredecessor(writer, denial);
-        const result = await this.#finish(capturedTicket, observed, denial, writer.intent);
-        await this.#reopenPredecessor(writer, denial);
+        await this.#reopenPredecessor(context, writer, denial);
+        const result = await this.#finish(context, capturedTicket, observed, denial, writer.intent);
+        await this.#reopenPredecessor(context, writer, denial);
         denial();
         return result;
       });
@@ -995,8 +1130,8 @@ export class InfrastructureJournal {
             originalTicket();
             requireRecord(writer.phase === "projected");
           };
-          await this.#reopenPredecessor(writer, pendingDenial);
-          await this.#reopenProjection(observed, reopened.records, null, pendingDenial);
+          await this.#reopenPredecessor(undefined, writer, pendingDenial);
+          await this.#reopenProjection(undefined, observed, reopened.records, null, pendingDenial);
         },
       );
       writer.phase = "projected";

@@ -3,13 +3,18 @@
  * boundary -> per-object consumer guard -> encrypted journal. No environment/secret lookup,
  * raw transport, repair capability or caller-supplied approval callback is exposed.
  *
- * This deliberately retains the existing guard: completed-repair access costs 68 GitHub GETs
- * per ordinary object I/O. Remaining host integration, owner-only configuration administration,
- * independent writer fencing and a separately reviewed bounded-operation design remain activation
+ * Public journal methods retain one original native owner/repair proof for at most 30 seconds.
+ * Every S3 mutation and final delivery reopens full fresh authority without renewing that proof.
+ * Trust publication and deferred candidate file work retain per-object guarding. Native DNS/SSH
+ * integration, owner configuration administration and independent writer fencing remain activation
  * prerequisites. Fresh checks/readbacks are not locks; failed acknowledgements grant no retry.
  */
 import { isDeepStrictEqual } from "node:util";
-import { ControlConsumerGuard, guardedControlStore } from "./control-consumer.js";
+import {
+  ControlConsumerGuard,
+  guardedControlStore,
+  createControlJournalOperationController,
+} from "./control-consumer.js";
 import {
   GitHubControlOwnerBoundary,
   type ControlOwnerBoundaryConfiguration,
@@ -195,9 +200,11 @@ export function createControlJournal(
       ...(now === undefined ? {} : { now }),
     });
     const store = guardedControlStore(raw, guard);
+    const operationController = createControlJournalOperationController(store, raw, guard, owner);
     const journal =
       c.target === "infra"
         ? new InfrastructureJournal(store, new RecordCodec(c.passphrase, c.backend), {
+            operationController,
             ...(now === undefined ? {} : { now }),
             // Capture actual native evidence, never a caller-selected approval/receipt callback.
             verifyBaselineRun: createInfrastructureBaselineRunVerifier(
@@ -210,6 +217,7 @@ export function createControlJournal(
             ),
           })
         : new TrustJournal(store, {
+            operationController,
             target: c.target,
             backend: c.backend,
             passphrase: c.passphrase,

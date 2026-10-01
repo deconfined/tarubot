@@ -9,6 +9,12 @@ import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import type { RecoveryTarget } from "./control-recovery.js";
 import type { ControlStore } from "./infra-control.js";
+import {
+  beginNativeOwnerJournalOperation,
+  assertNativeControlOwnerPublicEntry,
+  isNativeControlOwnerBoundary,
+  matchesNativeControlOwnerBoundary,
+} from "./control-owner-boundary.js";
 
 type Value = Record<string, unknown>;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
@@ -181,6 +187,8 @@ interface TicketState {
 }
 interface CapturedStore {
   source: ControlStore;
+  owner: ControlConsumerBoundary;
+  scope: ControlConsumerScope;
   read: ControlStore["read"];
   write: ControlStore["write"];
   allowed: RegExp;
@@ -189,6 +197,7 @@ interface CapturedStore {
 }
 // Module-private capabilities prevent a guard for one backend from wrapping another backend.
 const capturedStores = new WeakMap<ControlConsumerGuard, CapturedStore>();
+const guardedOrigins = new WeakMap<ControlStore, ControlConsumerGuard>();
 
 export class ControlConsumerGuard {
   readonly #scope: ControlConsumerScope;
@@ -236,6 +245,8 @@ export class ControlConsumerGuard {
           : `trust/${target}/(?:registration|authorization-current|current|(?:authorizations|attempts|consumed|intents|references|records|publication-intents|publications|completed)/${id})`;
       capturedStores.set(this, {
         source: store,
+        owner,
+        scope: this.#scope,
         read: this.#read,
         write: write.bind(store),
         allowed: new RegExp(`^${ordinary}$`, "u"),
@@ -526,7 +537,7 @@ export function guardedControlStore(
   if (!captured || captured.source !== store) throw new Error("invalid-control-consumer-store");
   const { read, write, allowed, within, assert } = captured;
   const check = guard.check.bind(guard);
-  return Object.freeze({
+  const guarded = Object.freeze({
     async read(path: string, beforeRead?: () => void): Promise<Uint8Array | null> {
       const original = originalRefusal(beforeRead);
       try {
@@ -582,4 +593,459 @@ export function guardedControlStore(
       }
     },
   });
+  guardedOrigins.set(guarded, guard);
+  return guarded;
+}
+
+declare const journalOperationBrand: unique symbol;
+/** Factory-owned origin only; plain JSON and copied controller objects cannot authorize I/O. */
+export type ControlJournalOperationController = Readonly<{ [journalOperationBrand]: true }>;
+export interface ControlJournalOperation {
+  readonly store: ControlStore;
+  assert(): void;
+  capture<T>(work: () => T): T;
+  wait<T>(work: () => Promise<T>): Promise<T>;
+  onFailure(stop: () => void): void;
+  retain<T extends object>(nativeResult: T): T;
+}
+interface JournalOrigin {
+  legacy: ControlStore;
+  owner: object;
+  captured: CapturedStore;
+  authority: JournalAuthority;
+}
+interface JournalAuthority {
+  hook: { stop(): void } | undefined;
+}
+const journalOrigins = new WeakMap<ControlJournalOperationController, JournalOrigin>();
+const journalStoreOrigins = new WeakMap<ControlStore, JournalOrigin>();
+// Only synchronous denial is shared across aliases. Tickets/evidence remain lexical per call.
+const journalOwnerAuthorities = new WeakMap<object, JournalAuthority>();
+function refuseJournalHooks(...authorities: (JournalAuthority | undefined)[]): void {
+  const hooks = new Set(
+    authorities.flatMap((authority) => (authority?.hook ? [authority.hook] : [])),
+  );
+  if (hooks.size === 0) return;
+  for (const hook of hooks) hook.stop();
+  throw new Error("control-journal-operation-failed");
+}
+function storeJournalAuthority(legacy: ControlStore): JournalAuthority | undefined {
+  const known = journalStoreOrigins.get(legacy);
+  if (known) return known.authority;
+  const guard = guardedOrigins.get(legacy);
+  const captured = guard === undefined ? undefined : capturedStores.get(guard);
+  return captured === undefined ? undefined : journalOwnerAuthorities.get(captured.owner);
+}
+/** Only the real native owner and this guard's exact raw/guarded store pair are accepted. */
+export function createControlJournalOperationController(
+  legacy: ControlStore,
+  raw: ControlStore,
+  guard: ControlConsumerGuard,
+  owner: object,
+): ControlJournalOperationController {
+  const authority = journalOwnerAuthorities.get(owner);
+  const captured = capturedStores.get(guard);
+  // Rewrapping an exact native owner/guard/raw pair cannot evade its active synchronous hook.
+  refuseJournalHooks(
+    authority,
+    storeJournalAuthority(legacy),
+    captured === undefined ? undefined : journalOwnerAuthorities.get(captured.owner),
+  );
+  requireConsumer(
+    guardedOrigins.get(legacy) === guard &&
+      captured?.source === raw &&
+      captured.owner === owner &&
+      isNativeControlOwnerBoundary(owner) &&
+      matchesNativeControlOwnerBoundary(owner, captured.scope),
+  );
+  const controller = Object.freeze({}) as ControlJournalOperationController;
+  const previous = journalStoreOrigins.get(legacy);
+  requireConsumer(
+    previous === undefined || (previous.owner === owner && previous.captured === captured),
+  );
+  const shared = authority ?? { hook: undefined };
+  const origin: JournalOrigin = previous ?? { legacy, owner, captured, authority: shared };
+  journalOwnerAuthorities.set(owner, shared);
+  journalOrigins.set(controller, origin);
+  journalStoreOrigins.set(legacy, origin);
+  return controller;
+}
+export function assertControlJournalOperationController(
+  controller: ControlJournalOperationController,
+  legacy: ControlStore,
+): void {
+  const origin = journalOrigins.get(controller);
+  refuseJournalHooks(origin?.authority, storeJournalAuthority(legacy));
+  if (origin?.legacy !== legacy) {
+    throw new Error("invalid-control-consumer");
+  }
+}
+/** Reentry denial for excluded methods; it creates/borrows no proof and changes no valid I/O. */
+export function assertControlJournalPublicEntry(
+  controller: ControlJournalOperationController | undefined,
+  legacy: ControlStore,
+): void {
+  const origin = controller === undefined ? undefined : journalOrigins.get(controller);
+  // Even a wrong passed legacy must fence the known controller's original synchronous call.
+  refuseJournalHooks(origin?.authority, storeJournalAuthority(legacy));
+  if (controller !== undefined) {
+    requireConsumer(origin?.legacy === legacy);
+    assertNativeControlOwnerPublicEntry(origin.owner);
+  }
+}
+
+/**
+ * One lexical public-method authority: original native owner/repair evidence and at most 30s.
+ * Checkpoints only refuse contradictions; ignored recheck tickets never replace the original.
+ * Every PUT and successful delivery gets a full fresh check. No cross-operation cache exists.
+ */
+export async function withinControlJournalOperation<T>(
+  controller: ControlJournalOperationController | undefined,
+  legacy: ControlStore,
+  work: (operation: ControlJournalOperation | undefined) => Promise<T>,
+): Promise<T> {
+  assertControlJournalPublicEntry(controller, legacy);
+  if (controller === undefined) return work(undefined);
+  const origin = journalOrigins.get(controller);
+  requireConsumer(origin?.legacy === legacy);
+  const authority = origin.authority;
+  if (authority.hook) {
+    authority.hook.stop();
+    throw new Error("control-journal-operation-failed");
+  }
+  const native = beginNativeOwnerJournalOperation(origin.owner);
+  let phase: "active" | "closing" | "closed" = "active";
+  let busy = false;
+  let original: ControlConsumerTicket | undefined;
+  let checkingRefusal: (() => void) | undefined;
+  const failures: (() => void)[] = [];
+  const retained = new WeakSet<object>();
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    phase = "closed";
+    native.stop();
+    const cleanup = { stop };
+    const owns = authority.hook === undefined;
+    if (owns) authority.hook = cleanup;
+    try {
+      for (const deny of failures) {
+        try {
+          synchronousRefusal(deny);
+        } catch {
+          /* Cleanup can only refuse, never restore authority. */
+        }
+      }
+    } finally {
+      if (owns && authority.hook === cleanup) authority.hook = undefined;
+    }
+  };
+  const hooked = <V>(callback: () => V): V => {
+    if (authority.hook) {
+      // A leaf fence may call this same operation's pure clock/copy helper. Public method
+      // entry above still refuses while the reservation is held, including swallowed denial.
+      if (authority.hook.stop === stop) return callback();
+      authority.hook.stop();
+      stop();
+      throw new Error("control-journal-operation-failed");
+    }
+    const hook = { stop };
+    authority.hook = hook;
+    try {
+      return callback();
+    } finally {
+      if (authority.hook === hook) authority.hook = undefined;
+    }
+  };
+  const deny = (callback: (() => void) | undefined) => hooked(() => synchronousRefusal(callback));
+  const pure = () => {
+    requireConsumer(phase !== "closed");
+    native.now();
+  };
+  const raw = origin.captured;
+  const metadata: ControlStore = {
+    read: async (path, refusal) => {
+      pure();
+      const retainedCheck = checkingRefusal;
+      requireConsumer(retainedCheck !== undefined);
+      const value = await native.within(() =>
+        hooked(() =>
+          raw.read(path, () => {
+            retainedCheck();
+            deny(refusal);
+            pure();
+            deny(refusal);
+            retainedCheck();
+          }),
+        ),
+      );
+      native.metadata(path, value);
+      pure();
+      return value;
+    },
+    write: async () => {
+      throw new Error("control-journal-operation-failed");
+    },
+  };
+  const guard = new ControlConsumerGuard(native.scope, {
+    store: metadata,
+    owner: native.owner,
+    now: native.now,
+  });
+  const access = capturedStores.get(guard);
+  requireConsumer(access !== undefined);
+  const assert = () => {
+    pure();
+    if (original) access.assert(original);
+    pure();
+  };
+  const checkpoint = async (refusal?: () => void) => {
+    assert();
+    checkingRefusal = native.beginCheck(refusal);
+    const checked = await native.within(() => guard.check(original, pure));
+    native.finishCheck();
+    checkingRefusal = undefined;
+    if (original === undefined) original = checked;
+    assert();
+  };
+  const ensure = async (refusal?: () => void) => {
+    if (original === undefined) await checkpoint(refusal);
+    else assert();
+  };
+  const use = async <V>(callback: () => Promise<V>, diagnostic: string): Promise<V> => {
+    let owns = false;
+    try {
+      requireConsumer(phase === "active" && !busy);
+      busy = true;
+      owns = true;
+      const result = await native.within(callback);
+      assert();
+      return result;
+    } catch {
+      stop();
+      throw new Error(diagnostic);
+    } finally {
+      if (owns) busy = false;
+    }
+  };
+  const settle = <V>(
+    callback: () => Promise<V>,
+    identities: WeakSet<object>,
+  ): Promise<{ value: V }> =>
+    new Promise((accept, reject) => {
+      try {
+        const pending = hooked(callback);
+        // Native fulfillment is intercepted BEFORE any async unboxing/thenable assimilation.
+        // Only the owned null-prototype box crosses subsequent Promise resolution boundaries.
+        hooked(() =>
+          Reflect.apply(nativeThen, pending, [
+            (value: V) => {
+              try {
+                const owned = hooked(() =>
+                  native.capture(() => snapshotJournalResult(value, identities)),
+                );
+                assert();
+                const box = Object.create(null) as { value: V };
+                Object.defineProperty(box, "value", { value: owned, enumerable: true });
+                accept(Object.freeze(box));
+              } catch (error) {
+                stop();
+                reject(error);
+              }
+            },
+            (error: unknown) => {
+              stop();
+              reject(error);
+            },
+          ]),
+        );
+      } catch (error) {
+        stop();
+        reject(error);
+      }
+    });
+  const scoped: ControlStore = Object.freeze({
+    read: (path: string, beforeRead?: () => void) =>
+      use(async () => {
+        requireConsumer(typeof path === "string" && raw.allowed.test(path));
+        deny(beforeRead);
+        await ensure(beforeRead);
+        const fence = () => {
+          assert();
+          deny(beforeRead);
+          assert();
+          deny(beforeRead);
+          assert();
+        };
+        const value = await native.within(() => hooked(() => raw.read(path, fence)));
+        fence();
+        const copy = native.capture(() => (value === null ? null : copyBytes(value)));
+        fence();
+        return copy;
+      }, "control-consumer-read-failed"),
+    write: (path: string, value: Uint8Array, beforeWrite?: () => void) =>
+      use(async () => {
+        requireConsumer(typeof path === "string" && raw.allowed.test(path));
+        const bytes = native.capture(() => copyBytes(value));
+        deny(beforeWrite);
+        await ensure(beforeWrite);
+        // Owned bytes precede the mandatory full fresh mutation checkpoint.
+        await checkpoint(beforeWrite);
+        const fence = () => {
+          assert();
+          deny(beforeWrite);
+          assert();
+          deny(beforeWrite);
+          assert();
+        };
+        fence();
+        await native.within(() => hooked(() => raw.write(path, bytes, fence)));
+        fence();
+      }, "control-consumer-write-failed"),
+  });
+  const operation: ControlJournalOperation = Object.freeze({
+    store: scoped,
+    assert: () => {
+      try {
+        requireConsumer(phase === "active");
+        assert();
+      } catch {
+        stop();
+        throw new Error("control-journal-operation-failed");
+      }
+    },
+    capture: <V>(callback: () => V) => {
+      try {
+        requireConsumer(phase === "active");
+        const value = hooked(() => native.capture(callback));
+        assert();
+        return value;
+      } catch {
+        stop();
+        throw new Error("control-journal-operation-failed");
+      }
+    },
+    wait: <V>(callback: () => Promise<V>) =>
+      native.within(async () => {
+        requireConsumer(phase === "active");
+        assert();
+        const result = await settle(callback, new WeakSet());
+        assert();
+        return result.value;
+      }),
+    onFailure: (deny: () => void) => {
+      requireConsumer(phase === "active" && typeof deny === "function");
+      failures.push(deny);
+    },
+    retain: <V extends object>(value: V) => {
+      requireConsumer(phase === "active");
+      retained.add(value);
+      return value;
+    },
+  });
+  try {
+    const box = await native.within(() => settle(() => work(operation), retained));
+    const result = box.value;
+    requireConsumer(phase === "active" && !busy);
+    phase = "closing"; // Reserve closure before fresh reads, clocks or final copy hooks.
+    await ensure();
+    await checkpoint();
+    const sealed = native.capture(() => snapshotJournalResult(result, retained));
+    assert();
+    phase = "closed";
+    native.stop();
+    return sealed;
+  } catch (error) {
+    stop();
+    // Keep existing trusted journal refusal names, while arbitrary callback diagnostics stay fixed.
+    let diagnostic: string | undefined;
+    try {
+      if (error instanceof Error) {
+        const message = Object.getOwnPropertyDescriptor(error, "message");
+        if (
+          message &&
+          Object.hasOwn(message, "value") &&
+          typeof message.value === "string" &&
+          /^(?:invalid-control-record|invalid-infrastructure-baseline-run|invalid-target-candidate|invalid-ssh-trust|control-consumer-(?:read|write|guard)-failed)$/u.test(
+            message.value,
+          )
+        )
+          diagnostic = message.value;
+      }
+    } catch {
+      /* Diagnostic inspection is untrusted too; no trap text is returned. */
+    }
+    if (diagnostic !== undefined) throw new Error(diagnostic);
+    throw new Error("control-journal-operation-failed");
+  }
+}
+
+/** Bounded owned result copy; only explicitly retained native identity objects keep identity. */
+function snapshotJournalResult<T>(input: T, retained: WeakSet<object>): T {
+  let nodes = 0,
+    size = 0;
+  const ancestors = new Set<object>();
+  const copy = (value: unknown, depth: number): unknown => {
+    requireConsumer(++nodes <= 65_536 && depth <= 64);
+    if (value === null || value === undefined || typeof value === "boolean") return value;
+    if (typeof value === "number") {
+      requireConsumer(Number.isFinite(value));
+      return value;
+    }
+    if (typeof value === "string") {
+      size += Buffer.byteLength(value);
+      requireConsumer(size <= 4 * 1024 * 1024);
+      return value;
+    }
+    requireConsumer(typeof value === "object" && !ancestors.has(value));
+    requireConsumer(Object.getOwnPropertySymbols(value).length === 0);
+    if (retained.has(value)) {
+      // Native writer tickets carry only primitive fields. Keeping identity must never also
+      // keep a then getter, mutable nested object or callback that escapes guarded copying.
+      requireConsumer(
+        Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null,
+      );
+      for (const item of Object.values(Object.getOwnPropertyDescriptors(value))) {
+        requireConsumer(item.enumerable === true && Object.hasOwn(item, "value"));
+        requireConsumer(
+          item.value === null ||
+            (typeof item.value !== "object" && typeof item.value !== "function"),
+        );
+        copy(item.value, depth + 1);
+      }
+      return Object.freeze(value);
+    }
+    ancestors.add(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    let result: unknown;
+    if (Array.isArray(value)) {
+      requireConsumer(
+        value.length <= 65_536 && Object.keys(descriptors).length === value.length + 1,
+      );
+      result = Array.from({ length: value.length }, (_, index) => {
+        const item = descriptors[String(index)];
+        requireConsumer(item?.enumerable === true && Object.hasOwn(item, "value"));
+        return copy(item.value, depth + 1);
+      });
+    } else {
+      requireConsumer(
+        Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null,
+      );
+      const output: Value = {};
+      for (const [key, item] of Object.entries(descriptors)) {
+        requireConsumer(item.enumerable === true && Object.hasOwn(item, "value"));
+        size += Buffer.byteLength(key);
+        requireConsumer(size <= 4 * 1024 * 1024);
+        Object.defineProperty(output, key, {
+          value: copy(item.value, depth + 1),
+          enumerable: true,
+        });
+      }
+      result = output;
+    }
+    ancestors.delete(value);
+    return Object.freeze(result);
+  };
+  return copy(input, 0) as T;
 }

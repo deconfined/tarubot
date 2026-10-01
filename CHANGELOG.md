@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.29**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.30**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.30 — Bound ordinary journal owner checks
+
+- Retain one native owner and completed-repair proof across each ordinary journal method under its original wall/physical deadline. Intermediate reads use that proof; each write and final result require a fresh full comparison without renewing it.
+- Bind the private store facade to its actual owner and backend, retain exact repair-run observations, and permanently refuse nested, expired or abandoned operations.
+- Reduce repeated owner GETs within ordinary methods. Trust publication and deferred target projection retain their existing per-object checks; native host/provider integration and activation remain pending.
 
 ## 2.36.29 — Integrate the owner’s CodeQL workflow cleanup
 

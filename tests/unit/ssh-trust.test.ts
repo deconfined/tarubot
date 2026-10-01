@@ -1019,3 +1019,25 @@ describe("conflicts, interruptions and immutable historical references", () => {
     await refusal(invalidClock.recordAuthorization(authorization()));
   });
 });
+
+test("legacy raw-store journals keep their explicit fallback and copied operation origins cannot enter", async () => {
+  const f = await established();
+  const snapshot = await f.journal.inspect(f.d);
+  // Direct invented raw-store constructors retain legacy snapshots; the operational factory
+  // owns native whole-method windows and freezes its detached delivery separately.
+  expect(Object.isFrozen(snapshot)).toBe(false);
+  const calls = f.store.events.length;
+  expect(
+    () =>
+      new TrustJournal(f.store, {
+        target: "staging",
+        backend,
+        passphrase,
+        validator: pin,
+        operationController: {} as NonNullable<
+          ConstructorParameters<typeof TrustJournal>[1]["operationController"]
+        >,
+      }),
+  ).toThrow("invalid-ssh-trust");
+  expect(f.store.events).toHaveLength(calls);
+});

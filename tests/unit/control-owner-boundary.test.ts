@@ -9,6 +9,7 @@ import {
 } from "../../scripts/control-consumer.js";
 import {
   GitHubControlOwnerBoundary,
+  beginNativeOwnerJournalOperation,
   controlOwnerEnvironments,
   type ControlOwnerBoundaryConfiguration,
 } from "../../scripts/control-owner-boundary.js";
@@ -1158,5 +1159,122 @@ describe("independently current owner control configuration", () => {
         })
         .readOwnerAnchor(reversed.scope),
     );
+  });
+});
+
+describe("native original whole-journal owner evidence", () => {
+  test("only actual native owners create the original30 window and callback reentry permanently denies", async () => {
+    expect(() => beginNativeOwnerJournalOperation({ readOwnerAnchor: async () => ({}) })).toThrow(
+      "invalid-control-owner-boundary",
+    );
+    for (const wrong of [false, true]) {
+      const f = fixture(),
+        owner = f.make();
+      const window = beginNativeOwnerJournalOperation(owner);
+      window.beginCheck();
+      await expect(
+        window.owner.readOwnerAnchor(f.scope, () => {
+          void owner
+            .readOwnerAnchor(wrong ? { ...f.scope, backend: "b".repeat(64) } : f.scope)
+            .catch(() => {});
+        }),
+      ).rejects.toThrow("invalid-control-owner-boundary");
+      expect(f.seen).toHaveLength(0);
+      expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    }
+  });
+  test("fresh denial checkpoints compare full actual repair execution fields and encrypted metadata", async () => {
+    for (const changed of ["step", "ciphertext"]) {
+      const f = fixture();
+      await completed(f);
+      const owner = f.make(),
+        window = beginNativeOwnerJournalOperation(owner);
+      const check = async () => {
+        window.beginCheck();
+        await window.owner.readOwnerAnchor(f.scope);
+        await window.owner.confirmCompletedRepair({ ...f.scope, generation: repairGeneration });
+        await window.owner.readOwnerAnchor(f.scope);
+        window.finishCheck();
+      };
+      await check();
+      expect(f.seen).toHaveLength(34);
+      if (changed === "step") present(f.job.steps[0]).number = 2;
+      else {
+        const path = `recovery/infra/completed/${repairGeneration}`;
+        const codec = new RecordCodec(
+          f.configuration.passphrase,
+          privateDigest({ purpose: "tarubot-control-recovery-v1", ...f.scope }),
+        );
+        const previous = present(f.store.data.get(path));
+        f.store.data.set(path, codec.seal(path, codec.open(path, previous)));
+      }
+      f.clock.now += 100;
+      await expect(check()).rejects.toThrow("invalid-control-owner-boundary");
+      expect(f.seen).toHaveLength(68); // All checks parse real raw evidence; none refresh the original.
+      expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    }
+  });
+  test("same private observations accept advancing clocks but cannot renew the original deadline", async () => {
+    const f = fixture(),
+      window = beginNativeOwnerJournalOperation(f.make());
+    for (const elapsed of [0, 100, 29_900]) {
+      f.clock.now = instant + elapsed;
+      window.beginCheck();
+      await window.owner.readOwnerAnchor(f.scope);
+      window.finishCheck();
+    }
+    const count = f.seen.length;
+    f.clock.now = instant + 30_000;
+    expect(() => window.beginCheck()).toThrow("invalid-control-owner-boundary");
+    expect(f.seen).toHaveLength(count);
+  });
+  test("held work shortens its existing timer after synchronous wall-clock consumption", async () => {
+    const f = fixture(),
+      window = beginNativeOwnerJournalOperation(f.make());
+    let release!: () => void;
+    const pending = window.within(() => {
+      f.clock.now += 29_980;
+      return new Promise<string>((resolve) => {
+        release = () => resolve("invented held result");
+      });
+    });
+    const settled = pending.catch(() => "refused");
+    await Bun.sleep(60);
+    expect(await Promise.race([settled, Promise.resolve("still-pending")])).toBe("refused");
+    release();
+    await expect(pending).rejects.toThrow("invalid-control-owner-boundary");
+    expect(() => window.now()).toThrow("invalid-control-owner-boundary");
+    expect(f.seen).toHaveLength(0);
+  });
+  test("cross-realm rejected first clocks are drained without callback getters or native offers", () => {
+    const f = fixture(),
+      modulePath = new URL("../../scripts/control-owner-boundary.ts", import.meta.url).pathname;
+    const program = `
+      import { runInNewContext } from "node:vm";
+      const { GitHubControlOwnerBoundary, beginNativeOwnerJournalOperation } = await import(${JSON.stringify(modulePath)});
+      let unhandled = 0, gets = 0, code;
+      process.on("unhandledRejection", () => unhandled++);
+      const owner = new GitHubControlOwnerBoundary(${JSON.stringify(f.configuration)}, {
+        store: { read: async () => null, write: async () => {}, readVersion: async () => null },
+        get: async () => { gets++; throw Error("unexpected mock GET"); },
+        now: () => runInNewContext('Promise.reject(Error("invented-private-clock"))'),
+      });
+      try { beginNativeOwnerJournalOperation(owner); code = "accepted"; } catch (error) { code = error.message; }
+      await Bun.sleep(20);
+      console.log(JSON.stringify({ unhandled, gets, code }));
+    `;
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", program], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+    expect(Buffer.from(child.stderr).toString()).toBe("");
+    expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual({
+      unhandled: 0,
+      gets: 0,
+      code: "invalid-control-owner-boundary",
+    });
   });
 });

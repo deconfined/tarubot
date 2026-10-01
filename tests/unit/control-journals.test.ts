@@ -25,9 +25,13 @@ import {
   canonicalEd25519,
   type ValidatorPin,
   type TargetDescriptor,
+  type DnssecEvidence,
 } from "../../scripts/ssh-trust.js";
 import type { GitHubReader, GitHubReadRequest } from "../../scripts/trust-run.js";
-import { targetCandidatePreparation } from "../../scripts/target-candidate.js";
+import {
+  targetCandidatePreparation,
+  type TargetCandidatePreparation,
+} from "../../scripts/target-candidate.js";
 import { candidateRelease, candidateProducer } from "../fixtures/infra/applied-target.js";
 
 const instant = 1_800_000_000_000;
@@ -612,7 +616,7 @@ async function refused(operation: Promise<unknown>): Promise<void> {
   } catch (error) {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(
-      /^(?:invalid-control-record|invalid-ssh-trust|control-consumer-(?:read|write)-failed)$/u,
+      /^(?:invalid-control-record|invalid-ssh-trust|control-journal-operation-failed|control-consumer-(?:read|write|guard)-failed)$/u,
     );
     expect((error as Error).message).not.toContain("invented-secret");
   }
@@ -715,12 +719,12 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
     });
     const nativeGet = f.dependencies.get;
     f.dependencies.get = async (request) => {
-      // The absence read's post-owner check has four variable reads. Its final response
-      // approaches the original proof deadline; the NEXT owner check has its own fresh clock.
+      // Local absence no longer creates a younger object check. Hold the final anchor
+      // round of the SAME operation's mandatory pre-PUT checkpoint near its original deadline.
       if (oldPath && request.url.endsWith("/variables/CONTROL_OWNER_ANCHOR")) {
-        if (++variableReads === 4) f.clock.now = instant + 29_990;
+        if (++variableReads === 2) f.clock.now = instant + 29_990;
       }
-      if (oldPath && variableReads === 4 && request.url === api && !held) {
+      if (oldPath && variableReads === 2 && request.url === api && !held) {
         held = true;
         signalHeld();
         await release;
@@ -1066,9 +1070,9 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
     expect(ordinaryCalls(f)).toHaveLength(before);
   });
 
-  test("a changed owner revision during the ordinary stream refuses the post-I/O readback", async () => {
+  test("a changed owner revision during local reads refuses the whole-operation final delivery", async () => {
     const f = nativeFixture();
-    await ordinaryHistory(f);
+    const history = await ordinaryHistory(f);
     f.beforeRead(async (path) => {
       if (path === "current") {
         f.record.revision = "77777777-7777-4777-8777-777777777777";
@@ -1077,7 +1081,18 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
       }
     });
     await refused(inspectFactory(f));
-    expect(ordinaryCalls(f).map((call) => call.key)).toEqual([`${f.scope.namespace}current`]);
+    expect(ordinaryCalls(f).map((call) => call.key)).toEqual(
+      [
+        "current",
+        `intents/${history.desired}`,
+        `baselines/${history.desired}`,
+        `completed/${history.desired}`,
+        "current",
+        `intents/${history.desired}`,
+        `baselines/${history.desired}`,
+        `completed/${history.desired}`,
+      ].map((path) => `${f.scope.namespace}${path}`),
+    );
   });
 
   test("persisted pending write with failed acknowledgement receives no retry or later completed authority", async () => {
@@ -1133,3 +1148,231 @@ describe("mandatory owner-guarded ordinary journal factories", () => {
     expect(f.constructed[0]?.endpoint).toBe("https://invented-journal-bucket.region.example.org");
   });
 });
+
+describe("whole ordinary-journal volume and native checkpoints", () => {
+  test("completed repair infra inspect/begin/finish preserve34-GET authority checks without per-read amplification", async () => {
+    const f = nativeFixture();
+    const completion = await completed(f);
+    const baseline = object(
+      codec(f).open(
+        `baselines/${completion.history.desired}`,
+        present(f.store.data.get(`baselines/${completion.history.desired}`)),
+      ),
+    );
+    const state = object(baseline.state) as unknown as Snapshot["state"];
+    const journal = f.make() as InfrastructureJournal;
+    const beforeInspect = f.seen.length,
+      beforeReads = ordinaryCalls(f).length;
+    const snapshot = await journal.inspect(state);
+    expect(f.seen.length - beforeInspect).toBe(82); // 68owner +14independent original baseline.
+    expect(ordinaryCalls(f).length - beforeReads).toBe(8);
+    const beforeBegin = f.seen.length,
+      beforeBeginObjects = ordinaryCalls(f).length;
+    const ticket = await journal.begin(
+      snapshot,
+      object(baseline.intent).inputs as Value,
+      { commit: "c".repeat(40), run: "34567" },
+      "d".repeat(64),
+      "apply",
+    );
+    expect(f.seen.length - beforeBegin).toBe(150); // 136owner +14baseline; two PUT checkpoints.
+    expect(ordinaryCalls(f).length - beforeBeginObjects).toBe(13);
+    const beforeFinish = f.seen.length,
+      beforeFinishObjects = ordinaryCalls(f).length;
+    await journal.finish(ticket, { ...state, serial: state.serial + 1, digest: "c".repeat(64) });
+    expect(f.seen.length - beforeFinish).toBe(204); // Initial/final plus one fresh check per4PUT.
+    expect(ordinaryCalls(f).length - beforeFinishObjects).toBe(16);
+    expect(Object.isFrozen(ticket)).toBe(true);
+  });
+  test("trust private inspection delegation reuses one original proof; publish stays entirely per-object", async () => {
+    const f = nativeFixture("staging");
+    const history = await ordinaryHistory(f, f.store, f.make());
+    expect(f.seen).toHaveLength(1176); //60authorization +108begin +960excluded publish +48finish.
+    const record = object(
+      codec(f).open(
+        `trust/staging/records/${history.desired}`,
+        present(f.store.data.get(`trust/staging/records/${history.desired}`)),
+      ),
+    );
+    const descriptor = record.descriptor as TargetDescriptor;
+    const journal = f.make() as TrustJournal;
+    let at = f.seen.length,
+      io = ordinaryCalls(f).length;
+    const snapshot = await journal.inspect(descriptor);
+    expect(f.seen.length - at).toBe(24);
+    expect(ordinaryCalls(f).length - io).toBe(18);
+    const publication = object(
+      codec(f).open(
+        `trust/staging/publications/${String(record.operation)}`,
+        present(f.store.data.get(`trust/staging/publications/${String(record.operation)}`)),
+      ),
+    );
+    at = f.seen.length;
+    io = ordinaryCalls(f).length;
+    const connection = await journal.connectionTrust(
+      descriptor,
+      async () => true,
+      async () => publication.dns as DnssecEvidence,
+    );
+    expect(connection.generation).toBe(snapshot.generation);
+    expect(f.seen.length - at).toBe(24);
+    expect(ordinaryCalls(f).length - io).toBe(36);
+  });
+  test("changed critical execution and semantically equal new repair ciphertext refuse before the next raw PUT", async () => {
+    for (const changed of ["step", "ciphertext"]) {
+      const f = nativeFixture();
+      const completion = await completed(f);
+      const b = object(
+        codec(f).open(
+          `baselines/${completion.history.desired}`,
+          present(f.store.data.get(`baselines/${completion.history.desired}`)),
+        ),
+      );
+      const state = b.state as Snapshot["state"];
+      const journal = f.make() as InfrastructureJournal;
+      const snapshot = await journal.inspect(state);
+      f.beforeRead(async (path) => {
+        if (!path.startsWith("intents/") || f.store.data.has(path)) return;
+        if (changed === "step") {
+          const page = object(
+            f.data[`${api}/actions/runs/${run.run}/attempts/1/jobs?per_page=100&page=1`],
+          );
+          const job = object((page.jobs as unknown[])[0]);
+          object((job.steps as unknown[])[0]).number = 2;
+        } else {
+          const key = `recovery/infra/completed/${repairGeneration}`;
+          const bytes = present(f.store.data.get(key));
+          f.store.data.set(
+            key,
+            completion.metadata.seal(key, completion.metadata.open(key, bytes)),
+          );
+        }
+      });
+      await expect(
+        journal.begin(
+          snapshot,
+          object(b.intent).inputs as Value,
+          { commit: "c".repeat(40), run: "34567" },
+          "d".repeat(64),
+          "apply",
+        ),
+      ).rejects.toThrow("control-consumer-write-failed");
+      expect(ordinaryCalls(f).filter((call) => call.method === "write")).toHaveLength(0);
+    }
+  });
+});
+
+test("excluded target and publication entries only deny active synchronous origins, including wrong inputs", async () => {
+  for (const method of ["prepare", "inspect", "finish"] as const)
+    for (const wrong of [false, true]) {
+      const f = nativeFixture();
+      const history = await ordinaryHistory(f);
+      const b = object(
+        codec(f).open(
+          `baselines/${history.desired}`,
+          present(f.store.data.get(`baselines/${history.desired}`)),
+        ),
+      );
+      const state = b.state as Snapshot["state"];
+      const journal = f.make() as InfrastructureJournal;
+      const snapshot = await journal.inspect(state);
+      const ticket = await journal.begin(
+        snapshot,
+        object(b.intent).inputs as Value,
+        { commit: candidateRelease.commit, run: candidateRelease.publication_run },
+        "d".repeat(64),
+        "apply",
+      );
+      const preparation = journal.prepareTargetCandidates({
+        targets: ["staging"],
+        release: candidateRelease,
+        producer: candidateProducer,
+      });
+      f.seen.length = 0;
+      f.calls.length = 0;
+      const hostile = new Proxy(state, {
+        ownKeys(value) {
+          try {
+            if (method === "prepare")
+              journal.prepareTargetCandidates(
+                wrong
+                  ? ({} as Parameters<InfrastructureJournal["prepareTargetCandidates"]>[0])
+                  : {
+                      targets: ["staging"],
+                      release: candidateRelease,
+                      producer: candidateProducer,
+                    },
+              );
+            else if (method === "inspect")
+              void journal
+                .inspectTargetCandidates(
+                  wrong ? ({} as TargetCandidatePreparation) : preparation,
+                  {} as Parameters<InfrastructureJournal["inspectTargetCandidates"]>[1],
+                )
+                .catch(() => {});
+            else
+              void journal
+                .finishTargetCandidates(
+                  wrong ? { ...ticket } : ticket,
+                  preparation,
+                  {} as Parameters<InfrastructureJournal["finishTargetCandidates"]>[2],
+                )
+                .catch(() => {});
+          } catch {
+            /* A swallowed excluded-entry refusal must still stop the original operation. */
+          }
+          return Reflect.ownKeys(value);
+        },
+      });
+      await expect(journal.inspect(hostile)).rejects.toThrow("control-journal-operation-failed");
+      expect(f.seen).toHaveLength(0);
+      expect(ordinaryCalls(f)).toHaveLength(0);
+    }
+  for (const wrong of [false, true]) {
+    const f = nativeFixture("staging");
+    const history = await ordinaryHistory(f);
+    const record = object(
+      codec(f).open(
+        `trust/staging/records/${history.desired}`,
+        present(f.store.data.get(`trust/staging/records/${history.desired}`)),
+      ),
+    );
+    const journal = f.make() as TrustJournal;
+    let effects = 0;
+    const descriptor = new Proxy(record.descriptor as TargetDescriptor, {
+      ownKeys(value) {
+        const ticket = wrong
+          ? {}
+          : {
+              generation: String(record.generation),
+              operation: String(record.operation),
+              binding: String(record.binding),
+            };
+        void journal
+          .publish(
+            ticket as Parameters<TrustJournal["publish"]>[0],
+            {
+              read: async () => {
+                effects++;
+                return [];
+              },
+              write: async () => {
+                effects++;
+                throw new Error("unexpected invented DNS mutation");
+              },
+            },
+            async () => {
+              effects++;
+              throw new Error("unexpected invented DNS measurement");
+            },
+          )
+          .catch(() => {});
+        return Reflect.ownKeys(value);
+      },
+    });
+    await expect(journal.inspect(descriptor)).rejects.toThrow("control-journal-operation-failed");
+    expect(f.seen).toHaveLength(0);
+    expect(ordinaryCalls(f)).toHaveLength(0);
+    expect(effects).toBe(0);
+  }
+}, 15_000);

@@ -709,6 +709,10 @@ describe("scoped infrastructure journal factory", () => {
     });
     const snapshot = await journal.inspect(before);
     expect(snapshot).toEqual({ generation: previous, inputs, state: before });
+    // The actual factory retains one original owner proof across all8 object reads.
+    expect(requests).toHaveLength(38); //24owner GETs +14independent original baseline GETs.
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.state)).toBe(true);
     const ticket = await journal.begin(snapshot, inputs, nextRun, binding, "apply");
     await journal.finish(ticket, after);
     expect(await journal.inspect(after)).toEqual({

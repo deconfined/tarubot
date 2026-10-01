@@ -3,11 +3,17 @@ import { describe, expect, test } from "bun:test";
 import {
   ControlConsumerGuard,
   guardedControlStore,
+  createControlJournalOperationController,
+  assertControlJournalOperationController,
+  assertControlJournalPublicEntry,
+  withinControlJournalOperation,
+  type ControlJournalOperation,
   type ControlConsumerBoundary,
   type ControlConsumerScope,
   type ControlConsumerTicket,
   type OwnerControlAnchor,
 } from "../../scripts/control-consumer.js";
+import { GitHubControlOwnerBoundary } from "../../scripts/control-owner-boundary.js";
 import type { ControlStore } from "../../scripts/infra-control.js";
 
 const revision = "00000000-0000-4000-8000-000000000001";
@@ -613,5 +619,456 @@ describe("independently owner-anchored normal control consumers", () => {
     );
     expect(f.state.writes).toEqual(["current"]);
     expect(f.state.values.get("current")).toBeUndefined();
+  });
+});
+
+/** Native parsing remains real; only the three read-only GitHub replies and raw bytes are invented. */
+function nativeJournalFixture() {
+  const scope: ControlConsumerScope = {
+    target: "infra",
+    backend: "a".repeat(64),
+    namespace: "tarubot/control/v1/infra/",
+  };
+  const clock = { now: instant };
+  const calls: string[] = [],
+    offers: string[] = [];
+  const values = new Map<string, Uint8Array>();
+  const fences: (() => void)[] = [];
+  let beforeRead = (_path: string) => {},
+    beforeWrite = () => {};
+  const raw = {
+    async read(path: string, refusal?: () => void) {
+      beforeRead(path);
+      refusal?.();
+      if (refusal) fences.push(refusal);
+      offers.push(`read:${path}`);
+      return values.get(path) ?? null;
+    },
+    async write(path: string, bytes: Uint8Array, refusal?: () => void) {
+      beforeWrite();
+      refusal?.();
+      if (refusal) fences.push(refusal);
+      offers.push(`write:${path}`);
+      values.set(path, Uint8Array.from(bytes));
+    },
+    async readVersion(): Promise<never> {
+      throw new Error("invented version capability refused");
+    },
+  };
+  const config = {
+    ...scope,
+    target: "infra" as const,
+    passphrase: "invented native journal control passphrase",
+    owner_id: 123,
+    repository_id: 234,
+    environment_id: 345,
+    token: "invented_native_read_token",
+  };
+  const api = "https://api.github.com/repos/deconfined/tarubot";
+  const record = { schema: 1, ...scope, revision, repair: { mode: "never-repaired" } };
+  const replies: Record<string, unknown> = {
+    [api]: {
+      id: 234,
+      full_name: "deconfined/tarubot",
+      fork: false,
+      owner: { id: 123, login: "deconfined" },
+    },
+    [`${api}/environments/control-infra`]: {
+      id: 345,
+      name: "control-infra",
+      url: `${api}/environments/control-infra`,
+    },
+    [`${api}/environments/control-infra/variables/CONTROL_OWNER_ANCHOR`]: {
+      name: "CONTROL_OWNER_ANCHOR",
+      value: JSON.stringify(record),
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  };
+  const owner = new GitHubControlOwnerBoundary(config, {
+    store: raw,
+    now: () => clock.now,
+    get: async (request) => {
+      calls.push(request.url);
+      if (!Object.hasOwn(replies, request.url)) throw new Error("invented unexpected GET");
+      return {
+        status: 200,
+        url: request.url,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify(replies[request.url])),
+      };
+    },
+  });
+  const guard = new ControlConsumerGuard(scope, { store: raw, owner, now: () => clock.now });
+  const legacy = guardedControlStore(raw, guard);
+  const controller = createControlJournalOperationController(legacy, raw, guard, owner);
+  return {
+    scope,
+    config,
+    clock,
+    calls,
+    offers,
+    values,
+    fences,
+    raw,
+    owner,
+    guard,
+    legacy,
+    controller,
+    beforeRead: (work: (path: string) => void) => {
+      beforeRead = work;
+    },
+    beforeWrite: (work: () => void) => {
+      beforeWrite = work;
+    },
+  };
+}
+
+describe("lexical native whole journal authority", () => {
+  test("read volume is per public operation and every PUT receives its own fresh checkpoint", async () => {
+    const f = nativeJournalFixture();
+    f.values.set("current", Uint8Array.from([1, 2, 3]));
+    const result = await withinControlJournalOperation(
+      f.controller,
+      f.legacy,
+      async (operation) => {
+        if (!operation) throw new Error("missing native operation");
+        await operation.store.read("current");
+        await operation.store.read("current");
+        await operation.store.write("current", Uint8Array.from([4, 5, 6]));
+        await operation.store.read("current");
+        return { received: [4, 5, 6] };
+      },
+    );
+    expect(f.calls).toHaveLength(36); // Initial + pre-PUT + final, each12 actual owner GETs.
+    expect(f.offers.filter((offer) => !offer.includes("recovery/"))).toEqual([
+      "read:current",
+      "read:current",
+      "write:current",
+      "read:current",
+    ]);
+    expect(result).toEqual({ received: [4, 5, 6] });
+    expect(Object.isFrozen(result.received)).toBe(true);
+  });
+  test("controllers cannot cross owner, scope, raw store, copied origin or later method windows", async () => {
+    const a = nativeJournalFixture(),
+      b = nativeJournalFixture();
+    expect(() =>
+      createControlJournalOperationController(a.legacy, a.raw, a.guard, b.owner),
+    ).toThrow("invalid-control-consumer");
+    expect(() =>
+      createControlJournalOperationController(a.legacy, b.raw, a.guard, a.owner),
+    ).toThrow("invalid-control-consumer");
+    await expect(
+      withinControlJournalOperation({ ...a.controller }, a.legacy, async () => 1),
+    ).rejects.toThrow("invalid-control-consumer");
+    let escaped: ControlJournalOperation | undefined;
+    await withinControlJournalOperation(a.controller, a.legacy, async (operation) => {
+      escaped = operation;
+      await operation?.store.read("current");
+    });
+    const count = a.calls.length;
+    await expect(escaped?.store.read("current")).rejects.toThrow("control-consumer-read-failed");
+    expect(a.calls).toHaveLength(count);
+    await withinControlJournalOperation(a.controller, a.legacy, async (operation) => {
+      await operation?.store.read("current");
+    });
+    expect(() => escaped?.assert()).toThrow("control-journal-operation-failed");
+  });
+  test("initial and post-I/O refusal hooks cannot swallow nested matching or wrong-context entry", async () => {
+    for (const late of [false, true])
+      for (const wrong of [false, true]) {
+        const f = nativeJournalFixture();
+        let entered = false,
+          delivered = false;
+        f.beforeRead((path) => {
+          if (path === "current")
+            queueMicrotask(() => {
+              entered = true;
+            });
+        });
+        await expect(
+          withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+            if (!operation) throw new Error("missing native operation");
+            await operation.store.read("current", () => {
+              if (late !== entered) return;
+              void withinControlJournalOperation(
+                wrong ? { ...f.controller } : f.controller,
+                f.legacy,
+                async () => {},
+              ).catch(() => {});
+            });
+            delivered = true;
+          }),
+        ).rejects.toThrow();
+        expect(delivered).toBe(false);
+        expect(f.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(late ? 1 : 0);
+        if (!late) expect(f.calls).toHaveLength(0);
+      }
+  });
+  test("same-pair controller aliases cannot replace an active synchronous origin reservation", async () => {
+    const f = nativeJournalFixture();
+    await expect(
+      withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+        await operation?.store.read("current", () => {
+          const alias = createControlJournalOperationController(f.legacy, f.raw, f.guard, f.owner);
+          void withinControlJournalOperation(alias, f.legacy, async () => {}).catch(() => {});
+        });
+      }),
+    ).rejects.toThrow("control-consumer-read-failed");
+    expect(f.calls).toHaveLength(0);
+    expect(f.offers).toHaveLength(0);
+  });
+  test("known controllers fence their original hook even when a nested caller passes the wrong store", async () => {
+    for (const directAssertion of [false, true]) {
+      const f = nativeJournalFixture();
+      const wrong = nativeJournalFixture();
+      await expect(
+        withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+          await operation?.store.read("current", () => {
+            if (directAssertion) {
+              try {
+                assertControlJournalOperationController(f.controller, wrong.legacy);
+              } catch {
+                /* Swallowing a wrong-context refusal must still fence its original operation. */
+              }
+            } else {
+              void withinControlJournalOperation(f.controller, wrong.legacy, async () => {
+                await wrong.legacy.read("current");
+              }).catch(() => {});
+            }
+          });
+        }),
+      ).rejects.toThrow("control-consumer-read-failed");
+      expect(f.calls).toHaveLength(0);
+      expect(f.offers).toHaveLength(0);
+      expect(wrong.calls).toHaveLength(0);
+      expect(wrong.offers).toHaveLength(0);
+    }
+  });
+  test("rewrapped stores and fresh guards cannot evade the same native owner's synchronous reservation", async () => {
+    for (const freshGuard of [false, true])
+      for (const precreated of [false, true]) {
+        const f = nativeJournalFixture();
+        const makeAlias = () => {
+          const guard = freshGuard
+            ? new ControlConsumerGuard(f.scope, {
+                store: f.raw,
+                owner: f.owner,
+                now: () => f.clock.now,
+              })
+            : f.guard;
+          const legacy = guardedControlStore(f.raw, guard);
+          return {
+            legacy,
+            controller: createControlJournalOperationController(legacy, f.raw, guard, f.owner),
+          };
+        };
+        const ready = precreated ? makeAlias() : undefined;
+        let nestedDelivered = false;
+        await expect(
+          withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+            await operation?.store.read("current", () => {
+              try {
+                const alias = ready ?? makeAlias();
+                void withinControlJournalOperation(
+                  alias.controller,
+                  alias.legacy,
+                  async (nested) => {
+                    await nested?.store.read("current");
+                    nestedDelivered = true;
+                  },
+                ).catch(() => {});
+              } catch {
+                /* Creation denial is permanent even when this caller catches it. */
+              }
+            });
+          }),
+        ).rejects.toThrow("control-consumer-read-failed");
+        expect(nestedDelivered).toBe(false);
+        expect(f.calls).toHaveLength(0);
+        expect(f.offers).toHaveLength(0);
+        // The reservation carries no ticket across awaits or into a later public operation.
+        const alias = ready ?? makeAlias();
+        await withinControlJournalOperation(alias.controller, alias.legacy, async (operation) => {
+          await operation?.store.read("current");
+        });
+        expect(f.calls).toHaveLength(24);
+      }
+  });
+  test("wrong-owner admission and unbound excluded aliases still deny an active known owner", async () => {
+    for (const excluded of [false, true]) {
+      const f = nativeJournalFixture();
+      const other = nativeJournalFixture();
+      const fresh = new ControlConsumerGuard(f.scope, {
+        store: f.raw,
+        owner: f.owner,
+        now: () => f.clock.now,
+      });
+      const alias = guardedControlStore(f.raw, fresh);
+      await expect(
+        withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+          await operation?.store.read("current", () => {
+            try {
+              if (excluded) assertControlJournalPublicEntry(undefined, alias);
+              else createControlJournalOperationController(f.legacy, f.raw, f.guard, other.owner);
+            } catch {
+              /* Neither a forged admission nor a legacy alias can erase known active denial. */
+            }
+          });
+        }),
+      ).rejects.toThrow("control-consumer-read-failed");
+      expect(f.calls).toHaveLength(0);
+      expect(f.offers).toHaveLength(0);
+      expect(other.calls).toHaveLength(0);
+    }
+  });
+  test("native callback promises bypass .then getters and thenable echoes cannot enter", async () => {
+    const f = nativeJournalFixture();
+    let getterCalls = 0;
+    await withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+      const native = Promise.resolve({ received: true });
+      // biome-ignore lint/suspicious/noThenProperty: invented getter must never be invoked by the native bridge.
+      Object.defineProperty(native, "then", {
+        get() {
+          getterCalls++;
+          throw new Error("invented-private-then");
+        },
+      });
+      const result = await operation?.wait(() => native);
+      expect(result).toEqual({ received: true });
+    });
+    expect(getterCalls).toBe(0);
+    const g = nativeJournalFixture();
+    await expect(
+      withinControlJournalOperation(g.controller, g.legacy, async (operation) => {
+        await operation?.wait(
+          () =>
+            ({
+              // biome-ignore lint/suspicious/noThenProperty: invented thenable echo must be refused without property access.
+              get then() {
+                getterCalls++;
+                throw new Error("invented-private-thenable");
+              },
+            }) as unknown as Promise<never>,
+        );
+      }),
+    ).rejects.toThrow("control-journal-operation-failed");
+    expect(getterCalls).toBe(0);
+    expect(g.calls).toHaveLength(0);
+  });
+  test("fulfilled values are copied before wait or top-level async resolution can read a then getter", async () => {
+    for (const throughWait of [false, true])
+      for (const retained of [false, true]) {
+        const f = nativeJournalFixture();
+        let reads = 0,
+          nestedDelivered = false,
+          delivered = false;
+        const value = { received: true };
+        // Promise.resolve reads this once; a second async assimilation used to escape the hook.
+        // biome-ignore lint/suspicious/noThenProperty: invented fulfilled-value accessor probes extra assimilation.
+        Object.defineProperty(value, "then", {
+          enumerable: true,
+          get() {
+            if (++reads > 1)
+              void withinControlJournalOperation(f.controller, f.legacy, async (nested) => {
+                await nested?.store.read("current");
+                nestedDelivered = true;
+              }).catch(() => {});
+            return undefined;
+          },
+        });
+        await expect(
+          withinControlJournalOperation(f.controller, f.legacy, (operation) => {
+            if (!operation) throw new Error("missing native operation");
+            if (retained) operation.retain(value);
+            const pending = Promise.resolve(value);
+            if (throughWait)
+              return operation
+                .wait(() => pending)
+                .then(() => {
+                  delivered = true;
+                  return value;
+                });
+            return pending;
+          }),
+        ).rejects.toThrow("control-journal-operation-failed");
+        expect(reads).toBe(1);
+        expect(delivered).toBe(false);
+        expect(nestedDelivered).toBe(false);
+        expect(f.calls).toHaveLength(0);
+        expect(f.offers).toHaveLength(0);
+      }
+  });
+  test("diagnostic Proxy traps and arbitrary callback messages remain fixed private refusals", async () => {
+    for (const descriptor of [false, true]) {
+      const f = nativeJournalFixture();
+      const hostile = new Proxy(
+        new Error("invalid-ssh-trust"),
+        descriptor
+          ? {
+              getOwnPropertyDescriptor() {
+                throw new Error("invented-private-descriptor");
+              },
+            }
+          : {
+              getPrototypeOf() {
+                throw new Error("invented-private-prototype");
+              },
+            },
+      );
+      await expect(
+        withinControlJournalOperation(f.controller, f.legacy, async () => {
+          throw hostile;
+        }),
+      ).rejects.toThrow("control-journal-operation-failed");
+      expect(f.calls).toHaveLength(0);
+      expect(f.offers).toHaveLength(0);
+    }
+  });
+  test("old SDK callbacks stay fenced after timeout, a fresh operation and failed final result hooks", async () => {
+    const f = nativeJournalFixture();
+    let saved: ControlJournalOperation | undefined;
+    await expect(
+      withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+        if (!operation) throw new Error("missing native operation");
+        saved = operation;
+        await operation.store.read("current");
+        f.clock.now += 30_000;
+        return { stale: true };
+      }),
+    ).rejects.toThrow("control-journal-operation-failed");
+    const old = f.fences.filter((_fence, index) => index === f.fences.length - 1)[0];
+    expect(old).toBeDefined();
+    await withinControlJournalOperation(f.controller, f.legacy, async (operation) => {
+      await operation?.store.read("current");
+    });
+    expect(() => old?.()).toThrow();
+    const count = f.offers.length;
+    await expect(saved?.store.read("current")).rejects.toThrow("control-consumer-read-failed");
+    expect(f.offers).toHaveLength(count);
+    const g = nativeJournalFixture();
+    let closing: ControlJournalOperation | undefined,
+      stopped = false;
+    await expect(
+      withinControlJournalOperation(g.controller, g.legacy, async (operation) => {
+        closing = operation;
+        operation?.onFailure(() => {
+          stopped = true;
+        });
+        await operation?.store.read("current");
+        return new Proxy(
+          {},
+          {
+            ownKeys() {
+              void closing?.store.read("current").catch(() => {});
+              return [];
+            },
+          },
+        );
+      }),
+    ).rejects.toThrow("control-journal-operation-failed");
+    expect(stopped).toBe(true);
+    expect(g.offers.filter((offer) => !offer.includes("recovery/"))).toHaveLength(1);
   });
 });

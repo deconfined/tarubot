@@ -238,11 +238,54 @@ interface Budget {
   stop(): void;
   now(): number;
   capture<T>(work: () => T): T;
-  wait<T>(work: () => Promise<T>, whole?: boolean): Promise<T>;
+  wait<T>(work: () => Promise<T>, whole?: boolean, preserveError?: boolean): Promise<T>;
   remaining(whole?: boolean): number;
 }
+/** Native journal bridge is factory-private. A copied object or an owner callback cannot mint it. */
+export interface NativeOwnerJournalAccess {
+  readonly scope: ControlConsumerScope;
+  readonly owner: ControlConsumerBoundary;
+  now(): number;
+  capture<T>(work: () => T): T;
+  within<T>(work: () => Promise<T>): Promise<T>;
+  stop(): void;
+  beginCheck(refusal?: () => void): () => void;
+  finishCheck(): void;
+  metadata(path: string, bytes: Uint8Array | null): void;
+}
+const nativeOwners = new WeakMap<
+  object,
+  { start(): NativeOwnerJournalAccess; assertEntry(): void; scope: ControlConsumerScope }
+>();
+export function beginNativeOwnerJournalOperation(owner: object): NativeOwnerJournalAccess {
+  const start = nativeOwners.get(owner);
+  requireOwner(start !== undefined);
+  return start.start();
+}
+export function isNativeControlOwnerBoundary(owner: object): boolean {
+  return nativeOwners.has(owner);
+}
+/** Denial only: an excluded public method cannot swallow an active native clock/snapshot hook. */
+export function assertNativeControlOwnerPublicEntry(owner: object): void {
+  const native = nativeOwners.get(owner);
+  requireOwner(native !== undefined);
+  native.assertEntry();
+}
+export function matchesNativeControlOwnerBoundary(
+  owner: object,
+  expected: ControlConsumerScope,
+): boolean {
+  const native = nativeOwners.get(owner);
+  return native !== undefined && isDeepStrictEqual(native.scope, expected);
+}
+
 type Hook = <T>(fence: () => void, work: () => T) => T;
-function budget(clock: () => number, refusal: (() => void) | undefined, hooks: Hook): Budget {
+function budget(
+  clock: () => number,
+  refusal: (() => void) | undefined,
+  hooks: Hook,
+  maximum = maxOperation,
+): Budget {
   // Includes the first denial/clock and caller snapshot, rather than starting after them.
   const physicalStarted = performance.now();
   let started: number | undefined,
@@ -260,7 +303,10 @@ function budget(clock: () => number, refusal: (() => void) | undefined, hooks: H
       owns = true;
       return hooks(fence, () => {
         synchronousRefusal(refusal);
-        const at = clock();
+        const at: unknown = clock();
+        try {
+          void Reflect.apply(nativeThen, at, [undefined, () => {}]);
+        } catch {}
         integer(at);
         synchronousRefusal(refusal);
         if (started === undefined) started = at;
@@ -268,8 +314,8 @@ function budget(clock: () => number, refusal: (() => void) | undefined, hooks: H
           !fenced &&
             checking &&
             at >= (last ?? started) &&
-            at - started < maxOperation &&
-            performance.now() - physicalStarted < maxOperation,
+            at - started < maximum &&
+            performance.now() - physicalStarted < maximum,
         );
         last = at;
         return at;
@@ -284,9 +330,9 @@ function budget(clock: () => number, refusal: (() => void) | undefined, hooks: H
   const origin = now();
   const remaining = (whole = false) =>
     Math.min(
-      whole ? maxOperation : 10_000,
-      maxOperation - (now() - origin),
-      maxOperation - (performance.now() - physicalStarted),
+      whole ? maximum : 10_000,
+      maximum - (now() - origin),
+      maximum - (performance.now() - physicalStarted),
     );
   return {
     stop: fence,
@@ -310,27 +356,50 @@ function budget(clock: () => number, refusal: (() => void) | undefined, hooks: H
         now();
       }
     },
-    async wait<T>(work: () => Promise<T>, whole = false): Promise<T> {
+    async wait<T>(work: () => Promise<T>, whole = false, preserveError = false): Promise<T> {
       const limit = remaining(whole);
       requireOwner(limit > 0);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        let end = performance.now() + limit;
+        let rejectDeadline: (reason: Error) => void = () => {};
+        const schedule = () => {
+          end = Math.min(end, performance.now() + remaining(whole));
+          clearTimeout(timer);
+          timer = setTimeout(
+            () => {
+              fence();
+              rejectDeadline(new Error("invalid-control-owner-boundary"));
+            },
+            Math.max(0, end - performance.now()),
+          );
+        };
+        const timeout = new Promise<never>((_, reject) => {
+          rejectDeadline = reject;
+        });
+        schedule();
         const result = await Promise.race([
           Promise.resolve().then(() => {
             now();
-            return work();
+            const pending = work();
+            try {
+              now();
+              schedule();
+            } catch (error) {
+              try {
+                void Reflect.apply(nativeThen, pending, [undefined, () => {}]);
+              } catch {}
+              throw error;
+            }
+            return pending;
           }),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-              fence();
-              reject(new Error("invalid-control-owner-boundary"));
-            }, limit);
-          }),
+          timeout,
         ]);
         now();
         return result;
-      } catch {
+      } catch (error) {
         fence();
+        if (preserveError) throw error;
         throw new Error("invalid-control-owner-boundary");
       } finally {
         clearTimeout(timer);
@@ -508,6 +577,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
   readonly #revisions = new Map<string, string>();
   #lastRevision: string | undefined;
   #hook: { fence(): void } | undefined;
+  #journalHook: { fence(): void } | undefined;
   constructor(
     configuration: ControlOwnerBoundaryConfiguration,
     dependencies: {
@@ -588,6 +658,11 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       this.#get = get;
       this.#native = capturedGet === undefined;
       this.#clock = clock;
+      nativeOwners.set(this, {
+        start: () => this.#journalOperation(),
+        assertEntry: () => this.#publicEntry(),
+        scope: this.#scope,
+      });
       Object.freeze(this);
     } catch {
       throw new Error("invalid-control-owner-boundary");
@@ -607,12 +682,156 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
       if (this.#hook === reservation) this.#hook = undefined;
     }
   }
-  #operation(refusal?: () => void): Budget {
+  #operation(refusal?: () => void, maximum = maxOperation): Budget {
+    this.#publicEntry();
+    return budget(this.#clock, refusal, (fence, work) => this.#hooks(fence, work), maximum);
+  }
+  #publicEntry(): void {
+    if (this.#journalHook) {
+      this.#journalHook.fence();
+      throw new Error("invalid-control-owner-boundary");
+    }
     if (this.#hook) {
       this.#hook.fence();
       throw new Error("invalid-control-owner-boundary");
     }
-    return budget(this.#clock, refusal, (fence, work) => this.#hooks(fence, work));
+  }
+
+  #journalOperation(): NativeOwnerJournalAccess {
+    const operation = this.#operation(undefined, maxFreshAge);
+    let original: unknown[] | undefined;
+    let current: unknown[] = [];
+    let phase: "idle" | "checking" = "idle";
+    let checkBudget = operation;
+    let checkIdentity: object | undefined;
+    const fail = () => operation.stop();
+    const refuse = (refusal: (() => void) | undefined) => {
+      if (this.#journalHook) {
+        this.#journalHook.fence();
+        fail();
+        throw new Error("invalid-control-owner-boundary");
+      }
+      const reservation = { fence: fail };
+      this.#journalHook = reservation;
+      try {
+        // The internal consumer callback may read this same pure clock. A separate entry
+        // reservation fences nested public operations without recursively asserting a proof.
+        synchronousRefusal(refusal);
+        operation.now();
+        synchronousRefusal(refusal);
+        requireOwner(phase === "checking");
+      } catch {
+        fail();
+        throw new Error("invalid-control-owner-boundary");
+      } finally {
+        if (this.#journalHook === reservation) this.#journalHook = undefined;
+      }
+    };
+    const beginCheck = (denial?: () => void) => {
+      try {
+        requireOwner(phase === "idle");
+        operation.now();
+        phase = "checking";
+        current = [];
+        const identity = {};
+        checkIdentity = identity;
+        const check = () => {
+          try {
+            requireOwner(phase === "checking" && checkIdentity === identity);
+            refuse(denial);
+            operation.now();
+          } catch {
+            fail();
+            throw new Error("invalid-control-owner-boundary");
+          }
+        };
+        // Supplement this checkpoint with its immutable incoming refusal. The ORIGINAL
+        // authority budget/proof stays unchanged; a later check cannot rebind old callbacks.
+        checkBudget = {
+          stop: operation.stop,
+          now: () => {
+            check();
+            return operation.now();
+          },
+          remaining: (whole) => {
+            check();
+            return operation.remaining(whole);
+          },
+          capture: <T>(work: () => T) => {
+            check();
+            const value = operation.capture(work);
+            check();
+            return value;
+          },
+          wait: <T>(work: () => Promise<T>, whole?: boolean) =>
+            operation.wait(async () => {
+              check();
+              const pending = work();
+              try {
+                check();
+              } catch (error) {
+                try {
+                  void Reflect.apply(nativeThen, pending, [undefined, () => {}]);
+                } catch {}
+                throw error;
+              }
+              const value = await pending;
+              check();
+              return value;
+            }, whole),
+        };
+        check();
+        return check;
+      } catch {
+        fail();
+        throw new Error("invalid-control-owner-boundary");
+      }
+    };
+    const finishCheck = () => {
+      try {
+        requireOwner(phase === "checking");
+        operation.now();
+        if (original === undefined) original = current;
+        else requireOwner(isDeepStrictEqual(original, current));
+        phase = "idle";
+        checkIdentity = undefined;
+        operation.now();
+      } catch {
+        fail();
+        throw new Error("invalid-control-owner-boundary");
+      }
+    };
+    return Object.freeze({
+      scope: Object.freeze({ ...this.#scope }),
+      now: operation.now,
+      capture: operation.capture,
+      within: <T>(work: () => Promise<T>) => operation.wait(work, true, true),
+      stop: fail,
+      beginCheck,
+      finishCheck,
+      // Only native private helpers can supply authority; no caller JSON/parser callback enters.
+      owner: Object.freeze({
+        readOwnerAnchor: async (input: ControlConsumerScope, refusal?: () => void) => {
+          refuse(refusal);
+          requireOwner(phase === "checking");
+          return this.#anchor(input, checkBudget, current);
+        },
+        confirmCompletedRepair: async (
+          input: ControlConsumerScope & { generation: string },
+          refusal?: () => void,
+        ) => {
+          refuse(refusal);
+          requireOwner(phase === "checking");
+          return this.#repair(input, checkBudget, current);
+        },
+      }),
+      metadata: (path: string, bytes: Uint8Array | null) => {
+        operation.capture(() => {
+          requireOwner(phase === "checking");
+          current.push({ path, bytes: bytes === null ? null : copyBytes(bytes, 64 * 1024 * 1024) });
+        });
+      },
+    });
   }
 
   #scopeRequest(input: unknown, completed: boolean): void {
@@ -758,7 +977,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
     }
     return record as unknown as OwnerRecord;
   }
-  async #current(operation: Budget): Promise<CurrentRecord> {
+  async #current(operation: Budget, evidence?: unknown[]): Promise<CurrentRecord> {
     // Include the first request's whole transport time; a slow repository response must not
     // mint a younger anchor after it arrives, including when an injected wall clock stands still.
     const observed = operation.now(),
@@ -818,6 +1037,7 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
     this.#fresh({ record, identity, observed, physicalObserved }, operation);
     this.#revisions.set(record.revision, identity);
     this.#lastRevision = record.revision;
+    evidence?.push({ owner_identity: identity, record });
     return { record, identity, observed, physicalObserved };
   }
   #fresh(record: CurrentRecord, operation: Budget): void {
@@ -837,33 +1057,39 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
     input: ControlConsumerScope,
     refusal?: () => void,
   ): Promise<OwnerControlAnchor> {
-    let abandoned: Budget | undefined;
+    let operation: Budget | undefined;
     try {
-      const operation = this.#operation(refusal);
-      abandoned = operation;
-      operation.capture(() => this.#scopeRequest(input, false));
-      const first = await this.#current(operation),
-        final = await this.#current(operation);
-      this.#same(first, final, operation);
-      const r = final.record;
-      const repair =
-        r.repair.mode === "never-repaired"
-          ? { mode: "never-repaired" as const }
-          : { mode: r.repair.mode, generation: r.repair.generation };
-      const remaining = Math.floor(maxFreshAge - (performance.now() - first.physicalObserved));
-      requireOwner(remaining > 0);
-      return freeze({
-        ...this.#scope,
-        schema: 1,
-        revision: r.revision,
-        repair,
-        observed_at: first.observed,
-        expires_at: Math.min(first.observed + maxFreshAge, operation.now() + remaining),
-      });
+      operation = this.#operation(refusal);
+      return await this.#anchor(input, operation);
     } catch {
-      abandoned?.stop();
+      operation?.stop();
       throw new Error("invalid-control-owner-boundary");
     }
+  }
+  async #anchor(
+    input: ControlConsumerScope,
+    operation: Budget,
+    evidence?: unknown[],
+  ): Promise<OwnerControlAnchor> {
+    operation.capture(() => this.#scopeRequest(input, false));
+    const first = await this.#current(operation, evidence),
+      final = await this.#current(operation, evidence);
+    this.#same(first, final, operation);
+    const r = final.record;
+    const repair =
+      r.repair.mode === "never-repaired"
+        ? { mode: "never-repaired" as const }
+        : { mode: r.repair.mode, generation: r.repair.generation };
+    const remaining = Math.floor(maxFreshAge - (performance.now() - first.physicalObserved));
+    requireOwner(remaining > 0);
+    return freeze({
+      ...this.#scope,
+      schema: 1,
+      revision: r.revision,
+      repair,
+      observed_at: first.observed,
+      expires_at: Math.min(first.observed + maxFreshAge, operation.now() + remaining),
+    });
   }
 
   /** Restore-only capabilities refuse; only completed encrypted metadata and final run are read. */
@@ -871,142 +1097,148 @@ export class GitHubControlOwnerBoundary implements ControlConsumerBoundary {
     input: ControlConsumerScope & { generation: string },
     refusal?: () => void,
   ): Promise<void> {
-    let abandoned: Budget | undefined;
+    let operation: Budget | undefined;
     try {
-      const operation = this.#operation(refusal);
-      abandoned = operation;
-      const request = operation.capture(() => snapshot(input)) as ControlConsumerScope & {
-        generation: string;
-      };
-      operation.capture(() => this.#scopeRequest(request, true));
-      const first = await this.#current(operation);
-      requireOwner(
-        first.record.repair.mode === "completed-repair" &&
-          first.record.repair.generation === request.generation,
-      );
-      const expected = first.record.repair;
-      const denied = async (): Promise<never> => {
-        throw new Error("invalid-control-owner-boundary");
-      };
-      const owner: OwnerRecoveryBoundary = {
-        assertOwnerFence: denied,
-        verifyOutcome: denied,
-        confirmEnrollmentRun: denied,
-        confirmRecoveryRun: async (runRequest) => {
-          const current = await this.#current(operation);
-          this.#same(first, current, operation);
-          requireOwner(
-            isDeepStrictEqual(runRequest, {
-              target: this.#scope.target,
-              backend: this.#scope.backend,
-              generation: expected.generation,
-              binding_digest: expected.intent_digest,
-              run: { commit: expected.commit, run: expected.run },
-            }),
-          );
-          const gate = `recover-${this.#scope.target}`;
-          const allowed = new Set(
-            [
-              `/actions/runs/${expected.run}`,
-              `/actions/runs/${expected.run}/attempts/1/jobs?per_page=100&page=1`,
-              `/actions/runs/${expected.run}/approvals`,
-              `/environments/${gate}`,
-              `/environments/${gate}/deployment-branch-policies?per_page=100&page=1`,
-              "/branches/main",
-            ].map((path) => `${api}${prefix}${path}`),
-          );
-          const proof = await operation.wait(
-            () =>
-              readTrustRun(
-                {
-                  kind: "recovery",
-                  target: this.#scope.target,
-                  commit: expected.commit,
-                  run: expected.run,
-                },
-                {
-                  owner_id: this.#configuration.owner_id,
-                  token: this.#configuration.token,
-                  now: () => operation.now(),
-                  get: async (readRequest) => {
-                    requireOwner(allowed.has(readRequest.url));
-                    const result = await this.#response(readRequest, operation);
-                    if (readRequest.url === `${api}${prefix}/actions/runs/${expected.run}`) {
-                      const run = object(result.value);
-                      requireOwner(
-                        object(run.repository).id === this.#configuration.repository_id &&
-                          object(run.head_repository).id === this.#configuration.repository_id,
-                      );
-                    }
-                    return result.response;
-                  },
-                },
-              ),
-            true,
-          );
-          integer(proof.observed_at);
-          requireOwner(
-            proof.observed_at <= operation.now() &&
-              operation.now() - proof.observed_at < maxFreshAge,
-          );
-          const final = await this.#current(operation);
-          this.#same(first, final, operation);
-          return {
-            schema: 1,
+      operation = this.#operation(refusal);
+      await this.#repair(input, operation);
+    } catch {
+      operation?.stop();
+      throw new Error("invalid-control-owner-boundary");
+    }
+  }
+  async #repair(
+    input: ControlConsumerScope & { generation: string },
+    operation: Budget,
+    evidence?: unknown[],
+  ): Promise<void> {
+    const request = operation.capture(() => snapshot(input)) as ControlConsumerScope & {
+      generation: string;
+    };
+    operation.capture(() => this.#scopeRequest(request, true));
+    const first = await this.#current(operation, evidence);
+    requireOwner(
+      first.record.repair.mode === "completed-repair" &&
+        first.record.repair.generation === request.generation,
+    );
+    const expected = first.record.repair;
+    const denied = async (): Promise<never> => {
+      throw new Error("invalid-control-owner-boundary");
+    };
+    const owner: OwnerRecoveryBoundary = {
+      assertOwnerFence: denied,
+      verifyOutcome: denied,
+      confirmEnrollmentRun: denied,
+      confirmRecoveryRun: async (runRequest) => {
+        const current = await this.#current(operation, evidence);
+        this.#same(first, current, operation);
+        requireOwner(
+          isDeepStrictEqual(runRequest, {
             target: this.#scope.target,
             backend: this.#scope.backend,
             generation: expected.generation,
             binding_digest: expected.intent_digest,
-            commit: expected.commit,
-            run: expected.run,
-            attempt: 1,
-            conclusion: "success",
-          };
-        },
-      };
-      const id = uuid.source.slice(1, -1);
-      const metadata = new RegExp(
-        `^recovery/${this.#scope.target}/(?:registration|current|(?:intents|completed)/${id})$`,
-        "u",
-      );
-      const store: VersionedControlStore = {
-        read: async (path, beforeRead) => {
-          requireOwner(metadata.test(path));
-          // Every recursive recovery metadata read uses this ORIGINAL owner operation.
-          // No consumer check/GET is performed inside a stream checkpoint.
-          const fence = () => {
-            synchronousRefusal(beforeRead);
-            operation.now();
-            synchronousRefusal(beforeRead);
-          };
-          const value = await operation.wait(() => this.#rawRead(path, fence));
-          return operation.capture(() =>
-            value === null ? null : copyBytes(value, 64 * 1024 * 1024),
-          );
-        },
-        write: denied,
-        readVersion: denied,
-      };
-      // Historical codec binding is the exact configured backend identity, not physical routing.
-      const {
-        owner_id: _owner,
-        repository_id: _repository,
-        environment_id: _environment,
-        token: _token,
-        ...options
-      } = this.#configuration;
-      const recovery = new ControlRecovery(
-        store,
-        { ...options, now: () => operation.now() },
-        owner,
-      );
-      await operation.wait(() => recovery.guardConsumer(expected.generation), true);
-      const final = await this.#current(operation);
-      this.#same(first, final, operation);
-    } catch {
-      abandoned?.stop();
-      throw new Error("invalid-control-owner-boundary");
-    }
+            run: { commit: expected.commit, run: expected.run },
+          }),
+        );
+        const gate = `recover-${this.#scope.target}`;
+        const allowed = new Set(
+          [
+            `/actions/runs/${expected.run}`,
+            `/actions/runs/${expected.run}/attempts/1/jobs?per_page=100&page=1`,
+            `/actions/runs/${expected.run}/approvals`,
+            `/environments/${gate}`,
+            `/environments/${gate}/deployment-branch-policies?per_page=100&page=1`,
+            "/branches/main",
+          ].map((path) => `${api}${prefix}${path}`),
+        );
+        const proof = await operation.wait(
+          () =>
+            readTrustRun(
+              {
+                kind: "recovery",
+                target: this.#scope.target,
+                commit: expected.commit,
+                run: expected.run,
+              },
+              {
+                owner_id: this.#configuration.owner_id,
+                token: this.#configuration.token,
+                now: () => operation.now(),
+                get: async (readRequest) => {
+                  requireOwner(allowed.has(readRequest.url));
+                  const result = await this.#response(readRequest, operation);
+                  evidence?.push({ repair_read: readRequest.url, value: result.value });
+                  if (readRequest.url === `${api}${prefix}/actions/runs/${expected.run}`) {
+                    const run = object(result.value);
+                    requireOwner(
+                      object(run.repository).id === this.#configuration.repository_id &&
+                        object(run.head_repository).id === this.#configuration.repository_id,
+                    );
+                  }
+                  return result.response;
+                },
+              },
+            ),
+          true,
+        );
+        // Actual parser result stays private, with its original observation held by this window.
+        evidence?.push({ repair_run: { ...proof, observed_at: undefined, expires_at: undefined } });
+        integer(proof.observed_at);
+        requireOwner(
+          proof.observed_at <= operation.now() && operation.now() - proof.observed_at < maxFreshAge,
+        );
+        const final = await this.#current(operation, evidence);
+        this.#same(first, final, operation);
+        return {
+          schema: 1,
+          target: this.#scope.target,
+          backend: this.#scope.backend,
+          generation: expected.generation,
+          binding_digest: expected.intent_digest,
+          commit: expected.commit,
+          run: expected.run,
+          attempt: 1,
+          conclusion: "success",
+        };
+      },
+    };
+    const id = uuid.source.slice(1, -1);
+    const metadata = new RegExp(
+      `^recovery/${this.#scope.target}/(?:registration|current|(?:intents|completed)/${id})$`,
+      "u",
+    );
+    const store: VersionedControlStore = {
+      read: async (path, beforeRead) => {
+        requireOwner(metadata.test(path));
+        // Every recursive recovery metadata read uses this ORIGINAL owner operation.
+        // No consumer check/GET is performed inside a stream checkpoint.
+        const fence = () => {
+          synchronousRefusal(beforeRead);
+          operation.now();
+          synchronousRefusal(beforeRead);
+        };
+        const value = await operation.wait(() => this.#rawRead(path, fence));
+        return operation.capture(() => {
+          const bytes = value === null ? null : copyBytes(value, 64 * 1024 * 1024);
+          evidence?.push({ path, bytes });
+          return bytes;
+        });
+      },
+      write: denied,
+      readVersion: denied,
+    };
+    // Historical codec binding is the exact configured backend identity, not physical routing.
+    const {
+      owner_id: _owner,
+      repository_id: _repository,
+      environment_id: _environment,
+      token: _token,
+      ...options
+    } = this.#configuration;
+    const recovery = new ControlRecovery(store, { ...options, now: () => operation.now() }, owner);
+    await operation.wait(() => recovery.guardConsumer(expected.generation), true);
+    const final = await this.#current(operation, evidence);
+    this.#same(first, final, operation);
   }
 }
 
