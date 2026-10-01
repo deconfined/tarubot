@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.27**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.28**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.28 — Bind native enrollment execution evidence
+
+- Retain a private original proof of the exact successful owner-approved enrollment run, repository, target environment and completed job/critical step under one wall/physical observation budget.
+- Carry synchronous refusal through native requests, responses and parsing; copied proofs, nested refusal and abandoned reads cannot authorize later offers.
+- Preserve the legacy enrollment/recovery receipt while counting capture and physical time in its original read window. Host integration and request-volume work remain pending; release activation stays fenced.
 
 ## 2.36.27 — Retain control-read refusal boundaries
 

@@ -1,12 +1,12 @@
 {
-  "title": "Session: 2.36.27 control-read refusal boundaries",
-  "objective": "Exercise original refusal propagation through journal, consumer, owner metadata and native storage/request offers. Request volume and host integration remain pending; the disposable guest remains stopped with evidence retained.",
+  "title": "Session: 2.36.28 native enrollment execution evidence",
+  "objective": "Exercise exact completed enrollment identity and the same private original proof through native reads and bounded use. Request volume and host integration remain pending; the disposable guest remains stopped with evidence retained.",
   "user": [
     "Review the import-only guard and privately supply current cluster settings only for a separately approved import; missing adoption, trust or staging acceptance blocks promotion.",
     "Keep existing approval gates intact. No credentials, environments, shared bot, database or host changes are authorized by these offline checks."
   ],
   "assistant": [
-    "Exercise invented storage and isolated request substitutes for original deadlines, method getters, stream callbacks, nested refusals, abandoned work and byte capture; contact no real endpoint, host or provider.",
+    "Exercise invented enrollment and recovery responses for numeric repository/environment pins, job identity, owner approval, original deadlines, native callback refusal, copied proofs and abandoned work; contact no real endpoint, host or provider.",
     "Run quality/build/unit/contract, workflow and credential-free infrastructure checks. Use only new marked Proxmox guests for authorized lab rehearsals; operate no real bot, Discord application, managed cluster or deployment environment."
   ],
   "bot": [
