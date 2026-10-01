@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.36.21**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.22**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.22 — Historical target issuance evidence
+
+- Define a separate v2 content receipt and immutable issuance statement, with exact private-content, source-projection, issuer-job and release bindings and an absolute lifetime of at most 24 hours.
+- Verify historical GitHub signatures against current official keys and fresh native job evidence, preserving the original observation deadline across nested reads. Local mint-window helpers permit one attempt without redating the statement.
+- Add invented RSA and GitHub fixtures for expiry, tampering, job contradictions, opaque proof forgery and abandoned reads. Private content storage, token minting and the proposed projection/sealing workflow remain pending.
 
 ## 2.36.21 — Guarded Ansible connection fixtures
 
