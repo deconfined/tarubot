@@ -10,7 +10,7 @@ The integrated replacement publisher, automatic enrollment and staging-gated pro
 
 ## Intended flow
 
-1. Review and merge to protected `main`; pass CI and security checks. An explicit version increase declares a release; maintenance merges publish no bot image.
+1. Review and merge to protected `main`; pass CI and security checks. An explicit version increase declares a release. Maintenance preserves published versions and can finish an unpublished release after a build fix.
 2. Build AMD64 and ARM64 images, scan their exact digests and publish a GitHub attestation for the resulting image index. Verify the exact publisher identity and digest before use.
 3. Plan infrastructure with read-only credentials. Classify the complete plan as no change, a permitted automatic update or owner review required. Apply only the exact saved plan.
 4. Establish or verify durable SSH trust for the applied host generation, including locally validated DNSSEC SSHFP.

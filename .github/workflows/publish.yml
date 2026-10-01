@@ -1,4 +1,4 @@
-# Version increases on main publish releases; maintenance and manual dispatches only verify.
+# Main publishes an absent version; maintenance preserves existing releases and dispatches verify.
 name: Publish containers
 
 on:
@@ -22,11 +22,11 @@ jobs:
   publish:
     name: Publish ${{ matrix.target }}
     needs: verify
-    # A version bump is release intent. Dispatches and reruns verify without rebuilding tags;
-    # an unsuccessful publication is repaired with a new version, not by replacing its image.
+    # A version bump declares a release; a later maintenance merge may finish its failed build.
+    # Existing version tags are preserved. Dispatches and reruns only verify.
     if: >-
       github.ref == 'refs/heads/main' && github.event_name == 'push'
-      && github.run_attempt == '1' && needs.verify.outputs.release == 'true'
+      && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     concurrency:
@@ -77,11 +77,13 @@ jobs:
             org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Require an unpublished version
-        # Registry failures are not evidence of absence. Only the standard manifest 404 permits
-        # publication; an existing tag is never overwritten, including after a partial failure.
+      - name: Check version publication
+        id: publication
+        # Registry failures are not evidence of absence. An absent tag may finish an unpublished
+        # release after a maintenance fix; an existing version is never rebuilt or overwritten.
         env:
           VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_REQUESTED: ${{ needs.verify.outputs.release }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,16 +108,21 @@ jobs:
             exit 1
           fi
           case "$status" in
-            404) ;;
+            404) echo 'publish=true' >> "$GITHUB_OUTPUT" ;;
             200)
-              echo "::error::This release version already exists; publish a new version instead."
-              exit 1 ;;
+              if [[ $RELEASE_REQUESTED == true ]]; then
+                echo "::error::This release version already exists; publish a new version instead."
+                exit 1
+              fi
+              echo 'publish=false' >> "$GITHUB_OUTPUT"
+              echo '::notice::This version is already published; maintenance produces no release image.' ;;
             *)
               echo "::error::Could not verify that the release version is unpublished."
               exit 1 ;;
           esac
       - name: Build and publish both supported platforms
         id: build
+        if: steps.publication.outputs.publish == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -132,6 +139,8 @@ jobs:
   scan:
     name: Scan built platforms
     needs: publish
+    # A maintenance run that preserved an existing tag has no new digest to scan or sign.
+    if: needs.publish.outputs.digest != ''
     uses: ./.github/workflows/scan.yml
     with:
       digest: ${{ needs.publish.outputs.digest }}

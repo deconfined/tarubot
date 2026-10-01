@@ -95,7 +95,7 @@ Next: [back up](/tarubot/deploy/operations/#backup) the database regularly, and 
 
 `TARUBOT_IMAGE_TAG` also accepts `sha-<commit>`, the full commit that published an image. To pin by digest, set `TARUBOT_IMAGE` to the complete reference, such as `ghcr.io/deconfined/tarubot@sha256:<digest>`; it overrides `TARUBOT_IMAGE_TAG`.
 
-New bot releases publish version and commit tags after their checks pass. Documentation and pipeline maintenance can merge without a bot release, so some commits on `main` have no image. Existing version tags are preserved.
+New bot releases publish version and commit tags after their checks pass. Documentation and pipeline maintenance can merge without a bot release, so some commits on `main` have no image. A maintenance fix can finish the same release if its build failed before publishing a version tag. Existing version tags are preserved.
 
 ### Checking where an image came from
 

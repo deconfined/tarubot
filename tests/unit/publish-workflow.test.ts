@@ -145,20 +145,40 @@ describe("the build's digest", () => {
 });
 
 describe("explicit release publication", () => {
-  test("only the first main push with a version increase may publish", () => {
-    // Manual verification and unchanged-version maintenance must never receive a build digest.
+  test("only the first main push checks publication, and absent versions alone receive a build digest", () => {
+    // An unchanged version can finish an unpublished release; existing versions skip the build.
     expect(build.if.replace(/\s+/gu, " ").trim()).toBe(
-      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && needs.verify.outputs.release == 'true'",
+      "github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'",
     );
     expect(build.concurrency).toEqual({
       group: `publish-${expr("github.repository")}-${expr("needs.verify.outputs.version")}`,
       "cancel-in-progress": false,
     });
     const jobs = publish.jobs as typeof publish.jobs & {
-      scan: { needs: string };
+      scan: { needs: string; if: string };
       release: { needs: string[] };
     };
     expect(jobs.scan.needs).toBe("publish");
+    expect(jobs.scan.if).toBe("needs.publish.outputs.digest != ''");
+    const push = stepOf(build, "build");
+    expect(push.if).toBe("steps.publication.outputs.publish == 'true'");
+    for (const [decision, expected] of [
+      ["true", true],
+      ["false", false],
+      ["", false],
+    ] as const)
+      expect(
+        runInNewContext(push.if ?? "", {
+          steps: { publication: { outputs: { publish: decision } } },
+        }),
+      ).toBe(expected);
+    for (const [digest, expected] of [
+      [`sha256:${"a".repeat(64)}`, true],
+      ["", false],
+    ] as const)
+      expect(runInNewContext(jobs.scan.if, { needs: { publish: { outputs: { digest } } } })).toBe(
+        expected,
+      );
     expect(needsOf(attest)).toContain("publish");
     expect(jobs.release.needs).toContain("publish");
     expect(latest.if).toContain("needs.publish.result == 'success'");
@@ -193,13 +213,15 @@ describe("explicit release publication", () => {
     }
   });
 
-  test("the registry guard permits only a confirmed absent tag, before the build", () => {
-    const guard = stepOf(build, "Require an unpublished version");
+  test("the registry guard finishes unpublished releases, skips published maintenance and refuses conflicts", () => {
+    const guard = stepOf(build, "Check version publication");
+    expect(guard.id).toBe("publication");
     expect(build.steps.indexOf(guard)).toBeLessThan(build.steps.indexOf(stepOf(build, "build")));
     expect(guard.env).toEqual({
       VERSION: expr("needs.verify.outputs.version"),
       GHCR_USER: expr("github.actor"),
       GHCR_TOKEN: expr("secrets.GITHUB_TOKEN"),
+      RELEASE_REQUESTED: expr("needs.verify.outputs.release"),
     });
 
     // Exercise the actual shell guard with a fixed local curl replacement. Unknown routes fail
@@ -255,8 +277,10 @@ if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:example/taru
 `,
         { mode: 0o700 },
       );
-      const outcome = (status: string, tokenCase = "valid") => {
+      const outputs = join(directory, "outputs");
+      const outcome = (status: string, tokenCase = "valid", releaseRequested = "true") => {
         writeFileSync(calls, "");
+        writeFileSync(outputs, "");
         const result = Bun.spawnSync(["bash", "-e", "-c", guard.run ?? ""], {
           env: {
             PATH: `${directory}:${process.env.PATH}`,
@@ -264,6 +288,8 @@ if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:example/taru
             VERSION: "2.40.0",
             GHCR_USER: "invented-user",
             GHCR_TOKEN: "invented-workflow-token",
+            GITHUB_OUTPUT: outputs,
+            RELEASE_REQUESTED: releaseRequested,
             CALLS: calls,
             STATUS: status,
             TOKEN_CASE: tokenCase,
@@ -280,17 +306,35 @@ if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:example/taru
           exit: result.exitCode,
           calls: readFileSync(calls, "utf8"),
           output,
+          outputs: readFileSync(outputs, "utf8"),
           masked: rawOutput.includes(mask),
         };
       };
-      expect(outcome("404")).toMatchObject({ exit: 0, calls: "token\nmanifest\n", masked: true });
+      for (const releaseRequested of ["true", "false"])
+        expect(outcome("404", "valid", releaseRequested)).toMatchObject({
+          exit: 0,
+          calls: "token\nmanifest\n",
+          outputs: "publish=true\n",
+          masked: true,
+        });
+      expect(outcome("200", "valid", "false")).toMatchObject({
+        exit: 0,
+        calls: "token\nmanifest\n",
+        outputs: "publish=false\n",
+        output: expect.stringContaining("::notice::"),
+      });
       expect(outcome("200")).toMatchObject({
         exit: 1,
         calls: "token\nmanifest\n",
+        outputs: "",
         output: expect.stringContaining("already exists"),
       });
       for (const status of ["301", "307", "401", "403", "429", "500", "000", "error"])
-        expect(outcome(status)).toMatchObject({ exit: 1, calls: "token\nmanifest\n" });
+        expect(outcome(status)).toMatchObject({
+          exit: 1,
+          calls: "token\nmanifest\n",
+          outputs: "",
+        });
       for (const tokenCase of [
         "empty",
         "error",
@@ -303,6 +347,7 @@ if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:example/taru
         expect(outcome("404", tokenCase)).toMatchObject({
           exit: 1,
           calls: "token\n",
+          outputs: "",
           masked: false,
         });
     } finally {
