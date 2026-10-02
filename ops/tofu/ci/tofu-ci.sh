@@ -136,8 +136,9 @@ init() {
 }
 
 # A decrypted state export is private, never an output/artifact; it supplies lineage/serial evidence.
+# Native state pull decrypts with the configured key; 1.12.6 has no -unencrypted flag.
 control_state() {
-  tofu -chdir="$module" state pull -unencrypted >"$d/state.json" 2>"$d/state.stderr" ||
+  tofu -chdir="$module" state pull >"$d/state.json" 2>"$d/state.stderr" ||
     fail "Private state evidence couldn't be read; control records require existing state."
 }
 

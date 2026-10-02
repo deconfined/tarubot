@@ -320,9 +320,9 @@ describe("automatic infrastructure adapter", () => {
     let current = release.commit;
     let plan: unknown = candidate;
     let mismatchedShow = false;
-    let changedRead = "";
+    let stateDriftsDuringShow = false;
     const calls: string[][] = [];
-    const execute = (argv: string[], name: string): Uint8Array => {
+    const execute = (argv: string[], _name: string): Uint8Array => {
       calls.push([...argv]);
       let output: unknown = {};
       if (argv[0] === "gh") output = { object: { sha: current } };
@@ -341,9 +341,13 @@ describe("automatic infrastructure adapter", () => {
           write("plan.json", plan);
         }
       } else if (argv[0] === "tofu") {
-        if (argv[2] === "state")
-          output = name === changedRead ? { ...state, serial: state.serial + 1 } : state;
-        if (argv[2] === "show")
+        if (argv[2] === "state") {
+          // Model the native CLI contract instead of accepting unsupported state commands/options.
+          if (argv[3] !== "pull" || argv.length !== 4)
+            throw new Error("unsupported-invented-state-command");
+          output = state;
+        }
+        if (argv[2] === "show") {
           output =
             argv.length > 4
               ? plan
@@ -354,6 +358,10 @@ describe("automatic infrastructure adapter", () => {
                     ? { ...candidate.planned_values, root_module: { resources: [] } }
                     : candidate.planned_values,
                 };
+          // Drift during inspection requires a later state read, independent of diagnostic labels.
+          if (argv.length === 4 && stateDriftsDuringShow)
+            state = { ...state, serial: state.serial + 1 };
+        }
         if (argv[2] === "apply") {
           // Actual encrypted intent and pending readbacks must precede the invented provider effect.
           const head = objects.get("current");
@@ -401,8 +409,8 @@ describe("automatic infrastructure adapter", () => {
       mismatch: () => {
         mismatchedShow = true;
       },
-      changeRead: (name: string) => {
-        changedRead = name;
+      changeDuringShow: () => {
+        stateDriftsDuringShow = true;
       },
       failCompletion: () => {
         failFinish = true;
@@ -418,11 +426,6 @@ describe("automatic infrastructure adapter", () => {
     const r = await runner(releaseInputs.hosts.staging.label);
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     expect(readFileSync(r.env.GITHUB_OUTPUT, "utf8")).toBe("decision=no-changes\nverified=true\n");
-    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
-      ["state", "pull", "-unencrypted"],
-      ["show", "-json"],
-      ["state", "pull", "-unencrypted"],
-    ]);
     expect(
       r.calls
         .filter((call) => call[0] === "gh")
@@ -450,14 +453,6 @@ describe("automatic infrastructure adapter", () => {
     const r = await runner();
     await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
     await automaticInfrastructure("apply", release, r.directory, r.binding(), r.deps);
-    expect(r.calls.filter((call) => call[0] === "tofu").map((call) => call.slice(2))).toEqual([
-      ["show", "-json", join(r.directory, "plan.bin")],
-      ["state", "pull", "-unencrypted"],
-      ["apply", "-input=false", "-json", join(r.directory, "plan.bin")],
-      ["state", "pull", "-unencrypted"],
-      ["show", "-json"],
-      ["state", "pull", "-unencrypted"],
-    ]);
     expect(
       (await r.records.inspect(stateEvidence({ ...rawState, serial: 11 }))).inputs?.hosts,
     ).toEqual({ staging: { ...releaseInputs.hosts.staging, label: "example-renamed" } });
@@ -468,7 +463,7 @@ describe("automatic infrastructure adapter", () => {
   test("unstable state, wrong applied show and corrupted completed baseline never produce verified continuation", async () => {
     for (const failure of ["changed-state", "wrong-show", "corrupt-baseline"] as const) {
       const r = await runner(releaseInputs.hosts.staging.label);
-      if (failure === "changed-state") r.changeRead("state-verified");
+      if (failure === "changed-state") r.changeDuringShow();
       if (failure === "wrong-show") r.mismatch();
       if (failure === "corrupt-baseline") r.objects.set("current", new Uint8Array([1]));
       await expect(
@@ -526,7 +521,7 @@ describe("automatic infrastructure adapter", () => {
     for (const failure of ["changed-state", "wrong-show", "finish-failed"] as const) {
       const r = await runner();
       await automaticInfrastructure("plan", release, r.directory, r.env, r.deps);
-      if (failure === "changed-state") r.changeRead("state-verified");
+      if (failure === "changed-state") r.changeDuringShow();
       if (failure === "wrong-show") r.mismatch();
       if (failure === "finish-failed") r.failCompletion();
       await expect(

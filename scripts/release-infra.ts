@@ -120,11 +120,11 @@ export async function automaticInfrastructure(
     const context = read("control-context.json") as { snapshot: Snapshot };
     const decision = requireAutomaticPlan(read("plan.json"), read("values.tfvars.json"), context);
     if (decision === "no-changes") {
-      const before = stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-before"));
+      const before = stateEvidence(tofu(["state", "pull"], "state-before"));
       requireEvidence(isDeepStrictEqual(before, context.snapshot.state));
       const shown = tofu(["show", "-json"], "applied-state");
       verifyAppliedPlan(read("plan.json"), shown);
-      const reopened = stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-verified"));
+      const reopened = stateEvidence(tofu(["state", "pull"], "state-verified"));
       requireEvidence(isDeepStrictEqual(reopened, before));
       // Reopen all completion links; a copied Plan snapshot is never sufficient by itself.
       const records = deps.records ?? infrastructureRecords(directory, env);
@@ -149,7 +149,7 @@ export async function automaticInfrastructure(
     .digest("hex");
   const binding = handoffBinding(directory, env);
   requireEvidence(env.DIGEST === digest && env.BINDING === binding);
-  const before = stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-before"));
+  const before = stateEvidence(tofu(["state", "pull"], "state-before"));
   requireEvidence(isDeepStrictEqual(before, context.snapshot.state));
   fresh();
   await noHostPending();
@@ -168,13 +168,10 @@ export async function automaticInfrastructure(
     ["tofu", "-chdir=ops/tofu", "apply", "-input=false", "-json", join(directory, "plan.bin")],
     "apply",
   );
-  const state = stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-after"));
+  const state = stateEvidence(tofu(["state", "pull"], "state-after"));
   verifyAppliedPlan(shown, tofu(["show", "-json"], "applied-state"));
   requireEvidence(
-    isDeepStrictEqual(
-      stateEvidence(tofu(["state", "pull", "-unencrypted"], "state-verified")),
-      state,
-    ),
+    isDeepStrictEqual(stateEvidence(tofu(["state", "pull"], "state-verified")), state),
   );
   await records.finish(ticket, state);
   fresh();

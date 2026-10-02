@@ -142,6 +142,21 @@ Leave `TOFU_CONTROL_RECORDS_ENABLED` off until real-backend persistence and inte
 
 If records were previously enabled, a pending operation, missing baseline/history or uncertain readback blocks another mutation. Fence all writers and reconcile actual provider/state outcomes and related record generations before resuming. Do not disable records to bypass recovery, delete a pending reference, restore only the newest object or blindly retry Apply. See [recovery requirements](../../docs/PIPELINE.md#recovery).
 
+### Private-backend acceptance
+
+An S3-compatible local rehearsal does not accept the intended storage service. Before enabling records, the owner performs these checks privately with disposable objects in an isolated acceptance bucket on that service. Do not use the operational bucket: the native state and record clients have fixed key prefixes.
+
+1. Read back the GitHub environment protections and matching bucket, endpoint, passphrase and inputs described above. Keep provider and storage credentials outside agent sessions.
+2. Enable and read back native bucket versioning with standard S3 `put-bucket-versioning` and `get-bucket-versioning`. The Linode API/Cloud Manager do not manage this feature; use [the provider's S3 procedure](https://techdocs.akamai.com/cloud-computing/docs/versioning-retain-object-version-history).
+3. Inspect the lifecycle policy on the operational bucket. No enabled expiration rule may discard current or noncurrent `tarubot/control/` records needed for recovery. Backup retention policies are not a control-record policy. [Linode's lifecycle support](https://techdocs.akamai.com/cloud-computing/docs/lifecycle-policies) does not include `NewerNoncurrentVersions`; do not depend on that setting.
+4. With the pinned OpenTofu and the module's enforced PBKDF2/AES-GCM encryption, use a provider-free disposable module to write encrypted state, plan with read-only credentials, transfer the exact encrypted plan bytes and apply with write credentials. Verify the planned result and unchanged transfer digest. Then advance the disposable state and require the older plan to fail as stale without changing it. A wrong passphrase must fail.
+5. Exercise `infrastructureRecords`, `S3ControlStore` and `hostEnrollmentRecords` with Bun against that isolated bucket over verified TLS and virtual-hosted routing. Require ciphertext readback, read-only write refusal and an authentication failure distinct from a missing object. [Limited read keys](https://techdocs.akamai.com/cloud-computing/docs/manage-access-keys) support reads of noncurrent versions.
+6. Interrupt the disposable record sequence after first-key persistence and simulate a lost write acknowledgement. Fresh readers must refuse pending operations. Use standard S3 version listing and selected-version reads to recover the first observed key and related records following [the recovery write table](../../docs/HOSTING.md#infrastructure-and-enrollment-records); clear the host pending index last and retain the old versions.
+
+`tofu state pull` already decrypts its output with the configured key. Pinned OpenTofu 1.12.6 has no `-unencrypted` flag. Keep the resulting raw JSON private, under umask 077, and derive lineage/serial evidence with `stateEvidence`; `show -json` is a different projection. This changes no at-rest encryption setting.
+
+Record the reviewed commit, tool versions, backend role, checks, refusals and unexercised cases without private identifiers. Local storage, synthetic state evidence and simulated host/DNS effects cannot prove intended-backend retention, database adoption, actual enrollment or live staging readiness. Keep both activation switches off until their corresponding acceptance is complete.
+
 ## The first apply
 
 It is two applies, so that adopting the existing access list can't change it.

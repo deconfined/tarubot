@@ -88,3 +88,5 @@ Before enabling the replacement path, demonstrate:
 - Owner-reviewed production cutover preserving approval and recovery, followed by separate removal of retired paths.
 
 A green build, configure-only run, skipped job or old fixture does not satisfy these checks. Keep remaining work in issues/PRs ([pipeline work](https://github.com/deconfined/tarubot/issues/62), [live behavior acceptance](https://github.com/deconfined/tarubot/issues/46)), and record version/commit, target role, checks and unexercised cases there. Do not recreate a release-by-release diary here.
+
+Offline adapter regressions must reject unsupported state-pull commands and state drift during applied-state inspection. A refused no-change continuation must not emit a verified result; a post-Apply verification failure must leave durable pending intent. Exercise those outcomes rather than pinning command-array order. These tests do not replace native OpenTofu or real-backend acceptance.
