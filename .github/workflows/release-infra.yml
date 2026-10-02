@@ -55,7 +55,11 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
+          OVH_APPLICATION_KEY: ${{ secrets.OVH_READ_APPLICATION_KEY }}
+          OVH_APPLICATION_SECRET: ${{ secrets.OVH_READ_APPLICATION_SECRET }}
+          OVH_CONSUMER_KEY: ${{ secrets.OVH_READ_CONSUMER_KEY }}
+          OS_USERNAME: ${{ secrets.OPENSTACK_READ_USERNAME }}
+          OS_PASSWORD: ${{ secrets.OPENSTACK_READ_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
         run: |
           umask 077
@@ -114,7 +118,11 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-          LINODE_TOKEN: ${{ secrets.LINODE_WRITE_TOKEN }}
+          OVH_APPLICATION_KEY: ${{ secrets.OVH_WRITE_APPLICATION_KEY }}
+          OVH_APPLICATION_SECRET: ${{ secrets.OVH_WRITE_APPLICATION_SECRET }}
+          OVH_CONSUMER_KEY: ${{ secrets.OVH_WRITE_CONSUMER_KEY }}
+          OS_USERNAME: ${{ secrets.OPENSTACK_WRITE_USERNAME }}
+          OS_PASSWORD: ${{ secrets.OPENSTACK_WRITE_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WRITE_TOKEN }}
         run: |
           umask 077

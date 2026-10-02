@@ -6,7 +6,7 @@ The [agreed threat model](THREAT_MODEL.md) governs this design: minimal complexi
 
 Production still uses Compose. Staging host delivery implements reviewed Ansible host and bot playbooks with manual key pinning; this does not establish a running staging bot. Infrastructure is dispatch-only: read-only Plan, then owner-approved Apply. The full-plan classifier is advisory; automatic Apply is disabled.
 
-The selected replacement stack is OVH US: compute `US-EAST-VA-1`, single-node Essential PostgreSQL `US-EAST-VA` and Standard S3-compatible Object Storage `us-east-va`. Explicit S3 signing-region configuration is implemented across saved-plan binding and record readers. Compute/database resources and their plan/enrollment consumers remain inactive Linode-specific code pending coherent replacement; this is not yet an OVH provisioning path or real-service acceptance.
+The selected replacement stack is OVH US: compute `US-EAST-VA-1`, single-node Essential PostgreSQL `US-EAST-VA` and Standard S3-compatible Object Storage `us-east-va`. Explicit S3 region binding, pinned OVH/OpenStack resources, private inputs, plan policy and UUID/project-bound enrollment consumers are implemented and tested offline. The selected VM size is d2-2 with an explicit AlmaLinux 10-UEFI image ID and local disk. This does not establish real-service acceptance or provision/migrate a live system.
 
 The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Infrastructure records use the protected job's authority, with encrypted baseline/pending records and persistence readback. New-host Apply includes first enrollment; ordinary deployment reads the stored key and validates DNSSEC once before strict Ansible/OpenSSH delivery. Private-backend and live staging acceptance remain outstanding. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
 
@@ -26,13 +26,13 @@ A reviewed workflow in its intended protected environment is the command authori
 
 | Component | Responsibility |
 | --- | --- |
-| OpenTofu | Hosts, firewalls, A/AAAA records and database access lists; optional import-only adoption of the existing managed cluster. |
+| OpenTofu | OpenStack hosts/security groups, A/AAAA records and NEW OVH Essential PostgreSQL services with complete IP restrictions. No import/adoption path. |
 | cloud-init | First-boot public login keys and optional root console password hash. The guest generates its own SSH host key. |
 | Ansible | Host configuration from reviewed `main`; bot deployment from the selected release. Use `ansible.builtin`, with no Galaxy dependencies. |
 | Enrollment | Persist the first host key for an explicitly approved new generation and write its SSHFP record. |
 | Owner | Environment credentials, protection rules, sensitive infrastructure changes, enrollment/recovery and production approval. |
 
-The OVH target retains AlmaLinux 10, enforcing SELinux and rootless Quadlet. Preserve the current live production/database path until a separately reviewed cutover; a newly provisioned OVH database is not migrated application data. VM sizing, a usable image and the account-specific quote must be settled before provisioning. Detailed implemented inputs and owner procedures live in the [OpenTofu runbook](../ops/tofu/README.md).
+The OVH target retains AlmaLinux 10, enforcing SELinux and rootless Quadlet. Preserve the current live production/database path until a separately reviewed cutover; a newly provisioned OVH database is not migrated application data. Verify selected image/flavor IDs, dual-stack network support, workload headroom and the account-specific quote before provisioning. Detailed inputs and owner procedures live in the [OpenTofu runbook](../ops/tofu/README.md).
 
 ## Infrastructure safety policy
 
@@ -48,7 +48,7 @@ The automatic allowlist is deliberately small:
 | Database access-list additions consisting only of unchanged module-managed host IPv4 `/32` or IPv6 `/128` addresses, preserving every previous entry | Safe update. |
 | Provisioning, import, rebuild, deletion/replacement, image, network, firewall, power, keys, security settings, database mutation, access removal/widening, or anything outside the allowlist | Owner review required, or invalid. Never automatic. |
 
-Existing-cluster adoption is a separate import-only operation. The owner records actual settings privately; the saved plan must import the expected cluster without remote changes. A separate read-only no-change verification follows Apply. Defaults and example values are not evidence of existing settings.
+The old Linode import/adoption operation is removed, not translated into OVH state or compatibility shims. Use a new isolated backend and new service; provider provisioning, migration proof, credential cutover and retirement remain separate owner operations. Defaults/examples are never observations of existing settings.
 
 Public summaries contain fixed decisions/reasons and safe counts, not hostnames, addresses, account/zone/cluster IDs, keys, private plan values or raw diagnostics. Encrypt state, saved plans and retained records. Keep decrypted plan/state JSON and provider responses in private working memory/files and remove them when the operation ends.
 
@@ -83,7 +83,7 @@ Use established encrypted backup tools and the [HOSTING recovery procedure](HOST
 Before enabling the replacement path, demonstrate:
 
 - Exact publisher identity, architecture/index digests and schema binding throughout publication, staging and production admission.
-- Real encrypted-state/plan compatibility and private-record persistence against the intended backend; exact saved-plan Apply, stale-plan refusal and owner-reviewed import-only database adoption.
+- Real encrypted-state/plan compatibility and private-record persistence against the intended backend; exact saved-plan Apply and stale-plan refusal, least-privilege provider write refusal, selected image/network/database compatibility, and separate migration/restore proof preserving live data.
 - Owner-approved enrollment followed by ordinary strict SSH; missing/changed keys and DNSSEC failure stop a deployment.
 - A complete disposable-host rehearsal, including interruption, unhealthy release and recovery, using invented data and credentials.
 - Actual staging startup, sustained readiness, Discord connection and sole database writer lease; command registration, representative authorized commands, the backup timer and a restore drill.

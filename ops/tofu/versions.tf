@@ -15,9 +15,13 @@ terraform {
   # platforms (README.md, "Checks and upgrades"). No TLS or random provider: the module makes no
   # keys.
   required_providers {
-    linode = {
-      source  = "linode/linode"
-      version = "~> 4.5.0"
+    ovh = {
+      source  = "ovh/ovh"
+      version = "= 2.9.0"
+    }
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = "= 3.4.0"
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"
@@ -67,9 +71,20 @@ terraform {
   }
 }
 
-# Credentials come from the environment only: LINODE_TOKEN and CLOUDFLARE_API_TOKEN, which
-# infra.yml sets on its Plan step from infra-plan's read-only tokens and on its Apply step from
-# infra's write tokens.
-provider "linode" {}
+# Credentials come only from phase-specific environment secrets: OVH_APPLICATION_KEY,
+# OVH_APPLICATION_SECRET, OVH_CONSUMER_KEY, OS_USERNAME, OS_PASSWORD and CLOUDFLARE_API_TOKEN.
+# Pin US endpoints and the intended tenant; ambient region/project selections cannot redirect it.
+provider "ovh" {
+  endpoint = "ovh-us"
+}
+provider "openstack" {
+  auth_url          = "https://auth.cloud.ovh.us/v3/"
+  region            = "US-EAST-VA-1"
+  tenant_id         = var.openstack_project_id
+  user_domain_id    = "default"
+  project_domain_id = "default"
+  insecure          = false
+  enable_logging    = false
+}
 
 provider "cloudflare" {}

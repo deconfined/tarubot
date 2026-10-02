@@ -54,181 +54,132 @@ const inputKeys = [
   "configure_keys",
   "root_password_hash",
   "cloudflare_zone_id",
-  "database_ids",
+  "ovh_project_id",
+  "openstack_project_id",
+  "databases",
   "db_allow_extra",
 ];
-/** Normalize the optional adoption map without changing the older private tfvars contract. */
+/** Selected stack only: obsolete database IDs/import maps are not compatibility inputs. */
 export function inputs(value: unknown): ObjectValue {
-  const raw = object(value);
-  const v: ObjectValue = {
-    ...raw,
-    existing_databases: Object.hasOwn(raw, "existing_databases") ? raw.existing_databases : {},
-  };
-  requireEvidence(
-    isDeepStrictEqual(Object.keys(v).sort(), [...inputKeys, "existing_databases"].sort()),
-  );
+  const v = object(value);
+  requireEvidence(isDeepStrictEqual(Object.keys(v).sort(), [...inputKeys].sort()));
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
   const hosts = object(v.hosts);
+  const labels = new Set<string>(),
+    names = new Set<string>();
   for (const [key, entry] of Object.entries(hosts)) {
     requireEvidence(/^(staging|production)(-[0-9]{1,2})?$/u.test(key));
-    const host = object(entry);
+    const h = object(entry);
     requireEvidence(
-      isDeepStrictEqual(Object.keys(host).sort(), ["fqdn", "label", "region", "role", "type"]),
+      isDeepStrictEqual(Object.keys(h).sort(), [
+        "flavor_id",
+        "fqdn",
+        "image_id",
+        "label",
+        "network_id",
+        "role",
+      ]),
     );
-    requireEvidence(host.role === key.split("-")[0]);
-    for (const field of ["fqdn", "label", "region", "type"]) text(host[field]);
+    requireEvidence(h.role === key.split("-")[0]);
+    const label = text(h.label),
+      fqdn = text(h.fqdn);
+    requireEvidence(/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/u.test(label) && !label.includes("--"));
+    requireEvidence(
+      fqdn.length <= 253 &&
+        fqdn.includes(".") &&
+        fqdn.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(part)),
+    );
+    requireEvidence(!labels.has(label) && !names.has(fqdn));
+    labels.add(label);
+    names.add(fqdn);
+    requireEvidence(uuid.test(text(h.image_id)) && uuid.test(text(h.network_id)));
+    requireEvidence(/^[a-zA-Z0-9_-]{1,64}$/u.test(text(h.flavor_id)));
   }
-  for (const [key, id] of Object.entries(object(v.database_ids))) {
-    requireEvidence(/^[a-z]{1,16}$/u.test(key) && /^[0-9]{1,20}$/u.test(text(id)));
+  for (const key of ["cloudflare_zone_id", "ovh_project_id", "openstack_project_id"])
+    requireEvidence(/^[0-9a-f]{32}$/u.test(text(v[key])));
+  for (const [key, entry] of Object.entries(object(v.databases))) {
+    const d = object(entry);
+    requireEvidence(
+      /^[a-z]{1,16}$/u.test(key) &&
+        isDeepStrictEqual(Object.keys(d).sort(), [
+          "backup_time",
+          "description",
+          "disk_size_gb",
+          "flavor",
+          "maintenance_time",
+          "version",
+        ]),
+    );
+    requireEvidence(
+      text(d.description).trim().length > 0 &&
+        ["14", "15", "16", "17", "18"].includes(text(d.version)),
+    );
+    requireEvidence(/^[a-z0-9-]{2,64}$/u.test(text(d.flavor)));
+    requireEvidence(Number.isSafeInteger(d.disk_size_gb) && Number(d.disk_size_gb) > 0);
+    for (const time of ["backup_time", "maintenance_time"])
+      requireEvidence(/^([01][0-9]|2[0-3]):[0-5][0-9]:00$/u.test(text(d[time])));
   }
-  v.existing_databases = Object.fromEntries(
-    Object.entries(object(v.existing_databases)).map(([key, config]) => {
-      requireEvidence(Object.hasOwn(object(v.database_ids), key));
-      return [key, databaseConfig(config)];
-    }),
+  const keys = list(v.root_keys).map(text);
+  requireEvidence(
+    keys.length > 0 &&
+      keys.every((key) =>
+        /^(verify-required )?(ssh-ed25519|sk-ssh-ed25519@openssh[.]com) AAAA[0-9A-Za-z+/]+={0,3}( [ -~]+)?$/u.test(
+          key,
+        ),
+      ),
   );
-  const adoptedIds = Object.keys(object(v.existing_databases)).map(
-    (key) => object(v.database_ids)[key],
+  for (const [role, key] of Object.entries(object(v.configure_keys)))
+    requireEvidence(
+      ["staging", "production"].includes(role) &&
+        /^ssh-ed25519 AAAA[0-9A-Za-z+/]+={0,3}( [ -~]+)?$/u.test(text(key)),
+    );
+  for (const h of Object.values(hosts))
+    requireEvidence(Object.hasOwn(object(v.configure_keys), text(object(h).role)));
+  const hash = text(v.root_password_hash);
+  requireEvidence(
+    hash === "" ||
+      /^(\$y\$[./0-9A-Za-z]+\$[./0-9A-Za-z]{1,86}\$[./0-9A-Za-z]{43}|\$6\$(rounds=[1-9][0-9]{3,8}\$)?[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86})$/u.test(
+        hash,
+      ),
   );
-  requireEvidence(new Set(adoptedIds).size === adoptedIds.length);
-  list(v.root_keys).forEach(text);
-  Object.values(object(v.configure_keys)).forEach(text);
-  text(v.root_password_hash);
-  requireEvidence(/^[0-9a-f]{32}$/u.test(text(v.cloudflare_zone_id)));
-  list(v.db_allow_extra).forEach(text);
+  for (const entry of list(v.db_allow_extra)) {
+    const [ip, prefix, extra] = text(entry).split("/");
+    const family = isIP(ip ?? "");
+    requireEvidence(
+      family !== 0 &&
+        extra === undefined &&
+        prefix !== undefined &&
+        /^[0-9]+$/u.test(prefix) &&
+        Number(prefix) <= (family === 4 ? 32 : 128),
+    );
+  }
   return v;
 }
 
-/** Pinned-provider top-level fields. Unknown additions need review, never implicit acceptance. */
+/** Fields from signed OVH 2.9.0 / OpenStack 3.4.0 schemas. New fields cannot ride safe changes. */
 const fields: Record<string, string[]> = {
-  linode_instance: `id image backup_id stackscript_id stackscript_data label tags capabilities locks
-    boot_config_label region maintenance_policy type resize_disk migration_type status ip_address
-    ipv6 ipv4 private_ip private_ip_address authorized_keys authorized_users root_pass swap_size
-    kernel boot_size backups_enabled watchdog_enabled host_uuid booted firewall_id shared_ipv4
-    metadata network_helper placement_group placement_group_externally_managed interface_generation
-    has_user_data disk_encryption lke_cluster_id specs alerts backups interface linode_interfaces
-    config disk timeouts`.split(/\s+/u),
-  cloudflare_dns_record: `id zone_id include_shadow_metadata name comment content priority type data
-    private_routing proxied ttl tags settings comment_modified_on created_on modified_on proxiable
-    tags_modified_on meta`.split(/\s+/u),
-  linode_database_access_controls: ["id", "database_id", "database_type", "allow_list", "timeouts"],
-  // Linode v4.5.0 at c77ffd4d69cde96fb01b9bf83f6506e5cab957a4:
-  // linode/firewall/framework_schema_resource.go and framework_schema_datasource.go.
-  linode_firewall: `id label tags disabled inbound outbound inbound_policy outbound_policy version
-    fingerprint linodes nodebalancers interfaces devices status created updated`.split(/\s+/u),
-  // The same pinned source's linode/databasepostgresqlv2/framework_resource_schema.go;
-  // framework_resource.go adds create/update/delete timeouts through BaseResource.
-  linode_database_postgresql_v2: `id engine_id label region type allow_list ca_cert cluster_size
-    fork_restore_time fork_source suspended updates created encrypted engine host_primary
-    host_secondary host_standby members oldest_restore_time pending_updates platform port
-    private_network root_password root_username ssl_connection status updated version timeouts
-    engine_config_pg_autovacuum_analyze_scale_factor engine_config_pg_autovacuum_analyze_threshold
-    engine_config_pg_autovacuum_max_workers engine_config_pg_autovacuum_naptime
-    engine_config_pg_autovacuum_vacuum_cost_delay engine_config_pg_autovacuum_vacuum_cost_limit
-    engine_config_pg_autovacuum_vacuum_scale_factor engine_config_pg_autovacuum_vacuum_threshold
-    engine_config_pg_bgwriter_delay engine_config_pg_bgwriter_flush_after engine_config_pg_bgwriter_lru_maxpages
-    engine_config_pg_bgwriter_lru_multiplier engine_config_pg_deadlock_timeout engine_config_pg_default_toast_compression
-    engine_config_pg_idle_in_transaction_session_timeout engine_config_pg_jit engine_config_pg_max_files_per_process
-    engine_config_pg_max_locks_per_transaction engine_config_pg_max_logical_replication_workers
-    engine_config_pg_max_parallel_workers engine_config_pg_max_parallel_workers_per_gather
-    engine_config_pg_max_pred_locks_per_transaction engine_config_pg_max_replication_slots
-    engine_config_pg_max_slot_wal_keep_size engine_config_pg_max_stack_depth engine_config_pg_max_standby_archive_delay
-    engine_config_pg_max_standby_streaming_delay engine_config_pg_max_wal_senders engine_config_pg_max_worker_processes
-    engine_config_pg_password_encryption engine_config_pg_pg_partman_bgw_interval engine_config_pg_pg_partman_bgw_role
-    engine_config_pg_pg_stat_monitor_pgsm_enable_query_plan engine_config_pg_pg_stat_monitor_pgsm_max_buckets
-    engine_config_pg_pg_stat_statements_track engine_config_pg_temp_file_limit engine_config_pg_timezone
-    engine_config_pg_track_activity_query_size engine_config_pg_track_commit_timestamp engine_config_pg_track_functions
-    engine_config_pg_track_io_timing engine_config_pg_wal_sender_timeout engine_config_pg_wal_writer_delay
-    engine_config_pg_stat_monitor_enable engine_config_pglookout_max_failover_replication_time_lag
-    engine_config_shared_buffers_percentage engine_config_work_mem`.split(/\s+/u),
+  openstack_compute_instance_v2:
+    "access_ip_v4 access_ip_v6 admin_pass all_metadata all_tags availability_zone availability_zone_hints config_drive created flavor_id flavor_name force_delete hypervisor_hostname id image_id image_name key_pair metadata name network_mode power_state region security_groups stop_before_destroy tags updated user_data block_device network personality scheduler_hints timeouts vendor_options".split(
+      " ",
+    ),
+  openstack_networking_secgroup_v2:
+    "all_tags delete_default_rules description id name region stateful tags tenant_id timeouts".split(
+      " ",
+    ),
+  openstack_networking_secgroup_rule_v2:
+    "description direction ethertype id port_range_max port_range_min protocol region remote_address_group_id remote_group_id remote_ip_prefix security_group_id tenant_id timeouts".split(
+      " ",
+    ),
+  ovh_cloud_project_database:
+    "advanced_configuration backup_regions backup_time created_at deletion_protection description disk_size disk_type endpoints engine flavor id kafka_rest_api kafka_schema_registry maintenance_time network_type opensearch_acls_enabled plan service_name status version ip_restrictions nodes timeouts".split(
+      " ",
+    ),
+  cloudflare_dns_record:
+    "id zone_id include_shadow_metadata name comment content priority type data private_routing proxied ttl tags settings comment_modified_on created_on modified_on proxiable tags_modified_on meta".split(
+      " ",
+    ),
 };
-/** Match the pinned module's typed optional nulls; never default an actual cluster setting. */
-function databaseConfig(value: unknown): ObjectValue {
-  const config = object(value);
-  requireEvidence(
-    isDeepStrictEqual(Object.keys(config).sort(), [
-      "cluster_size",
-      "engine_config",
-      "engine_id",
-      "expected_encrypted",
-      "expected_ssl_connection",
-      "label",
-      "private_network",
-      "region",
-      "suspended",
-      "type",
-      "updates",
-    ]),
-  );
-  for (const key of ["label", "engine_id", "region", "type"])
-    requireEvidence(text(config[key]).trim().length > 0);
-  requireEvidence(/^postgresql\/[0-9][0-9A-Za-z._-]*$/u.test(text(config.engine_id)));
-  for (const key of ["suspended", "expected_encrypted", "expected_ssl_connection"])
-    requireEvidence(typeof config[key] === "boolean");
-  requireEvidence(Number.isSafeInteger(config.cluster_size) && Number(config.cluster_size) > 0);
-  const updates = object(config.updates);
-  requireEvidence(
-    isDeepStrictEqual(Object.keys(updates).sort(), [
-      "day_of_week",
-      "duration",
-      "frequency",
-      "hour_of_day",
-    ]),
-  );
-  for (const key of ["day_of_week", "duration", "hour_of_day"])
-    requireEvidence(Number.isSafeInteger(updates[key]));
-  requireEvidence(
-    Number(updates.day_of_week) >= 1 &&
-      Number(updates.day_of_week) <= 7 &&
-      Number(updates.hour_of_day) >= 0 &&
-      Number(updates.hour_of_day) <= 23 &&
-      Number(updates.duration) > 0 &&
-      updates.frequency === "weekly",
-  );
-  if (config.private_network !== null) {
-    const network = object(config.private_network);
-    requireEvidence(
-      isDeepStrictEqual(Object.keys(network).sort(), ["public_access", "subnet_id", "vpc_id"]),
-    );
-    requireEvidence(typeof network.public_access === "boolean");
-    for (const key of ["vpc_id", "subnet_id"])
-      requireEvidence(Number.isSafeInteger(network[key]) && Number(network[key]) > 0);
-  }
-  const engine = object(config.engine_config);
-  const keys =
-    fields.linode_database_postgresql_v2?.filter((key) => key.startsWith("engine_config_")) ?? [];
-  requireEvidence(Object.keys(engine).every((key) => keys.includes(key)));
-  const booleans = new Set([
-    "engine_config_pg_jit",
-    "engine_config_pg_pg_stat_monitor_pgsm_enable_query_plan",
-    "engine_config_pg_stat_monitor_enable",
-  ]);
-  const strings = new Set([
-    "engine_config_pg_default_toast_compression",
-    "engine_config_pg_password_encryption",
-    "engine_config_pg_pg_partman_bgw_role",
-    "engine_config_pg_pg_stat_statements_track",
-    "engine_config_pg_timezone",
-    "engine_config_pg_track_commit_timestamp",
-    "engine_config_pg_track_functions",
-    "engine_config_pg_track_io_timing",
-  ]);
-  const normalized = Object.fromEntries(
-    keys.map((key) => {
-      const entry = Object.hasOwn(engine, key) ? engine[key] : null;
-      requireEvidence(
-        entry === null ||
-          (booleans.has(key)
-            ? typeof entry === "boolean"
-            : strings.has(key)
-              ? typeof entry === "string"
-              : typeof entry === "number" && Number.isFinite(entry)),
-      );
-      return [key, entry];
-    }),
-  );
-  return { ...config, engine_config: normalized };
-}
-/** Nested controls have named fields too; unchanged unknown fields cannot ride a safe update. */
+/** Only named control fields, including unchanged nested fields, can support a safe plan. */
 function knownNestedFields(type: string, values: ObjectValue): void {
   const record = (value: unknown, keys: string[]) =>
     requireEvidence(Object.keys(object(value)).every((key) => keys.includes(key)));
@@ -236,36 +187,59 @@ function knownNestedFields(type: string, values: ObjectValue): void {
     list(value).forEach((v) => {
       record(v, keys);
     });
-  if (type === "linode_firewall") {
-    for (const key of ["inbound", "outbound"])
-      if (values[key] !== undefined && values[key] !== null)
-        records(values[key], [
-          "label",
-          "action",
-          "protocol",
-          "description",
-          "ports",
-          "ipv4",
-          "ipv6",
-        ]);
-    if (values.devices !== undefined && values.devices !== null)
-      records(values.devices, ["id", "entity_id", "type", "label", "url"]);
-  } else if (type === "linode_database_postgresql_v2") {
-    // Pinned linode/helper/databaseshared/{updates,private_network,pending_updates}.go.
-    if (values.updates !== undefined && values.updates !== null)
-      record(values.updates, ["day_of_week", "duration", "frequency", "hour_of_day"]);
-    if (values.private_network !== undefined && values.private_network !== null)
-      record(values.private_network, ["vpc_id", "subnet_id", "public_access"]);
-    if (values.pending_updates !== undefined && values.pending_updates !== null)
-      records(values.pending_updates, ["deadline", "description", "planned_for"]);
+  if (type === "ovh_cloud_project_database") {
+    if (values.ip_restrictions != null)
+      records(values.ip_restrictions, ["ip", "description", "status"]);
+    if (values.nodes != null) records(values.nodes, ["region", "network_id", "subnet_id"]);
   }
+  if (type === "openstack_compute_instance_v2" && values.network != null)
+    records(values.network, [
+      "access_network",
+      "fixed_ip_v4",
+      "fixed_ip_v6",
+      "mac",
+      "name",
+      "port",
+      "uuid",
+    ]);
 }
 const providers: Record<string, string> = {
-  linode_instance: "registry.opentofu.org/linode/linode",
-  linode_firewall: "registry.opentofu.org/linode/linode",
-  linode_database_access_controls: "registry.opentofu.org/linode/linode",
-  linode_database_postgresql_v2: "registry.opentofu.org/linode/linode",
+  openstack_compute_instance_v2: "registry.opentofu.org/terraform-provider-openstack/openstack",
+  openstack_networking_secgroup_v2: "registry.opentofu.org/terraform-provider-openstack/openstack",
+  openstack_networking_secgroup_rule_v2:
+    "registry.opentofu.org/terraform-provider-openstack/openstack",
+  ovh_cloud_project_database: "registry.opentofu.org/ovh/ovh",
   cloudflare_dns_record: "registry.opentofu.org/cloudflare/cloudflare",
+};
+/** One explicit dual-stack firewall, matching main.tf; defaults are removed before these rules. */
+const rules: Record<
+  string,
+  {
+    direction: string;
+    ethertype: string;
+    protocol: string | null;
+    port: number | null;
+    cidr: string;
+  }
+> = {
+  ssh4: { direction: "ingress", ethertype: "IPv4", protocol: "tcp", port: 22, cidr: "0.0.0.0/0" },
+  ssh6: { direction: "ingress", ethertype: "IPv6", protocol: "tcp", port: 22, cidr: "::/0" },
+  icmp4: {
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "icmp",
+    port: null,
+    cidr: "0.0.0.0/0",
+  },
+  icmp6: {
+    direction: "ingress",
+    ethertype: "IPv6",
+    protocol: "ipv6-icmp",
+    port: null,
+    cidr: "::/0",
+  },
+  out4: { direction: "egress", ethertype: "IPv4", protocol: null, port: null, cidr: "0.0.0.0/0" },
+  out6: { direction: "egress", ethertype: "IPv6", protocol: null, port: null, cidr: "::/0" },
 };
 /** Actions are exact combinations, not a search for a convenient member of the action array. */
 const actions = new Set([
@@ -295,17 +269,17 @@ function resource(value: unknown, v: ObjectValue): Resource {
   requireEvidence(Object.hasOwn(providers, type) && r.provider_name === providers[type]);
   requireEvidence(r.mode === "managed" && !Object.hasOwn(r, "module_address"));
   requireEvidence(!Object.hasOwn(r, "deposed") && !Object.hasOwn(r, "previous_address"));
-  const database = type.startsWith("linode_database_");
-  const name = database
-    ? type === "linode_database_access_controls"
-      ? "db"
-      : "cluster"
-    : type === "cloudflare_dns_record"
-      ? r.name
-      : "host";
+  const database = type === "ovh_cloud_project_database";
+  const name = database ? "cluster" : type === "cloudflare_dns_record" ? r.name : "host";
   requireEvidence(type !== "cloudflare_dns_record" || name === "a" || name === "aaaa");
   requireEvidence(r.name === name && r.address === `${type}.${name}[${JSON.stringify(index)}]`);
-  requireEvidence(Object.hasOwn(object(database ? v.database_ids : v.hosts), index));
+  const hostKey =
+    type === "openstack_networking_secgroup_rule_v2"
+      ? index.replace(/-(ssh4|ssh6|icmp4|icmp6|out4|out6)$/u, "")
+      : index;
+  requireEvidence(Object.hasOwn(object(database ? v.databases : v.hosts), hostKey));
+  if (type === "openstack_networking_secgroup_rule_v2")
+    requireEvidence(Object.keys(rules).some((key) => index === `${hostKey}-${key}`));
   const change = object(r.change);
   const action = JSON.stringify(list(change.actions));
   requireEvidence(actions.has(action));
@@ -321,18 +295,19 @@ function resource(value: unknown, v: ObjectValue): Resource {
 function hostEntries(resources: Resource[]): Set<string> {
   const entries = new Set<string>();
   for (const r of resources) {
-    if (r.type !== "linode_instance" || r.action !== '["no-op"]' || r.change.importing) continue;
+    if (
+      r.type !== "openstack_compute_instance_v2" ||
+      r.action !== '["no-op"]' ||
+      r.change.importing
+    )
+      continue;
     const before = object(r.change.before);
     requireEvidence(
       isDeepStrictEqual(before, r.change.after) && !unknownMask(r.change.after_unknown),
     );
-    for (const address of list(before.ipv4)) {
-      requireEvidence(isIP(text(address)) === 4);
-      entries.add(`${address}/32`);
-    }
-    const ipv6 = text(before.ipv6);
-    requireEvidence(ipv6.endsWith("/128") && isIP(ipv6.slice(0, -4)) === 6);
-    entries.add(ipv6);
+    requireEvidence(isIP(text(before.access_ip_v4)) === 4 && isIP(text(before.access_ip_v6)) === 6);
+    entries.add(`${before.access_ip_v4}/32`);
+    entries.add(`${before.access_ip_v6}/128`);
   }
   return entries;
 }
@@ -372,9 +347,10 @@ function unchangedIntent(current: ObjectValue, baseline: unknown): boolean {
     "root_keys",
     "configure_keys",
     "root_password_hash",
-    "database_ids",
+    "ovh_project_id",
+    "openstack_project_id",
+    "databases",
     "cloudflare_zone_id",
-    "existing_databases",
   ])
     if (!isDeepStrictEqual(current[key], previous[key])) return false;
   const strippedHosts = (v: ObjectValue) =>
@@ -387,35 +363,112 @@ function unchangedIntent(current: ObjectValue, baseline: unknown): boolean {
   return isDeepStrictEqual(strippedHosts(current), strippedHosts(previous));
 }
 
-/** Independent adoption guard reuses pinned schema validation but never permits cluster mutation. */
-export function requireClusterNoop(value: unknown, expected: unknown): void {
-  const v = inputs(expected);
-  const r = resource(value, v);
-  requireEvidence(r.type === "linode_database_postgresql_v2" && r.action === '["no-op"]');
-  requireEvidence(differences(r).length === 0);
+/** A duplicated no-op view is insufficient: it must describe the configured selected stack. */
+function configured(r: Resource, v: ObjectValue, resources: Resource[]): void {
   const after = object(r.change.after);
-  const config = object(object(v.existing_databases)[r.index]);
-  requireEvidence(String(after.id) === object(v.database_ids)[r.index]);
-  for (const key of [
-    "label",
-    "engine_id",
-    "region",
-    "type",
-    "cluster_size",
-    "suspended",
-    "updates",
-    "private_network",
-  ])
-    requireEvidence(Object.hasOwn(config, key) && isDeepStrictEqual(after[key], config[key]));
-  requireEvidence(
-    typeof config.expected_encrypted === "boolean" && after.encrypted === config.expected_encrypted,
+  const hostKey =
+    r.type === "openstack_networking_secgroup_rule_v2"
+      ? r.index.replace(/-(ssh4|ssh6|icmp4|icmp6|out4|out6)$/u, "")
+      : r.index;
+  const firewall = resources.find(
+    (entry) => entry.type === "openstack_networking_secgroup_v2" && entry.index === hostKey,
   );
-  requireEvidence(
-    typeof config.expected_ssl_connection === "boolean" &&
-      after.ssl_connection === config.expected_ssl_connection,
-  );
-  for (const [key, value] of Object.entries(object(config.engine_config)))
-    if (value !== null) requireEvidence(isDeepStrictEqual(after[key], value));
+  if (r.type.startsWith("openstack_")) requireEvidence(after.region === "US-EAST-VA-1");
+  if (r.type === "openstack_compute_instance_v2") {
+    const host = object(object(v.hosts)[r.index]);
+    const network = list(after.network);
+    requireEvidence(
+      after.name === host.label &&
+        after.image_id === host.image_id &&
+        after.flavor_id === host.flavor_id &&
+        after.power_state === "active" &&
+        after.config_drive === true &&
+        after.stop_before_destroy === true &&
+        !after.key_pair &&
+        !after.admin_pass &&
+        list(after.block_device ?? []).length === 0 &&
+        network.length === 1 &&
+        object(network[0]).uuid === host.network_id &&
+        object(network[0]).access_network === true &&
+        firewall &&
+        isDeepStrictEqual(after.security_groups, [object(firewall.change.after).name]),
+    );
+  } else if (r.type === "openstack_networking_secgroup_v2") {
+    requireEvidence(
+      after.name === `tarubot-${r.index}-fw` &&
+        after.tenant_id === v.openstack_project_id &&
+        after.delete_default_rules === true &&
+        after.stateful === true,
+    );
+  } else if (r.type === "openstack_networking_secgroup_rule_v2") {
+    const rule = rules[r.index.slice(hostKey.length + 1)];
+    requireEvidence(
+      rule &&
+        firewall &&
+        after.security_group_id === object(firewall.change.after).id &&
+        after.tenant_id === v.openstack_project_id &&
+        after.direction === rule.direction &&
+        after.ethertype === rule.ethertype &&
+        (after.protocol || null) === rule.protocol &&
+        (after.port_range_min || null) === rule.port &&
+        (after.port_range_max || null) === rule.port &&
+        after.remote_ip_prefix === rule.cidr &&
+        !after.remote_group_id &&
+        !after.remote_address_group_id,
+    );
+  } else if (r.type === "cloudflare_dns_record") {
+    const host = resources.find(
+      (entry) => entry.type === "openstack_compute_instance_v2" && entry.index === r.index,
+    );
+    requireEvidence(host);
+    const addresses = object(host.change.after),
+      isIPv6 = r.raw.name === "aaaa";
+    requireEvidence(
+      isIP(text(addresses.access_ip_v4)) === 4 && isIP(text(addresses.access_ip_v6)) === 6,
+    );
+    requireEvidence(
+      after.zone_id === v.cloudflare_zone_id &&
+        after.name === object(object(v.hosts)[r.index]).fqdn &&
+        after.type === (isIPv6 ? "AAAA" : "A") &&
+        after.proxied === false &&
+        after.content === addresses[isIPv6 ? "access_ip_v6" : "access_ip_v4"],
+    );
+  } else {
+    const db = object(object(v.databases)[r.index]),
+      nodes = list(after.nodes);
+    requireEvidence(
+      after.service_name === v.ovh_project_id &&
+        after.engine === "postgresql" &&
+        after.plan === "essential" &&
+        after.deletion_protection === true &&
+        nodes.length === 1 &&
+        object(nodes[0]).region === "US-EAST-VA" &&
+        !object(nodes[0]).network_id &&
+        !object(nodes[0]).subnet_id,
+    );
+    for (const key of ["description", "version", "flavor", "backup_time", "maintenance_time"])
+      requireEvidence(after[key] === db[key]);
+    requireEvidence(after.disk_size === db.disk_size_gb);
+    const wanted = new Set(list(v.db_allow_extra).map(text));
+    for (const host of resources.filter(
+      (entry) => entry.type === "openstack_compute_instance_v2",
+    )) {
+      const values = object(host.change.after);
+      wanted.add(`${text(values.access_ip_v4)}/32`);
+      wanted.add(`${text(values.access_ip_v6)}/128`);
+    }
+    const restrictions = restrictionEntries(after.ip_restrictions);
+    requireEvidence(
+      isDeepStrictEqual(restrictions.map((entry) => text(entry.ip)).sort(), [...wanted].sort()),
+    );
+  }
+}
+/** Restriction sets include descriptions/status; compare whole old entries, not only IP strings. */
+function restrictionEntries(value: unknown): ObjectValue[] {
+  const entries = list(value).map(object);
+  const ips = entries.map((entry) => text(entry.ip));
+  requireEvidence(new Set(ips).size === ips.length);
+  return entries;
 }
 
 /** Conservative pure classifier; it has no provider, state, credential or network access. */
@@ -454,22 +507,21 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
     requireEvidence(new Set(resources.map((r) => r.address)).size === resources.length);
     const expectedAddresses = Object.keys(object(v.hosts))
       .flatMap((key) => [
-        `linode_instance.host[${JSON.stringify(key)}]`,
-        `linode_firewall.host[${JSON.stringify(key)}]`,
+        `openstack_compute_instance_v2.host[${JSON.stringify(key)}]`,
+        `openstack_networking_secgroup_v2.host[${JSON.stringify(key)}]`,
+        ...Object.keys(rules).map(
+          (rule) =>
+            `openstack_networking_secgroup_rule_v2.host[${JSON.stringify(`${key}-${rule}`)}]`,
+        ),
         `cloudflare_dns_record.a[${JSON.stringify(key)}]`,
         `cloudflare_dns_record.aaaa[${JSON.stringify(key)}]`,
       ])
       .concat(
-        Object.keys(object(v.database_ids)).map(
-          (key) => `linode_database_access_controls.db[${JSON.stringify(key)}]`,
+        Object.keys(object(v.databases)).map(
+          (key) => `ovh_cloud_project_database.cluster[${JSON.stringify(key)}]`,
         ),
       );
-    expectedAddresses.push(
-      ...Object.keys(object(v.existing_databases)).map(
-        (key) => `linode_database_postgresql_v2.cluster[${JSON.stringify(key)}]`,
-      ),
-    );
-    // Configured adoption resources must be present even on no-op; omission is not completion.
+    // Every configured resource, including every firewall rule, is required even on a no-op.
     requireEvidence(
       isDeepStrictEqual(resources.map((r) => r.address).sort(), expectedAddresses.sort()),
     );
@@ -500,16 +552,8 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
     else if (!unchangedIntent(v, baseline)) reasons.add("changed-intent");
     const knownEntries = hostEntries(resources);
     for (const r of resources) {
-      if (r.change.importing) reasons.add("import");
-      if (r.type === "linode_database_postgresql_v2" || r.type === "linode_firewall") {
-        if (r.action !== '["no-op"]')
-          reasons.add(r.type === "linode_firewall" ? "firewall-change" : "cluster-change");
-        else {
-          requireEvidence(differences(r).length === 0);
-          if (r.type === "linode_database_postgresql_v2") requireClusterNoop(r.raw, v);
-        }
-        continue;
-      }
+      // This module creates new services. Import/forget semantics are not a migration path.
+      requireEvidence(!r.change.importing && !r.action.includes("forget"));
       if (r.action !== '["no-op"]' && r.action !== '["update"]') {
         reasons.add("lifecycle-change");
         continue;
@@ -517,92 +561,52 @@ export function classifyPlan(plan: unknown, expected: unknown, baseline?: unknow
       const delta = differences(r);
       if (r.action === '["no-op"]') {
         requireEvidence(delta.length === 0);
-        const after = object(r.change.after);
-        // A provider no-op must still describe the configured object, rather than merely
-        // matching its own duplicated views. Ignored creation-only inputs stay baseline-bound.
-        if (r.type === "linode_instance") {
-          const host = object(object(v.hosts)[r.index]);
-          const firewall = resources.find(
-            (entry) => entry.type === "linode_firewall" && entry.index === r.index,
-          );
-          requireEvidence(
-            ["label", "region", "type"].every((key) => after[key] === host[key]) &&
-              after.image === "linode/almalinux10" &&
-              after.booted === true &&
-              after.disk_encryption === "enabled" &&
-              after.interface_generation === "legacy_config" &&
-              list(after.interface).length === 1 &&
-              object(list(after.interface)[0]).purpose === "public" &&
-              firewall &&
-              String(after.firewall_id) === String(object(firewall.change.after).id),
-          );
-        } else if (r.type === "cloudflare_dns_record") {
-          const host = resources.find(
-            (entry) => entry.type === "linode_instance" && entry.index === r.index,
-          );
-          requireEvidence(host);
-          const addresses = object(host.change.after);
-          const ipv4 = list(addresses.ipv4);
-          const ipv6 = text(addresses.ipv6);
-          requireEvidence(ipv4.length === 1 && isIP(text(ipv4[0])) === 4);
-          requireEvidence(ipv6.endsWith("/128") && isIP(ipv6.slice(0, -4)) === 6);
-          const isIPv6 = r.address.includes(".aaaa[");
-          requireEvidence(
-            after.zone_id === v.cloudflare_zone_id &&
-              after.name === object(object(v.hosts)[r.index]).fqdn &&
-              after.type === (isIPv6 ? "AAAA" : "A") &&
-              after.proxied === false &&
-              after.content === (isIPv6 ? ipv6.slice(0, -4) : ipv4[0]),
-          );
-        } else
-          requireEvidence(
-            String(after.database_id) === object(v.database_ids)[r.index] &&
-              after.database_type === "postgresql" &&
-              after.id === `${object(v.database_ids)[r.index]}:postgresql`,
-          );
+        configured(r, v, resources);
         continue;
       }
-      if (r.type === "linode_instance") {
-        const label = object(r.change.after).label;
+      if (r.type.startsWith("openstack_networking_")) {
+        reasons.add("firewall-change");
+      } else if (r.type === "openstack_compute_instance_v2") {
+        const name = object(r.change.after).name;
         if (
           delta.length !== 1 ||
-          delta[0] !== "label" ||
-          typeof label !== "string" ||
-          !/^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$/u.test(label) ||
-          label.includes("--")
+          delta[0] !== "name" ||
+          name !== object(object(v.hosts)[r.index]).label
         )
           reasons.add("instance-change");
+        else configured(r, v, resources);
       } else if (r.type === "cloudflare_dns_record") {
-        const after = object(r.change.after);
-        const ttl = after.ttl;
+        const after = object(r.change.after),
+          ttl = after.ttl;
         if (
           delta.length !== 1 ||
           delta[0] !== "ttl" ||
-          after.proxied !== false ||
-          after.type !== (r.address.includes(".aaaa[") ? "AAAA" : "A") ||
-          after.zone_id !== v.cloudflare_zone_id ||
-          after.name !== object(object(v.hosts)[r.index]).fqdn ||
           typeof ttl !== "number" ||
           !Number.isInteger(ttl) ||
           ttl < 300 ||
           ttl > 3600
         )
           reasons.add("dns-change");
+        else configured(r, v, resources);
       } else {
-        const before = object(r.change.before);
-        const after = object(r.change.after);
-        const oldEntries = list(before.allow_list).map(text);
-        const newEntries = list(after.allow_list).map(text);
-        const added = newEntries.filter((entry) => !oldEntries.includes(entry));
+        if (delta.length !== 1 || delta[0] !== "ip_restrictions") {
+          reasons.add("cluster-change");
+          continue;
+        }
+        configured(r, v, resources);
+        const before = restrictionEntries(object(r.change.before).ip_restrictions);
+        const after = restrictionEntries(object(r.change.after).ip_restrictions);
+        const oldIPs = before.map((entry) => text(entry.ip));
+        const added = after.filter((entry) => !oldIPs.includes(text(entry.ip)));
         if (
-          delta.length !== 1 ||
-          delta[0] !== "allow_list" ||
-          after.database_type !== "postgresql" ||
-          String(after.database_id) !== object(v.database_ids)[r.index] ||
-          new Set(newEntries).size !== newEntries.length ||
-          oldEntries.some((entry) => !newEntries.includes(entry)) ||
+          before.some((entry) => !after.some((next) => isDeepStrictEqual(entry, next))) ||
           added.length === 0 ||
-          added.some((entry) => !knownEntries.has(entry))
+          added.some(
+            (entry) =>
+              !knownEntries.has(text(entry.ip)) ||
+              entry.description !== "tarubot-managed" ||
+              entry.status !== "active",
+          )
         )
           reasons.add("access-change");
       }
@@ -655,7 +659,9 @@ export function handoffBinding(directory: string, environment: NodeJS.ProcessEnv
       "infra-control-cli.ts",
       "release-infra.ts",
       "release-policy.ts",
-      "database-adoption.ts",
+      "infra-inputs.ts",
+      "host-enrollment.ts",
+      "ovh-client.ts",
     ].map((name) =>
       createHash("sha256")
         .update(readFileSync(new URL(name, import.meta.url)))

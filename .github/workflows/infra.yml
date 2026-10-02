@@ -1,5 +1,5 @@
 # Plans and applies ops/tofu/, the OpenTofu module that builds TaruBot's hosts, their Cloud
-# Firewalls, their DNS records and the managed database's access lists (2.36.0, issue #62).
+# OpenStack security groups, DNS records and NEW OVH PostgreSQL services/restrictions.
 # ops/tofu/README.md has the runbook; the owner's decisions are REQUIREMENTS.md "Approved pipeline
 # amendments (2026-09-29)", whose confirmed item 4 gives the two jobs their own environments.
 #
@@ -48,12 +48,12 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "plan previews; apply reviews changes; baseline records unchanged state; adopt imports existing clusters"
+        description: "plan previews; apply reviews changes; baseline records unchanged state"
         type: choice
-        options: [plan, apply, baseline, adopt]
+        options: [plan, apply, baseline]
         default: plan
       replace:
-        description: 'Rebuild one host: linode_instance.host["<key>"] (needs allow_destroy)'
+        description: 'Rebuild one host: openstack_compute_instance_v2.host["<key>"] (needs allow_destroy)'
         type: string
         default: ""
       allow_destroy:
@@ -104,6 +104,8 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
+      - name: Install pinned tooling dependencies
+        run: bun install --frozen-lockfile
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       # The replace input reaches the script through the event payload, never env:, which the
@@ -134,7 +136,11 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
+          OVH_APPLICATION_KEY: ${{ secrets.OVH_READ_APPLICATION_KEY }}
+          OVH_APPLICATION_SECRET: ${{ secrets.OVH_READ_APPLICATION_SECRET }}
+          OVH_CONSUMER_KEY: ${{ secrets.OVH_READ_CONSUMER_KEY }}
+          OS_USERNAME: ${{ secrets.OPENSTACK_READ_USERNAME }}
+          OS_PASSWORD: ${{ secrets.OPENSTACK_READ_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
         run: bash ops/tofu/ci/tofu-ci.sh plan
       - name: Summarize the plan
@@ -146,7 +152,7 @@ jobs:
         run: bash ops/tofu/ci/tofu-ci.sh summarize
       # Only a plan that passed the guards, for an apply, leaves the job: the encrypted file alone.
       - name: Keep the saved plan for Apply
-        if: inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && steps.summary.outputs.has_changes == 'true')
+        if: inputs.operation == 'baseline' || (inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: saved-plan
@@ -163,7 +169,7 @@ jobs:
     needs: plan
     if: >-
       github.run_attempt == '1' && github.ref == 'refs/heads/main'
-      && (inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && needs.plan.outputs.has_changes == 'true'))
+      && (inputs.operation == 'baseline' || (inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: infra
@@ -179,6 +185,8 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
+      - name: Install pinned tooling dependencies
+        run: bun install --frozen-lockfile
       - name: Install the pinned OpenTofu
         run: bash ops/tofu/ci/tofu-ci.sh install
       - name: Prepare the values and the masks
@@ -219,24 +227,18 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends unbound dnsutils dns-root-data openssh-client
       - name: Apply
-        if: inputs.operation == 'apply' || inputs.operation == 'adopt'
+        if: inputs.operation == 'apply'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-          LINODE_TOKEN: ${{ secrets.LINODE_WRITE_TOKEN }}
+          OVH_APPLICATION_KEY: ${{ secrets.OVH_WRITE_APPLICATION_KEY }}
+          OVH_APPLICATION_SECRET: ${{ secrets.OVH_WRITE_APPLICATION_SECRET }}
+          OVH_CONSUMER_KEY: ${{ secrets.OVH_WRITE_CONSUMER_KEY }}
+          OS_USERNAME: ${{ secrets.OPENSTACK_WRITE_USERNAME }}
+          OS_PASSWORD: ${{ secrets.OPENSTACK_WRITE_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WRITE_TOKEN }}
         run: bash ops/tofu/ci/tofu-ci.sh apply
-      # Import completion is withheld until refresh uses read-only provider tokens in a new step.
-      - name: Verify adoption with read-only provider credentials
-        if: inputs.operation == 'adopt'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
-          TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
-          LINODE_TOKEN: ${{ secrets.LINODE_READ_TOKEN }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
-        run: bash ops/tofu/ci/tofu-ci.sh verify_adoption
       - name: Establish initial baseline without provider changes
         if: inputs.operation == 'baseline'
         env:

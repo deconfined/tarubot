@@ -7,11 +7,7 @@ import {
   plannedNewHostTargets,
   projectNewAppliedHosts,
 } from "./host-enrollment.js";
-import {
-  guardDatabaseClusters,
-  requireDatabaseAdoption,
-  verifyDatabaseAdoption,
-} from "./database-adoption.js";
+import { guardInfrastructurePlan } from "./infra-inputs.js";
 import {
   InfrastructureRecords,
   RecordCodec,
@@ -205,7 +201,7 @@ export async function controlPhase(
     // The fixed index blocks a pending target even if later inputs omit or rename it.
     await enrollment.requireNoPending();
     const event = readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8");
-    if (!["apply", "adopt"].includes(JSON.parse(event).inputs?.operation)) fail();
+    if (JSON.parse(event).inputs?.operation !== "apply") fail();
     const targets = plannedNewHostTargets(read("plan.json"), read("values.tfvars.json"));
     const context = read("control-context.json") as { enabled?: unknown };
     if (targets.length > 0 && context.enabled !== true) fail();
@@ -230,11 +226,8 @@ export async function controlPhase(
     const inputs = read("values.tfvars.json") as Record<string, unknown>;
     const run = { commit: environment.GITHUB_SHA ?? "", run: environment.GITHUB_RUN_ID ?? "" };
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
-    const adopting = command === "begin" && event.inputs?.operation === "adopt";
-    if (!adopting && event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply"))
-      fail();
-    if (adopting) requireDatabaseAdoption(read("plan.json"), inputs, context.snapshot.inputs);
-    else guardDatabaseClusters(read("plan.json"), inputs);
+    if (event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply")) fail();
+    guardInfrastructurePlan(read("plan.json"), inputs);
     if (command === "baseline") {
       // Initial establishment is an explicit reviewed dispatch, with a complete no-change plan.
       if (classifyPlan(read("plan.json"), inputs, inputs).decision !== "no-changes") fail();
@@ -251,15 +244,7 @@ export async function controlPhase(
   } else if (command === "finish" || command === "enroll") {
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
     if (command === "enroll" && event.inputs?.operation !== "apply") fail();
-    if (event.inputs?.operation === "adopt")
-      verifyDatabaseAdoption(
-        read("plan.json"),
-        read("adoption-no-change.json"),
-        read("applied-state.json"),
-        read("values.tfvars.json"),
-        context.snapshot.inputs,
-      );
-    else if (event.inputs?.operation !== "apply") fail();
+    if (event.inputs?.operation !== "apply") fail();
     verifyAppliedPlan(read("plan.json"), read("applied-state.json"));
     const ticket = read("control-ticket.json") as Ticket;
     if (command === "finish") await journal.finish(ticket, state);
@@ -286,7 +271,11 @@ export async function controlPhase(
           binding,
         }),
         {
-          linodeToken: environment.LINODE_TOKEN ?? "",
+          ovh: {
+            applicationKey: environment.OVH_APPLICATION_KEY ?? "",
+            applicationSecret: environment.OVH_APPLICATION_SECRET ?? "",
+            consumerKey: environment.OVH_CONSUMER_KEY ?? "",
+          },
           cloudflareToken: environment.CLOUDFLARE_API_TOKEN ?? "",
         },
         // Both pending records stay live through enrollment and exact Infra completion readback.

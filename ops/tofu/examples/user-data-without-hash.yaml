@@ -26,7 +26,7 @@ write_files:
       # cloud-init 24.4 drops the options on root's key lines (cc_ssh passes options=""), so sshd requires a verified FIDO key itself.
       # Non-FIDO keys are unaffected. Configure (ops/ansible/site.yml) replaces this file with the full drop-in.
       PubkeyAuthOptions verify-required
-# No hash given: lock root's password, the random throwaway main.tf gives the Linode.
+# No hash given: lock root's password; no provider-generated password is an access credential.
 runcmd:
   - [usermod, --lock, root]
 packages: [python3, python3-libselinux]

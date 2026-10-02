@@ -3,7 +3,7 @@
   "objective": "Prepare the selected OVH infrastructure, private inputs and planning consumers with offline verification, preserving production Compose and keeping the replacement pipeline inactive.",
   "user": [
     "Review the bounded infrastructure change and its offline evidence.",
-    "Confirm VM sizing, AlmaLinux 10 image availability and the account-specific quote before any separately authorized provisioning.",
+    "Verify the selected d2-2 flavor and AlmaLinux 10-UEFI image IDs, dual-stack public network and account-specific quote before separately authorized provisioning.",
     "Keep environment credentials, real-service acceptance and live data migration outside agent sessions."
   ],
   "assistant": [

@@ -279,13 +279,17 @@ describe("single-writer journal transitions", () => {
 
 /** Show data is independently read after Apply; computed unknowns are not wildcard whole resources. */
 const resource = {
-  address: 'linode_instance.host["staging"]',
+  address: 'openstack_compute_instance_v2.host["staging"]',
   mode: "managed",
-  type: "linode_instance",
+  type: "openstack_compute_instance_v2",
   name: "host",
   index: "staging",
-  provider_name: "registry.opentofu.org/linode/linode",
-  values: { id: "100", label: "example-staging", ipv4: null },
+  provider_name: "registry.opentofu.org/terraform-provider-openstack/openstack",
+  values: {
+    id: "00000000-0000-0000-0000-000000000040",
+    name: "example-staging",
+    access_ip_v4: null,
+  },
 };
 const plan = {
   format_version: "1.2",
@@ -295,7 +299,9 @@ const plan = {
     root_module: { resources: [resource] },
     outputs: { host: { sensitive: true, value: null } },
   },
-  resource_changes: [{ address: resource.address, change: { after_unknown: { ipv4: true } } }],
+  resource_changes: [
+    { ...resource, change: { actions: ["update"], after_unknown: { access_ip_v4: true } } },
+  ],
   output_changes: { host: { after_unknown: true } },
 };
 const shown = {
@@ -303,7 +309,7 @@ const shown = {
   terraform_version: "1.12.6",
   values: {
     root_module: {
-      resources: [{ ...resource, values: { ...resource.values, ipv4: ["198.51.100.10"] } }],
+      resources: [{ ...resource, values: { ...resource.values, access_ip_v4: "198.51.100.10" } }],
     },
     outputs: { host: { sensitive: true, value: "198.51.100.10" } },
   },
@@ -325,12 +331,12 @@ describe("post-Apply verification", () => {
         if (first)
           s.values.root_module.resources.push({
             ...first,
-            address: 'linode_instance.host["production"]',
+            address: 'openstack_compute_instance_v2.host["production"]',
           });
       },
       (s: typeof shown) => {
         const first = s.values.root_module.resources[0];
-        if (first) first.values.label = "unexpected-private-label";
+        if (first) first.values.name = "unexpected-private-label";
       },
       (s: typeof shown) => {
         s.values.outputs.host.sensitive = false;
@@ -360,11 +366,13 @@ describe("private phase adapter", () => {
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
   const values = {
     hosts: {},
-    root_keys: ["invented-public-key"],
+    root_keys: ["ssh-ed25519 AAAAEXAMPLE0001 invented-root"],
     configure_keys: {},
     root_password_hash: "",
     cloudflare_zone_id: "0".repeat(32),
-    database_ids: {},
+    databases: {},
+    ovh_project_id: "1".repeat(32),
+    openstack_project_id: "2".repeat(32),
     db_allow_extra: [],
   };
   const noChanges = {
@@ -459,7 +467,7 @@ describe("private phase adapter", () => {
     await r.phase("baseline");
     await r.phase("read");
     r.write("event.json", { inputs: { operation: "apply" } });
-    r.write("plan.json", plan);
+    r.write("plan.json", { ...plan, variables: noChanges.variables });
     r.verify();
     await r.phase("begin");
     r.write("state.json", { ...rawState, serial: 11, outputs: { invented: "changed" } });

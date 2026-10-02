@@ -14,6 +14,8 @@ import {
   type EnrollmentHelpers,
 } from "../../scripts/host-enrollment.js";
 import { RecordCodec, type ControlStore } from "../../scripts/infra-control.js";
+import { releaseInputs } from "../fixtures/infra/release.js";
+import { readOvhInstance } from "../../scripts/ovh-client.js";
 
 const blob = Buffer.concat([
   Buffer.from("0000000b", "hex"),
@@ -28,7 +30,11 @@ const observed = {
 const host: AppliedHost = {
   hostKey: "staging",
   target: "staging",
-  instanceId: 123,
+  instanceId: "00000000-0000-0000-0000-000000000040",
+  ovhProjectId: releaseInputs.ovh_project_id,
+  imageId: releaseInputs.hosts.staging.image_id,
+  flavorId: releaseInputs.hosts.staging.flavor_id,
+  networkId: releaseInputs.hosts.staging.network_id,
   fqdn: "bot.example.org",
   ipv4: "192.0.2.7",
   ipv6: "2001:db8::7",
@@ -39,7 +45,11 @@ const host: AppliedHost = {
   binding: "d".repeat(64),
 };
 const credentials = {
-  linodeToken: "invented-linode-token",
+  ovh: {
+    applicationKey: "invented-application-key",
+    applicationSecret: "invented-application-secret",
+    consumerKey: "invented-consumer-key",
+  },
   cloudflareToken: "invented-cloudflare-token",
 };
 const codec = () => new RecordCodec("invented-private-record-passphrase-12345", "e".repeat(64));
@@ -65,15 +75,16 @@ function at<T>(values: T[], index: number): T {
 }
 function projectionFixture() {
   const inputs = {
-    hosts: { staging: { role: "staging", fqdn: host.fqdn } },
+    ovh_project_id: host.ovhProjectId,
+    hosts: { staging: { ...releaseInputs.hosts.staging, fqdn: host.fqdn } },
     cloudflare_zone_id: host.zoneId,
   };
   const plan = {
     resource_changes: [
       {
-        address: 'linode_instance.host["staging"]',
+        address: 'openstack_compute_instance_v2.host["staging"]',
         mode: "managed",
-        type: "linode_instance",
+        type: "openstack_compute_instance_v2",
         name: "host",
         index: "staging",
         change: { actions: ["create"], before: null },
@@ -92,10 +103,15 @@ function projectionFixture() {
     values: {
       root_module: {
         resources: [
-          resource("linode_instance", "host", {
-            id: "123",
-            ipv4: [host.ipv4],
-            ipv6: `${host.ipv6}/128`,
+          resource("openstack_compute_instance_v2", "host", {
+            id: host.instanceId,
+            name: releaseInputs.hosts.staging.label,
+            region: "US-EAST-VA-1",
+            image_id: releaseInputs.hosts.staging.image_id,
+            flavor_id: releaseInputs.hosts.staging.flavor_id,
+            network: [{ uuid: releaseInputs.hosts.staging.network_id, access_network: true }],
+            access_ip_v4: host.ipv4,
+            access_ip_v6: host.ipv6,
           }),
           resource("cloudflare_dns_record", "a", {
             name: host.fqdn,
@@ -129,12 +145,11 @@ describe("new applied-host projection", () => {
     expect(plannedNewHostTargets(f.plan, f.inputs)).toEqual(["staging"]);
     expect(projectNewAppliedHosts(f.plan, f.applied, f.inputs, f.completion)).toEqual([host]);
     at(f.applied.values.root_module.resources, 0).values = {
-      id: "456",
-      ipv4: [host.ipv4],
-      ipv6: `${host.ipv6}/128`,
+      ...at(f.applied.values.root_module.resources, 0).values,
+      id: "00000000-0000-0000-0000-000000000041",
     };
     expect(projectNewAppliedHosts(f.plan, f.applied, f.inputs, f.completion)[0]?.instanceId).toBe(
-      456,
+      "00000000-0000-0000-0000-000000000041",
     );
   });
   test("does not reenroll replacements, updates or imports and rejects duplicate roles", () => {
@@ -269,7 +284,7 @@ describe("encrypted first enrollment", () => {
       ...host,
       target: "production" as const,
       hostKey: "production",
-      instanceId: 124,
+      instanceId: "00000000-0000-0000-0000-000000000041",
       fqdn: "prod.example.org",
     };
     const records = new HostEnrollmentRecords(new MemoryStore(), codec(), {
@@ -309,34 +324,120 @@ const response = (value: unknown) =>
 const fetchFixture = (
   handler: (url: string, options: RequestInit) => Response | Promise<Response>,
 ) => handler as unknown as typeof fetch;
-test("Linode reads bind actual ID and both addresses; boot polling is bounded and private", async () => {
+test("OVH readback binds project, UUID, region and both public addresses; only BUILD is retried", async () => {
   let gets = 0,
     sleeps = 0;
+  const value = () => ({
+    id: host.instanceId,
+    region: "US-EAST-VA-1",
+    imageId: host.imageId,
+    flavorId: host.flavorId,
+    status: gets === 1 ? "BUILD" : "ACTIVE",
+    ipAddresses: [
+      { ip: host.ipv4, type: "public", version: 4, networkId: host.networkId },
+      { ip: host.ipv6, type: "public", version: 6, networkId: host.networkId },
+    ],
+  });
   const dependencies = {
-    fetch: fetchFixture((url, options) => {
-      expect(url).toBe("https://api.linode.com/v4/linode/instances/123");
-      expect(options.method).toBe("GET");
-      expect(options.redirect).toBe("error");
+    readInstance: async (project: string, id: string) => {
+      expect(project).toBe(host.ovhProjectId);
+      expect(id).toBe(host.instanceId);
       gets++;
-      return response({
-        id: 123,
-        ipv4: [host.ipv4],
-        ipv6: `${host.ipv6}/128`,
-        status: gets === 1 ? "booting" : "running",
-      });
-    }),
+      return value();
+    },
     sleep: async () => {
       sleeps++;
     },
   };
-  await verifyAppliedInstance(host, credentials.linodeToken, dependencies);
+  await verifyAppliedInstance(host, credentials.ovh, dependencies);
   expect([gets, sleeps]).toEqual([2, 1]);
-  dependencies.fetch = fetchFixture(() =>
-    response({ id: 124, ipv4: [host.ipv4], ipv6: `${host.ipv6}/128`, status: "running" }),
-  );
-  await expect(verifyAppliedInstance(host, credentials.linodeToken, dependencies)).rejects.toThrow(
-    /^host-enrollment-failed$/,
-  );
+  for (const patch of [
+    { id: "other" },
+    { region: "other-region" },
+    { imageId: "other-image" },
+    { flavorId: "other-flavor" },
+    { status: "ERROR" },
+    { ipAddresses: [] },
+  ]) {
+    await expect(
+      verifyAppliedInstance(host, credentials.ovh, {
+        readInstance: async () => ({ ...value(), ...patch }),
+      }),
+    ).rejects.toThrow(/^host-enrollment-failed$/);
+  }
+});
+test("instance polling stops after thirty reads and never retries changed network identity", async () => {
+  let reads = 0,
+    sleeps = 0;
+  const booting = {
+    id: host.instanceId,
+    region: "US-EAST-VA-1",
+    imageId: host.imageId,
+    flavorId: host.flavorId,
+    status: "BUILD",
+    ipAddresses: [
+      { ip: host.ipv4, type: "public", version: 4, networkId: host.networkId },
+      { ip: host.ipv6, type: "public", version: 6, networkId: host.networkId },
+    ],
+  };
+  await expect(
+    verifyAppliedInstance(host, credentials.ovh, {
+      readInstance: async () => {
+        reads++;
+        return booting;
+      },
+      sleep: async () => {
+        sleeps++;
+      },
+    }),
+  ).rejects.toThrow(/^host-enrollment-failed$/);
+  expect([reads, sleeps]).toEqual([30, 29]);
+  const changed = structuredClone(booting);
+  changed.ipAddresses[0] = {
+    ...changed.ipAddresses[0],
+    ip: host.ipv4,
+    type: "public",
+    version: 4,
+    networkId: releaseInputs.hosts.staging.image_id,
+  };
+  reads = 0;
+  sleeps = 0;
+  await expect(
+    verifyAppliedInstance(host, credentials.ovh, {
+      readInstance: async () => {
+        reads++;
+        return changed;
+      },
+      sleep: async () => {
+        sleeps++;
+      },
+    }),
+  ).rejects.toThrow(/^host-enrollment-failed$/);
+  expect([reads, sleeps]).toEqual([1, 0]);
+});
+test("official SDK adapter fixes ovh-us routing and hides upstream diagnostics", async () => {
+  expect(
+    await readOvhInstance(host.ovhProjectId, host.instanceId, credentials.ovh, (options) => {
+      expect(options).toMatchObject({
+        ...credentials.ovh,
+        endpoint: "ovh-us",
+        timeout: 15000,
+        debug: false,
+      });
+      return {
+        requestPromised: async (method, path) => {
+          expect(method).toBe("GET");
+          expect(path).toBe(`/cloud/project/${host.ovhProjectId}/instance/${host.instanceId}`);
+          return { invented: true };
+        },
+      };
+    }),
+  ).toEqual({ invented: true });
+  await expect(
+    readOvhInstance(host.ovhProjectId, host.instanceId, credentials.ovh, () => {
+      throw new Error("NEVER-PRINT private credentials/path");
+    }),
+  ).rejects.toThrow(/^host-enrollment-failed$/);
 });
 // Minimal build images lack OpenSSH; hosted CI and the native lab run this executable check.
 test.skipIf(Bun.which("/usr/bin/ssh-keygen") === null)(
