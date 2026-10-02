@@ -85,9 +85,9 @@ export function infrastructureRecords(
   createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
 ): InfrastructureRecords {
   try {
-    const { backend, bucket, endpoint } = backendStorage(directory);
+    const { backend, bucket, endpoint, region } = backendStorage(directory);
     return new InfrastructureRecords(
-      nativeStore(bucket, endpoint, environment, createClient),
+      nativeStore(bucket, endpoint, region, environment, createClient),
       new RecordCodec(
         environment.TF_VAR_state_passphrase ?? "",
         privateDigest({ backend, key: backendKey }),
@@ -105,12 +105,16 @@ function backendStorage(directory: string) {
   const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
     backend,
   )?.[1];
-  if (!bucket || !endpoint) fail();
-  return { backend, bucket, endpoint };
+  const region = /^region\s*= "([a-z0-9]+(?:-[a-z0-9]+)*)"$/mu.exec(backend)?.[1];
+  // OpenTofu rejects duplicate assignments; record access must not silently select the first.
+  if (!bucket || !endpoint || !region || [...backend.matchAll(/^region\s*=/gmu)].length !== 1)
+    fail();
+  return { backend, bucket, endpoint, region };
 }
 function nativeStore(
   bucket: string,
   endpoint: string,
+  region: string,
   environment: NodeJS.ProcessEnv,
   createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
 ): S3ControlStore {
@@ -118,7 +122,8 @@ function nativeStore(
   const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(bucket) ||
-    !/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(endpoint)
+    !/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(endpoint) ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(region)
   )
     fail();
   if (!accessKeyId || !secretAccessKey || (environment.TF_VAR_state_passphrase ?? "").length < 32)
@@ -130,7 +135,7 @@ function nativeStore(
     createClient({
       bucket,
       endpoint: url.origin,
-      region: "us-east-1",
+      region,
       virtualHostedStyle: true,
       accessKeyId,
       secretAccessKey,
@@ -139,29 +144,36 @@ function nativeStore(
     }),
   );
 }
-export function hostRecordCodec(bucket: string, endpoint: string, passphrase: string): RecordCodec {
+export function hostRecordCodec(
+  bucket: string,
+  endpoint: string,
+  region: string,
+  passphrase: string,
+): RecordCodec {
   return new RecordCodec(
     passphrase,
     privateDigest({
-      schema: 1,
+      schema: 2,
       purpose: "tarubot-host-enrollment-v1",
       bucket,
       endpoint: new URL(endpoint).origin,
+      region,
       namespace: prefix,
       stateKey: backendKey,
     }),
   );
 }
-/** Native factory accepts the stable bucket/endpoint, so stock Host needs no infrastructure inputs. */
+/** Enrollment ciphertext is bound to the same bucket, endpoint and signing region as Infra. */
 export function hostEnrollmentRecords(
   bucket: string,
   endpoint: string,
+  region: string,
   environment: NodeJS.ProcessEnv,
 ): HostEnrollmentRecords {
   try {
     return new HostEnrollmentRecords(
-      nativeStore(bucket, endpoint, environment),
-      hostRecordCodec(bucket, endpoint, environment.TF_VAR_state_passphrase ?? ""),
+      nativeStore(bucket, endpoint, region, environment),
+      hostRecordCodec(bucket, endpoint, region, environment.TF_VAR_state_passphrase ?? ""),
     );
   } catch {
     fail();
@@ -187,8 +199,9 @@ export async function controlPhase(
     return;
   }
   if (command === "enrollment_check") {
-    const { bucket, endpoint } = backendStorage(directory);
-    const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+    const { bucket, endpoint, region } = backendStorage(directory);
+    const enrollment =
+      suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, region, environment);
     // The fixed index blocks a pending target even if later inputs omit or rename it.
     await enrollment.requireNoPending();
     const event = readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8");
@@ -262,8 +275,9 @@ export async function controlPhase(
         state.serial <= context.snapshot.state.serial
       )
         fail();
-      const { bucket, endpoint } = backendStorage(directory);
-      const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+      const { bucket, endpoint, region } = backendStorage(directory);
+      const enrollment =
+        suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, region, environment);
       await enrollment.enroll(
         projectNewAppliedHosts(read("plan.json"), read("applied-state.json"), inputs, {
           generation: ticket.generation,

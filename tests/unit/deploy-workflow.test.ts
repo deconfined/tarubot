@@ -1034,7 +1034,7 @@ describe("the other workflows", () => {
         const scoped =
           file === "host.yml" && owner === "infra.yml"
             ? source.replace(
-                /secrets\.TOFU_STATE_(?:BUCKET|ENDPOINT|PASSPHRASE|READ_ACCESS_KEY|READ_SECRET_KEY)\b/gu,
+                /secrets\.TOFU_STATE_(?:BUCKET|ENDPOINT|REGION|PASSPHRASE|READ_ACCESS_KEY|READ_SECRET_KEY)\b/gu,
                 "host trust read",
               )
             : source;

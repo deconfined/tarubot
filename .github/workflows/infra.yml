@@ -113,6 +113,7 @@ jobs:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          STATE_REGION: ${{ secrets.TOFU_STATE_REGION }}
         run: bash ops/tofu/ci/tofu-ci.sh prepare
       - name: Initialize OpenTofu
         env:
@@ -185,6 +186,7 @@ jobs:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          STATE_REGION: ${{ secrets.TOFU_STATE_REGION }}
         run: bash ops/tofu/ci/tofu-ci.sh prepare
       - name: Initialize OpenTofu
         env:

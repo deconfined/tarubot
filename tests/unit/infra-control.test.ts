@@ -14,6 +14,7 @@ import {
 import {
   controlPhase,
   infrastructureRecords,
+  hostRecordCodec,
   S3ControlStore,
 } from "../../scripts/infra-control-cli.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
@@ -391,7 +392,7 @@ describe("private phase adapter", () => {
       writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
     writeFileSync(
       join(directory, "backend.hcl"),
-      'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://us-east-1.example.org" }\nuse_path_style = false\n',
+      'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://s3.us-east-va.example.org" }\nregion         = "us-east-va"\nuse_path_style = false\n',
     );
     writeFileSync(join(directory, "plan.bin"), "invented encrypted plan bytes");
     write("values.tfvars.json", values);
@@ -497,11 +498,38 @@ describe("private phase adapter", () => {
 describe("manual infrastructure records factory", () => {
   const scratch = mkdtempSync(join(tmpdir(), "infra-records-factory-test-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  test("native Bun signing uses the explicit backend region without a network request", () => {
+    const directory = mkdtempSync(join(scratch, "native-signing-"));
+    writeFileSync(
+      join(directory, "backend.hcl"),
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n',
+    );
+    let signed: URL | undefined;
+    infrastructureRecords(
+      directory,
+      {
+        AWS_ACCESS_KEY_ID: "invented-access",
+        AWS_SECRET_ACCESS_KEY: "invented-secret",
+        TF_VAR_state_passphrase: passphrase,
+        AWS_REGION: "us-east-1",
+      },
+      (options) => {
+        // Presigning exercises Bun's real SigV4 implementation but never contacts a service.
+        const client = new Bun.S3Client(options);
+        signed = new URL(client.file("invented-record").presign({ expiresIn: 60 }));
+        return client;
+      },
+    );
+    expect(signed?.origin).toBe("https://state-bucket-example.s3.us-east-va.example.org");
+    expect(signed?.searchParams.get("X-Amz-Credential")).toMatch(
+      /^invented-access\/\d{8}\/us-east-va\/s3\/aws4_request$/u,
+    );
+  });
   test("an approved runner establishes and updates reusable inputs with only S3 credentials", async () => {
     const directory = mkdtempSync(join(scratch, "runner-"));
     writeFileSync(
       join(directory, "backend.hcl"),
-      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n',
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n',
       { mode: 0o600 },
     );
     const options: Bun.S3Options[] = [];
@@ -515,6 +543,7 @@ describe("manual infrastructure records factory", () => {
         AWS_ACCESS_KEY_ID: "invented-access",
         AWS_SECRET_ACCESS_KEY: "invented-secret",
         AWS_SESSION_TOKEN: "invented-unrelated-session",
+        AWS_REGION: "invented-unrelated-region",
         TF_VAR_state_passphrase: passphrase,
       },
       (native) => {
@@ -547,8 +576,8 @@ describe("manual infrastructure records factory", () => {
     expect(options).toEqual([
       {
         bucket: "state-bucket-example",
-        endpoint: "https://state-bucket-example.us-east-1.example.org",
-        region: "us-east-1",
+        endpoint: "https://state-bucket-example.s3.us-east-va.example.org",
+        region: "us-east-va",
         virtualHostedStyle: true,
         accessKeyId: "invented-access",
         secretAccessKey: "invented-secret",
@@ -581,7 +610,7 @@ describe("manual infrastructure records factory", () => {
   test("missing storage credentials or malformed backend refuses before creating the S3 client", () => {
     const directory = mkdtempSync(join(scratch, "invalid-"));
     const backend =
-      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n';
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n';
     writeFileSync(join(directory, "backend.hcl"), backend);
     const environment = {
       AWS_ACCESS_KEY_ID: "invented-access",
@@ -601,11 +630,37 @@ describe("manual infrastructure records factory", () => {
       expect(() =>
         infrastructureRecords(directory, { ...environment, ...changed }, client),
       ).toThrow("invalid-control-evidence");
-    writeFileSync(join(directory, "backend.hcl"), backend.replace("https:", "http:"));
-    expect(() => infrastructureRecords(directory, environment, client)).toThrow(
-      "invalid-control-evidence",
-    );
+    for (const changedBackend of [
+      backend.replace("https:", "http:"),
+      backend.replace('region = "us-east-va"\n', ""),
+      backend.replace('region = "us-east-va"', 'region = "private-region-marker/invalid"'),
+      `${backend}region = "us-west-1"\n`,
+    ]) {
+      writeFileSync(join(directory, "backend.hcl"), changedBackend);
+      expect(() => infrastructureRecords(directory, environment, client)).toThrow(
+        "invalid-control-evidence",
+      );
+    }
     expect(created).toBe(0);
+  });
+  test("changing the signing region cannot decrypt an enrolled host record", () => {
+    const codec = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-east-va",
+      passphrase,
+    );
+    const key = "hosts/staging";
+    const value = { invented: "first-host-key" };
+    const encrypted = codec.seal(key, value);
+    expect(codec.open(key, encrypted)).toEqual(value);
+    const otherRegion = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-west-1",
+      passphrase,
+    );
+    expect(() => otherRegion.open(key, encrypted)).toThrow();
   });
 });
 

@@ -70,6 +70,7 @@ function fixture(value: HostEnrollmentRecord | null = record) {
   const codec = hostRecordCodec(
     "example-bucket",
     "https://storage.example.org",
+    "us-east-va",
     "invented-private-record-passphrase-12345",
   );
   const persist = (path: string, value: unknown) => store.values.set(path, codec.seal(path, value));

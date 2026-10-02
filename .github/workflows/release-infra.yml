@@ -51,6 +51,7 @@ jobs:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          STATE_REGION: ${{ secrets.TOFU_STATE_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_READ_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}
@@ -109,6 +110,7 @@ jobs:
           TOFU_VARS: ${{ secrets.TOFU_VARS }}
           STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
           STATE_ENDPOINT: ${{ secrets.TOFU_STATE_ENDPOINT }}
+          STATE_REGION: ${{ secrets.TOFU_STATE_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.TOFU_STATE_WRITE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TOFU_STATE_WRITE_SECRET_KEY }}
           TF_VAR_state_passphrase: ${{ secrets.TOFU_STATE_PASSPHRASE }}

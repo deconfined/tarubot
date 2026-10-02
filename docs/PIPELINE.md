@@ -4,7 +4,9 @@ The [agreed threat model](THREAT_MODEL.md) governs this design: minimal complexi
 
 ## Current status
 
-Production still uses Compose. Staging uses the reviewed Ansible host and bot playbooks, with a manually pinned host key. Infrastructure is dispatch-only: read-only Plan, then owner-approved Apply. The full-plan classifier is advisory; automatic Apply is disabled.
+Production still uses Compose. Staging host delivery implements reviewed Ansible host and bot playbooks with manual key pinning; this does not establish a running staging bot. Infrastructure is dispatch-only: read-only Plan, then owner-approved Apply. The full-plan classifier is advisory; automatic Apply is disabled.
+
+The selected replacement stack is OVH US: compute `US-EAST-VA-1`, single-node Essential PostgreSQL `US-EAST-VA` and Standard S3-compatible Object Storage `us-east-va`. Explicit S3 signing-region configuration is implemented across saved-plan binding and record readers. Compute/database resources and their plan/enrollment consumers remain inactive Linode-specific code pending coherent replacement; this is not yet an OVH provisioning path or real-service acceptance.
 
 The integrated replacement publisher, automatic enrollment and staging-gated production path are **not ready for activation**. Offline tests and implementation commits do not establish live acceptance. Infrastructure records use the protected job's authority, with encrypted baseline/pending records and persistence readback. New-host Apply includes first enrollment; ordinary deployment reads the stored key and validates DNSSEC once before strict Ansible/OpenSSH delivery. Private-backend and live staging acceptance remain outstanding. See [DEPLOYMENT](DEPLOYMENT.md) for implemented operations and [HOSTING](HOSTING.md) for recovery.
 
@@ -30,7 +32,7 @@ A reviewed workflow in its intended protected environment is the command authori
 | Enrollment | Persist the first host key for an explicitly approved new generation and write its SSHFP record. |
 | Owner | Environment credentials, protection rules, sensitive infrastructure changes, enrollment/recovery and production approval. |
 
-Retain Linode compute, the existing managed PostgreSQL cluster and private object storage. Hosts use AlmaLinux 10, enforcing SELinux and rootless Quadlet. Do not provision a replacement database as a shortcut. Detailed inputs and owner procedures live in the [OpenTofu runbook](../ops/tofu/README.md).
+The OVH target retains AlmaLinux 10, enforcing SELinux and rootless Quadlet. Preserve the current live production/database path until a separately reviewed cutover; a newly provisioned OVH database is not migrated application data. VM sizing, a usable image and the account-specific quote must be settled before provisioning. Detailed implemented inputs and owner procedures live in the [OpenTofu runbook](../ops/tofu/README.md).
 
 ## Infrastructure safety policy
 

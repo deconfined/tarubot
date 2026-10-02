@@ -2,6 +2,8 @@
 
 This module builds the provider side of TaruBot's hosts. `.github/workflows/infra.yml` plans and applies it from GitHub Actions: its Plan job runs in the `infra-plan` environment with read-only credentials and no approval, and its Apply job runs in `infra`, after @deconfined approves it. The owner's decisions are in REQUIREMENTS.md, "Approved pipeline amendments (2026-09-29)" (the environments are its confirmed item 4).
 
+**Selected replacement target:** OVH US compute in `US-EAST-VA-1`, single-node Essential PostgreSQL in `US-EAST-VA`, and Standard S3-compatible Object Storage with signing region `us-east-va`. Backend/record clients require an explicit region. The module's compute/database resources and their consumers are still Linode-specific and inactive; they must be replaced together before this is an OVH provisioning path. No OVH service acceptance or live database migration is established. Production's existing Compose bot and database remain unchanged.
+
 The four layers each have one owner:
 - **OpenTofu** (this module) builds the VM, its firewall, its DNS records and the database access lists.
 - **cloud-init** (`cloud-init.yaml.tftpl`) sets the hostname and root's credentials at first boot.
@@ -51,12 +53,13 @@ User data takes effect only when a Linode is created (`ignore_changes = [metadat
 | `CLOUDFLARE_WRITE_TOKEN` | `infra` | A Cloudflare API token with DNS edit on the one zone. |
 | `TOFU_STATE_WRITE_ACCESS_KEY`, `TOFU_STATE_WRITE_SECRET_KEY` | `infra` | An Object Storage key limited to the state bucket, read/write. |
 | `TOFU_STATE_BUCKET` | both | The private Object Storage bucket for the state. |
-| `TOFU_STATE_ENDPOINT` | both | `https://<region>.linodeobjects.com`, the bucket's cluster. |
+| `TOFU_STATE_ENDPOINT` | both | The selected Standard S3 endpoint: `https://s3.us-east-va.io.cloud.ovh.us`, without a bucket prefix or path. Do not use global `.net`, legacy `.perf` or Swift endpoints. |
+| `TOFU_STATE_REGION` | both | The S3 SigV4 signing region, `us-east-va`; this is distinct from the compute and database region identifiers. Also required by replacement Host trust readers. |
 | `TOFU_STATE_PASSPHRASE` | both | At least 32 characters, random, kept in the owner's password manager; the workflow and the module refuse a shorter one. State and saved plans are encrypted with a key derived from it, and the saved plan is a public artifact for a day, so the passphrase is all that protects it. Without it the state can't be read. |
 | `TOFU_VARS` | both | The module's values, one JSON document (below). |
 
-The four secrets marked "both" must hold the same value in each environment:
-- **The bucket and endpoint.** The saved plan records the Plan job's bucket and endpoint, and OpenTofu writes the new state there; `infra`'s own copies serve only its `init`. So `infra`'s read/write key must be for that same bucket, and `TOFU_STATE_BUCKET` and `TOFU_STATE_ENDPOINT` must match exactly, or the apply changes the resources and then fails to write the state.
+The five secrets marked "both" must hold the same value in each environment:
+- **The bucket, endpoint and signing region.** The saved plan records Plan's backend configuration. Apply's copies must match exactly before provider writes, including `TOFU_STATE_REGION`. Infrastructure records and Host trust use that same explicit region; neither falls back to an ambient AWS region or `us-east-1`. Enrollment ciphertext is also bound to the region. There are no existing operational experimental records to migrate.
 - **The passphrase.** Apply decrypts the saved plan with its own copy.
 - **`TOFU_VARS`.** The saved plan applies the values it was planned with, `infra-plan`'s. Apply masks with its own copy and refuses to go on when the two differ, since a key or hash set in one copy alone changes no line of the change list.
 
@@ -146,16 +149,16 @@ If records were previously enabled, a pending operation, missing baseline/histor
 
 An S3-compatible local rehearsal does not accept the intended storage service. Before enabling records, the owner performs these checks privately with disposable objects in an isolated acceptance bucket on that service. Do not use the operational bucket: the native state and record clients have fixed key prefixes.
 
-1. Read back the GitHub environment protections and matching bucket, endpoint, passphrase and inputs described above. Keep provider and storage credentials outside agent sessions.
-2. Enable and read back native bucket versioning with standard S3 `put-bucket-versioning` and `get-bucket-versioning`. The Linode API/Cloud Manager do not manage this feature; use [the provider's S3 procedure](https://techdocs.akamai.com/cloud-computing/docs/versioning-retain-object-version-history).
-3. Inspect the lifecycle policy on the operational bucket. No enabled expiration rule may discard current or noncurrent `tarubot/control/` records needed for recovery. Backup retention policies are not a control-record policy. [Linode's lifecycle support](https://techdocs.akamai.com/cloud-computing/docs/lifecycle-policies) does not include `NewerNoncurrentVersions`; do not depend on that setting.
+1. Read back the GitHub environment protections and matching bucket, endpoint, signing region, passphrase and inputs described above. Keep provider and storage credentials outside agent sessions.
+2. Enable and read back native bucket versioning with standard S3 `put-bucket-versioning` and `get-bucket-versioning`. Use the selected [OVH US Standard S3 endpoint and signing region](https://support.us.ovhcloud.com/hc/en-us/articles/10667991081107-Object-Storage-Endpoints-and-geoavailability), not evidence from another provider or OVH's global endpoints.
+3. Inspect the lifecycle policy on the operational bucket. No enabled expiration rule may discard current or noncurrent `tarubot/control/` records needed for recovery. Backup retention policies are not a control-record policy; verify actual selected-service retention and selected-version recovery privately.
 4. With the pinned OpenTofu and the module's enforced PBKDF2/AES-GCM encryption, use a provider-free disposable module to write encrypted state, plan with read-only credentials, transfer the exact encrypted plan bytes and apply with write credentials. Verify the planned result and unchanged transfer digest. Then advance the disposable state and require the older plan to fail as stale without changing it. A wrong passphrase must fail.
-5. Exercise `infrastructureRecords`, `S3ControlStore` and `hostEnrollmentRecords` with Bun against that isolated bucket over verified TLS and virtual-hosted routing. Require ciphertext readback, read-only write refusal and an authentication failure distinct from a missing object. [Limited read keys](https://techdocs.akamai.com/cloud-computing/docs/manage-access-keys) support reads of noncurrent versions.
+5. Exercise `infrastructureRecords`, `S3ControlStore` and `hostEnrollmentRecords` with Bun against that isolated bucket over verified TLS and virtual-hosted routing, using `us-east-va` in both clients. Require ciphertext readback, read-only write refusal and an authentication failure distinct from a missing object. Verify access to noncurrent versions too. Do not assume an allow-only user policy restricts the bucket owner: real write refusal is required.
 6. Interrupt the disposable record sequence after first-key persistence and simulate a lost write acknowledgement. Fresh readers must refuse pending operations. Use standard S3 version listing and selected-version reads to recover the first observed key and related records following [the recovery write table](../../docs/HOSTING.md#infrastructure-and-enrollment-records); clear the host pending index last and retain the old versions.
 
 `tofu state pull` already decrypts its output with the configured key. Pinned OpenTofu 1.12.6 has no `-unencrypted` flag. Keep the resulting raw JSON private, under umask 077, and derive lineage/serial evidence with `stateEvidence`; `show -json` is a different projection. This changes no at-rest encryption setting.
 
-Record the reviewed commit, tool versions, backend role, checks, refusals and unexercised cases without private identifiers. Local storage, synthetic state evidence and simulated host/DNS effects cannot prove intended-backend retention, database adoption, actual enrollment or live staging readiness. Keep both activation switches off until their corresponding acceptance is complete.
+Record the reviewed commit, tool versions, backend role, checks, refusals and unexercised cases without private identifiers. Local storage, synthetic state evidence and simulated host/DNS effects cannot prove intended-backend retention, database provisioning/migration, actual enrollment or live staging readiness. Keep both activation switches off until their corresponding acceptance is complete.
 
 ## The first apply
 
@@ -219,7 +222,8 @@ W=$(mktemp -d)
 export TF_DATA_DIR="$W/data"
 cat > "$W/backend.hcl" <<'EOF'
 bucket         = "<bucket>"
-endpoints      = { s3 = "https://<region>.linodeobjects.com" }
+endpoints      = { s3 = "https://s3.us-east-va.io.cloud.ovh.us" }
+region         = "us-east-va"
 use_path_style = false
 EOF
 # Write "$W/values.tfvars.json": the same document as TOFU_VARS.

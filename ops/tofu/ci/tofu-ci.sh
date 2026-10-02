@@ -11,7 +11,7 @@
 #   tofu-ci.sh prepare     TOFU_VARS checked silently, every identifying value in it masked before
 #                          anything else prints, then the private working files: the values, the
 #                          backend settings and the replace target (TOFU_VARS, STATE_BUCKET,
-#                          STATE_ENDPOINT, and the replace input from the event payload)
+#                          STATE_ENDPOINT, STATE_REGION, and the replace input from the event payload)
 #   tofu-ci.sh init        the backend from backend.hcl and the providers from the lock file
 #                          (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, TF_VAR_state_passphrase)
 #   tofu-ci.sh plan        Plan only: a saved, encrypted plan, without a state lock (init's three,
@@ -84,12 +84,15 @@ prepare() {
   bun "$module/../../scripts/database-adoption.ts" validate "$d" >"$d/input-validation.log" 2>"$d/input-validation.stderr" ||
     fail "Private infrastructure inputs or existing-cluster settings are invalid; nothing was planned."
 
-  # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
+  # The signing region is explicit private backend configuration, not an AWS default. It travels
+  # in the same saved-plan binding as the bucket and endpoint, and record readers use it too.
   [[ ${STATE_BUCKET-} =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "TOFU_STATE_BUCKET must be an Object Storage bucket name."
   [[ ${STATE_ENDPOINT-} =~ ^https://[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || fail "TOFU_STATE_ENDPOINT must be the bucket's https:// endpoint, with no path (ops/tofu/README.md)."
+  [[ ${STATE_REGION-} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "TOFU_STATE_REGION must be an explicit S3 signing region (ops/tofu/README.md)."
   {
     printf 'bucket         = "%s"\n' "${STATE_BUCKET-}"
     printf 'endpoints      = { s3 = "%s" }\n' "${STATE_ENDPOINT-}"
+    printf 'region         = "%s"\n' "${STATE_REGION-}"
     printf 'use_path_style = false\n'
   } >"$d/backend.hcl"
 

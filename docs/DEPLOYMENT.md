@@ -1,6 +1,6 @@
 # Deployment
 
-Production currently uses Docker Compose. Staging has the OpenTofu/Ansible/rootless Quadlet path. This guide describes implemented behavior; the [replacement pipeline](PIPELINE.md#current-status) remains inactive. Use [configuration](CONFIGURATION.md) for settings, [the threat model](THREAT_MODEL.md) for trust decisions, and [AGENTS.md](../AGENTS.md) for the confirmed agent rule.
+Production currently uses Docker Compose. Staging host delivery has an Ansible/rootless Quadlet implementation, not established live acceptance. OVH is the selected replacement provider; compute/database module conversion and real-service acceptance remain outstanding. This guide describes implemented behavior; the [replacement pipeline](PIPELINE.md#current-status) remains inactive. Use [configuration](CONFIGURATION.md) for settings, [the threat model](THREAT_MODEL.md) for trust decisions, and [AGENTS.md](../AGENTS.md) for the confirmed agent rule.
 
 ## Release flow
 
@@ -45,7 +45,7 @@ These are owner actions, not a claim that setup is complete.
 
 Production's Quadlet cutover needs a separate reviewed change and owner-run window. Stop the old bot before starting its replacement.
 
-Before rehearsing the replacement Host path, the owner supplies matching `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_PASSPHRASE`, `TOFU_STATE_READ_ACCESS_KEY` and `TOFU_STATE_READ_SECRET_KEY` in the target environment. These give read-only access to the enrolled trust records; Host needs no provider token or infrastructure inputs. It requires complete trust with no pending enrollment, validates DNSSEC locally, and connects to a literal enrolled address with the stored key. Missing records or DNSSEC failure stops delivery.
+Before rehearsing the replacement Host path, the owner supplies matching `TOFU_STATE_BUCKET`, `TOFU_STATE_ENDPOINT`, `TOFU_STATE_REGION`, `TOFU_STATE_PASSPHRASE`, `TOFU_STATE_READ_ACCESS_KEY` and `TOFU_STATE_READ_SECRET_KEY` in the target environment. The selected S3 signing region is `us-east-va`, not the compute/database region spelling. These give read-only access to the enrolled trust records; Host needs no provider token or infrastructure inputs. It requires complete trust with no pending enrollment, validates DNSSEC locally, and connects to a literal enrolled address with the stored key. Missing settings/records, region-bound ciphertext mismatch or DNSSEC failure stops delivery.
 
 ## Boundaries
 

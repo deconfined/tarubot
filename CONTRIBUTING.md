@@ -20,6 +20,8 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
+Infrastructure fixtures must supply an explicit S3 signing region alongside their invented bucket/endpoint. Exercise endpoint/region handoff mismatches and region-bound record refusal without real storage/provider credentials. Offline fixtures do not accept the selected OVH service; its private checks remain in the [OpenTofu runbook](ops/tofu/README.md#private-backend-acceptance).
+
 ## Make a change
 
 1. Start a feature branch from an up-to-date `main`. Keep unrelated work separate.

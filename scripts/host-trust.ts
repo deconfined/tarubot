@@ -168,6 +168,7 @@ export async function hostTrust(environment: NodeJS.ProcessEnv = process.env): P
     const records = hostEnrollmentRecords(
       environment.STATE_BUCKET ?? "",
       environment.STATE_ENDPOINT ?? "",
+      environment.STATE_REGION ?? "",
       {
         AWS_ACCESS_KEY_ID: environment.AWS_ACCESS_KEY_ID,
         AWS_SECRET_ACCESS_KEY: environment.AWS_SECRET_ACCESS_KEY,

@@ -101,7 +101,12 @@ export async function automaticInfrastructure(
   const noHostPending = () =>
     (
       deps.enrollment ??
-      hostEnrollmentRecords(env.STATE_BUCKET ?? "", env.STATE_ENDPOINT ?? "", env)
+      hostEnrollmentRecords(
+        env.STATE_BUCKET ?? "",
+        env.STATE_ENDPOINT ?? "",
+        env.STATE_REGION ?? "",
+        env,
+      )
     ).requireNoPending();
   fresh();
   phase("prepare");

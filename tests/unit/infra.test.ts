@@ -151,6 +151,7 @@ const ARTIFACT = "saved-plan";
 const SHARED_SECRETS = [
   "TOFU_STATE_BUCKET",
   "TOFU_STATE_ENDPOINT",
+  "TOFU_STATE_REGION",
   "TOFU_STATE_PASSPHRASE",
   "TOFU_VARS",
 ];
@@ -388,7 +389,7 @@ describe("infra.yml's shape", () => {
       Object.values(s.env ?? {})
         .flatMap((v) => [...v.matchAll(/secrets\.([A-Z_]+)/gu)].map((m) => m[1]))
         .sort();
-    const prepare = ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_VARS"];
+    const prepare = ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_STATE_REGION", "TOFU_VARS"];
     const init = (kind: string) => [
       "TOFU_STATE_PASSPHRASE",
       `TOFU_STATE_${kind}_ACCESS_KEY`,
@@ -982,7 +983,6 @@ describe("ops/tofu", () => {
     const versions = tf("versions.tf");
     const backend = /backend "s3" \{\n([\s\S]*?)\n {2}\}/u.exec(versions)?.[1] ?? "";
     expect(backend).toContain('key = "tarubot/infra.tfstate"');
-    expect(backend).toContain('region = "us-east-1"');
     for (const skip of [
       "skip_credentials_validation",
       "skip_region_validation",
@@ -992,7 +992,7 @@ describe("ops/tofu", () => {
     ])
       expect(backend).toMatch(new RegExp(`^\\s+${skip}\\s+= true$`, "mu"));
     expect(backend).not.toMatch(
-      /^\s*(bucket|endpoints?|use_path_style|use_lockfile|access_key|secret_key|profile)\s*=/mu,
+      /^\s*(bucket|endpoints?|region|use_path_style|use_lockfile|access_key|secret_key|profile)\s*=/mu,
     );
     expect(versions).toContain("passphrase = var.state_passphrase");
     expect(versions).toMatch(/method "aes_gcm" "state" \{\n\s+keys = key_provider\.pbkdf2\.state/u);
@@ -1136,31 +1136,23 @@ describe("no host and no real address", () => {
     );
   });
 
-  test("hostnames are limited to public documentation, placeholders and the endpoint's shape", () => {
+  test("hostnames are limited to public documentation, placeholders and the selected service endpoint", () => {
     for (const file of FILES) {
       const text = read(file);
       const allowed = (host: string) =>
         host === "github.com" ||
         host === "example.org" ||
         host.endsWith(".example.org") ||
-        // Public provider documentation is not a private infrastructure identifier.
-        (host === "techdocs.akamai.com" && file === "ops/tofu/README.md") ||
+        // Only the exact public OVH service/documentation endpoints are permitted here, not a
+        // bucket-prefixed endpoint, database domain or arbitrary provider-account identifier.
+        (file === "ops/tofu/README.md" &&
+          ["support.us.ovhcloud.com", "s3.us-east-va.io.cloud.ovh.us"].includes(host)) ||
         (host === "registry.opentofu.org" && file === "ops/tofu/.terraform.lock.hcl");
       const hosts = [...new Set(hostNames(text))].filter((h) => !allowed(h));
-      // The README shows the endpoint only as a shape.
-      const shaped = hosts.filter(
-        (h) => h === "linodeobjects.com" && file === "ops/tofu/README.md",
-      );
-      expect({ file, hosts: hosts.filter((h) => !shaped.includes(h)) }).toEqual({
+      expect({ file, hosts }).toEqual({
         file,
         hosts: [],
       });
-      if (shaped.length > 0)
-        expect(
-          text
-            .match(/[a-z0-9<>.-]*linodeobjects\.com/gu)
-            ?.every((h) => h === "<region>.linodeobjects.com"),
-        ).toBe(true);
     }
   });
 
@@ -1467,7 +1459,8 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
   const PREPARED = {
     TOFU_VARS: EXAMPLE,
     STATE_BUCKET: "state-bucket-example",
-    STATE_ENDPOINT: "https://us-east-1.example.org",
+    STATE_ENDPOINT: "https://s3.us-east-va.example.org",
+    STATE_REGION: "us-east-va",
   };
   const STATE = {
     AWS_ACCESS_KEY_ID: "access-example",
@@ -1655,6 +1648,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     const privateCodec = hostRecordCodec(
       PREPARED.STATE_BUCKET,
       PREPARED.STATE_ENDPOINT,
+      PREPARED.STATE_REGION,
       STATE.TF_VAR_state_passphrase,
     );
     const pending = privateCodec.open(
@@ -1768,6 +1762,20 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(result.err).toBe("");
   });
 
+  test("prepare refuses an absent or malformed signing region before any backend use", () => {
+    for (const region of ["", "private-region-marker/invalid", "us-east-va\nregion = evil"]) {
+      const r = runner();
+      const refused = r.phase("prepare", { ...PREPARED, STATE_REGION: region });
+      expect(refused.code).toBe(1);
+      expect(refused.out).toContain(
+        "::error::TOFU_STATE_REGION must be an explicit S3 signing region",
+      );
+      if (region) expect(refused.out + refused.err).not.toContain(region);
+      expect(existsSync(join(r.dir, "temp", "tofu", "backend.hcl"))).toBe(false);
+      expect(existsSync(join(r.dir, "stub", "calls"))).toBe(false);
+    }
+  });
+
   test("prepare masks every identifying value first, and writes only private files", () => {
     const r = runner();
     const done = r.phase("prepare", PREPARED);
@@ -1780,6 +1788,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     ]);
     expect(r.file("env")).toBe(`TF_DATA_DIR=${join(r.dir, "temp", "tofu")}/data\n`);
     expect(r.file("temp/tofu/backend.hcl")).toContain('bucket         = "state-bucket-example"');
+    expect(r.file("temp/tofu/backend.hcl")).toContain('region         = "us-east-va"');
     expect(JSON.parse(r.file("temp/tofu/values.tfvars.json"))).toEqual(JSON.parse(EXAMPLE));
     // A value the shape refuses: one fixed error, no mask, nothing of the value.
     const bad = runner().phase("prepare", {
@@ -2049,20 +2058,33 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(r.phase("compare", reviewed).code).toBe(0);
     // Backend identity is privately bound too: refuse a mismatch before provider writes.
     const backend = r.file("temp/tofu/backend.hcl");
-    writeFileSync(
-      join(r.dir, "temp", "tofu", "backend.hcl"),
-      backend.replace("us-east-1", "us-west-1"),
-    );
-    expect(r.phase("compare", reviewed)).toEqual({
-      code: 1,
-      out: "::error::The plan's backend, inputs, run or code differs from Plan; nothing was applied.\n",
-      err: "",
-    });
     const writeTokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
-    // Failed Compare removes a previous success marker; direct Apply must then fail.
-    expect(r.phase("apply", writeTokens).out).toBe(
-      "::error::Apply has no successful plan comparison; nothing was applied.\n",
-    );
+    for (const changedBackend of [
+      backend.replace("https://s3.us-east-va.example.org", "https://other.example.org"),
+      backend.replace('region         = "us-east-va"', 'region         = "us-west-1"'),
+    ]) {
+      writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), backend);
+      expect(r.phase("compare", reviewed).code).toBe(0);
+      writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), changedBackend);
+      // Recheck immediately before a write, even if Compare previously succeeded.
+      expect(r.phase("apply", writeTokens).out).toBe(
+        "::error::The plan handoff changed after comparison; nothing was applied.\n",
+      );
+      expect(r.phase("compare", reviewed)).toEqual({
+        code: 1,
+        out: "::error::The plan's backend, inputs, run or code differs from Plan; nothing was applied.\n",
+        err: "",
+      });
+      // Failed Compare removes a previous success marker; direct Apply must then fail.
+      expect(r.phase("apply", writeTokens).out).toBe(
+        "::error::Apply has no successful plan comparison; nothing was applied.\n",
+      );
+      expect(
+        readdirSync(join(r.dir, "stub", "calls")).every(
+          (name) => !r.file(`stub/calls/${name}`).includes("\napply\n"),
+        ),
+      ).toBe(true);
+    }
     writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), backend);
     expect(r.phase("compare", reviewed).code).toBe(0);
     writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), `${saved}-changed-after-compare`);

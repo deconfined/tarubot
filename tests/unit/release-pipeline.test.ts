@@ -291,7 +291,12 @@ describe("automatic infrastructure adapter", () => {
       first.state,
     );
     const snapshot = await records.inspect(first.state);
-    const hostCodec = hostRecordCodec("example-bucket", "https://storage.example.org", passphrase);
+    const hostCodec = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-east-va",
+      passphrase,
+    );
     const enrollment = new HostEnrollmentRecords(store, hostCodec);
     const candidate = releasePlan(label);
     const values = {

@@ -1,17 +1,19 @@
 {
-  "title": "Session: 2.36.42 private-backend acceptance",
-  "objective": "Rehearse encrypted state, saved-plan transfer and versioned control-record recovery with disposable data; identify owner prerequisites without enabling the replacement pipeline.",
+  "title": "Session: OVH infrastructure preparation",
+  "objective": "Prepare the selected OVH infrastructure, private inputs and planning consumers with offline verification, preserving production Compose and keeping the replacement pipeline inactive.",
   "user": [
-    "Review the offline acceptance evidence and unexercised intended-backend checks.",
-    "Configure or verify private storage and environment protections outside agent sessions before authorizing protected acceptance runs."
+    "Review the bounded infrastructure change and its offline evidence.",
+    "Confirm VM sizing, AlmaLinux 10 image availability and the account-specific quote before any separately authorized provisioning.",
+    "Keep environment credentials, real-service acceptance and live data migration outside agent sessions."
   ],
   "assistant": [
-    "Use pinned OpenTofu and Bun with a private local S3-compatible service and invented data.",
-    "Prove exact encrypted-plan application, stale-plan refusal, record readback and interruption recovery preserving first SSH trust.",
-    "Correct native CLI incompatibilities and run focused checks; make no live bot, host, database, environment or provider changes."
+    "Replace inactive provider-specific contracts and update affected consumers together, using standard OVH/OpenStack components.",
+    "Bind the selected S3 region throughout planning, saved-plan verification, Apply and encrypted control-record access.",
+    "Use invented inputs for offline source, OpenTofu and consumer refusal checks; preserve encryption, pending recovery and strict enrollment.",
+    "Make no live bot, host, database, environment or provider changes, and do not activate or dispatch the replacement pipeline."
   ],
   "bot": [
-    "Do not restart or connect to Discord for this offline rehearsal.",
+    "Do not restart or connect to Discord for this offline infrastructure preparation.",
     "Continue the owner's existing deployment unchanged; pipeline maintenance does not declare a new bot release."
   ]
 }
