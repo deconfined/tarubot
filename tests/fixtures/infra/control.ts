@@ -43,7 +43,13 @@ const codec = new RecordCodec(
 );
 const bucket = /^bucket\s*= "([^"]+)"$/mu.exec(backend)?.[1] ?? "";
 const endpoint = /^endpoints\s*= \{ s3 = "([^"]+)" \}$/mu.exec(backend)?.[1] ?? "";
-const hostCodec = hostRecordCodec(bucket, endpoint, process.env.TF_VAR_state_passphrase ?? "");
+const region = /^region\s*= "([^"]+)"$/mu.exec(backend)?.[1] ?? "";
+const hostCodec = hostRecordCodec(
+  bucket,
+  endpoint,
+  region,
+  process.env.TF_VAR_state_passphrase ?? "",
+);
 // Invented native helper responses exercise the real encrypted enrollment engine without SSH,
 // HTTP or DNS. The wire-format key has a valid Ed25519 type and an invented 32-byte public value.
 const wire = Buffer.concat([

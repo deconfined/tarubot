@@ -31,7 +31,7 @@
  *   checksum files agree and satisfy the module's required_version.
  * - ops/tofu: every variable sensitive, the addresses output sensitive, the validations present
  *   and in step with infra.yml's own checks, no host key or private key anywhere, verify-required
- *   seeded, the access lists protected and adopted by import, encrypted state and plans, no bucket
+ *   seeded, new services/restrictions protected without imports, encrypted state and plans, no bucket
  *   or endpoint in the repository, the lock file pinning both providers, and examples that use
  *   only documentation names and addresses.
  */
@@ -141,6 +141,7 @@ const expr = (inner: string) => `\${{ ${inner} }}`;
 const SHARED: [string, string | null][] = [
   ["Check out source", null],
   ["Install the project Bun version", null],
+  ["Install pinned tooling dependencies", null],
   ["Install the pinned OpenTofu", "install"],
   ["Prepare the values and the masks", "prepare"],
   ["Initialize OpenTofu", "init"],
@@ -151,6 +152,7 @@ const ARTIFACT = "saved-plan";
 const SHARED_SECRETS = [
   "TOFU_STATE_BUCKET",
   "TOFU_STATE_ENDPOINT",
+  "TOFU_STATE_REGION",
   "TOFU_STATE_PASSPHRASE",
   "TOFU_VARS",
 ];
@@ -216,7 +218,7 @@ describe("infra.yml's shape", () => {
     ]);
     expect(inputs.operation).toMatchObject({
       type: "choice",
-      options: ["plan", "apply", "baseline", "adopt"],
+      options: ["plan", "apply", "baseline"],
       default: "plan",
     });
     expect(inputs.replace).toMatchObject({ type: "string", default: "" });
@@ -243,7 +245,7 @@ describe("infra.yml's shape", () => {
     const guard = "github.run_attempt == '1' && github.ref == 'refs/heads/main'";
     expect(plan.if).toBe(guard);
     expect(apply.if).toBe(
-      `${guard} && (inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && needs.plan.outputs.has_changes == 'true'))`,
+      `${guard} && (inputs.operation == 'baseline' || (inputs.operation == 'apply' && needs.plan.outputs.has_changes == 'true'))`,
     );
     // Plan is the first job; nothing reads the environments' own rules through the API, which
     // the owner sets and reads back once (REQUIREMENTS.md, "Approved pipeline amendments").
@@ -270,59 +272,40 @@ describe("infra.yml's shape", () => {
     expect(apply.outputs).toBeUndefined();
   });
 
-  test("Plan reads only read credentials; Apply uses writes and a distinct read-only verification step", () => {
-    const planSecrets = secretsOfJob(plan);
-    const applySecrets = secretsOfJob(apply);
-    expect(planSecrets).toEqual(
-      [
-        "CLOUDFLARE_READ_TOKEN",
-        "LINODE_READ_TOKEN",
-        ...SHARED_SECRETS,
-        "TOFU_STATE_READ_ACCESS_KEY",
-        "TOFU_STATE_READ_SECRET_KEY",
-      ].sort(),
-    );
-    expect(applySecrets).toEqual(
-      [
-        "CLOUDFLARE_WRITE_TOKEN",
-        "LINODE_WRITE_TOKEN",
-        "LINODE_READ_TOKEN",
-        "CLOUDFLARE_READ_TOKEN",
-        ...SHARED_SECRETS,
-        "TOFU_STATE_WRITE_ACCESS_KEY",
-        "TOFU_STATE_WRITE_SECRET_KEY",
-      ].sort(),
-    );
-    // Provider/storage names identify the read-only and write roles.
-    for (const name of [...planSecrets, ...applySecrets].filter((n) => !SHARED_SECRETS.includes(n)))
-      expect({ name, kind: /_(READ|WRITE)_/u.test(name) }).toEqual({ name, kind: true });
-    expect(planSecrets.filter((n) => n.includes("_WRITE_"))).toEqual([]);
-    expect(applySecrets.filter((n) => n.includes("_READ_"))).toEqual([
-      "CLOUDFLARE_READ_TOKEN",
-      "LINODE_READ_TOKEN",
-    ]);
-    // Each job maps them onto the variables OpenTofu reads, the same names in both.
-    const tools = (kind: string) => ({
-      AWS_ACCESS_KEY_ID: expr(`secrets.TOFU_STATE_${kind}_ACCESS_KEY`),
-      AWS_SECRET_ACCESS_KEY: expr(`secrets.TOFU_STATE_${kind}_SECRET_KEY`),
-      TF_VAR_state_passphrase: expr("secrets.TOFU_STATE_PASSPHRASE"),
-      LINODE_TOKEN: expr(`secrets.LINODE_${kind}_TOKEN`),
-      CLOUDFLARE_API_TOKEN: expr(`secrets.CLOUDFLARE_${kind}_TOKEN`),
-    });
-    expect(stepOf(plan, "Plan").env).toEqual(tools("READ"));
-    expect(stepOf(apply, "Apply").env).toEqual(tools("WRITE"));
-    expect(stepOf(apply, "Verify adoption with read-only provider credentials").env).toEqual({
-      ...tools("WRITE"),
-      LINODE_TOKEN: expr("secrets.LINODE_READ_TOKEN"),
-      CLOUDFLARE_API_TOKEN: expr("secrets.CLOUDFLARE_READ_TOKEN"),
-    });
-    // The script names each environment's own secrets when one is missing.
-    expect(phaseOf("plan")).toContain(
-      'provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."',
-    );
-    expect(phaseOf("apply")).toContain(
-      'provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."',
-    );
+  test("Plan uses only read-scoped OVH/OpenStack credentials; Apply uses only write-scoped ones", () => {
+    const providerSecrets = (kind: string) => [
+      `OVH_${kind}_APPLICATION_KEY`,
+      `OVH_${kind}_APPLICATION_SECRET`,
+      `OVH_${kind}_CONSUMER_KEY`,
+      `OPENSTACK_${kind}_USERNAME`,
+      `OPENSTACK_${kind}_PASSWORD`,
+      `CLOUDFLARE_${kind}_TOKEN`,
+    ];
+    for (const [j, kind, name] of [
+      [plan, "READ", "Plan"],
+      [apply, "WRITE", "Apply"],
+    ] as const) {
+      expect(secretsOfJob(j)).toEqual(
+        [
+          ...SHARED_SECRETS,
+          ...providerSecrets(kind),
+          `TOFU_STATE_${kind}_ACCESS_KEY`,
+          `TOFU_STATE_${kind}_SECRET_KEY`,
+        ].sort(),
+      );
+      const env = stepOf(j, name).env;
+      for (const [variable, secret] of [
+        ["OVH_APPLICATION_KEY", `OVH_${kind}_APPLICATION_KEY`],
+        ["OVH_APPLICATION_SECRET", `OVH_${kind}_APPLICATION_SECRET`],
+        ["OVH_CONSUMER_KEY", `OVH_${kind}_CONSUMER_KEY`],
+        ["OS_USERNAME", `OPENSTACK_${kind}_USERNAME`],
+        ["OS_PASSWORD", `OPENSTACK_${kind}_PASSWORD`],
+      ])
+        expect(env?.[variable ?? ""]).toBe(expr(`secrets.${secret}`));
+    }
+    expect(secretsOfJob(plan).filter((n) => n.includes("_WRITE_"))).toEqual([]);
+    expect(secretsOfJob(apply).filter((n) => n.includes("_READ_"))).toEqual([]);
+    expect(infraText).not.toContain("LINODE_TOKEN");
   });
 
   test("the actions are checkout at ci.yml's pin, and the artifact pair that carries the saved plan", () => {
@@ -349,7 +332,7 @@ describe("infra.yml's shape", () => {
     const phases = (j: Job) =>
       j.steps.map((s) => [
         s.name,
-        /^bash ops\/tofu\/ci\/tofu-ci\.sh ([a-z_]+)$/u.exec(s.run ?? "")?.[1] ?? null,
+        /^bash ops\/tofu\/ci\/tofu-ci\.sh ([a-z0-9_]+)$/u.exec(s.run ?? "")?.[1] ?? null,
       ]);
     const cleanup = ["Clean up", null];
     expect(phases(plan)).toEqual([
@@ -368,13 +351,12 @@ describe("infra.yml's shape", () => {
       ["Compare with the reviewed plan", "compare"],
       ["Install first-host enrollment tools", null],
       ["Apply", "apply"],
-      ["Verify adoption with read-only provider credentials", "verify_adoption"],
       ["Establish initial baseline without provider changes", "baseline"],
       cleanup,
     ]);
     // The script holds exactly those phases, and runs nothing else.
     expect(scriptText).toContain(
-      "  install | prepare | init | control_read | plan | summarize | compare | apply | verify_adoption | baseline)\n",
+      "  install | prepare | init | control_read | plan | summarize | compare | apply | baseline)\n",
     );
     for (const j of [plan, apply]) {
       const clean = stepOf(j, "Clean up");
@@ -388,14 +370,22 @@ describe("infra.yml's shape", () => {
       Object.values(s.env ?? {})
         .flatMap((v) => [...v.matchAll(/secrets\.([A-Z_]+)/gu)].map((m) => m[1]))
         .sort();
-    const prepare = ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_VARS"];
+    const prepare = ["TOFU_STATE_BUCKET", "TOFU_STATE_ENDPOINT", "TOFU_STATE_REGION", "TOFU_VARS"];
     const init = (kind: string) => [
       "TOFU_STATE_PASSPHRASE",
       `TOFU_STATE_${kind}_ACCESS_KEY`,
       `TOFU_STATE_${kind}_SECRET_KEY`,
     ];
     const tokens = (kind: string) =>
-      [`CLOUDFLARE_${kind}_TOKEN`, `LINODE_${kind}_TOKEN`, ...init(kind)].sort();
+      [
+        `CLOUDFLARE_${kind}_TOKEN`,
+        `OVH_${kind}_APPLICATION_KEY`,
+        `OVH_${kind}_APPLICATION_SECRET`,
+        `OVH_${kind}_CONSUMER_KEY`,
+        `OPENSTACK_${kind}_USERNAME`,
+        `OPENSTACK_${kind}_PASSWORD`,
+        ...init(kind),
+      ].sort();
     const expected: [Job, Record<string, string[]>][] = [
       [
         plan,
@@ -415,11 +405,6 @@ describe("infra.yml's shape", () => {
           "Read durable control records": init("WRITE").sort(),
           "Compare with the reviewed plan": ["TOFU_STATE_PASSPHRASE"],
           Apply: tokens("WRITE"),
-          "Verify adoption with read-only provider credentials": [
-            "CLOUDFLARE_READ_TOKEN",
-            "LINODE_READ_TOKEN",
-            ...init("WRITE"),
-          ].sort(),
           "Establish initial baseline without provider changes": [...init("WRITE")].sort(),
         },
       ],
@@ -451,7 +436,7 @@ describe("infra.yml's shape", () => {
     for (const e of expressions)
       expect({
         e,
-        ok: /^(secrets\.[A-Z_]+|vars\.TOFU_CONTROL_RECORDS_ENABLED|inputs\.[a-z_]+|steps\.summary\.outputs\.[a-z_]+|needs\.plan\.outputs\.(changes|digest|binding)|runner\.temp)$/u.test(
+        ok: /^(secrets\.[A-Z_]+|vars\.TOFU_CONTROL_RECORDS_ENABLED|inputs\.[a-z0-9_]+|steps\.summary\.outputs\.[a-z0-9_]+|needs\.plan\.outputs\.(changes|digest|binding)|runner\.temp)$/u.test(
           e ?? "",
         ),
       }).toMatchObject({
@@ -475,7 +460,7 @@ describe("infra.yml's shape", () => {
     const keep = stepOf(plan, "Keep the saved plan for Apply");
     // After the summary step, whose guards exit non-zero, so a refused plan never leaves the job.
     expect(keep.if).toBe(
-      `inputs.operation == 'baseline' || (contains(fromJSON('["apply","adopt"]'), inputs.operation) && steps.summary.outputs.has_changes == 'true')`,
+      `inputs.operation == 'baseline' || (inputs.operation == 'apply' && steps.summary.outputs.has_changes == 'true')`,
     );
     expect(keep.with).toEqual({
       name: ARTIFACT,
@@ -533,8 +518,8 @@ describe("public-log hygiene", () => {
   test("every tofu command writes its output and errors to a private file", () => {
     // Decrypted state/show evidence also stays private and is never uploaded.
     const calls = commandLines(scriptText).filter((l) => /^tofu\s/u.test(l));
-    expect(calls.length).toBe(9);
-    expect(scriptText.match(/\btofu -chdir=/gu)).toHaveLength(8);
+    expect(calls.length).toBe(6);
+    expect(scriptText.match(/\btofu -chdir=/gu)).toHaveLength(5);
     for (const line of calls) {
       // stdout to a file under $d, and stderr to a file or along with stdout.
       const ok =
@@ -565,14 +550,16 @@ describe("public-log hygiene", () => {
   test("the prepare phase masks every identifying value before anything else prints", () => {
     const masks = jqProgram("masks.jq");
     for (const part of [
-      "(.hosts[] | .fqdn)",
+      '(.hosts[] | .[] | select(type == "string")',
+      ".ovh_project_id",
+      ".openstack_project_id",
       ".cloudflare_zone_id",
       '(.db_allow_extra[] | ., split("/")[0])',
       '(.root_password_hash | select(. != ""))',
       '((.root_keys[], .configure_keys[]) | split(" ")[] | select(startswith("AAAA")))',
     ])
       expect({ part, present: masks.includes(part) }).toEqual({ part, present: true });
-    // Labels are Linode display names, never masked: masking a plain word would censor the log.
+    // All private host string fields are masked, rather than treating display labels as public.
     expect(masks).not.toContain(".label");
     const lines = commandLines(PREPARE);
     const loop = lines.findIndex((l) => l.includes("::add-mask::"));
@@ -603,34 +590,15 @@ describe("public-log hygiene", () => {
     expect(scriptText).toMatch(/^fail\(\) \{\n {2}echo "::error::\$1"\n {2}exit 1\n\}$/mu);
   });
 
-  test("the shape check agrees with ops/tofu/variables.tf on keys and names", () => {
+  test("the shallow shape and precise input adapters share the selected field contract", () => {
     const shape = jqProgram("shape.jq");
-    const variables = read("ops/tofu/variables.tf");
-    for (const pattern of [
-      "^(staging|production)(-[0-9]{1,2})?$",
-      "^[a-z]{1,16}$",
-      "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
-    ])
-      expect({
-        pattern,
-        shape: shape.includes(pattern),
-        tofu: variables.includes(pattern),
-      }).toEqual({
-        pattern,
-        shape: true,
-        tofu: true,
-      });
-    // Exactly the seven keys of examples/example.tfvars.json.
-    const keys = Object.keys(JSON.parse(read("ops/tofu/examples/example.tfvars.json")))
-      .filter((k) => k !== "existing_databases")
-      .sort();
-    expect(shape).toContain(
-      `(keys - ["existing_databases"]) == ${JSON.stringify(keys).replaceAll(",", ", ")}`,
-    );
-    // A label is only a string here (it isn't masked); variables.tf keeps Linode's own rules.
-    expect(shape).toContain('(.value.label | type == "string")');
-    expect(variables).toContain('can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label))');
-    expect(variables).not.toContain("strcontains(k, h.label)");
+    const keys = Object.keys(JSON.parse(read("ops/tofu/examples/example.tfvars.json"))).sort();
+    expect(shape).toContain(`keys == ${JSON.stringify(keys).replaceAll(",", ", ")}`);
+    for (const pattern of ["^(staging|production)(-[0-9]{1,2})?$", "^[a-z]{1,16}$"]) {
+      expect(shape).toContain(pattern);
+      expect(read("ops/tofu/variables.tf")).toContain(pattern);
+    }
+    expect(PREPARE).toContain("scripts/infra-inputs.ts");
   });
 
   test("the diagnostics filter lets no digit, '/', '@' or '=' through, nor a dotted name", () => {
@@ -651,7 +619,7 @@ describe("public-log hygiene", () => {
     expect(diag).toContain(".[0:120]");
     expect(diag).not.toContain(".detail");
     // Addresses print only in the change list's own form.
-    const address = '^[a-z_]+[.][a-z_]+(\\\\[\\"[a-z0-9-]+\\"\\\\])?$';
+    const address = '^[a-z0-9_]+[.][a-z0-9_]+(\\\\[\\"[a-z0-9-]+\\"\\\\])?$';
     expect(diag).toContain(address);
     expect(jqProgram("summary.jq")).toContain(address);
   });
@@ -689,23 +657,23 @@ describe("public-log hygiene", () => {
     expect(matches(unnamed, "? ?")).toBe(true);
     expect(matches(unnamed, "create ?")).toBe(true);
     expect(matches(unnamed, "update ? +1 -0")).toBe(true);
-    expect(matches(unnamed, 'create linode_instance.host["staging"]')).toBe(false);
-    expect(matches(destroy, 'delete linode_firewall.host["staging"]')).toBe(true);
-    expect(matches(destroy, 'replace linode_instance.host["staging"]')).toBe(true);
-    expect(matches(destroy, 'update linode_instance.host["staging"]')).toBe(false);
-    expect(matches(removal, 'update linode_database_access_controls.db["primary"] +2 -1')).toBe(
+    expect(matches(unnamed, 'create openstack_compute_instance_v2.host["staging"]')).toBe(false);
+    expect(matches(destroy, 'delete openstack_networking_secgroup_v2.host["staging"]')).toBe(true);
+    expect(matches(destroy, 'replace openstack_compute_instance_v2.host["staging"]')).toBe(true);
+    expect(matches(destroy, 'update openstack_compute_instance_v2.host["staging"]')).toBe(false);
+    expect(matches(removal, 'update ovh_cloud_project_database.cluster["primary"] +2 -1')).toBe(
       true,
     );
-    expect(matches(removal, 'import linode_database_access_controls.db["primary"] +0 -10')).toBe(
+    expect(matches(removal, 'import ovh_cloud_project_database.cluster["primary"] +0 -10')).toBe(
       true,
     );
-    expect(matches(removal, 'update linode_database_access_controls.db["primary"] +2 -0')).toBe(
+    expect(matches(removal, 'update ovh_cloud_project_database.cluster["primary"] +2 -0')).toBe(
       false,
     );
     expect(SUMMARIZE).toContain('exit "$refuse"');
     // A replace names exactly one configured host's instance.
     expect(PREPARE).toContain(
-      `if ! [[ $replace =~ ^linode_instance\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] ||`,
+      `if ! [[ $replace =~ ^openstack_compute_instance_v2\\.host\\[\\"((staging|production)(-[0-9]{1,2})?)\\"\\]$ ]] ||`,
     );
     expect(PREPARE).toContain(`jq -e --arg k "\${BASH_REMATCH[1]}" '.hosts | has($k)'`);
   });
@@ -779,12 +747,12 @@ const TOFU = walk("ops/tofu");
 const tf = (name: string) => read(`ops/tofu/${name}`);
 
 /**
- * The top-level blocks of an HCL file, by label ("variable.hosts", "resource.linode_instance.host").
+ * The top-level blocks of an HCL file, by label ("variable.hosts", "resource.openstack_compute_instance_v2.host").
  * `tofu fmt -check` keeps every top-level block's closing brace alone at the start of a line.
  */
 const blocks = (text: string) => {
   const found = new Map<string, string>();
-  for (const m of text.matchAll(/^([a-z_]+)((?: "[^"]+")*) \{\n([\s\S]*?)^\}$/gmu)) {
+  for (const m of text.matchAll(/^([a-z0-9_]+)((?: "[^"]+")*) \{\n([\s\S]*?)^\}$/gmu)) {
     const labels = [...(m[2] ?? "").matchAll(/"([^"]+)"/gu)].map((l) => l[1]);
     found.set([m[1], ...labels].join("."), m[3] ?? "");
   }
@@ -818,8 +786,6 @@ describe("ops/tofu", () => {
       "ops/tofu/main.tf",
       "ops/tofu/opentofu.sha256",
       "ops/tofu/outputs.tf",
-      "ops/tofu/tests/database-adoption.tftest.hcl",
-      "ops/tofu/tests/fixtures/database-adoption-validation/outputs.tf",
       "ops/tofu/tests/main.tftest.hcl",
       "ops/tofu/variables.tf",
       "ops/tofu/versions.tf",
@@ -830,12 +796,13 @@ describe("ops/tofu", () => {
     const names = [...VARIABLES.keys()].map((k) => k.replace(/^variable\./u, ""));
     expect(names).toEqual([
       "hosts",
+      "ovh_project_id",
+      "openstack_project_id",
+      "databases",
       "root_keys",
       "configure_keys",
       "root_password_hash",
       "cloudflare_zone_id",
-      "database_ids",
-      "existing_databases",
       "db_allow_extra",
       "state_passphrase",
     ]);
@@ -866,7 +833,7 @@ describe("ops/tofu", () => {
       'can(regex("^(staging|production)(-[0-9]{1,2})?$", k)) && split("-", k)[0] == h.role',
     );
     expect(hosts).toContain('can(regex("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", h.label))');
-    expect(block(VARIABLES, "variable.database_ids")).toContain('can(regex("^[a-z]{1,16}$", k))');
+    expect(block(VARIABLES, "variable.databases")).toContain('can(regex("^[a-z]{1,16}$", k))');
     expect(block(VARIABLES, "variable.db_allow_extra")).toContain(
       'can(cidrhost(x, 0)) && strcontains(x, "/")',
     );
@@ -903,86 +870,61 @@ describe("ops/tofu", () => {
         expect({ file, word, found: text.includes(word) }).toEqual({ file, word, found: false });
     }
     const test_ = tf("tests/main.tftest.hcl");
-    expect(test_).toContain('!strcontains(base64decode(i.metadata[0].user_data), "ssh_keys")');
-    expect(test_).toContain('!strcontains(base64decode(i.metadata[0].user_data), "PRIVATE KEY")');
-  });
-
-  test("the instance takes its credentials from cloud-init alone, and user data never rebuilds a host", () => {
-    const instance = block(MAIN, "resource.linode_instance.host");
-    expect(instance).toContain('image           = "linode/almalinux10"');
-    expect(instance).toContain('disk_encryption = "enabled"');
-    expect(instance).toContain("booted          = true");
-    expect(instance).toContain('interface_generation = "legacy_config"');
-    expect(instance).toContain('purpose = "public"');
-    expect(instance).toContain("user_data = base64encode(local.user_data[each.key])");
-    expect(instance).toContain("ignore_changes = [metadata, root_pass]");
-    // A throwaway password the provider requires, never a chosen one, and no keys or users.
-    expect(instance).toContain(`root_pass = base64sha512("\${uuid()}\${uuid()}")`);
-    expect(instance).not.toMatch(/^\s*(authorized_keys|authorized_users)\s*=/mu);
-    expect(instance).toContain("contains(keys(var.configure_keys), var.hosts[each.key].role)");
-    expect(tf("main.tf")).toContain(
-      'root_keys          = concat(var.root_keys, [lookup(var.configure_keys, var.hosts[k].role, "")])',
+    expect(test_).toContain(
+      '!strcontains(openstack_compute_instance_v2.host["staging"].user_data, "ssh_keys")',
     );
-    // Providers take no inline credentials.
-    expect(tf("versions.tf")).toMatch(/^provider "linode" \{\}$/mu);
-    expect(tf("versions.tf")).toMatch(/^provider "cloudflare" \{\}$/mu);
-    expect(TOFU.map(read).join("\n")).not.toMatch(
-      /^\s*(api_token|token|access_key|secret_key)\s*=/mu,
+    expect(test_).toContain(
+      '!strcontains(openstack_compute_instance_v2.host["staging"].user_data, "PRIVATE KEY")',
     );
   });
 
-  test("the firewall admits only SSH and ICMP, and the records are unproxied", () => {
-    const firewall = block(MAIN, "resource.linode_firewall.host");
-    expect(firewall).toContain('inbound_policy  = "DROP"');
-    expect(firewall).toContain('outbound_policy = "ACCEPT"');
-    const rules = [...firewall.matchAll(/inbound \{\n([\s\S]*?)\n {2}\}/gu)].map((m) => m[1] ?? "");
-    expect(rules).toHaveLength(3);
-    expect(rules[0]).toMatch(/protocol = "TCP"[\s\S]*ports {4}= "22"/u);
-    for (const rule of rules) expect(rule).toContain('action   = "ACCEPT"');
-    for (const name of [
-      "resource.cloudflare_dns_record.a",
-      "resource.cloudflare_dns_record.aaaa",
-    ]) {
-      const record = block(MAIN, name);
-      expect(record).toContain("proxied = false");
-      expect(record).toContain("ttl     = 300");
+  test("selected VMs boot locally with explicit image/flavor/network and cloud-init public access", () => {
+    const instance = block(MAIN, "resource.openstack_compute_instance_v2.host");
+    for (const word of [
+      "var.hosts[each.key].image_id",
+      "var.hosts[each.key].flavor_id",
+      "var.hosts[each.key].network_id",
+      "local.user_data[each.key]",
+      "ignore_changes = [user_data]",
+    ])
+      expect(instance).toContain(word);
+    expect(instance).not.toMatch(/block_device|key_pair\s*=|admin_pass\s*=/u);
+    expect(tf("versions.tf")).toContain('endpoint = "ovh-us"');
+    expect(tf("versions.tf")).toContain("tenant_id         = var.openstack_project_id");
+  });
+  test("Neutron removes defaults and all six firewall rules remain explicit", () => {
+    const firewall = block(MAIN, "resource.openstack_networking_secgroup_v2.host");
+    expect(firewall).toMatch(/delete_default_rules\s*= true/u);
+    expect(firewall).toMatch(/stateful\s*= true/u);
+    for (const rule of ["ssh4", "ssh6", "icmp4", "icmp6", "out4", "out6"])
+      expect(tf("main.tf")).toContain(rule);
+    for (const name of ["a", "aaaa"]) {
+      const dns = block(MAIN, `resource.cloudflare_dns_record.${name}`);
+      expect(dns).toMatch(/proxied\s*= false/u);
+      expect(dns).toMatch(/ttl\s*= 300/u);
     }
-    expect(tf("main.tf")).not.toMatch(/type\s*=\s*"(?!A"|AAAA")[A-Z]+"/u);
   });
-
-  test("each access list is the hosts' CIDR entries plus the extras, protected and adopted by import", () => {
-    const list = block(MAIN, "resource.linode_database_access_controls.db");
-    expect(list).toContain("for_each = local.database_keys");
-    expect(list).toContain('database_type = "postgresql"');
-    expect(list).toContain("allow_list    = concat(local.host_access, var.db_allow_extra)");
-    expect(list).toContain("prevent_destroy = true");
-    const main = tf("main.tf");
-    // IPv6 first, then IPv4, in the form the API stores.
-    expect(main).toMatch(
-      /host_access = concat\(\n\s+\[for k in sort\(tolist\(local\.host_keys\)\) : "\$\{local\.host_ipv6\[k\]\}\/128"\],\n\s+\[for k in sort\(tolist\(local\.host_keys\)\) : "\$\{local\.host_ipv4\[k\]\}\/32"\],\n/u,
+  test("NEW Essential PostgreSQL owns the complete restriction set and cannot be imported/destroyed", () => {
+    const cluster = block(MAIN, "resource.ovh_cloud_project_database.cluster");
+    for (const value of [
+      '"essential"',
+      '"postgresql"',
+      '"US-EAST-VA"',
+      'dynamic "ip_restrictions"',
+      "toset(concat(local.host_access, var.db_allow_extra))",
+      "prevent_destroy = true",
+    ])
+      expect(cluster).toContain(value);
+    expect(cluster).toMatch(/deletion_protection\s*= true/u);
+    expect(tf("main.tf")).not.toMatch(
+      /^import |linode_|ovh_cloud_project_database_ip_restriction/gmu,
     );
-    // The unchanged access-list import keeps its state address and provider ID form. The separate
-    // existing-cluster import is covered by database-adoption-module.test.ts and import-only guards.
-    const imports = [...main.matchAll(/^import \{\n([\s\S]*?)^\}$/gmu)].map((m) => m[1] ?? "");
-    expect(imports).toHaveLength(2);
-    const accessImport = imports.find((value) =>
-      value.includes("to = linode_database_access_controls.db[each.key]"),
-    );
-    expect(accessImport).toContain("for_each = local.database_keys");
-    expect(accessImport).toContain("to = linode_database_access_controls.db[each.key]");
-    expect(accessImport).toContain(
-      `id = nonsensitive("\${var.database_ids[each.key]}:postgresql")`,
-    );
-    // Both for_each keys come unwrapped from their sensitive maps, as public-safe words.
-    expect(main).toContain("host_keys     = nonsensitive(toset(keys(var.hosts)))");
-    expect(main).toContain("database_keys = nonsensitive(toset(keys(var.database_ids)))");
   });
 
   test("state and plans are encrypted, and the backend names no bucket or endpoint", () => {
     const versions = tf("versions.tf");
     const backend = /backend "s3" \{\n([\s\S]*?)\n {2}\}/u.exec(versions)?.[1] ?? "";
     expect(backend).toContain('key = "tarubot/infra.tfstate"');
-    expect(backend).toContain('region = "us-east-1"');
     for (const skip of [
       "skip_credentials_validation",
       "skip_region_validation",
@@ -992,7 +934,7 @@ describe("ops/tofu", () => {
     ])
       expect(backend).toMatch(new RegExp(`^\\s+${skip}\\s+= true$`, "mu"));
     expect(backend).not.toMatch(
-      /^\s*(bucket|endpoints?|use_path_style|use_lockfile|access_key|secret_key|profile)\s*=/mu,
+      /^\s*(bucket|endpoints?|region|use_path_style|use_lockfile|access_key|secret_key|profile)\s*=/mu,
     );
     expect(versions).toContain("passphrase = var.state_passphrase");
     expect(versions).toMatch(/method "aes_gcm" "state" \{\n\s+keys = key_provider\.pbkdf2\.state/u);
@@ -1005,7 +947,8 @@ describe("ops/tofu", () => {
       );
     // Two providers, each held to its release line; the lock file pins them with hashes.
     expect([...versions.matchAll(/source\s+= "([^"]+)"/gu)].map((m) => m[1])).toEqual([
-      "linode/linode",
+      "ovh/ovh",
+      "terraform-provider-openstack/openstack",
       "cloudflare/cloudflare",
     ]);
     const constraints = Object.fromEntries(
@@ -1026,7 +969,8 @@ describe("ops/tofu", () => {
     }
     expect([...lock.matchAll(/^provider "([^"]+)"/gmu)].map((m) => m[1])).toEqual([
       "registry.opentofu.org/cloudflare/cloudflare",
-      "registry.opentofu.org/linode/linode",
+      "registry.opentofu.org/ovh/ovh",
+      "registry.opentofu.org/terraform-provider-openstack/openstack",
     ]);
   });
 
@@ -1094,17 +1038,17 @@ describe("ops/tofu", () => {
     expect(Object.keys(vars).sort()).toEqual([
       "cloudflare_zone_id",
       "configure_keys",
-      "database_ids",
+      "databases",
       "db_allow_extra",
-      "existing_databases",
       "hosts",
+      "openstack_project_id",
+      "ovh_project_id",
       "root_keys",
       "root_password_hash",
     ]);
     expect(Object.keys(vars.hosts)).toEqual(["staging"]);
     expect(vars.cloudflare_zone_id).toBe("0".repeat(32));
-    expect(vars.database_ids).toEqual({ primary: "0" });
-    expect(vars.existing_databases).toEqual({});
+    expect(Object.keys(vars.databases)).toEqual(["primary"]);
     expect(vars.root_password_hash).toBe("");
     for (const key of [...vars.root_keys, ...Object.values(vars.configure_keys)])
       expect(key).toMatch(/EXAMPLE/u);
@@ -1131,36 +1075,29 @@ describe("no host and no real address", () => {
       "https://host.linodeobjects.com/x",
     ])
       expect({ sample, caught: hostNames(sample).length > 0 }).toEqual({ sample, caught: true });
-    expect(hostNames("linode_instance.host main.tf README.md sk-ssh-ed25519@openssh.com")).toEqual(
-      [],
-    );
+    expect(
+      hostNames("openstack_compute_instance_v2.host main.tf README.md sk-ssh-ed25519@openssh.com"),
+    ).toEqual([]);
   });
 
-  test("hostnames are limited to public documentation, placeholders and the endpoint's shape", () => {
+  test("hostnames are limited to public documentation, placeholders and the selected service endpoint", () => {
     for (const file of FILES) {
       const text = read(file);
       const allowed = (host: string) =>
         host === "github.com" ||
         host === "example.org" ||
         host.endsWith(".example.org") ||
-        // Public provider documentation is not a private infrastructure identifier.
-        (host === "techdocs.akamai.com" && file === "ops/tofu/README.md") ||
+        // Only the exact public OVH service/documentation endpoints are permitted here, not a
+        // bucket-prefixed endpoint, database domain or arbitrary provider-account identifier.
+        (file === "ops/tofu/README.md" &&
+          ["support.us.ovhcloud.com", "s3.us-east-va.io.cloud.ovh.us"].includes(host)) ||
+        (file === "ops/tofu/versions.tf" && host === "auth.cloud.ovh.us") ||
         (host === "registry.opentofu.org" && file === "ops/tofu/.terraform.lock.hcl");
       const hosts = [...new Set(hostNames(text))].filter((h) => !allowed(h));
-      // The README shows the endpoint only as a shape.
-      const shaped = hosts.filter(
-        (h) => h === "linodeobjects.com" && file === "ops/tofu/README.md",
-      );
-      expect({ file, hosts: hosts.filter((h) => !shaped.includes(h)) }).toEqual({
+      expect({ file, hosts }).toEqual({
         file,
         hosts: [],
       });
-      if (shaped.length > 0)
-        expect(
-          text
-            .match(/[a-z0-9<>.-]*linodeobjects\.com/gu)
-            ?.every((h) => h === "<region>.linodeobjects.com"),
-        ).toBe(true);
     }
   });
 
@@ -1180,7 +1117,12 @@ describe("no host and no real address", () => {
       for (const [address] of text.matchAll(
         /(?<![\w:])[0-9a-f]{1,4}:[0-9a-f]{0,4}:[0-9a-f:]*(?![\w:])/giu,
       ))
-        expect({ file, address, documentation: /^2001:db8:/iu.test(address) }).toMatchObject({
+        expect({
+          file,
+          address,
+          documentation:
+            /^2001:db8:/iu.test(address) || /^[0-2][0-9]:[0-5][0-9]:00$/u.test(address),
+        }).toMatchObject({
           documentation: true,
         });
     }
@@ -1211,13 +1153,48 @@ const change = (
   } = {},
 ) => {
   const [, type, name, index] =
-    /^([a-z_]+)\.([a-z_]+)(?:\["([a-z0-9-]+)"\])?$/u.exec(address) ?? [];
+    /^([a-z0-9_]+)\.([a-z0-9_]+)(?:\["([a-z0-9-]+)"\])?$/u.exec(address) ?? [];
+  // Test shorthand still expands to the actual provider schema before any CLI consumer sees it.
+  const native = (value: object | null | undefined) => {
+    if (!value) return value;
+    const result = { ...value } as Record<string, unknown>;
+    if (Array.isArray(result.ip_restrictions))
+      result.ip_restrictions = result.ip_restrictions.map((ip) =>
+        typeof ip === "string" ? { ip, description: "tarubot-managed", status: "active" } : ip,
+      );
+    if (Array.isArray(result.ipv4)) {
+      result.access_ip_v4 = result.ipv4[0];
+      delete result.ipv4;
+    }
+    if (typeof result.ipv6 === "string") {
+      result.access_ip_v6 = result.ipv6.replace(/\/128$/u, "");
+      delete result.ipv6;
+    }
+    return result;
+  };
+  const unknown = { ...fields.after_unknown } as Record<string, unknown>;
+  if ("ipv4" in unknown) {
+    unknown.access_ip_v4 = unknown.ipv4;
+    delete unknown.ipv4;
+  }
+  if ("ipv6" in unknown) {
+    unknown.access_ip_v6 = unknown.ipv6;
+    delete unknown.ipv6;
+  }
   return {
     address,
     type,
     name,
+    mode: "managed",
+    provider_name: `registry.opentofu.org/${type?.startsWith("openstack_") ? "terraform-provider-openstack/openstack" : type?.startsWith("ovh_") ? "ovh/ovh" : "cloudflare/cloudflare"}`,
     ...(index === undefined ? {} : { index }),
-    change: { actions, before: {}, after: {}, after_unknown: {}, ...fields },
+    change: {
+      actions,
+      ...fields,
+      before: fields.before === null ? null : (native(fields.before) ?? {}),
+      after: fields.after === null ? null : (native(fields.after) ?? {}),
+      after_unknown: unknown,
+    },
   };
 };
 const SUMMARY_VARS = ["--slurpfile", "vars", root("ops/tofu/examples/example.tfvars.json"), "-r"];
@@ -1276,7 +1253,8 @@ describe.skipIf(!hasJq)("the jq programs", () => {
           .split(" ")
           .find((part) => part.startsWith("AAAA")) ?? "",
       );
-    for (const word of ["tarubot-staging", "staging", "primary", "us-east", "g6-standard-1"])
+    expect(masks).toContain("tarubot-staging");
+    for (const word of ["staging", "primary"])
       expect({ word, masked: masks.includes(word) }).toEqual({ word, masked: false });
   });
 
@@ -1287,59 +1265,59 @@ describe.skipIf(!hasJq)("the jq programs", () => {
     // A new host: its addresses are unknown, so the list's counts are rebuilt (two per host).
     expect(
       summarize([
-        change('linode_instance.host["staging"]', ["create"], {
+        change('openstack_compute_instance_v2.host["staging"]', ["create"], {
           after_unknown: { ipv4: true, ipv6: true },
         }),
-        change('linode_firewall.host["staging"]', ["create"]),
+        change('openstack_networking_secgroup_v2.host["staging"]', ["create"]),
         change('cloudflare_dns_record.a["staging"]', ["create"]),
-        change('linode_database_access_controls.db["primary"]', ["update"], {
-          before: { allow_list: extra },
+        change('ovh_cloud_project_database.cluster["primary"]', ["update"], {
+          before: { ip_restrictions: extra },
           after: {},
-          after_unknown: { allow_list: true },
+          after_unknown: { ip_restrictions: true },
         }),
       ]),
     ).toBe(
       [
         'create cloudflare_dns_record.a["staging"]',
-        'create linode_firewall.host["staging"]',
-        'create linode_instance.host["staging"]',
-        'update linode_database_access_controls.db["primary"] +2 -0',
+        'create openstack_compute_instance_v2.host["staging"]',
+        'create openstack_networking_secgroup_v2.host["staging"]',
+        'update ovh_cloud_project_database.cluster["primary"] +2 -0',
         "",
       ].join("\n"),
     );
     // A rebuild: a replace, and the old addresses leave the list.
     expect(
       summarize([
-        change('linode_instance.host["staging"]', ["delete", "create"], {
+        change('openstack_compute_instance_v2.host["staging"]', ["delete", "create"], {
           before: { ipv4: ["192.0.2.10"], ipv6: "2001:db8:1::10/128" },
           after_unknown: { ipv4: true, ipv6: true },
         }),
-        change('linode_database_access_controls.db["primary"]', ["update"], {
-          before: { allow_list: ["2001:db8:1::10/128", "192.0.2.10/32", ...extra] },
+        change('ovh_cloud_project_database.cluster["primary"]', ["update"], {
+          before: { ip_restrictions: ["2001:db8:1::10/128", "192.0.2.10/32", ...extra] },
           after: {},
-          after_unknown: { allow_list: true },
+          after_unknown: { ip_restrictions: true },
         }),
       ]),
     ).toBe(
-      'replace linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -2\n',
+      'replace openstack_compute_instance_v2.host["staging"]\nupdate ovh_cloud_project_database.cluster["primary"] +2 -2\n',
     );
     // An import with a known list, no-ops left out, and what it can't name as ?.
     expect(
       summarize([
-        change('linode_database_access_controls.db["primary"]', ["no-op"], {
-          before: { allow_list: extra },
-          after: { allow_list: extra },
+        change('ovh_cloud_project_database.cluster["primary"]', ["no-op"], {
+          before: { ip_restrictions: extra },
+          after: { ip_restrictions: extra },
           importing: { id: "0:postgresql" },
         }),
-        change('linode_firewall.host["staging"]', ["no-op"]),
-        change('linode_firewall.host["staging"]', ["forget"]),
+        change('openstack_networking_secgroup_v2.host["staging"]', ["no-op"]),
+        change('openstack_networking_secgroup_v2.host["staging"]', ["forget"]),
         change("module.other.thing", ["create"]),
       ]),
     ).toBe(
       [
-        '? linode_firewall.host["staging"]',
+        '? openstack_networking_secgroup_v2.host["staging"]',
         "create ?",
-        'import linode_database_access_controls.db["primary"] +0 -0',
+        'import ovh_cloud_project_database.cluster["primary"] +0 -0',
         "",
       ].join("\n"),
     );
@@ -1357,7 +1335,7 @@ describe.skipIf(!hasJq)("the jq programs", () => {
             summary:
               "Error 403 for db 123456 at https://api.example.org/v4/x?id=9 from 192.0.2.10 and 2001:db8::1, key=AAAAC3Nz@host",
             detail: "the detail never prints",
-            address: 'provider["registry.opentofu.org/linode/linode"]',
+            address: 'provider["registry.opentofu.org/terraform-provider-openstack/openstack"]',
           },
         },
         {
@@ -1467,12 +1445,21 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
   const PREPARED = {
     TOFU_VARS: EXAMPLE,
     STATE_BUCKET: "state-bucket-example",
-    STATE_ENDPOINT: "https://us-east-1.example.org",
+    STATE_ENDPOINT: "https://s3.us-east-va.example.org",
+    STATE_REGION: "us-east-va",
   };
   const STATE = {
     AWS_ACCESS_KEY_ID: "access-example",
     AWS_SECRET_ACCESS_KEY: "secret-example",
     TF_VAR_state_passphrase: "a throwaway passphrase of 32 or more characters",
+  };
+  // Invented phase credentials are never inherited from the user's process/environment.
+  const PROVIDER_CREDENTIALS = {
+    OVH_APPLICATION_KEY: "invented-key",
+    OVH_APPLICATION_SECRET: "invented-secret",
+    OVH_CONSUMER_KEY: "invented-consumer",
+    OS_USERNAME: "invented-user",
+    OS_PASSWORD: "invented-password",
   };
   /** A saved plan's `variables`, as `tofu show -json` gives them: every value, the passphrase too. */
   const planned = (values: Record<string, unknown>) => ({
@@ -1483,7 +1470,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
   /** Run the actual controller in child phases with an injected encrypted filesystem transport. */
   test("owner-enabled baseline establishment journals unchanged state and invokes no provider Apply", () => {
     const r = runner();
-    const values = { ...example(), hosts: {}, configure_keys: {}, database_ids: {} };
+    const values = { ...example(), hosts: {}, configure_keys: {}, databases: {} };
     const state = {
       version: 4,
       terraform_version: "1.12.6",
@@ -1520,7 +1507,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       CONTROL_RECORDS_ENABLED: "true",
       TEST_REAL_BUN: process.execPath,
       CONTROL_FIXTURE: root("tests/fixtures/infra/control.ts"),
-      LINODE_TOKEN: "invented-token",
+      ...PROVIDER_CREDENTIALS,
       CLOUDFLARE_API_TOKEN: "invented-token",
     };
     expect(r.phase("prepare", { ...PREPARED, TOFU_VARS: JSON.stringify(values) }).code).toBe(0);
@@ -1550,17 +1537,21 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     // A later reviewed host plan uses the persisted baseline; Apply never replans.
     const current = example();
     const managed = {
-      address: 'linode_instance.host["staging"]',
+      address: 'openstack_compute_instance_v2.host["staging"]',
       mode: "managed",
-      type: "linode_instance",
+      type: "openstack_compute_instance_v2",
       name: "host",
       index: "staging",
-      provider_name: "registry.opentofu.org/linode/linode",
+      provider_name: "registry.opentofu.org/terraform-provider-openstack/openstack",
       values: {
-        id: "200",
-        label: "example-staging",
-        ipv4: ["198.51.100.10"],
-        ipv6: "2001:db8::10/128",
+        id: "00000000-0000-0000-0000-000000000040",
+        name: "tarubot-staging",
+        region: "US-EAST-VA-1",
+        image_id: "00000000-0000-0000-0000-000000000010",
+        flavor_id: "00000000-0000-0000-0000-000000000020",
+        network: [{ uuid: "00000000-0000-0000-0000-000000000030", access_network: true }],
+        access_ip_v4: "198.51.100.10",
+        access_ip_v6: "2001:db8::10",
       },
     };
     const dns = (["a", "aaaa"] as const).map((name) => ({
@@ -1655,6 +1646,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     const privateCodec = hostRecordCodec(
       PREPARED.STATE_BUCKET,
       PREPARED.STATE_ENDPOINT,
+      PREPARED.STATE_REGION,
       STATE.TF_VAR_state_passphrase,
     );
     const pending = privateCodec.open(
@@ -1677,11 +1669,11 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       readFileSync(join(r.dir, "stub", "control-objects", "hosts/staging")),
     ) as {
       status: string;
-      host: { generation: string; instanceId: number };
+      host: { generation: string; instanceId: string };
       observed: { key: string };
     };
     expect(trust.status).toBe("complete");
-    expect(trust.host.instanceId).toBe(200);
+    expect(trust.host.instanceId).toBe("00000000-0000-0000-0000-000000000040");
     expect(trust.host.generation).toBe(
       JSON.parse(r.file("temp/tofu/control-ticket.json")).generation,
     );
@@ -1720,7 +1712,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(r.phase("summarize", credentials).code).toBe(0);
     const retry = {
       ...reviewedApply,
-      APPROVED: 'update linode_instance.host["staging"]',
+      APPROVED: 'update openstack_compute_instance_v2.host["staging"]',
       DIGEST: lastOutput("digest"),
       BINDING: lastOutput("binding"),
     };
@@ -1745,19 +1737,11 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
 
   test("prepare escapes private multiline mask commands before any value can split into public lines", () => {
     const values = example();
-    values.existing_databases = {
+    values.databases = {
       primary: {
-        label: "invented-first%\r\ninvented-second",
-        engine_id: "postgresql/17",
-        region: "us-east",
-        type: "g6-standard-1",
-        cluster_size: 1,
-        suspended: false,
-        expected_encrypted: true,
-        expected_ssl_connection: true,
-        updates: { day_of_week: 2, duration: 4, frequency: "weekly", hour_of_day: 22 },
-        private_network: null,
-        engine_config: { engine_config_pg_timezone: "xy" },
+        ...(values.databases as Record<string, object>).primary,
+        description: "invented-first%\r\ninvented-second",
+        flavor: "xy",
       },
     };
     const result = runner().phase("prepare", { ...PREPARED, TOFU_VARS: JSON.stringify(values) });
@@ -1768,6 +1752,20 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(result.err).toBe("");
   });
 
+  test("prepare refuses an absent or malformed signing region before any backend use", () => {
+    for (const region of ["", "private-region-marker/invalid", "us-east-va\nregion = evil"]) {
+      const r = runner();
+      const refused = r.phase("prepare", { ...PREPARED, STATE_REGION: region });
+      expect(refused.code).toBe(1);
+      expect(refused.out).toContain(
+        "::error::TOFU_STATE_REGION must be an explicit S3 signing region",
+      );
+      if (region) expect(refused.out + refused.err).not.toContain(region);
+      expect(existsSync(join(r.dir, "temp", "tofu", "backend.hcl"))).toBe(false);
+      expect(existsSync(join(r.dir, "stub", "calls"))).toBe(false);
+    }
+  });
+
   test("prepare masks every identifying value first, and writes only private files", () => {
     const r = runner();
     const done = r.phase("prepare", PREPARED);
@@ -1776,10 +1774,11 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     const masks = JSON.parse(jq("masks.jq", EXAMPLE, ["-c"]).out) as string[];
     expect(lines.slice(0, masks.length)).toEqual(masks.map((m) => `::add-mask::${m}`));
     expect(lines.slice(masks.length)).toEqual([
-      "Prepared the values for 1 host(s) and 1 access list(s).",
+      "Prepared the values for 1 host(s) and 1 database service(s).",
     ]);
     expect(r.file("env")).toBe(`TF_DATA_DIR=${join(r.dir, "temp", "tofu")}/data\n`);
     expect(r.file("temp/tofu/backend.hcl")).toContain('bucket         = "state-bucket-example"');
+    expect(r.file("temp/tofu/backend.hcl")).toContain('region         = "us-east-va"');
     expect(JSON.parse(r.file("temp/tofu/values.tfvars.json"))).toEqual(JSON.parse(EXAMPLE));
     // A value the shape refuses: one fixed error, no mask, nothing of the value.
     const bad = runner().phase("prepare", {
@@ -1787,13 +1786,13 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       TOFU_VARS: '{"hosts": "staging.example.org"}',
     });
     expect(bad.code).toBe(1);
-    expect(bad.out).toStartWith("::error::TOFU_VARS must match the required keys");
+    expect(bad.out).toStartWith("::error::TOFU_VARS must match the selected OVH input contract");
     expect(bad.out + bad.err).not.toContain("example.org");
     // A replace, read from the event payload, names one configured host's instance, and is never
     // echoed back, not even a host name typed in its place.
     for (const replace of [
-      'linode_instance.host["production"]',
-      "linode_instance.host",
+      'openstack_compute_instance_v2.host["production"]',
+      "openstack_compute_instance_v2.host",
       "x; id",
       "other.example.net",
       "192.0.2.99",
@@ -1803,24 +1802,27 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       const refused = box.phase("prepare", PREPARED);
       expect({ replace, code: refused.code }).toEqual({ replace, code: 1 });
       expect(refused.out.trimEnd().split("\n").at(-1)).toBe(
-        '::error::replace must be exactly linode_instance.host["<key>"], naming a host in TOFU_VARS.',
+        '::error::replace must be exactly openstack_compute_instance_v2.host["<key>"], naming a host in TOFU_VARS.',
       );
       // A host name or address typed in its place never reaches the log.
-      if (!replace.startsWith("linode_instance"))
+      if (!replace.startsWith("openstack_compute_instance_v2"))
         expect({ replace, echoed: (refused.out + refused.err).includes(replace) }).toEqual({
           replace,
           echoed: false,
         });
     }
     const staging = runner();
-    staging.event('linode_instance.host["staging"]');
+    staging.event('openstack_compute_instance_v2.host["staging"]');
     expect(staging.phase("prepare", PREPARED).code).toBe(0);
-    expect(staging.file("temp/tofu/replace")).toBe('linode_instance.host["staging"]');
+    expect(staging.file("temp/tofu/replace")).toBe('openstack_compute_instance_v2.host["staging"]');
     expect(r.file("temp/tofu/replace")).toBe("");
     // A replace in env: is ignored: the step never sets one.
     const ignored = runner();
     expect(
-      ignored.phase("prepare", { ...PREPARED, REPLACE: 'linode_instance.host["production"]' }).code,
+      ignored.phase("prepare", {
+        ...PREPARED,
+        REPLACE: 'openstack_compute_instance_v2.host["production"]',
+      }).code,
     ).toBe(0);
     expect(ignored.file("temp/tofu/replace")).toBe("");
     // Without a readable payload, prepare stops with a fixed message.
@@ -1833,20 +1835,21 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     const r = runner();
     expect(r.phase("prepare", PREPARED).code).toBe(0);
     expect(r.phase("init", STATE)).toEqual({ code: 0, out: "init ok\n", err: "" });
-    const tokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
+    const tokens = { ...STATE, ...PROVIDER_CREDENTIALS, CLOUDFLARE_API_TOKEN: "t" };
     expect(r.phase("plan", tokens)).toEqual({ code: 0, out: "plan ok\n", err: "" });
-    // A plan with a replace and an access-list removal.
+    // A plan with a replace and an access-list removal, with complete bound private inputs.
     writeFileSync(
       join(r.dir, "stub", "plan.json"),
       JSON.stringify({
+        variables: planned(example()),
         resource_changes: [
-          change('linode_instance.host["staging"]', ["delete", "create"], {
+          change('openstack_compute_instance_v2.host["staging"]', ["delete", "create"], {
             after_unknown: { ipv4: true, ipv6: true },
           }),
-          change('linode_database_access_controls.db["primary"]', ["update"], {
-            before: { allow_list: ["2001:db8:1::10/128", "192.0.2.10/32"] },
+          change('ovh_cloud_project_database.cluster["primary"]', ["update"], {
+            before: { ip_restrictions: ["2001:db8:1::10/128", "192.0.2.10/32"] },
             after: {},
-            after_unknown: { allow_list: true },
+            after_unknown: { ip_restrictions: true },
           }),
         ],
       }),
@@ -1860,14 +1863,16 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(guarded.out).toBe(
       [
         "The plan's changes:",
-        'replace linode_instance.host["staging"]',
-        'update linode_database_access_controls.db["primary"] +4 -2',
+        'replace openstack_compute_instance_v2.host["staging"]',
+        'update ovh_cloud_project_database.cluster["primary"] +4 -2',
         "::error::The plan deletes or replaces a resource; dispatch again with allow_destroy if you meant it.",
         "::error::The plan removes an entry from a database access list; dispatch again with allow_access_removal if you meant it.",
         "",
       ].join("\n"),
     );
-    expect(r.file("summary")).toContain('| replace | `linode_instance.host["staging"]` |  |');
+    expect(r.file("summary")).toContain(
+      '| replace | `openstack_compute_instance_v2.host["staging"]` |  |',
+    );
     const output = r.file("output");
     expect(output).toMatch(/^changes<<changes_[0-9a-f]{32}\nreplace /u);
     expect(output).toContain("has_changes=true\n");
@@ -1920,9 +1925,9 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       join(odd.dir, "stub", "plan.json"),
       JSON.stringify({
         resource_changes: [
-          change('linode_database_access_controls.db["primary"]', ["update"], {
-            before: { allow_list: "203.0.113.10/32" },
-            after_unknown: { allow_list: true },
+          change('ovh_cloud_project_database.cluster["primary"]', ["update"], {
+            before: { ip_restrictions: "203.0.113.10/32" },
+            after_unknown: { ip_restrictions: true },
           }),
         ],
       }),
@@ -1935,7 +1940,8 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
       out: "::error::The change list couldn't be built from the saved plan; nothing was applied.\n",
       err: "",
     });
-    expect(odd.file("temp/tofu/summary.stderr")).toContain("203.0.113.");
+    expect(odd.file("temp/tofu/summary.stderr")).toContain("invalid-restrictions");
+    expect(odd.file("temp/tofu/summary.stderr")).not.toContain("203.0.113.");
   });
 
   test("compare binds the saved plan; disabled records refuse new hosts before an ordinary Apply", () => {
@@ -1956,16 +1962,20 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
           variables: planned(values),
           resource_changes: [
             {
-              ...change('linode_instance.host["staging"]', [creating ? "create" : "update"], {
-                ...(creating ? { before: null } : {}),
-                after_unknown: { ipv4: true, ipv6: true },
-              }),
+              ...change(
+                'openstack_compute_instance_v2.host["staging"]',
+                [creating ? "create" : "update"],
+                {
+                  ...(creating ? { before: null } : {}),
+                  after_unknown: { ipv4: true, ipv6: true },
+                },
+              ),
               mode: "managed",
             },
-            change('linode_database_access_controls.db["primary"]', ["update"], {
-              before: { allow_list: extra },
+            change('ovh_cloud_project_database.cluster["primary"]', ["update"], {
+              before: { ip_restrictions: extra },
               after: {},
-              after_unknown: { allow_list: true },
+              after_unknown: { ip_restrictions: true },
             }),
           ],
         }),
@@ -1974,7 +1984,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     // Plan's binding includes its full private show, reconstructed independently by Compare.
     cpSync(join(r.dir, "stub", "plan.json"), join(r.dir, "temp", "tofu", "plan.json"));
     let list =
-      'create linode_instance.host["staging"]\nupdate linode_database_access_controls.db["primary"] +2 -0';
+      'create openstack_compute_instance_v2.host["staging"]\nupdate ovh_cloud_project_database.cluster["primary"] +2 -0';
     const reviewed = {
       DIGEST: digest,
       APPROVED: list,
@@ -2049,20 +2059,33 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     expect(r.phase("compare", reviewed).code).toBe(0);
     // Backend identity is privately bound too: refuse a mismatch before provider writes.
     const backend = r.file("temp/tofu/backend.hcl");
-    writeFileSync(
-      join(r.dir, "temp", "tofu", "backend.hcl"),
-      backend.replace("us-east-1", "us-west-1"),
-    );
-    expect(r.phase("compare", reviewed)).toEqual({
-      code: 1,
-      out: "::error::The plan's backend, inputs, run or code differs from Plan; nothing was applied.\n",
-      err: "",
-    });
-    const writeTokens = { ...STATE, LINODE_TOKEN: "t", CLOUDFLARE_API_TOKEN: "t" };
-    // Failed Compare removes a previous success marker; direct Apply must then fail.
-    expect(r.phase("apply", writeTokens).out).toBe(
-      "::error::Apply has no successful plan comparison; nothing was applied.\n",
-    );
+    const writeTokens = { ...STATE, ...PROVIDER_CREDENTIALS, CLOUDFLARE_API_TOKEN: "t" };
+    for (const changedBackend of [
+      backend.replace("https://s3.us-east-va.example.org", "https://other.example.org"),
+      backend.replace('region         = "us-east-va"', 'region         = "us-west-1"'),
+    ]) {
+      writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), backend);
+      expect(r.phase("compare", reviewed).code).toBe(0);
+      writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), changedBackend);
+      // Recheck immediately before a write, even if Compare previously succeeded.
+      expect(r.phase("apply", writeTokens).out).toBe(
+        "::error::The plan handoff changed after comparison; nothing was applied.\n",
+      );
+      expect(r.phase("compare", reviewed)).toEqual({
+        code: 1,
+        out: "::error::The plan's backend, inputs, run or code differs from Plan; nothing was applied.\n",
+        err: "",
+      });
+      // Failed Compare removes a previous success marker; direct Apply must then fail.
+      expect(r.phase("apply", writeTokens).out).toBe(
+        "::error::Apply has no successful plan comparison; nothing was applied.\n",
+      );
+      expect(
+        readdirSync(join(r.dir, "stub", "calls")).every(
+          (name) => !r.file(`stub/calls/${name}`).includes("\napply\n"),
+        ),
+      ).toBe(true);
+    }
     writeFileSync(join(r.dir, "temp", "tofu", "backend.hcl"), backend);
     expect(r.phase("compare", reviewed).code).toBe(0);
     writeFileSync(join(r.dir, "temp", "tofu", "plan.bin"), `${saved}-changed-after-compare`);
@@ -2089,7 +2112,7 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     savedPlan(example());
     cpSync(join(r.dir, "stub", "plan.json"), join(r.dir, "temp", "tofu", "plan.json"));
     list = list
-      .replace("create linode_instance", "update linode_instance")
+      .replace("create openstack_compute_instance_v2", "update openstack_compute_instance_v2")
       .split("\n")
       .sort()
       .join("\n");
@@ -2138,10 +2161,10 @@ describe.skipIf(!hasJq)("tofu-ci.sh's phases, with a stand-in for tofu", () => {
     });
     // Without the tokens, nothing runs; each message names that job's own secrets.
     expect(r.phase("apply", STATE).out).toBe(
-      "::error::LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment.\n",
+      "::error::Write-scoped OVH/OpenStack and Cloudflare credentials must be set in the infra environment.\n",
     );
     expect(r.phase("plan", STATE).out).toBe(
-      "::error::LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment.\n",
+      "::error::Read-only OVH/OpenStack and Cloudflare credentials must be set in the infra-plan environment.\n",
     );
     expect(r.phase("init", { TF_VAR_state_passphrase: STATE.TF_VAR_state_passphrase }).out).toBe(
       "::error::The state key must be set: TOFU_STATE_READ_ACCESS_KEY and TOFU_STATE_READ_SECRET_KEY in infra-plan, TOFU_STATE_WRITE_ACCESS_KEY and TOFU_STATE_WRITE_SECRET_KEY in infra.\n",

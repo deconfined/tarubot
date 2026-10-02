@@ -3,8 +3,8 @@
 #
 # The real values never live in the repository. .github/workflows/infra.yml passes them from the
 # `infra-plan` (Plan) and `infra` (Apply) GitHub environments: TOFU_VARS as a -var-file, the
-# backend's bucket and endpoint as a -backend-config file, and the state passphrase as
-# TF_VAR_state_passphrase.
+# backend's bucket, endpoint and signing region as a -backend-config file, and the state passphrase
+# as TF_VAR_state_passphrase.
 terraform {
   # ops/tofu/.opentofu-version names the release CI and infra.yml install; it must satisfy this
   # (tests/unit/infra.test.ts checks). 1.12 is the release this module was written and tested on.
@@ -15,9 +15,13 @@ terraform {
   # platforms (README.md, "Checks and upgrades"). No TLS or random provider: the module makes no
   # keys.
   required_providers {
-    linode = {
-      source  = "linode/linode"
-      version = "~> 4.5.0"
+    ovh = {
+      source  = "ovh/ovh"
+      version = "= 2.9.0"
+    }
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = "= 3.4.0"
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"
@@ -25,24 +29,22 @@ terraform {
     }
   }
 
-  # The state lives in a private Linode Object Storage bucket. This is a partial configuration:
-  # the bucket, `endpoints = { s3 = "<the bucket's cluster endpoint>" }` and use_path_style come
+  # The selected state target is private OVH Standard S3-compatible Object Storage. This is a
+  # partial configuration: the bucket, endpoint, SigV4 region and use_path_style come
   # from the -backend-config file infra.yml writes (backend.hcl; README.md has its form), so no
-  # bucket or endpoint is named here. use_path_style is false for Linode, and true for a lab's
-  # local S3. The credentials are AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, filled from
+  # bucket or endpoint is named here. Operational routing is virtual-hosted. The credentials are
+  # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, filled from
   # infra-plan's read-only state key in the Plan job and infra's read/write one in the Apply job.
   backend "s3" {
     key = "tarubot/infra.tfstate"
-    # Linode Object Storage accepts any SigV4 region; the endpoint picks the cluster.
-    region = "us-east-1"
     # Nothing here is AWS: skip the checks that would call AWS's own services.
     skip_credentials_validation = true
     skip_region_validation      = true
     skip_requesting_account_id  = true
     skip_metadata_api_check     = true
     skip_s3_checksum            = true
-    # No use_lockfile: Linode's conditional writes are unverified. The `infra` concurrency group
-    # in infra.yml serializes runs, and a hand run must never overlap one. The Plan job also plans
+    # No use_lockfile: the selected backend's conditional writes are unverified. The `infra`
+    # concurrency group serializes runs, and a hand run must never overlap one. Plan also runs
     # with -lock=false, since its state key is read-only.
   }
 
@@ -69,9 +71,20 @@ terraform {
   }
 }
 
-# Credentials come from the environment only: LINODE_TOKEN and CLOUDFLARE_API_TOKEN, which
-# infra.yml sets on its Plan step from infra-plan's read-only tokens and on its Apply step from
-# infra's write tokens.
-provider "linode" {}
+# Credentials come only from phase-specific environment secrets: OVH_APPLICATION_KEY,
+# OVH_APPLICATION_SECRET, OVH_CONSUMER_KEY, OS_USERNAME, OS_PASSWORD and CLOUDFLARE_API_TOKEN.
+# Pin US endpoints and the intended tenant; ambient region/project selections cannot redirect it.
+provider "ovh" {
+  endpoint = "ovh-us"
+}
+provider "openstack" {
+  auth_url          = "https://auth.cloud.ovh.us/v3/"
+  region            = "US-EAST-VA-1"
+  tenant_id         = var.openstack_project_id
+  user_domain_id    = "default"
+  project_domain_id = "default"
+  insecure          = false
+  enable_logging    = false
+}
 
 provider "cloudflare" {}

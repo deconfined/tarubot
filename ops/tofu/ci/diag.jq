@@ -8,7 +8,7 @@ fromjson?
 | select(type == "object" and .type == "diagnostic")
 | .diagnostic
 | (if .severity == "error" or .severity == "warning" then .severity else "?" end) as $sev
-| ((.address // "-") | if . == "-" or test("^[a-z_]+[.][a-z_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end) as $addr
+| ((.address // "-") | if . == "-" or test("^[a-z0-9_]+[.][a-z0-9_]+(\\[\"[a-z0-9-]+\"\\])?$") then . else "?" end) as $addr
 | (if (.range.filename | type == "string" and test("^[a-z0-9_-]+[.](tf|tftpl)$")) and (.range.start.line | type == "number")
    then " \(.range.filename):\(.range.start.line)" else "" end) as $where
 | (reduce $masks[0][] as $m ((.summary // "") | tostring; split($m) | join(" (masked) ")))

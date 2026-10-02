@@ -27,13 +27,13 @@ write_files:
       # Non-FIDO keys are unaffected. Configure (ops/ansible/site.yml) replaces this file with the full drop-in.
       PubkeyAuthOptions verify-required
 %{ if root_password_hash != "" ~}
-# Root's password is the owner's hash, for the Lish console only (sshd refuses passwords).
+# Root's password is the owner's hash, for the guest console only (sshd refuses passwords).
 chpasswd:
   expire: false
   users:
     - {name: root, type: hash, password: ${jsonencode(root_password_hash)}}
 %{ else ~}
-# No hash given: lock root's password, the random throwaway main.tf gives the Linode.
+# No hash given: lock root's password; no provider-generated password is an access credential.
 runcmd:
   - [usermod, --lock, root]
 %{ endif ~}

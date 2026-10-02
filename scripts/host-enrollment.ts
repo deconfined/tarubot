@@ -6,12 +6,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ControlStore, RecordCodec, RunIdentity, StateEvidence } from "./infra-control.js";
+import { readOvhInstance, type OvhCredentials } from "./ovh-client.js";
 
 type ObjectValue = Record<string, unknown>;
 export interface AppliedHost {
   hostKey: string;
   target: "staging" | "production";
-  instanceId: number;
+  instanceId: string;
+  ovhProjectId: string;
+  imageId: string;
+  flavorId: string;
+  networkId: string;
   fqdn: string;
   ipv4: string;
   ipv6: string;
@@ -32,11 +37,11 @@ export interface HostEnrollmentRecord {
   observed: ObservedHostKey | null;
 }
 export interface EnrollmentCredentials {
-  linodeToken: string;
+  ovh: OvhCredentials;
   cloudflareToken: string;
 }
 export interface EnrollmentHelpers {
-  verifyInstance(host: AppliedHost, token: string): Promise<void>;
+  verifyInstance(host: AppliedHost, credentials: OvhCredentials): Promise<void>;
   scanKey(host: AppliedHost): Promise<ObservedHostKey>;
   publishSshfp(host: AppliedHost, sshfp: string, token: string): Promise<void>;
   validateDns(host: AppliedHost, sshfp: string): Promise<void>;
@@ -56,7 +61,11 @@ function validateHost(host: AppliedHost): void {
   requireEnrollment(/^(staging|production)(-[0-9]{1,2})?$/u.test(host.hostKey));
   requireEnrollment(host.target === "staging" || host.target === "production");
   requireEnrollment(host.hostKey.split("-")[0] === host.target);
-  requireEnrollment(Number.isSafeInteger(host.instanceId) && host.instanceId > 0);
+  requireEnrollment(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(host.instanceId));
+  requireEnrollment(/^[a-f0-9]{32}$/u.test(host.ovhProjectId));
+  requireEnrollment(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(host.imageId));
+  requireEnrollment(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(host.networkId));
+  requireEnrollment(/^[a-zA-Z0-9_-]{1,64}$/u.test(host.flavorId));
   requireEnrollment(
     host.fqdn.length <= 253 &&
       host.fqdn.includes(".") &&
@@ -100,7 +109,7 @@ export function plannedNewHostTargets(plan: unknown, inputs: unknown): AppliedHo
       const resource = object(entry);
       requireEnrollment(typeof resource.address === "string" && !addresses.has(resource.address));
       addresses.add(resource.address);
-      if (resource.type !== "linode_instance" || resource.name !== "host") continue;
+      if (resource.type !== "openstack_compute_instance_v2" || resource.name !== "host") continue;
       const change = object(resource.change);
       requireEnrollment(
         !(
@@ -117,7 +126,7 @@ export function plannedNewHostTargets(plan: unknown, inputs: unknown): AppliedHo
       requireEnrollment(
         typeof key === "string" &&
           /^(staging|production)(-[0-9]{1,2})?$/u.test(key) &&
-          resource.address === `linode_instance.host[${JSON.stringify(key)}]`,
+          resource.address === `openstack_compute_instance_v2.host[${JSON.stringify(key)}]`,
       );
       const role = object(hosts[key]).role;
       requireEnrollment(role === "staging" || role === "production");
@@ -167,7 +176,7 @@ export function projectNewAppliedHosts(
       const resource = object(entry);
       requireEnrollment(typeof resource.address === "string" && !addresses.has(resource.address));
       addresses.add(resource.address);
-      if (resource.type !== "linode_instance" || resource.name !== "host") continue;
+      if (resource.type !== "openstack_compute_instance_v2" || resource.name !== "host") continue;
       const change = object(resource.change);
       if (!isDeepStrictEqual(change.actions, ["create"])) continue;
       requireEnrollment(
@@ -176,39 +185,49 @@ export function projectNewAppliedHosts(
       const hostKey = resource.index;
       requireEnrollment(
         typeof hostKey === "string" &&
-          resource.address === `linode_instance.host[${JSON.stringify(hostKey)}]`,
+          resource.address === `openstack_compute_instance_v2.host[${JSON.stringify(hostKey)}]`,
       );
       const configured = object(hosts[hostKey]),
         applied = resources.get(resource.address);
       requireEnrollment(
         applied?.mode === "managed" &&
-          applied.type === "linode_instance" &&
+          applied.type === "openstack_compute_instance_v2" &&
           applied.name === "host" &&
           applied.index === hostKey,
       );
       const instance = object(applied.values);
       requireEnrollment(
-        Array.isArray(instance.ipv4) &&
-          instance.ipv4.length === 1 &&
-          typeof instance.ipv4[0] === "string" &&
-          typeof instance.ipv6 === "string" &&
-          instance.ipv6.endsWith("/128"),
+        typeof instance.access_ip_v4 === "string" && typeof instance.access_ip_v6 === "string",
       );
       requireEnrollment(
-        (typeof instance.id === "string" || typeof instance.id === "number") &&
-          /^[1-9][0-9]*$/u.test(String(instance.id)),
+        typeof instance.id === "string" &&
+          /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(instance.id),
       );
       const host: AppliedHost = {
         hostKey,
         target: configured.role as AppliedHost["target"],
-        instanceId: Number(instance.id),
+        instanceId: instance.id,
+        ovhProjectId: settings.ovh_project_id as string,
+        imageId: configured.image_id as string,
+        flavorId: configured.flavor_id as string,
+        networkId: configured.network_id as string,
         fqdn: configured.fqdn as string,
-        ipv4: instance.ipv4[0],
-        ipv6: ipv6(instance.ipv6.slice(0, -4)),
+        ipv4: instance.access_ip_v4,
+        ipv6: ipv6(instance.access_ip_v6),
         zoneId: settings.cloudflare_zone_id as string,
         ...structuredClone(completion),
       };
       validateHost(host);
+      requireEnrollment(
+        instance.region === "US-EAST-VA-1" &&
+          instance.name === configured.label &&
+          instance.image_id === configured.image_id &&
+          instance.flavor_id === configured.flavor_id &&
+          Array.isArray(instance.network) &&
+          instance.network.length === 1 &&
+          object(instance.network[0]).uuid === configured.network_id &&
+          object(instance.network[0]).access_network === true,
+      );
       requireEnrollment(
         Object.values(hosts).filter((value) => object(value).role === host.target).length === 1 &&
           !result.some((value) => value.target === host.target),
@@ -316,7 +335,7 @@ export class HostEnrollmentRecords {
           observed: null,
         });
       for (const host of hosts) {
-        await this.helpers.verifyInstance(host, credentials.linodeToken);
+        await this.helpers.verifyInstance(host, credentials.ovh);
         const observed = await this.helpers.scanKey(host);
         requireEnrollment(isDeepStrictEqual(observedKey(observed.key), observed));
         const record: HostEnrollmentRecord = { schema: 1, status: "pending", host, observed };
@@ -355,6 +374,7 @@ async function cleanup(
   }
 }
 export interface NativeEnrollmentDependencies {
+  readInstance?: typeof readOvhInstance;
   fetch?: typeof fetch;
   run?: (argv: string[]) => Promise<CommandResult>;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -406,28 +426,40 @@ async function api(
 
 export async function verifyAppliedInstance(
   host: AppliedHost,
-  token: string,
+  credentials: OvhCredentials,
   dependencies: NativeEnrollmentDependencies = {},
 ): Promise<void> {
   try {
     validateHost(host);
     // Only boot readiness is retried. An identity/address mismatch is a hard refusal.
     for (let attempt = 0; attempt < 30; attempt++) {
-      const result = await api(
-        `https://api.linode.com/v4/linode/instances/${host.instanceId}`,
-        token,
-        "GET",
-        null,
-        dependencies,
+      const result = object(
+        await (dependencies.readInstance ?? readOvhInstance)(
+          host.ovhProjectId,
+          host.instanceId,
+          credentials,
+        ),
       );
+      requireEnrollment(Array.isArray(result.ipAddresses));
+      const publicAddresses = result.ipAddresses
+        .map(object)
+        .filter((address) => address.type === "public");
+      const v4 = publicAddresses.filter((address) => address.version === 4);
+      const v6 = publicAddresses.filter((address) => address.version === 6);
       requireEnrollment(
         result.id === host.instanceId &&
-          isDeepStrictEqual(result.ipv4, [host.ipv4]) &&
-          typeof result.ipv6 === "string" &&
-          result.ipv6.endsWith("/128") &&
-          ipv6(result.ipv6.slice(0, -4)) === host.ipv6,
+          result.region === "US-EAST-VA-1" &&
+          result.imageId === host.imageId &&
+          result.flavorId === host.flavorId &&
+          v4.length === 1 &&
+          v4[0]?.ip === host.ipv4 &&
+          v4[0]?.networkId === host.networkId &&
+          v6[0]?.networkId === host.networkId &&
+          v6.length === 1 &&
+          ipv6(String(v6[0]?.ip)) === host.ipv6,
       );
-      if (result.status === "running") return;
+      if (result.status === "ACTIVE") return;
+      requireEnrollment(result.status === "BUILD");
       if (attempt < 29) await (dependencies.sleep ?? sleep)(5_000);
     }
     throw new Error();

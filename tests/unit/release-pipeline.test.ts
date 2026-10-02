@@ -291,7 +291,12 @@ describe("automatic infrastructure adapter", () => {
       first.state,
     );
     const snapshot = await records.inspect(first.state);
-    const hostCodec = hostRecordCodec("example-bucket", "https://storage.example.org", passphrase);
+    const hostCodec = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-east-va",
+      passphrase,
+    );
     const enrollment = new HostEnrollmentRecords(store, hostCodec);
     const candidate = releasePlan(label);
     const values = {
@@ -309,7 +314,11 @@ describe("automatic infrastructure adapter", () => {
       CONTROL_RECORDS_ENABLED: "true",
       TF_VAR_state_passphrase: passphrase,
       GITHUB_OUTPUT: join(directory, "output"),
-      LINODE_TOKEN: "invented-write-token",
+      OVH_APPLICATION_KEY: "invented-key",
+      OVH_APPLICATION_SECRET: "invented-secret",
+      OVH_CONSUMER_KEY: "invented-consumer",
+      OS_USERNAME: "invented-user",
+      OS_PASSWORD: "invented-password",
       CLOUDFLARE_API_TOKEN: "invented-write-token",
     };
     writeFileSync(env.GITHUB_OUTPUT, "");
@@ -613,8 +622,12 @@ describe("replacement workflow graph and acceptance execution", () => {
     expect(serialized).not.toMatch(/CONTROL_OWNER_|CONTROL_REPOSITORY_ID|TARGET_CANDIDATE_/u);
     expect(serialized).toContain("secrets.TOFU_STATE_READ_ACCESS_KEY");
     expect(serialized).toContain("secrets.TOFU_STATE_WRITE_ACCESS_KEY");
-    expect(serialized).toContain("secrets.LINODE_READ_TOKEN");
-    expect(serialized).toContain("secrets.LINODE_WRITE_TOKEN");
+    for (const kind of ["READ", "WRITE"])
+      for (const suffix of ["APPLICATION_KEY", "APPLICATION_SECRET", "CONSUMER_KEY"])
+        expect(serialized).toContain(`secrets.OVH_${kind}_${suffix}`);
+    for (const kind of ["READ", "WRITE"])
+      for (const suffix of ["USERNAME", "PASSWORD"])
+        expect(serialized).toContain(`secrets.OPENSTACK_${kind}_${suffix}`);
   });
   test("the unfinished trust/adoption prerequisites are a code fence before environment jobs", () => {
     const fence = z.string().parse(job("release", "identity").steps[0]?.run);

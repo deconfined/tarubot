@@ -14,6 +14,7 @@ import {
 import {
   controlPhase,
   infrastructureRecords,
+  hostRecordCodec,
   S3ControlStore,
 } from "../../scripts/infra-control-cli.js";
 import { handoffBinding } from "../../scripts/infra-policy.js";
@@ -278,13 +279,17 @@ describe("single-writer journal transitions", () => {
 
 /** Show data is independently read after Apply; computed unknowns are not wildcard whole resources. */
 const resource = {
-  address: 'linode_instance.host["staging"]',
+  address: 'openstack_compute_instance_v2.host["staging"]',
   mode: "managed",
-  type: "linode_instance",
+  type: "openstack_compute_instance_v2",
   name: "host",
   index: "staging",
-  provider_name: "registry.opentofu.org/linode/linode",
-  values: { id: "100", label: "example-staging", ipv4: null },
+  provider_name: "registry.opentofu.org/terraform-provider-openstack/openstack",
+  values: {
+    id: "00000000-0000-0000-0000-000000000040",
+    name: "example-staging",
+    access_ip_v4: null,
+  },
 };
 const plan = {
   format_version: "1.2",
@@ -294,7 +299,9 @@ const plan = {
     root_module: { resources: [resource] },
     outputs: { host: { sensitive: true, value: null } },
   },
-  resource_changes: [{ address: resource.address, change: { after_unknown: { ipv4: true } } }],
+  resource_changes: [
+    { ...resource, change: { actions: ["update"], after_unknown: { access_ip_v4: true } } },
+  ],
   output_changes: { host: { after_unknown: true } },
 };
 const shown = {
@@ -302,7 +309,7 @@ const shown = {
   terraform_version: "1.12.6",
   values: {
     root_module: {
-      resources: [{ ...resource, values: { ...resource.values, ipv4: ["198.51.100.10"] } }],
+      resources: [{ ...resource, values: { ...resource.values, access_ip_v4: "198.51.100.10" } }],
     },
     outputs: { host: { sensitive: true, value: "198.51.100.10" } },
   },
@@ -324,12 +331,12 @@ describe("post-Apply verification", () => {
         if (first)
           s.values.root_module.resources.push({
             ...first,
-            address: 'linode_instance.host["production"]',
+            address: 'openstack_compute_instance_v2.host["production"]',
           });
       },
       (s: typeof shown) => {
         const first = s.values.root_module.resources[0];
-        if (first) first.values.label = "unexpected-private-label";
+        if (first) first.values.name = "unexpected-private-label";
       },
       (s: typeof shown) => {
         s.values.outputs.host.sensitive = false;
@@ -359,11 +366,13 @@ describe("private phase adapter", () => {
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
   const values = {
     hosts: {},
-    root_keys: ["invented-public-key"],
+    root_keys: ["ssh-ed25519 AAAAEXAMPLE0001 invented-root"],
     configure_keys: {},
     root_password_hash: "",
     cloudflare_zone_id: "0".repeat(32),
-    database_ids: {},
+    databases: {},
+    ovh_project_id: "1".repeat(32),
+    openstack_project_id: "2".repeat(32),
     db_allow_extra: [],
   };
   const noChanges = {
@@ -391,7 +400,7 @@ describe("private phase adapter", () => {
       writeFileSync(join(directory, name), JSON.stringify(value), { mode: 0o600 });
     writeFileSync(
       join(directory, "backend.hcl"),
-      'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://us-east-1.example.org" }\nuse_path_style = false\n',
+      'bucket         = "state-bucket-example"\nendpoints      = { s3 = "https://s3.us-east-va.example.org" }\nregion         = "us-east-va"\nuse_path_style = false\n',
     );
     writeFileSync(join(directory, "plan.bin"), "invented encrypted plan bytes");
     write("values.tfvars.json", values);
@@ -458,7 +467,7 @@ describe("private phase adapter", () => {
     await r.phase("baseline");
     await r.phase("read");
     r.write("event.json", { inputs: { operation: "apply" } });
-    r.write("plan.json", plan);
+    r.write("plan.json", { ...plan, variables: noChanges.variables });
     r.verify();
     await r.phase("begin");
     r.write("state.json", { ...rawState, serial: 11, outputs: { invented: "changed" } });
@@ -497,11 +506,38 @@ describe("private phase adapter", () => {
 describe("manual infrastructure records factory", () => {
   const scratch = mkdtempSync(join(tmpdir(), "infra-records-factory-test-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  test("native Bun signing uses the explicit backend region without a network request", () => {
+    const directory = mkdtempSync(join(scratch, "native-signing-"));
+    writeFileSync(
+      join(directory, "backend.hcl"),
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n',
+    );
+    let signed: URL | undefined;
+    infrastructureRecords(
+      directory,
+      {
+        AWS_ACCESS_KEY_ID: "invented-access",
+        AWS_SECRET_ACCESS_KEY: "invented-secret",
+        TF_VAR_state_passphrase: passphrase,
+        AWS_REGION: "us-east-1",
+      },
+      (options) => {
+        // Presigning exercises Bun's real SigV4 implementation but never contacts a service.
+        const client = new Bun.S3Client(options);
+        signed = new URL(client.file("invented-record").presign({ expiresIn: 60 }));
+        return client;
+      },
+    );
+    expect(signed?.origin).toBe("https://state-bucket-example.s3.us-east-va.example.org");
+    expect(signed?.searchParams.get("X-Amz-Credential")).toMatch(
+      /^invented-access\/\d{8}\/us-east-va\/s3\/aws4_request$/u,
+    );
+  });
   test("an approved runner establishes and updates reusable inputs with only S3 credentials", async () => {
     const directory = mkdtempSync(join(scratch, "runner-"));
     writeFileSync(
       join(directory, "backend.hcl"),
-      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n',
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n',
       { mode: 0o600 },
     );
     const options: Bun.S3Options[] = [];
@@ -515,6 +551,7 @@ describe("manual infrastructure records factory", () => {
         AWS_ACCESS_KEY_ID: "invented-access",
         AWS_SECRET_ACCESS_KEY: "invented-secret",
         AWS_SESSION_TOKEN: "invented-unrelated-session",
+        AWS_REGION: "invented-unrelated-region",
         TF_VAR_state_passphrase: passphrase,
       },
       (native) => {
@@ -547,8 +584,8 @@ describe("manual infrastructure records factory", () => {
     expect(options).toEqual([
       {
         bucket: "state-bucket-example",
-        endpoint: "https://state-bucket-example.us-east-1.example.org",
-        region: "us-east-1",
+        endpoint: "https://state-bucket-example.s3.us-east-va.example.org",
+        region: "us-east-va",
         virtualHostedStyle: true,
         accessKeyId: "invented-access",
         secretAccessKey: "invented-secret",
@@ -581,7 +618,7 @@ describe("manual infrastructure records factory", () => {
   test("missing storage credentials or malformed backend refuses before creating the S3 client", () => {
     const directory = mkdtempSync(join(scratch, "invalid-"));
     const backend =
-      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://us-east-1.example.org" }\n';
+      'bucket = "state-bucket-example"\nendpoints = { s3 = "https://s3.us-east-va.example.org" }\nregion = "us-east-va"\n';
     writeFileSync(join(directory, "backend.hcl"), backend);
     const environment = {
       AWS_ACCESS_KEY_ID: "invented-access",
@@ -601,11 +638,37 @@ describe("manual infrastructure records factory", () => {
       expect(() =>
         infrastructureRecords(directory, { ...environment, ...changed }, client),
       ).toThrow("invalid-control-evidence");
-    writeFileSync(join(directory, "backend.hcl"), backend.replace("https:", "http:"));
-    expect(() => infrastructureRecords(directory, environment, client)).toThrow(
-      "invalid-control-evidence",
-    );
+    for (const changedBackend of [
+      backend.replace("https:", "http:"),
+      backend.replace('region = "us-east-va"\n', ""),
+      backend.replace('region = "us-east-va"', 'region = "private-region-marker/invalid"'),
+      `${backend}region = "us-west-1"\n`,
+    ]) {
+      writeFileSync(join(directory, "backend.hcl"), changedBackend);
+      expect(() => infrastructureRecords(directory, environment, client)).toThrow(
+        "invalid-control-evidence",
+      );
+    }
     expect(created).toBe(0);
+  });
+  test("changing the signing region cannot decrypt an enrolled host record", () => {
+    const codec = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-east-va",
+      passphrase,
+    );
+    const key = "hosts/staging";
+    const value = { invented: "first-host-key" };
+    const encrypted = codec.seal(key, value);
+    expect(codec.open(key, encrypted)).toEqual(value);
+    const otherRegion = hostRecordCodec(
+      "example-bucket",
+      "https://storage.example.org",
+      "us-west-1",
+      passphrase,
+    );
+    expect(() => otherRegion.open(key, encrypted)).toThrow();
   });
 });
 

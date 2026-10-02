@@ -4,18 +4,18 @@
 # the secrets its phase needs. ci.yml's "Infrastructure checks" job runs the install phase too.
 # The Plan job fills the state key and the tokens from the `infra-plan` environment's read-only
 # *_READ_* secrets, and the Apply job from `infra`'s *_WRITE_* ones, into the variables OpenTofu
-# reads (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, LINODE_TOKEN and CLOUDFLARE_API_TOKEN).
+# reads (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, OVH_*, OS_* and CLOUDFLARE_API_TOKEN).
 #
 #   tofu-ci.sh install     the release in ../.opentofu-version, checked against ../opentofu.sha256
 #                          (copied from that release's signature-verified SHA256SUMS), on GITHUB_PATH
 #   tofu-ci.sh prepare     TOFU_VARS checked silently, every identifying value in it masked before
 #                          anything else prints, then the private working files: the values, the
 #                          backend settings and the replace target (TOFU_VARS, STATE_BUCKET,
-#                          STATE_ENDPOINT, and the replace input from the event payload)
+#                          STATE_ENDPOINT, STATE_REGION, and the replace input from the event payload)
 #   tofu-ci.sh init        the backend from backend.hcl and the providers from the lock file
 #                          (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, TF_VAR_state_passphrase)
 #   tofu-ci.sh plan        Plan only: a saved, encrypted plan, without a state lock (init's three,
-#                          LINODE_TOKEN, CLOUDFLARE_API_TOKEN)
+#                          OVH_*, OS_*, CLOUDFLARE_API_TOKEN)
 #   tofu-ci.sh summarize   Plan only: the change list to the log, the run summary and the step's
 #                          outputs with the saved plan's SHA-256, then the guards
 #                          (TF_VAR_state_passphrase, ALLOW_DESTROY, ALLOW_ACCESS_REMOVAL)
@@ -69,7 +69,7 @@ prepare() {
   # The shape check prints nothing of the value: jq's own messages could quote it. Values reach jq
   # through printf (a shell builtin) and a pipe, never an argument or a temporary file.
   if ! printf '%s' "${TOFU_VARS-}" | jq -e -f "$here/shape.jq" >/dev/null 2>&1; then
-    fail "TOFU_VARS must match the required keys and optional existing_databases map in ops/tofu/examples/example.tfvars.json."
+    fail "TOFU_VARS must match the selected OVH input contract in ops/tofu/examples/example.tfvars.json."
   fi
   printf '%s' "${TOFU_VARS-}" | jq -c -f "$here/masks.jq" >"$d/masks.json"
   local m
@@ -81,15 +81,18 @@ prepare() {
   # From here on every identifying value prints as ***.
 
   printf '%s' "${TOFU_VARS-}" | jq -c . >"$d/values.tfvars.json"
-  bun "$module/../../scripts/database-adoption.ts" validate "$d" >"$d/input-validation.log" 2>"$d/input-validation.stderr" ||
-    fail "Private infrastructure inputs or existing-cluster settings are invalid; nothing was planned."
+  bun "$module/../../scripts/infra-inputs.ts" validate "$d" >"$d/input-validation.log" 2>"$d/input-validation.stderr" ||
+    fail "Private infrastructure inputs are invalid; nothing was planned."
 
-  # The backend's bucket and endpoint (partial configuration; ops/tofu/versions.tf).
+  # The signing region is explicit private backend configuration, not an AWS default. It travels
+  # in the same saved-plan binding as the bucket and endpoint, and record readers use it too.
   [[ ${STATE_BUCKET-} =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "TOFU_STATE_BUCKET must be an Object Storage bucket name."
   [[ ${STATE_ENDPOINT-} =~ ^https://[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || fail "TOFU_STATE_ENDPOINT must be the bucket's https:// endpoint, with no path (ops/tofu/README.md)."
+  [[ ${STATE_REGION-} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "TOFU_STATE_REGION must be an explicit S3 signing region (ops/tofu/README.md)."
   {
     printf 'bucket         = "%s"\n' "${STATE_BUCKET-}"
     printf 'endpoints      = { s3 = "%s" }\n' "${STATE_ENDPOINT-}"
+    printf 'region         = "%s"\n' "${STATE_REGION-}"
     printf 'use_path_style = false\n'
   } >"$d/backend.hcl"
 
@@ -99,16 +102,16 @@ prepare() {
   local replace
   replace=$(jq -r '.inputs.replace // ""' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "The dispatch's inputs couldn't be read from the event payload."
   if [[ -n $replace ]]; then
-    if ! [[ $replace =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] ||
+    if ! [[ $replace =~ ^openstack_compute_instance_v2\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]] ||
       ! jq -e --arg k "${BASH_REMATCH[1]}" '.hosts | has($k)' "$d/values.tfvars.json" >/dev/null; then
-      fail "replace must be exactly linode_instance.host[\"<key>\"], naming a host in TOFU_VARS."
+      fail "replace must be exactly openstack_compute_instance_v2.host[\"<key>\"], naming a host in TOFU_VARS."
     fi
   fi
   printf '%s' "$replace" >"$d/replace"
 
   # Provider downloads and the backend's settings stay under $d, which the last step removes.
   echo "TF_DATA_DIR=$d/data" >>"$GITHUB_ENV"
-  echo "Prepared the values for $(jq -r '.hosts | length' "$d/values.tfvars.json") host(s) and $(jq -r '.database_ids | length' "$d/values.tfvars.json") access list(s)."
+  echo "Prepared the values for $(jq -r '.hosts | length' "$d/values.tfvars.json") host(s) and $(jq -r '.databases | length' "$d/values.tfvars.json") database service(s)."
 }
 
 # The state's credentials and passphrase, which init, plan and apply need.
@@ -123,7 +126,7 @@ state_settings() {
 
 # The provider tokens, which plan and apply need; $1 is the message naming their secrets.
 provider_tokens() {
-  [[ -n ${LINODE_TOKEN-} && -n ${CLOUDFLARE_API_TOKEN-} ]] || fail "$1"
+  [[ -n ${OVH_APPLICATION_KEY-} && -n ${OVH_APPLICATION_SECRET-} && -n ${OVH_CONSUMER_KEY-} && -n ${OS_USERNAME-} && -n ${OS_PASSWORD-} && -n ${CLOUDFLARE_API_TOKEN-} ]] || fail "$1"
 }
 
 init() {
@@ -162,7 +165,7 @@ control_enabled() {
 
 plan() {
   state_settings
-  provider_tokens "LINODE_READ_TOKEN and CLOUDFLARE_READ_TOKEN must be set in the infra-plan environment."
+  provider_tokens "Read-only OVH/OpenStack and Cloudflare credentials must be set in the infra-plan environment."
   local args replace rc=0
   # The Plan job's state key is read-only, so the plan takes no state lock (-lock=false). The
   # backend configures none today (no use_lockfile); this keeps a later one from making Plan
@@ -191,15 +194,15 @@ changes() {
 }
 
 # This fence is independent of destroy/access overrides and the advisory automatic policy.
-database_guard() {
-  bun "$module/../../scripts/database-adoption.ts" guard "$d" >"$d/adoption-guard.log" 2>"$d/adoption-guard.stderr" ||
-    fail "The cluster guard refused this plan; mutations are never permitted and imports require reviewed adoption."
+plan_guard() {
+  bun "$module/../../scripts/infra-inputs.ts" guard "$d" >"$d/plan-guard.log" 2>"$d/plan-guard.stderr" ||
+    fail "The selected-stack guard refused this plan; imports, forgotten resources and other providers are not permitted."
 }
 
 summarize() {
   local has_changes delimiter digest refuse=0 action address counts
   changes
-  database_guard
+  plan_guard
   if [[ -s $d/changes.txt ]]; then has_changes=true; else has_changes=false; fi
 
   {
@@ -282,9 +285,9 @@ compare() {
   # Reconstruct full JSON from the encrypted saved plan before checking its bound evidence.
   changes
   # All private inputs, including ignored creation-only credentials, must agree before handoff.
-  bun "$module/../../scripts/database-adoption.ts" inputs "$d" >"$d/input-comparison.log" 2>"$d/input-comparison.stderr" ||
+  bun "$module/../../scripts/infra-inputs.ts" inputs "$d" >"$d/input-comparison.log" 2>"$d/input-comparison.stderr" ||
     fail "TOFU_VARS in infra differs from the value the Plan job planned with (infra-plan's); nothing was applied. Set the same value in both and dispatch a new run."
-  database_guard
+  plan_guard
   [[ ${BINDING-} =~ ^[0-9a-f]{64}$ ]] || fail "The Plan job's handoff binding didn't arrive; nothing was applied."
   local binding
   binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
@@ -298,7 +301,7 @@ compare() {
 
 apply() {
   state_settings
-  provider_tokens "LINODE_WRITE_TOKEN and CLOUDFLARE_WRITE_TOKEN must be set in the infra environment."
+  provider_tokens "Write-scoped OVH/OpenStack and Cloudflare credentials must be set in the infra environment."
   # Recheck immediately before the provider write; directly invoking Apply cannot skip Compare.
   local binding verified
   [[ -f $d/verified.binding ]] || fail "Apply has no successful plan comparison; nothing was applied."
@@ -306,12 +309,8 @@ apply() {
   binding=$(bun "$module/../../scripts/infra-policy.ts" binding "$d" 2>"$d/binding.stderr") ||
     fail "The plan handoff couldn't be rechecked; nothing was applied."
   [[ $binding == "$verified" ]] || fail "The plan handoff changed after comparison; nothing was applied."
-  database_guard
-  local operation
-  operation=$(jq -er '.inputs.operation | select(. == "apply" or . == "adopt")' "${GITHUB_EVENT_PATH:?}" 2>/dev/null) || fail "Apply requires a reviewed apply or adopt dispatch."
-  if [[ $operation == adopt ]]; then
-    control_enabled || fail "Cluster adoption requires a completed durable baseline."
-  fi
+  plan_guard
+  jq -e '.inputs.operation == "apply"' "${GITHUB_EVENT_PATH:?}" >/dev/null 2>&1 || fail "Apply requires a reviewed apply dispatch."
   # A previous uncertain enrollment blocks every later mutation, even with changed inputs.
   # New hosts also require enabled records and an unused target before provider creation.
   control_call enrollment_check
@@ -332,12 +331,6 @@ apply() {
     jq -rR --slurpfile masks "$d/masks.json" -f "$here/diag.jq" "$d/apply.jsonl" 2>/dev/null || true
     exit 1
   fi
-  if [[ $operation == adopt ]]; then
-    # Import advanced only state. Keep the journal pending until a distinct step, with read-only
-    # provider credentials, refreshes a no-change plan and verifies the original saved result.
-    echo "Import applied; durable completion awaits read-only no-change verification."
-    return
-  fi
   if control_enabled; then
     control_state
     cp -- "$d/state.json" "$d/applied-evidence-state.json"
@@ -355,36 +348,12 @@ apply() {
     echo "New-host enrollment checked; durable trust contains no pending operation."
   fi
   while read -r action address _; do
-    if [[ $action == create && $address =~ ^linode_instance\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
+    if [[ $action == create && $address =~ ^openstack_compute_instance_v2\.host\[\"((staging|production)(-[0-9]{1,2})?)\"\]$ ]]; then
       line="built ${BASH_REMATCH[1]} (${BASH_REMATCH[2]}): durable first-host enrollment completed"
       echo "$line"
       echo "- $line" >>"$GITHUB_STEP_SUMMARY"
     fi
   done <"$d/changes.txt"
-}
-
-# Never overwrite the exact imported plan or re-plan with provider-write credentials. The workflow
-# supplies read-only provider tokens here, while retaining storage writes for journal completion.
-verify_adoption() {
-  state_settings
-  provider_tokens "Read-only provider tokens are required for adoption verification."
-  control_enabled || fail "Adoption verification requires enabled control records."
-  [[ -f $d/control-ticket.json ]] || fail "Adoption verification has no pending ticket."
-  control_state
-  cp -- "$d/state.json" "$d/applied-evidence-state.json"
-  tofu -chdir="$module" plan -input=false -lock=false -json -var-file="$d/values.tfvars.json" -out="$d/adoption-verify.bin" >"$d/adoption-verify.jsonl" 2>"$d/adoption-verify.stderr" ||
-    fail "Read-only adoption refresh failed; durable intent remains pending."
-  tofu -chdir="$module" show -json "$d/adoption-verify.bin" >"$d/adoption-no-change.json" 2>"$d/adoption-show.stderr" ||
-    fail "Adoption refresh evidence couldn't be read; durable intent remains pending."
-  tofu -chdir="$module" show -json >"$d/applied-state.json" 2>"$d/applied-state.stderr" ||
-    fail "Imported state verification failed; durable intent remains pending."
-  control_state
-  cmp -s -- "$d/state.json" "$d/applied-evidence-state.json" ||
-    fail "State changed during adoption verification; durable intent remains pending."
-  bun "$module/../../scripts/database-adoption.ts" verify "$d" >"$d/adoption-verify.log" 2>"$d/adoption-verify-policy.stderr" ||
-    fail "Adoption is not verified unchanged; durable intent remains pending."
-  control_call finish
-  echo "Expected imports and read-only no-change refresh verified; durable baseline completed."
 }
 
 baseline() {
@@ -398,9 +367,9 @@ baseline() {
 }
 
 case ${1-} in
-  install | prepare | init | control_read | plan | summarize | compare | apply | verify_adoption | baseline)
-    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline"
+  install | prepare | init | control_read | plan | summarize | compare | apply | baseline)
+    (($# == 1)) || fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|baseline"
     "$1"
     ;;
-  *) fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|verify_adoption|baseline" ;;
+  *) fail "usage: tofu-ci.sh install|prepare|init|control_read|plan|summarize|compare|apply|baseline" ;;
 esac

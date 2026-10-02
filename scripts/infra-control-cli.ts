@@ -7,11 +7,7 @@ import {
   plannedNewHostTargets,
   projectNewAppliedHosts,
 } from "./host-enrollment.js";
-import {
-  guardDatabaseClusters,
-  requireDatabaseAdoption,
-  verifyDatabaseAdoption,
-} from "./database-adoption.js";
+import { guardInfrastructurePlan } from "./infra-inputs.js";
 import {
   InfrastructureRecords,
   RecordCodec,
@@ -85,9 +81,9 @@ export function infrastructureRecords(
   createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
 ): InfrastructureRecords {
   try {
-    const { backend, bucket, endpoint } = backendStorage(directory);
+    const { backend, bucket, endpoint, region } = backendStorage(directory);
     return new InfrastructureRecords(
-      nativeStore(bucket, endpoint, environment, createClient),
+      nativeStore(bucket, endpoint, region, environment, createClient),
       new RecordCodec(
         environment.TF_VAR_state_passphrase ?? "",
         privateDigest({ backend, key: backendKey }),
@@ -105,12 +101,16 @@ function backendStorage(directory: string) {
   const endpoint = /^endpoints\s*= \{ s3 = "(https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+)" \}$/mu.exec(
     backend,
   )?.[1];
-  if (!bucket || !endpoint) fail();
-  return { backend, bucket, endpoint };
+  const region = /^region\s*= "([a-z0-9]+(?:-[a-z0-9]+)*)"$/mu.exec(backend)?.[1];
+  // OpenTofu rejects duplicate assignments; record access must not silently select the first.
+  if (!bucket || !endpoint || !region || [...backend.matchAll(/^region\s*=/gmu)].length !== 1)
+    fail();
+  return { backend, bucket, endpoint, region };
 }
 function nativeStore(
   bucket: string,
   endpoint: string,
+  region: string,
   environment: NodeJS.ProcessEnv,
   createClient: (options: Bun.S3Options) => Bun.S3Client = (options) => new Bun.S3Client(options),
 ): S3ControlStore {
@@ -118,7 +118,8 @@ function nativeStore(
   const secretAccessKey = environment.AWS_SECRET_ACCESS_KEY;
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(bucket) ||
-    !/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(endpoint)
+    !/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(endpoint) ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(region)
   )
     fail();
   if (!accessKeyId || !secretAccessKey || (environment.TF_VAR_state_passphrase ?? "").length < 32)
@@ -130,7 +131,7 @@ function nativeStore(
     createClient({
       bucket,
       endpoint: url.origin,
-      region: "us-east-1",
+      region,
       virtualHostedStyle: true,
       accessKeyId,
       secretAccessKey,
@@ -139,29 +140,36 @@ function nativeStore(
     }),
   );
 }
-export function hostRecordCodec(bucket: string, endpoint: string, passphrase: string): RecordCodec {
+export function hostRecordCodec(
+  bucket: string,
+  endpoint: string,
+  region: string,
+  passphrase: string,
+): RecordCodec {
   return new RecordCodec(
     passphrase,
     privateDigest({
-      schema: 1,
+      schema: 2,
       purpose: "tarubot-host-enrollment-v1",
       bucket,
       endpoint: new URL(endpoint).origin,
+      region,
       namespace: prefix,
       stateKey: backendKey,
     }),
   );
 }
-/** Native factory accepts the stable bucket/endpoint, so stock Host needs no infrastructure inputs. */
+/** Enrollment ciphertext is bound to the same bucket, endpoint and signing region as Infra. */
 export function hostEnrollmentRecords(
   bucket: string,
   endpoint: string,
+  region: string,
   environment: NodeJS.ProcessEnv,
 ): HostEnrollmentRecords {
   try {
     return new HostEnrollmentRecords(
-      nativeStore(bucket, endpoint, environment),
-      hostRecordCodec(bucket, endpoint, environment.TF_VAR_state_passphrase ?? ""),
+      nativeStore(bucket, endpoint, region, environment),
+      hostRecordCodec(bucket, endpoint, region, environment.TF_VAR_state_passphrase ?? ""),
     );
   } catch {
     fail();
@@ -187,12 +195,13 @@ export async function controlPhase(
     return;
   }
   if (command === "enrollment_check") {
-    const { bucket, endpoint } = backendStorage(directory);
-    const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+    const { bucket, endpoint, region } = backendStorage(directory);
+    const enrollment =
+      suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, region, environment);
     // The fixed index blocks a pending target even if later inputs omit or rename it.
     await enrollment.requireNoPending();
     const event = readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8");
-    if (!["apply", "adopt"].includes(JSON.parse(event).inputs?.operation)) fail();
+    if (JSON.parse(event).inputs?.operation !== "apply") fail();
     const targets = plannedNewHostTargets(read("plan.json"), read("values.tfvars.json"));
     const context = read("control-context.json") as { enabled?: unknown };
     if (targets.length > 0 && context.enabled !== true) fail();
@@ -217,11 +226,8 @@ export async function controlPhase(
     const inputs = read("values.tfvars.json") as Record<string, unknown>;
     const run = { commit: environment.GITHUB_SHA ?? "", run: environment.GITHUB_RUN_ID ?? "" };
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
-    const adopting = command === "begin" && event.inputs?.operation === "adopt";
-    if (!adopting && event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply"))
-      fail();
-    if (adopting) requireDatabaseAdoption(read("plan.json"), inputs, context.snapshot.inputs);
-    else guardDatabaseClusters(read("plan.json"), inputs);
+    if (event.inputs?.operation !== (command === "baseline" ? "baseline" : "apply")) fail();
+    guardInfrastructurePlan(read("plan.json"), inputs);
     if (command === "baseline") {
       // Initial establishment is an explicit reviewed dispatch, with a complete no-change plan.
       if (classifyPlan(read("plan.json"), inputs, inputs).decision !== "no-changes") fail();
@@ -238,15 +244,7 @@ export async function controlPhase(
   } else if (command === "finish" || command === "enroll") {
     const event = JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH ?? "", "utf8"));
     if (command === "enroll" && event.inputs?.operation !== "apply") fail();
-    if (event.inputs?.operation === "adopt")
-      verifyDatabaseAdoption(
-        read("plan.json"),
-        read("adoption-no-change.json"),
-        read("applied-state.json"),
-        read("values.tfvars.json"),
-        context.snapshot.inputs,
-      );
-    else if (event.inputs?.operation !== "apply") fail();
+    if (event.inputs?.operation !== "apply") fail();
     verifyAppliedPlan(read("plan.json"), read("applied-state.json"));
     const ticket = read("control-ticket.json") as Ticket;
     if (command === "finish") await journal.finish(ticket, state);
@@ -262,8 +260,9 @@ export async function controlPhase(
         state.serial <= context.snapshot.state.serial
       )
         fail();
-      const { bucket, endpoint } = backendStorage(directory);
-      const enrollment = suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, environment);
+      const { bucket, endpoint, region } = backendStorage(directory);
+      const enrollment =
+        suppliedEnrollment ?? hostEnrollmentRecords(bucket, endpoint, region, environment);
       await enrollment.enroll(
         projectNewAppliedHosts(read("plan.json"), read("applied-state.json"), inputs, {
           generation: ticket.generation,
@@ -272,7 +271,11 @@ export async function controlPhase(
           binding,
         }),
         {
-          linodeToken: environment.LINODE_TOKEN ?? "",
+          ovh: {
+            applicationKey: environment.OVH_APPLICATION_KEY ?? "",
+            applicationSecret: environment.OVH_APPLICATION_SECRET ?? "",
+            consumerKey: environment.OVH_CONSUMER_KEY ?? "",
+          },
           cloudflareToken: environment.CLOUDFLARE_API_TOKEN ?? "",
         },
         // Both pending records stay live through enrollment and exact Infra completion readback.

@@ -101,7 +101,12 @@ export async function automaticInfrastructure(
   const noHostPending = () =>
     (
       deps.enrollment ??
-      hostEnrollmentRecords(env.STATE_BUCKET ?? "", env.STATE_ENDPOINT ?? "", env)
+      hostEnrollmentRecords(
+        env.STATE_BUCKET ?? "",
+        env.STATE_ENDPOINT ?? "",
+        env.STATE_REGION ?? "",
+        env,
+      )
     ).requireNoPending();
   fresh();
   phase("prepare");
@@ -139,7 +144,14 @@ export async function automaticInfrastructure(
     );
     return;
   }
-  requireEvidence(env.LINODE_TOKEN && env.CLOUDFLARE_API_TOKEN);
+  requireEvidence(
+    env.OVH_APPLICATION_KEY &&
+      env.OVH_APPLICATION_SECRET &&
+      env.OVH_CONSUMER_KEY &&
+      env.OS_USERNAME &&
+      env.OS_PASSWORD &&
+      env.CLOUDFLARE_API_TOKEN,
+  );
   const shown = tofu(["show", "-json", join(directory, "plan.bin")], "plan");
   const context = read("control-context.json") as { snapshot: Snapshot };
   const inputs = read("values.tfvars.json") as Record<string, unknown>;

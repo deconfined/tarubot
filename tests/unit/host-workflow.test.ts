@@ -143,6 +143,7 @@ const TRUST_SECRETS = [
   "TOFU_STATE_PASSPHRASE",
   "TOFU_STATE_READ_ACCESS_KEY",
   "TOFU_STATE_READ_SECRET_KEY",
+  "TOFU_STATE_REGION",
 ];
 /** The bot's 11 variables (vars/bot.yml tb_secret_env), set in "Deploy the bot" only. */
 const BOT_SECRETS = [
@@ -366,6 +367,7 @@ describe("the workflow's shape", () => {
       TARGET: `\${{ inputs.target }}`,
       STATE_BUCKET: `\${{ secrets.TOFU_STATE_BUCKET }}`,
       STATE_ENDPOINT: `\${{ secrets.TOFU_STATE_ENDPOINT }}`,
+      STATE_REGION: `\${{ secrets.TOFU_STATE_REGION }}`,
       AWS_ACCESS_KEY_ID: `\${{ secrets.TOFU_STATE_READ_ACCESS_KEY }}`,
       AWS_SECRET_ACCESS_KEY: `\${{ secrets.TOFU_STATE_READ_SECRET_KEY }}`,
       TF_VAR_state_passphrase: `\${{ secrets.TOFU_STATE_PASSPHRASE }}`,

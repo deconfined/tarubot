@@ -36,7 +36,11 @@ const record: HostEnrollmentRecord = {
   host: {
     hostKey: "staging",
     target: "staging",
-    instanceId: 123,
+    instanceId: "00000000-0000-0000-0000-000000000040",
+    ovhProjectId: "1".repeat(32),
+    imageId: "00000000-0000-0000-0000-000000000010",
+    flavorId: "00000000-0000-0000-0000-000000000020",
+    networkId: "00000000-0000-0000-0000-000000000030",
     fqdn: "bot.example.org",
     ipv4: "192.0.2.7",
     ipv6: "2001:db8::7",
@@ -70,6 +74,7 @@ function fixture(value: HostEnrollmentRecord | null = record) {
   const codec = hostRecordCodec(
     "example-bucket",
     "https://storage.example.org",
+    "us-east-va",
     "invented-private-record-passphrase-12345",
   );
   const persist = (path: string, value: unknown) => store.values.set(path, codec.seal(path, value));
@@ -216,7 +221,11 @@ describe("durable enrolled deployment trust", () => {
       const f = fixture();
       f.helpers.reachable = async () => {
         if (pending) f.persist("hosts/pending", { schema: 1, targets: ["staging"] });
-        else f.persist("hosts/staging", { ...record, host: { ...record.host, instanceId: 456 } });
+        else
+          f.persist("hosts/staging", {
+            ...record,
+            host: { ...record.host, instanceId: "00000000-0000-0000-0000-000000000041" },
+          });
         return true;
       };
       await expect(
