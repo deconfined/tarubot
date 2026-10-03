@@ -39,7 +39,7 @@ test("arguments need the host and default to the operator's backup folder", () =
 
 test("setting names are read without values, skipping every line of a quoted value", () => {
   const env = [
-    "TARUBOT_IMAGE_TAG=2.23.0",
+    "LOG_LEVEL=info",
     'DATABASE_CA_CERT="-----BEGIN CERTIFICATE-----',
     // A base64 line inside the value that looks like a setting must not be reported.
     "MIIDSECRETLOOKINGLINE=",
@@ -57,7 +57,7 @@ test("setting names are read without values, skipping every line of a quoted val
     "DATABASE_URL=postgresql://x",
   ].join("\n");
   expect(settingNames(env)).toEqual([
-    "TARUBOT_IMAGE_TAG",
+    "LOG_LEVEL",
     "DATABASE_CA_CERT",
     "DISCORD_TOKEN",
     "SINGLE",
@@ -68,7 +68,7 @@ test("setting names are read without values, skipping every line of a quoted val
 });
 
 test("a .env missing a setting production needs is refused by name", () => {
-  const complete = ["TARUBOT_IMAGE_TAG", "DATABASE_URL", "DATABASE_CA_CERT", "DISCORD_TOKEN"];
+  const complete = ["DISCORD_APPLICATION_ID", "DATABASE_URL", "DATABASE_CA_CERT", "DISCORD_TOKEN"];
   const expected = [
     "GITHUB_REPORTS_TOKEN",
     "GITHUB_APP_CLIENT_ID",
@@ -83,7 +83,7 @@ test("a .env missing a setting production needs is refused by name", () => {
   // Absent expected settings are reported, not refused.
   expect(checkSettings(complete)).toEqual(expected);
   expect(checkSettings([...complete, ...expected])).toEqual([]);
-  expect(() => checkSettings(["TARUBOT_IMAGE_TAG", "DATABASE_URL"])).toThrow(
+  expect(() => checkSettings(["DISCORD_APPLICATION_ID", "DATABASE_URL"])).toThrow(
     "lacks DATABASE_CA_CERT, DISCORD_TOKEN",
   );
 });
@@ -121,7 +121,7 @@ function fakeAge(decrypts: Uint8Array | Error, ciphertext = "age-encryption.org/
 
 test("a copy gets its final name only after it decrypts to what was read", async () => {
   const directory = await mkdtemp(`${tmpdir()}/env-backup-test-`);
-  const plain = new TextEncoder().encode("TARUBOT_IMAGE_TAG=2.23.0\n");
+  const plain = new TextEncoder().encode("LOG_LEVEL=info\n");
   const base = { plain, recipientsFile: "/r.txt" };
   try {
     // Verified: the final file exists, and the temporary one is gone.

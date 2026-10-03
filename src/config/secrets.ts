@@ -1,16 +1,13 @@
 /**
- * File-delivered secrets (2.33.0, #50). On a Quadlet host the six settings below reach the bot as
- * Podman secrets mounted read-only under /run/secrets, never as environment variables, and the
- * unit sets NAME_FILE to each file's path (ops/quadlet/units/tarubot.env). Everywhere else (local
- * development, Compose, CI) the plain NAME variables keep working. Every reader of these settings
- * goes through this module: env.ts's configuration(), the maintenance tools' guard
- * (deployment.ts), Database's default CA and the scripts.
+ * File-delivered secrets support Docker secret mounts and other private setting files.
+ * Plain NAME variables remain supported for Compose, local development and CI.
+ * Every reader goes through this module: configuration(), the maintenance-tool guard,
+ * Database's default CA and the scripts.
  *
  * The rules, for each NAME:
  * - NAME_FILE empty or unset: NAME as it is (possibly unset);
  * - NAME_FILE set: the file's UTF-8 text with exactly one trailing newline removed.
- *   ops/quadlet/secrets.sh writes each value followed by one newline, because Podman refuses an
- *   empty secret, so an empty optional value arrives as a lone newline and reads back as "";
+ *   An empty optional file value followed by one newline resolves to "".
  * - both set (neither empty): a configuration failure, so a stale plain value can never shadow the
  *   file or the other way round.
  *
@@ -21,10 +18,7 @@
 import { readFileSync } from "node:fs";
 import { Failure } from "../domain/values.js";
 
-/**
- * The settings that may come from a file, sorted. ops/quadlet/secrets.sh, ops/deploy.sh's
- * SECRET_SETTINGS and tests/unit/quadlet.test.ts hold the same six names.
- */
+/** Settings that may come from a file, sorted. */
 export const FILE_SETTINGS = [
   "DATABASE_CA_CERT",
   "DATABASE_URL",

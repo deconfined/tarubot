@@ -369,7 +369,7 @@ const settingsSchema = z.object({
 /**
  * The whole CLI behind an injectable REST factory, so tests can drive the guard and every mode.
  * The guard runs before the REST client exists; the token is never printed. The token may come
- * from DISCORD_TOKEN_FILE (a Quadlet host's container), resolved into a copy of env.
+ * from DISCORD_TOKEN_FILE, resolved into a copy of env.
  */
 export async function run(
   argv: readonly string[],

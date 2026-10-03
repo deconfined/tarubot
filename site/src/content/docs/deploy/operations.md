@@ -7,6 +7,8 @@ sidebar:
 
 These procedures assume the stock `docker-compose.yml` with its bundled PostgreSQL, run from the directory that holds it and `.env`. Every decision TaruBot makes, and all the Discord work it still owes, lives in PostgreSQL, so the database is the one thing to protect.
 
+The upstream instance uses the same Compose runtime with managed PostgreSQL, rather than this guide's `postgres` service. Its automated release stops the writer, backs up, migrates and registers commands from the exact signed image before starting and observing it. Automatic restart stays disabled until sustained observation and durable acceptance. Pending failures require owner reconciliation, with no automatic rollback; see [the deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md). Commands below are for your own stock Compose installation, not that managed instance.
+
 ## Updating to a release
 
 Read the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) entries between your release and the new one first. Each says whether it adds a **migration** and whether its **commands changed**.
@@ -116,7 +118,7 @@ docker compose exec -T postgres rm /tmp/tarubot.dump
 
 A dump is consistent even while the bot runs, because `pg_dump` reads one snapshot. Back up on a schedule (a daily `cron` job is plenty) and before every update, and keep copies **off the host**, encrypted: the dump holds your members' links and the ledger. A backup you haven't restored isn't proven; [rehearse a restore](#restore-rehearsal) now and then, with a dump taken while the bot is stopped.
 
-The repository's `ops/` directory and `scripts/host-env-backup.ts` are the upstream instance's own backup tooling. They are tied to its Compose file, encryption key and host, so don't reuse them as they are.
+The upstream Linode deployment's `ops/backup.sh` also encrypts the database and host settings and uploads offsite; its private storage settings, age recipients and retention belong to that instance. Do not copy its credentials or assume its backups are proven. Its [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#backups-and-restore) covers configuration, pending recovery and restore drills.
 
 ## Restore rehearsal
 

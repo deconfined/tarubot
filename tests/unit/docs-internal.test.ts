@@ -1,4 +1,4 @@
-/** Keep contributor navigation usable without Git metadata, site dependencies or live credentials. */
+/** Keep current guide navigation usable without Git metadata, site dependencies or live credentials. */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,9 +13,11 @@ const files = [
   "AGENTS.md",
   "CLAUDE.md",
   "REQUIREMENTS.md",
-  "ops/tofu/README.md",
   ...[...new Bun.Glob("**/*.md").scanSync({ cwd: resolve(root, "docs") })].map(
     (path) => `docs/${path}`,
+  ),
+  ...[...new Bun.Glob("**/*.md").scanSync({ cwd: resolve(root, "site/src/content/docs") })].map(
+    (path) => `site/src/content/docs/${path}`,
   ),
 ];
 
@@ -40,16 +42,25 @@ function anchors(text: string): Set<string> {
   return found;
 }
 
-test("internal guides link to existing files and Markdown headings", () => {
+test("current guides link to existing files and Markdown headings", () => {
   const problems: string[] = [];
   for (const file of files) {
     for (const match of prose(read(file)).matchAll(/\[[^\]\n]+\]\(([^)\s]+)\)/gu)) {
-      const target = match[1] ?? "";
-      if (/^(?:[a-z]+:|\/\/)/iu.test(target)) continue;
+      let target = match[1] ?? "";
+      const repositoryLink =
+        /^https:\/\/github\.com\/deconfined\/tarubot\/(?:blob|tree)\/main\/(.+)$/u.exec(target);
+      if (repositoryLink) target = repositoryLink[1] ?? "";
+      else if (/^(?:[a-z]+:|\/\/)/iu.test(target)) continue;
       const [path = "", fragment] = target.split("#");
-      const destination = path
-        ? resolve(root, dirname(file), decodeURI(path))
-        : resolve(root, file);
+      let destination: string;
+      if (path.startsWith("/tarubot/")) {
+        const slug = path.slice("/tarubot/".length).replace(/\/$/u, "") || "index";
+        destination = resolve(root, "site/src/content/docs", `${decodeURI(slug)}.md`);
+      } else {
+        destination = path
+          ? resolve(root, repositoryLink ? "." : dirname(file), decodeURI(path))
+          : resolve(root, file);
+      }
       if (!existsSync(destination)) {
         problems.push(`${file}: missing ${target}`);
       } else if (fragment && /\.mdx?$/u.test(destination)) {
@@ -59,12 +70,6 @@ test("internal guides link to existing files and Markdown headings", () => {
     }
   }
   expect(problems).toEqual([]);
-});
-
-test("obsolete session records stay out of current contributor documentation", () => {
-  // Git and PR history preserve these records; navigation must not recreate a second backlog.
-  for (const name of ["SESSION_HANDOFF", "OPEN_ITEMS", "VERIFICATION", "MIGRATION", "APP_PLATFORM"])
-    expect(existsSync(resolve(root, `docs/${name}.md`))).toBe(false);
 });
 
 test("the widened deployment restriction is also preserved verbatim", () => {

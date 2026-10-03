@@ -6,9 +6,8 @@
  * explicit marker, a production or staging run silently merged with a checkout's .env, or a
  * database belonging to another deployment. Errors are Failure("configuration") and name settings,
  * hosts and database names only, never a URL, password or token (OPS-05). The guard leaves env.ts
- * and the bot's startup configuration alone. It reads the file-delivered secrets (NAME_FILE,
- * 2.33.0) as the tools themselves do, through src/config/secrets.ts: in a Quadlet host's container
- * DATABASE_URL and DATABASE_CA_CERT exist only as files.
+ * and the bot's startup configuration alone. It reads file-delivered secrets (NAME_FILE)
+ * through src/config/secrets.ts, just as the tools do.
  *
  * The rehearsal allowance (2.35.0, #46 answer 8): DEVBOT_THROWAWAY_GUILD_ID exists for @deconfined's
  * rehearsal of /setup overrides on a throwaway server, while DevBot's TEST_GUILD_ID points there.
@@ -306,8 +305,8 @@ export function localDatabaseHost(host: string): boolean {
  * The CA check-restore uses for RESTORE_DATABASE_URL: its own when set (a PITR fork can have a new
  * CA), otherwise DATABASE_CA_CERT, read from DATABASE_CA_CERT_FILE when that is how it arrives. An
  * empty RESTORE_DATABASE_CA_CERT line (as in the env templates) falls back too, so it can never
- * silently drop certificate verification. The RESTORE_* settings have no file form: a restore
- * check is an operator's run from a settings file, never a Quadlet unit's.
+ * silently drop certificate verification. RESTORE_* settings have no file form; restore
+ * checks use an operator's explicit settings file.
  */
 export function restoreCertificate(env: Environment): string | undefined {
   return present(env.RESTORE_DATABASE_CA_CERT)
@@ -326,12 +325,7 @@ export const MANAGED_DIRECT_PORTS: readonly number[] = [27520];
 /** The provider's administrator login (Linode); tools connect as the application user. */
 export const MANAGED_ADMIN_USERS: readonly string[] = ["akmadmin"];
 
-/**
- * The databases production's tools may use as DATABASE_URL: the live `tarubot`, or
- * `tarubot_restore` after docs/HOSTING.md "Restoring a dump" repoints the bot at a same-cluster
- * restore. (A PITR fork is a new cluster that holds `tarubot`.) Anything else, staging's database
- * included, is refused.
- */
+/** Production tools accept the live database or its same-cluster restored replacement. */
 export const PRODUCTION_DATABASES: readonly string[] = ["tarubot", "tarubot_restore"];
 
 /**

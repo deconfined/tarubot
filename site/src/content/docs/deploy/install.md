@@ -7,6 +7,8 @@ sidebar:
 
 This installs TaruBot with the stock Compose file: the published bot image and a PostgreSQL 18 container next to it. You need the [requirements](/tarubot/deploy/requirements/) and a [Discord application](/tarubot/deploy/discord-application/).
 
+This is the self-hosting Compose path, not permission to operate the upstream instance. That instance uses Linode and managed PostgreSQL with owner-approved exact-digest delivery; [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes repository implementation, manual provisioning and unobserved live cutover.
+
 ## 1. Get the Compose file and settings template
 
 Pick a release from the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) and use it for `X.Y.Z` below. On the host, in a directory of its own, pull that release's image and fetch the Compose file and settings template from the commit that built it, so the three match:

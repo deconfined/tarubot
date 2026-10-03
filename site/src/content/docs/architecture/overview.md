@@ -78,6 +78,7 @@ The contributor notes in the repository go deeper:
 - [PERSISTENCE.md](https://github.com/deconfined/tarubot/blob/main/docs/PERSISTENCE.md): Drizzle, transactions, exact values and schema changes.
 - [LODESTONE.md](https://github.com/deconfined/tarubot/blob/main/docs/LODESTONE.md): the Lodestone adapter, parser and live selectors.
 - [CONFIGURATION.md](https://github.com/deconfined/tarubot/blob/main/docs/CONFIGURATION.md): the configuration files and the maintenance-tool guard.
-- [CI_CD.md](https://github.com/deconfined/tarubot/blob/main/docs/CI_CD.md): checks, container publishing and dependency updates.
+- [CONTRIBUTING.md](https://github.com/deconfined/tarubot/blob/main/CONTRIBUTING.md): credential-free checks, releases and dependency updates.
 - [REPLIES.md](https://github.com/deconfined/tarubot/blob/main/docs/REPLIES.md): the reply house style.
-- [TEST_PLANS.md](https://github.com/deconfined/tarubot/blob/main/docs/TEST_PLANS.md): development test-session plans.
+- [DEV_GUILD.md](https://github.com/deconfined/tarubot/blob/main/docs/DEV_GUILD.md): owner-authorized development acceptance and startup plans.
+- [DEPLOYMENT.md](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md): exact-digest Compose delivery, manual provisioning/cutover and recovery.

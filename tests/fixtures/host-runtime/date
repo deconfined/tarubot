@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case ${*: -1} in
+  +%Y%m%dT%H%M%SZ) printf '%s\n' 20261003T120000Z ;;
+  +%d) if [[ -e $SIM/monthly ]]; then printf '%s\n' 01; else printf '%s\n' 03; fi ;;
+  *) exec /bin/date "$@" ;;
+esac

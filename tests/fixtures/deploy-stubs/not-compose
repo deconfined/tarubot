@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# The stand-in for podman, systemctl, journalctl and systemd-run in tests/unit/deploy-script.test.ts:
-# tools only ops/deploy.sh's retired Quadlet modes called. It records the call in $SIM/runtime, as
-# "<tool> <arguments>" beside the docker stub's own lines, and fails, so a test shows that no
-# Compose path reaches one.
-printf '%s %s\n' "${0##*/}" "$*" >>"$SIM/runtime"
-exit 1

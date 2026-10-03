@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'git %s\n' "$*" >>"$SIM/argv"
+[[ ! -e $SIM/fail-fetch || $* != *' fetch '* ]]
+exec "${GIT_REAL:?}" "$@"

@@ -1,5 +1,4 @@
-# Omit repository metadata and local build/test working state, including OpenTofu's provider
-# downloads from a local `tofu init` (#62).
+# Omit repository metadata and local build/test working state.
 .git
 **/.git
 **/.terraform

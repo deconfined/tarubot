@@ -20,8 +20,6 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
-Infrastructure fixtures must supply an explicit S3 signing region alongside their invented bucket/endpoint. Exercise endpoint/region handoff mismatches and region-bound record refusal without real storage/provider credentials. Offline fixtures do not accept the selected OVH service; its private checks remain in the [OpenTofu runbook](ops/tofu/README.md#private-backend-acceptance).
-
 ## Make a change
 
 1. Start a feature branch from an up-to-date `main`. Keep unrelated work separate.
@@ -34,6 +32,23 @@ Infrastructure fixtures must supply an explicit S3 signing region alongside thei
 8. Open a PR when authorized. Merge with a merge commit only, after the owner's code-owner review, an up-to-date `CI result`, and the required security checks. A push dismisses stale approvals.
 
 Do not commit credentials, `.env`, dumps, backups, generated output or local coding-tool state. Applied SQL migrations are immutable: add a new migration, then update the Drizzle mapping and `SCHEMA_VERSION` together. See [persistence](docs/PERSISTENCE.md).
+
+## CI and dependencies
+
+`ci.yml` checks source, migration immutability, the application build, unit/contract tests and disposable PostgreSQL fixtures, plus `bash -n`/ShellCheck for `ops/*.sh` and pinned actionlint for workflows. PRs need no live credentials. `publish.yml` reuses CI, builds AMD64/ARM64 images for an explicit stable release, calls `scan.yml`, attests the exact index digest and calls `deploy.yml`. Deployment uses one owner-approved `production` job; publication is not evidence of a live deploy. See [deployment](docs/DEPLOYMENT.md).
+
+Actions use full-SHA pins; checkouts do not persist credentials. `pages.yml` builds the separate site, `dependency-audit.yml` audits locked Bun dependencies, and CodeQL uses GitHub default setup. The owner maintains required checks and branch/environment protections.
+
+| Dependency | Update method / paired pins |
+| --- | --- |
+| Bun | Dependabot Docker PR; synchronize runtime, `@types/bun`, lockfile and README |
+| PostgreSQL | Dependabot Compose minor PR; synchronize CI and README; majors need a migration plan |
+| Actions | Dependabot SHA-pin PR; retain full pins and version comments |
+| Site | Dependabot pnpm PR; install/build from `site/` and check peer compatibility |
+| Bun packages | Manual Bun update and frozen install; Dependabot cannot read the current lockfile format |
+| Selectors | `bun run selectors:update`; commit lockfile and revision metadata together |
+
+Dependency PRs use normal CI without a mandatory release bump. Publish runtime dependency changes in the next explicit bot release. Do not add `[dependabot skip]`: it permits force-pushing over maintainer edits. After a maintainer push, merge newer `main` if necessary; `@dependabot recreate` discards those commits. The owner manages security alerts and automated security-update settings.
 
 ## Documentation site
 
@@ -49,9 +64,7 @@ The build validates site links; `tests/unit/docs-site.test.ts` checks public con
 ## Live testing and delivery
 
 - [DevBot](docs/DEV_GUILD.md): isolated local development and owner-run acceptance.
-- [CI/CD](docs/CI_CD.md): explicit releases, required checks and dependency updates.
-- [Deployment](docs/DEPLOYMENT.md): the implemented delivery path, not future pipeline proposals.
+- [Deployment](docs/DEPLOYMENT.md): release orchestration, pinned provenance, owner provisioning, cutover and recovery.
 - [Threat model](docs/THREAT_MODEL.md): agreed scope and the requirement to prefer simple, standard components.
-- [Pipeline specification](docs/PIPELINE.md): intended flow, safety policy and outstanding acceptance.
 
 Building a release does not authorize restarting a shared bot, migrating a live database, writing to Discord, changing a provider/environment, pushing, or dispatching a workflow. Agents must follow [AGENTS.md](AGENTS.md); production deployment approval remains the owner's GitHub action.

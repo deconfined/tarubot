@@ -13,6 +13,8 @@ docker compose run --rm --no-deps -T tarubot bun dist/scripts/<tool>.js [argumen
 
 `--no-deps` leaves the running services alone, and `-T` keeps the output plain for scripts and logs. The container's filesystem is [read-only](/tarubot/deploy/install/#the-bots-container). Most tools only print, so to keep their output, redirect it on the host (`… > output.json`). The two that write a file, `preview.js --output` and `snapshot.js`, need [a writable mount](#previewjs) for that run. Each tool checks its settings against its deployment profile before it touches Discord or the database; yours is the unmanaged profile (see [Requirements](/tarubot/deploy/requirements/#maintenance-tools-and-profiles)). A tool that refuses exits without changing anything, and names the setting at fault, never its value.
 
+The upstream Linode deployment uses this same Compose tool model with its private central settings and exact release worktree/image, not the stock bundled database. Owner-only commands and recovery are in [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md); do not run generic examples against its managed application/database.
+
 ## The tools
 
 ### migrate.js
@@ -103,4 +105,4 @@ The image also carries `import.js`, `snapshot.js`, `acquire.js` and `activate.js
 
 ## Tools outside the container
 
-The same tools can run from a source checkout with Bun, against the loopback database port that `docker-compose.tools.yml` publishes. That's a development setup: it reads `DATABASE_URL` from `.env`, and a `bun run` script loads the checkout's `.env` automatically. The [repository's README](https://github.com/deconfined/tarubot/blob/main/README.md#running-the-compiled-bot-locally) lists the `bun run` aliases and the `bun run build` they need first, and [CONFIGURATION.md](https://github.com/deconfined/tarubot/blob/main/docs/CONFIGURATION.md#maintenance-tool-profiles) describes the deployment guard every tool applies before it connects.
+The same tools can run from a source checkout with Bun, against the loopback database port that `docker-compose.tools.yml` publishes. That's a development setup: it reads `DATABASE_URL` from `.env`, and a `bun run` child loads the checkout's `.env` automatically. Follow [CONTRIBUTING](https://github.com/deconfined/tarubot/blob/main/CONTRIBUTING.md) for the toolchain/checks and run `bun run build` before `bun dist/scripts/<tool>.js`. [CONFIGURATION](https://github.com/deconfined/tarubot/blob/main/docs/CONFIGURATION.md#maintenance-tool-profiles) describes the guard every tool applies before connecting.

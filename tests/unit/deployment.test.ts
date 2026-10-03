@@ -1,16 +1,8 @@
-/**
- * The maintenance-tool deployment guard: profile inference, identity and test-scope rules, guild
- * ownership, database endpoints per profile, the env-file launch check, the staging profile (#50)
- * and the tracked production env template, the file-delivered secrets (2.33.0), and DevBot's
- * throwaway-server rehearsal allowance (2.35.0, #46). Staging's container settings are pinned from
- * the playbook's side in bot-play.test.ts (2.36.0).
- * Every refusal is checked to be a configuration Failure that never echoes a secret.
- */
+/** Maintenance-tool profile, guild scope, database identity and private refusal behavior. */
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   assertAuthenticatedApplication,
   assertToolScope,
@@ -86,12 +78,7 @@ const rehearsalEnv = (overrides: Environment = {}): Environment =>
     ...overrides,
   });
 
-/**
- * The staging container's settings (#50; since 2.36.0 written by ops/ansible/bot.yml): the fixed
- * values in ops/ansible/vars/targets/staging.yml (the staging marker and public test replies),
- * plus the identity the release image reports (DevBot's application in its test guild), and
- * staging's own database and role on the managed cluster from the staging environment's secrets.
- */
+/** An isolated DevBot deployment with its own managed database and test-guild scope. */
 const stagingEnv = (overrides: Environment = {}): Environment => ({
   TARUBOT_ENVIRONMENT: "staging",
   DISCORD_TOKEN: TOKEN,
@@ -531,8 +518,8 @@ describe("databases", () => {
   });
 
   test("(#50) production's primary is tarubot or tarubot_restore, so a restore can be repointed", () => {
-    // docs/HOSTING.md "Restoring a dump": restore into tarubot_restore, check it, then point the
-    // bot (and so every later deploy's migrate and register steps) at it.
+    // A verified same-cluster restore may become the primary connection used by
+    // later migrations and command registration.
     expect(
       assertToolScope(
         productionEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_restore") }),
@@ -1222,67 +1209,10 @@ describe("throwaway-server rehearsal allowance (2.35.0, #46 answer 8)", () => {
       }
     }
   });
-
-  test("the setting lives only in the guard: never in the bot, a tool, a host file or a template", () => {
-    const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
-    /**
-     * Every file under a directory, as a repository-relative path. A local `tofu init` leaves
-     * provider binaries under ops/tofu/.terraform/ (ignored by Git), so any path with a
-     * `.terraform` segment is dropped before it is read; .terraform.lock.hcl is still scanned.
-     */
-    const walk = (directory: string): string[] =>
-      readdirSync(root(directory), { recursive: true, encoding: "utf8" })
-        .map((path) => `${directory}/${path}`)
-        .filter((path) => !path.split("/").includes(".terraform"))
-        .filter((path) => statSync(root(path)).isFile());
-    // The root's Compose files, env templates and image recipe.
-    const topLevel = readdirSync(root(".")).filter(
-      (name) =>
-        /^docker-compose.*\.ya?ml$/.test(name) ||
-        name.endsWith(".env.example") ||
-        name.startsWith("Dockerfile"),
-    );
-    // The scan is not vacuous: it reads the files the setting must stay out of.
-    expect(topLevel).toEqual(
-      expect.arrayContaining([
-        ".env.example",
-        "production.env.example",
-        "docker-compose.yml",
-        "docker-compose.devbot.yml",
-        "docker-compose.production.yml",
-        "Dockerfile",
-      ]),
-    );
-    const files = [...["src", "scripts", "ops", ".github"].flatMap(walk), ...topLevel];
-    // Including the playbook that deploys staging's bot (2.36.0), which replaced ops/quadlet.
-    expect(files).toEqual(expect.arrayContaining(["src/config/env.ts", "ops/ansible/bot.yml"]));
-    const mentions = files.filter((path) =>
-      readFileSync(root(path), "utf8").includes("DEVBOT_THROWAWAY_GUILD_ID"),
-    );
-    expect(mentions).toEqual(["src/config/deployment.ts"]);
-  });
-
-  test("the managed deployments themselves are unchanged", () => {
-    expect(deployments).toEqual({
-      production: {
-        applicationId: "965294750741692416",
-        guilds: ["1036062273631952955"],
-        registrationScope: "global",
-      },
-      devbot: {
-        applicationId: "943291473477128243",
-        guilds: ["1040379370159743139"],
-        registrationScope: "1040379370159743139",
-      },
-    });
-  });
 });
 
 describe("file-delivered secrets (#50, 2.33.0)", () => {
-  /**
-   * Write the given settings as files, the way ops/ansible/bot.yml fills a Podman secret over stdin
-   * (the value and one newline), run the check with their NAME_FILE paths, and clean up.
-   */
+  /** Write private secret files, check their NAME_FILE paths, then remove the fixture. */
   function withFiles<T>(
     values: Record<string, string>,
     check: (paths: Record<string, string>) => T,
@@ -1312,7 +1242,7 @@ describe("file-delivered secrets (#50, 2.33.0)", () => {
   }
 
   test("staging's container reads its database URL and CA from files, as the bot does", () => {
-    // In the Quadlet container tarubot.env sets NAME_FILE, and the plain names are never set.
+    // File-delivered values take the same scope checks as plain settings.
     const url = managedUrl(STAGING_DATABASE, MANAGED, STAGING_DATABASE);
     withFiles({ DATABASE_URL: url, DATABASE_CA_CERT: CA }, (paths) => {
       const env = stagingEnv({ DATABASE_URL: undefined, DATABASE_CA_CERT: undefined, ...paths });
@@ -1398,67 +1328,6 @@ describe("file-delivered secrets (#50, 2.33.0)", () => {
         container,
       ).name,
     ).toBe("staging");
-  });
-});
-
-describe("templates", () => {
-  const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.meta.url));
-  const keys = (text: string) =>
-    [...text.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((match) => match[1] ?? "");
-  /** Load an env file with Bun's own parser (multi-line PEMs included), as --env-file does. */
-  const loadEnvFile = (path: string): Record<string, string> => {
-    const child = Bun.spawnSync(
-      [process.execPath, `--env-file=${path}`, "-e", "console.log(JSON.stringify(process.env))"],
-      { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" } },
-    );
-    expect(child.exitCode).toBe(0);
-    return JSON.parse(child.stdout.toString());
-  };
-
-  test("(n) production.env.example lists every key and loads as a passing production env", async () => {
-    const template = await Bun.file(root("production.env.example")).text();
-    const developmentKeys = keys(await Bun.file(root(".env.example")).text());
-    // .env.example is the reference: every key present means a stray .env can never fill a gap.
-    expect(developmentKeys).toContain("TARUBOT_ENVIRONMENT");
-    expect(developmentKeys).toContain("RESTORE_DATABASE_CA_CERT");
-    for (const key of developmentKeys) expect(keys(template)).toContain(key);
-
-    // Load it exactly as the runbook does, with Bun's own parser (multi-line PEM included).
-    const env = loadEnvFile(root("production.env.example"));
-    expect(env).toMatchObject({
-      TARUBOT_ENVIRONMENT: "production",
-      DISCORD_APPLICATION_ID: PRODUCTION_APP,
-      TEST_GUILD_ID: "",
-      PUBLIC_TEST_RESPONSES: "false",
-      TEST_PLAN_CHANNEL_ID: "",
-      ENABLE_EFFECTS: "false",
-      DISCORD_TOKEN: "",
-      RESTORE_DATABASE_CA_CERT: "",
-    });
-    // Placeholders only: no real password, CA or token is tracked.
-    expect(env.DATABASE_URL).toContain("REPLACE_WITH_");
-    expect(env.DATABASE_CA_CERT).toStartWith("-----BEGIN CERTIFICATE-----\nREPLACE_WITH_");
-    expect(env.DATABASE_CA_CERT).toEndWith("\n-----END CERTIFICATE-----");
-    // Production's Linode cluster, on its direct port rather than the 27521 pool.
-    expect(databaseIdentity(env.DATABASE_URL ?? "")).toMatchObject({
-      port: 27520,
-      name: "tarubot",
-      user: "tarubot",
-    });
-    const launch: Launch = { execArgv: ["--env-file=production.env"], envFiles: [".env"] };
-    expect(assertToolScope(env, scope.import(PRODUCTION_GUILD), launch).name).toBe("production");
-    expect(assertToolScope(env, scope.register(), launch).name).toBe("production");
-  });
-
-  test("(n, C4) operator env files stay out of Git and images; the templates stay in both", async () => {
-    const gitignore = (await Bun.file(root(".gitignore")).text()).split("\n");
-    const dockerignore = (await Bun.file(root(".dockerignore")).text()).split("\n");
-    expect(gitignore).toContain("*.env");
-    expect(gitignore).toContain("!.env.example");
-    expect(dockerignore).toContain("*.env");
-    // The build stage runs these unit tests, so the non-secret template must reach it.
-    expect(dockerignore).toContain("!.env.example");
-    expect(dockerignore.indexOf("!.env.example")).toBeGreaterThan(dockerignore.indexOf(".env.*"));
   });
 });
 

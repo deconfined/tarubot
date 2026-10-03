@@ -1,10 +1,7 @@
-# Production host: the bot, with its in-process Lodestone parser (2.21.0), against the external
-# managed PostgreSQL. Self-contained (no bundled postgres service). Pin the release and start with:
-#   TARUBOT_IMAGE_TAG=X.Y.Z docker compose -f docker-compose.production.yml up -d --wait --remove-orphans
-# (--remove-orphans removes the parser sidecar container that releases before 2.21.0 ran.)
-# The project directory's .env (mode 600, never committed) supplies the token, DATABASE_URL and CA;
-# see docs/HOSTING.md. Exactly one bot process may write to the database: the writer lease
-# makes any second one wait, and migrate.js refuses pending migrations while this bot runs.
+# Production bot against external managed PostgreSQL. Deploy with an exact digest;
+# the private host .env supplies settings, not release identity. ops/deploy.sh passes
+# --project-name tarubot, the central --env-file and the release worktree manifest.
+# Exactly one writer holds the database lease; migrations run only while it is stopped.
 x-logging: &logging
   # Bounded local logs so a busy day can't fill the disk.
   driver: json-file
@@ -14,13 +11,13 @@ x-logging: &logging
 
 services:
   tarubot:
-    image: ${TARUBOT_IMAGE:-ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to the release}}
+    image: ghcr.io/deconfined/tarubot@${TARUBOT_IMAGE_DIGEST:?Set TARUBOT_IMAGE_DIGEST to the approved release digest}
     environment:
       # The managed cluster's direct connection, verified with its CA.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed tarubot database}
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN}
-      DISCORD_APPLICATION_ID: "965294750741692416"
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:?Set DISCORD_APPLICATION_ID to the production application}
       # Tools run inside this container (docker compose run) resolve the production profile.
       TARUBOT_ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -63,12 +60,12 @@ services:
       retries: 3
       # A new bot waits (unready) for the writer lease while a previous one stops.
       start_period: 60s
-    restart: unless-stopped
+    # Delivery forces "no" until sustained observation and durable acceptance.
+    restart: ${TARUBOT_RESTART_POLICY:-unless-stopped}
     stop_grace_period: 30s
     logging: *logging
-    # Container hardening (2.30.3, #51), as in docker-compose.yml: the bot writes no file at
-    # runtime, so the root filesystem is read-only with no tmpfs, it keeps no capability, and
-    # nothing in it may gain privileges. docs/HOSTING.md "Container hardening" has the evidence.
+    # The bot writes no runtime file: read-only root, no writable mounts, no
+    # capabilities, and no opportunity to gain privileges.
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -80,7 +77,7 @@ services:
   # the unencrypted dump, and a logging driver would copy it to disk even while it is piped, so
   # logging is off; `docker compose run` still streams stdout to the pipe.
   backup:
-    image: postgres:18.4-alpine
+    image: docker.io/library/postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     profiles: [backup]
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed tarubot database}

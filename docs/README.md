@@ -11,11 +11,8 @@ The [threat model](THREAT_MODEL.md) defines engineering scope: minimal complexit
 | Change configuration or maintenance-tool guards | [CONFIGURATION](CONFIGURATION.md) |
 | Change Lodestone parsing or selectors | [LODESTONE](LODESTONE.md) |
 | Build a Discord reply | [REPLIES](REPLIES.md) |
-| Prepare development testing | [DEV_GUILD](DEV_GUILD.md), [TEST_PLANS](TEST_PLANS.md) |
-| Change CI or update dependencies | [CI_CD](CI_CD.md) |
-| Operate deployment | [DEPLOYMENT](DEPLOYMENT.md) |
-| Check health, back up or recover | [HOSTING](HOSTING.md) |
-| Operate infrastructure | [OpenTofu runbook](../ops/tofu/README.md) |
-| Finish the release pipeline | [PIPELINE](PIPELINE.md) |
+| Prepare development testing and startup plans | [DEV_GUILD](DEV_GUILD.md) |
+| Change CI or update dependencies | [CONTRIBUTING](../CONTRIBUTING.md) |
+| Release, provision, cut over, back up or recover | [DEPLOYMENT](DEPLOYMENT.md) |
 
 Use issues for remaining work and PRs/CI for review and verification. Record important manual acceptance there with version/commit, target role, outcome and unexercised cases. Historical designs and rollout details remain in Git; keep current instructions in one place.

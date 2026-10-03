@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'sleep %s\n' "$*" >>"$SIM/argv"
+# Observation windows cost no wall time in the isolated subprocess tests.
+# Signal tests hold at this exact boundary until the parent receives TERM.
+if [[ -e $SIM/hold-observe ]]; then
+  touch "$SIM/observe-held"
+  while [[ -e $SIM/hold-observe ]]; do /bin/sleep 0.05; done
+fi

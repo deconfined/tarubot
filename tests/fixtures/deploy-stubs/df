@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# A simulated df for tests/unit/deploy-script.test.ts: 100 GB free on /.
-printf 'Avail\n100000000000\n'

@@ -7,7 +7,7 @@ Shared DevBot is not a disposable fixture. Stopping/restarting it, migrating its
 - Use the development application/token, test-guild scope and `tarubot_dev` database. The Compose overlay enforces database and guild scope; local tools also require the database URL to name `tarubot_dev`.
 - Use both Compose files on **every** command. Set an explicit release tag: shared DevBot's `.env` must not be assumed to pin one.
 - Never put production credentials in the checkout's `.env`. Bun loads it automatically.
-- One application runs in one place only. Do not restart an old fallback VM or local bot after its token has moved to staging.
+- One application runs in one place only. Fence its previous process before moving a token or starting a replacement.
 
 For a fresh, separately owned local installation, copy `.env.example`, supply your development identity and scope, and expose only loopback PostgreSQL for compiled local tools:
 
@@ -23,7 +23,7 @@ Use a dedicated database/application; this setup is not permission to use shared
 
 After the owner's go-ahead:
 
-1. Update [the startup plan](TEST_PLANS.md), read the changelog/schema changes and pull the pinned image without changing the running process.
+1. Update [the startup plan](#startup-test-session-plans), read the changelog/schema changes and pull the pinned image without changing the running process.
 2. Stop `tarubot` using the development overlay. Dump `tarubot_dev` into `.cache/backups/tarubot_dev-before-X.Y.Z-<sha>.dump` and restore it to `tarubot_dev_restore_test`. Follow the site's [backup procedure](../site/src/content/docs/deploy/operations.md#backup), substituting these names and Compose files.
 3. Run `check-restore.js` with the deployed build or `--schema-version <old head>.sql`. Both databases still have the old schema.
 4. If needed, rehearse the migration in the restore copy with the new image, then migrate DevBot while stopped. The rehearsal command derives its URL inside the container, never on the terminal:
@@ -50,10 +50,16 @@ TARUBOT_IMAGE_TAG=X.Y.Z docker compose -f docker-compose.yml -f docker-compose.d
 
 Append `-f docker-compose.build.yml` to the normal development command and use `up -d --build --wait`. This selects the local image and mounts editable test plans read-only. Do not mistake that image for a published release. Public test replies apply only in the scoped test guild and do not bypass authorization.
 
-## Staging handover and acceptance
-
-Staging uses `tarubot_staging`, verified TLS and the `staging` profile, with secrets in its GitHub environment. The owner must stop local DevBot before restoring equal-schema data and resetting/moving its token; see [deployment setup](DEPLOYMENT.md#first-host-setup-owner-checklist). Publication or a configure-only run does not prove the handover happened.
+## Manual acceptance
 
 Use a throwaway server for destructive permission/visibility rehearsal under the local-DevBot-only [allowance](CONFIGURATION.md#devbot-rehearsal-exceptions). Remove DevBot/delete the throwaway while still scoped there, then restore the normal test-guild setting. This does not authorize production onboarding.
 
 Record manual evidence in the relevant issue/PR: release/commit, environment role, checks and results, and anything skipped/waived. Use roles, not tester names. Fixture success does not replace live acceptance.
+
+## Startup test-session plans
+
+With `TEST_GUILD_ID` set, each successful startup posts a plan to that guild's unique `chat` text channel. Set `TEST_PLAN_CHANNEL_ID` if ambiguous, or `TEST_PLAN_FILE` for another plan file. Inspection and registration tools never post plans.
+
+Edit `test-plans/current.json` before an authorized session. Keep separate **You** (human commands/prerequisites), **Me** (assistant implementation/diagnosis) and **DevBot** (automatic acquisition/reconciliation/delivery) checklists. Each must fit one 1,024-character embed field; invalid plans produce a startup diagnostic. The announcement includes startup time and effect-enable state, with mentions disabled.
+
+`docker-compose.build.yml` mounts editable plans read-only; changes take effect at the next startup without rebuilding. Combine it with the development overlay for database isolation. Published images carry their own default plan. A plan grants no permission to operate shared DevBot.

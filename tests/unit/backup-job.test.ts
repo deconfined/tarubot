@@ -1,102 +1,154 @@
-/**
- * The daily database backup (2.24.0): ops/backup.sh runs on the production host and, with no
- * argument, the production Compose file's `backup` service dumps the database. These pin the
- * properties that keep it safe: strict shell error handling, no unencrypted dump on disk, secrets
- * kept out of process arguments, a failure reported to healthchecks.io, and a service `up` never
- * starts. The live run's record remains in Git history. Staging's backup script,
- * ops/ansible/files/bot/tarubot-backup (2.36.0), and its systemd units are pinned in
- * backup-quadlet.test.ts beside this Compose path, which that file also runs with stand-ins.
- */
-import { expect, setDefaultTimeout, test } from "bun:test";
-import { YAML } from "bun";
-import { z } from "zod";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import {
+  backup,
+  envContents,
+  events,
+  hostSandbox,
+  hostToolsAvailable,
+  knob,
+  type HostSandbox,
+} from "../fixtures/host-runtime.js";
 
-// Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
 setDefaultTimeout(120_000);
+const boxes: HostSandbox[] = [];
+afterAll(() => {
+  for (const box of boxes) rmSync(box.directory, { recursive: true, force: true });
+});
+const sandbox = () => {
+  const box = hostSandbox();
+  boxes.push(box);
+  return box;
+};
 
-/** Read a repository file relative to this test. */
-const read = (path: string) => Bun.file(new URL(`../../${path}`, import.meta.url)).text();
-
-test("the backup script is valid bash with strict error handling and private files", async () => {
-  const check = Bun.spawnSync([
-    "bash",
-    "-n",
-    new URL("../../ops/backup.sh", import.meta.url).pathname,
-  ]);
-  expect(check.exitCode).toBe(0);
-  const script = await read("ops/backup.sh");
-  expect(script).toStartWith("#!/usr/bin/env bash\n");
-  expect(script).toContain("set -Eeuo pipefail");
-  expect(script).toContain("umask 077");
-  // Any failure after the start reports which step failed.
-  expect(script).toMatch(/trap '.*notify \/fail/u);
+test("backup rejects positional arguments before reading settings or acquiring a lock", () => {
+  const box = sandbox();
+  const result = backup(box, {}, ["unexpected"]);
+  expect(result.code).toBe(64);
+  expect(existsSync(box.state)).toBe(false);
+  expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
 });
 
-test("the dump is encrypted as it streams, and secrets never reach curl's arguments", async () => {
-  const script = await read("ops/backup.sh");
-  // pg_dump's output goes straight into age: no plaintext file exists at any point.
-  expect(script).toMatch(
-    /compose run --rm --no-deps -T backup \| age --encrypt --recipients-file/u,
-  );
-  expect(script).not.toMatch(/pg_dump[^\n]*> /u);
-  // Credentials and ping URLs go through --config on stdin, never --user or a URL argument.
-  expect(script).not.toMatch(/--user\b|-u "\$/u);
-  expect(script.match(/curl --config -/gu)).toHaveLength(2);
-  // Only https storage is accepted.
-  expect(script).toContain("BACKUP_STORAGE_ENDPOINT must use https.");
-});
-
-test("the backup service is off by default and dumps with the bot's verified TLS settings", async () => {
-  const compose = z
-    .object({
-      services: z.record(
-        z.string(),
-        z
-          .object({
-            image: z.string(),
-            profiles: z.array(z.string()).optional(),
-            environment: z.record(z.string(), z.string()).optional(),
-            entrypoint: z.array(z.string()).optional(),
-            ports: z.unknown().optional(),
-            logging: z.unknown().optional(),
-          })
-          .passthrough(),
-      ),
-    })
-    .parse(YAML.parse(await read("docker-compose.production.yml")));
-  const backup = compose.services.backup;
-  if (!backup) throw new Error("Missing the backup service");
-  // Behind a profile, `up` never starts it; `docker compose run backup` does.
-  expect(backup.profiles).toEqual(["backup"]);
-  expect(backup.ports).toBeUndefined();
-  // Its stdout is the unencrypted dump: a logging driver would copy it to disk even while piped.
-  expect(backup.logging).toEqual({ driver: "none" });
-  // The same PostgreSQL image as the registry deployment, so pg_dump matches the server's major.
-  const base = YAML.parse(await read("docker-compose.yml")) as {
-    services: { postgres: { image: string } };
-  };
-  expect(backup.image).toBe(base.services.postgres.image);
-  expect(backup.environment).toMatchObject({
-    PGSSLMODE: "verify-full",
-    PGSSLROOTCERT: "/tmp/ca.crt",
+describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => {
+  test("streams the dump to encryption, uploads ciphertext and a settings copy, and cleans temporary files", () => {
+    const box = sandbox();
+    const result = backup(box);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("backup ok: tarubot-20261003T120000Z\n");
+    expect(events(box)).toEqual([
+      "backup",
+      "age-database",
+      "age-settings",
+      "upload-database",
+      "upload-settings",
+    ]);
+    expect(readdirSync(join(box.directory, "tmp"))).toEqual([]);
+    const uploads = join(box.sim, "uploads");
+    expect(readdirSync(uploads).sort()).toEqual([
+      "tarubot-20261003T120000Z.dump.age",
+      "tarubot-env-20261003T120000Z.age",
+    ]);
+    for (const path of readdirSync(uploads)) {
+      const ciphertext = readFileSync(join(uploads, path), "utf8");
+      expect(ciphertext).toContain("AGE-ENCRYPTED");
+      expect(ciphertext).not.toContain("database-plaintext-marker");
+      expect(ciphertext).not.toContain("private-database-password");
+    }
+    const argv = readFileSync(join(box.sim, "argv"), "utf8");
+    for (const secret of [
+      "backup-access",
+      "backup-secret",
+      "private-check",
+      "private-database-password",
+      "private-discord-token",
+    ])
+      expect(argv).not.toContain(secret);
+    expect(readFileSync(join(box.sim, "pings"), "utf8")).toContain("/private-check/start");
+    expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
   });
-  expect(backup.environment?.DATABASE_URL).toStartWith("${DATABASE_URL:?");
-  expect(backup.environment?.DATABASE_CA_CERT).toStartWith("${DATABASE_CA_CERT:?");
-  // $$ keeps Compose from splicing the multi-line CA into the command.
-  const command = backup.entrypoint?.join(" ") ?? "";
-  expect(command).toContain('"$$DATABASE_CA_CERT"');
-  expect(command).toContain('pg_dump --format=custom --no-owner --no-privileges "$$DATABASE_URL"');
-});
 
-test("the bucket keeps daily copies for 30 days and monthly dumps for a year", async () => {
-  const rules = [
-    ...(await read("ops/bucket-lifecycle.xml")).matchAll(
-      /<Prefix>([^<]+)<\/Prefix>\s*<\/Filter>\s*<Status>Enabled<\/Status>\s*<Expiration><Days>(\d+)<\/Days>/gu,
-    ),
-  ].map((match) => [match[1], Number(match[2])]);
-  expect(rules).toEqual([
-    ["daily/", 30],
-    ["env/", 30],
-    ["monthly/", 365],
-  ]);
+  test("the first day of the month also uploads the encrypted dump to monthly", () => {
+    const box = sandbox();
+    writeFileSync(join(box.sim, "monthly"), "");
+    expect(backup(box).code).toBe(0);
+    expect(events(box)).toContain("upload-monthly");
+  });
+
+  for (const failure of ["backup", "age", "upload"]) {
+    test(`${failure} failure cannot announce backup success and removes encrypted temporary files`, () => {
+      const box = sandbox();
+      knob(box, failure);
+      const result = backup(box);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("backup ok");
+      expect(readFileSync(join(box.sim, "pings"), "utf8")).toContain("/private-check/fail");
+      expect(readdirSync(join(box.directory, "tmp"))).toEqual([]);
+      expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
+    });
+  }
+
+  test("daily backup uses the durable successful worktree and digest without changing root settings", () => {
+    const box = sandbox();
+    const worktree = join(box.state, "releases/current");
+    mkdirSync(worktree, { recursive: true });
+    cpSync(
+      join(box.root, "docker-compose.production.yml"),
+      join(worktree, "docker-compose.production.yml"),
+    );
+    writeFileSync(
+      join(box.state, "current"),
+      JSON.stringify({ worktree, digest: box.target.digest }),
+    );
+    expect(backup(box, { TARUBOT_IMAGE_DIGEST: "" }).code).toBe(0);
+    expect(readFileSync(join(box.sim, "argv"), "utf8")).toContain(
+      `-f ${worktree}/docker-compose.production.yml`,
+    );
+    expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
+  });
+
+  test("an unheld inherited-lock flag is refused", () => {
+    const box = sandbox();
+    expect(backup(box, { TARUBOT_HOST_LOCK_HELD: "true" }).code).not.toBe(0);
+    expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
+  });
+
+  test("the shared local host lock prevents daily backup from overlapping a release", async () => {
+    const box = sandbox();
+    mkdirSync(box.state, { recursive: true });
+    const holder = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        'exec 9>"$1"; flock -n 9; printf "held\\n"; read -r line',
+        "holder",
+        join(box.state, "host.lock"),
+      ],
+      {
+        env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "ignore",
+      },
+    );
+    try {
+      const reader = holder.stdout.getReader();
+      const signal = await reader.read();
+      expect(new TextDecoder().decode(signal.value)).toBe("held\n");
+      reader.releaseLock();
+      expect(backup(box).code).not.toBe(0);
+      expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
+    } finally {
+      holder.stdin.end();
+      await holder.exited;
+    }
+  });
 });

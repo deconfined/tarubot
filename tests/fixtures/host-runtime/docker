@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'docker %s\n' "$*" >>"$SIM/argv"
+record() { printf '%s\n' "$*" >>"$SIM/events"; }
+fail() { [[ ! -e $SIM/fail-$1 ]]; }
+case $1 in
+  ps)
+    if [[ $2 == -aq ]] || jq -e '.[0].State.Running' "$SIM/container.json" >/dev/null; then
+      jq -r '.[0].Id' "$SIM/container.json"
+    fi
+    ;;
+  inspect)
+    if [[ -e $SIM/fail-inspect && -e $SIM/started ]]; then exit 1; fi
+    if [[ -e $SIM/fail-restart && -e $SIM/observed ]]; then
+      jq '.[0].RestartCount = 1' "$SIM/container.json"
+    else cat "$SIM/container.json"; fi
+    ;;
+  image)
+    key=target
+    if [[ $3 == $(jq -r .live.id "$SIM/config.json") ]]; then key=live; fi
+    jq --arg key "$key" '[.[$key] | {Id:.id,RepoDigests:["ghcr.io/deconfined/tarubot@"+.digest],Config:{Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit}}}]' "$SIM/config.json" >"$SIM/image.json"
+    if [[ $key == target && -e $SIM/fail-label ]]; then
+      jq '.[0].Config.Labels["org.opencontainers.image.revision"] = "wrong"' "$SIM/image.json"
+    elif [[ $key == target && -e $SIM/fail-digest ]]; then
+      jq '.[0].RepoDigests = []' "$SIM/image.json"
+    else cat "$SIM/image.json"; fi
+    ;;
+  pull) record "pull $2"; fail pull ;;
+  update)
+    [[ $2 == --restart && $3 == unless-stopped && $4 == $(jq -r '.[0].Id' "$SIM/container.json") ]]
+    [[ -f $HOME/.local/state/tarubot-deploy/current ]]
+    record restart-policy
+    jq '.[0].HostConfig.RestartPolicy.Name = "unless-stopped"' "$SIM/container.json" >"$SIM/next.json"
+    mv "$SIM/next.json" "$SIM/container.json"
+    fail restart-policy
+    ;;
+  stop)
+    record stop
+    [[ -f $HOME/.local/state/tarubot-deploy/pending ]]
+    fail stop
+    jq '.[0].State.Running = false' "$SIM/container.json" >"$SIM/next.json"
+    mv "$SIM/next.json" "$SIM/container.json"
+    ;;
+  exec)
+    record observe
+    touch "$SIM/observed"
+    [[ ${*: -2:1} == $(jq -r .target.version "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
+    fail probe
+    ;;
+  compose)
+    shift
+    root='' env_file='' manifest='' project=''
+    while [[ $1 == --* || $1 == -f ]]; do
+      case $1 in
+        --project-name) project=$2 ;;
+        --project-directory) root=$2 ;;
+        --env-file) env_file=$2 ;;
+        -f) manifest=$2 ;;
+        *) exit 90 ;;
+      esac
+      shift 2
+    done
+    [[ $project == tarubot && $root == "$HOME/tarubot" && $env_file == "$HOME/tarubot/.env" ]]
+    [[ -f $manifest && ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
+    case $1 in
+      config)
+        record config
+        fail config
+        policy=${TARUBOT_RESTART_POLICY:-unless-stopped}
+        [[ ! -e $SIM/fail-restart-config ]] || policy=unless-stopped
+        jq -n --arg policy "$policy" '{services:{tarubot:{restart:$policy}}}'
+        ;;
+      run)
+        case "$*" in
+          *backup)
+            record backup
+            fail backup
+            printf 'database-plaintext-marker'; printf '%8192s' padding
+            ;;
+          *migrate.js)
+            [[ $* == *'--pull never'* ]]
+            record migrate
+            fail migrate
+            printf '%s\n' 'Schema ready.'
+            ;;
+          *register.js*)
+            [[ $* == *'--pull never'* && $* == *'--global'* ]]
+            record register
+            fail register
+            ;;
+          *) exit 91 ;;
+        esac
+        ;;
+      up)
+        [[ $* == *'--pull never'* && $* == *'--force-recreate'* && $* == *'--wait'* ]]
+        record start
+        jq --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" '[.target | {Id:"c0ffee000002",Image:.id,RestartCount:0,HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}},Config:{Image:("ghcr.io/deconfined/tarubot@"+.digest),Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit,"com.docker.compose.project":"tarubot","com.docker.compose.oneoff":"False"}}}]' "$SIM/config.json" >"$SIM/container.json"
+        touch "$SIM/started"
+        fail start
+        ;;
+      *) exit 92 ;;
+    esac
+    ;;
+  *) exit 93 ;;
+esac
