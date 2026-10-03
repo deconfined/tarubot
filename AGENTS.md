@@ -1,17 +1,16 @@
 # Repository rules for agents
 
-Use [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and the change checklist, and [docs/README.md](docs/README.md) for task references. These rules constrain authorization; documentation or a test plan never grants permission to operate a live system.
+Use [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and releases, and [docs/README.md](docs/README.md) for task references. A requested source change includes the credential-free local checks needed to verify it; no separate approval is needed for each ordinary edit or check. Source work does not authorize live operations.
 
 ## Implementation
 
-- Follow the agreed [threat model](docs/THREAT_MODEL.md): minimal complexity, minimal bespoke design; use standard components wherever possible.
-- Work within this repository. Use Bun for installation, scripts, tests and builds. The sole exception is `site/`: use its pinned pnpm/Node from that directory; add no root site scripts.
-- Keep commands, gateway events and components in their discoverable modules. Add explanatory comments to first-party code, tooling and tests.
-- Use Drizzle and `src/infrastructure/postgres/schema.ts`. Bind transaction work with `orm(client)`; state, audit and outbox writes use that client. Applied numbered SQL migrations are immutable. Raw SQL is for migration/control, session locks, probes and catalog-based restore verification. See [PERSISTENCE](docs/PERSISTENCE.md).
-- Lodestone parsing runs in process with TaruBot's own parser; no Nodestone/sidecar. Selectors follow upstream HEAD live. A bundled refresh must commit verified `bun.lock` and `upstream-revisions.json` together.
-- Use checks appropriate to the change: typecheck, lint, format:check, build, unit and contract suites; `test:docker` adds disposable PostgreSQL. The contributor guide shows the credential-free synthetic fixture path. Use the supplied private fixture when relevant and available, never commit it.
-- Normal Compose deployments pull GHCR images. Local DevBot adds `docker-compose.devbot.yml` and uses `tarubot_dev`; source testing also adds `docker-compose.build.yml`. Update `test-plans/current.json` before a new session. Ask before restarting shared DevBot, migrating it, editing its `.env` or writing to Discord. Never run one application in two places.
-- Update affected site pages with user-facing behavior. Pages use placeholders, not production/DevBot IDs, member/character data, the FC's name, infrastructure identifiers, secrets or ping URLs. The sole approved exception is the Thank you page's tester names and maintainer contacts. Name testers nowhere else: records use roles, tests invented names. Do not merge a site change with a red Documentation site / Build.
+- Prefer standard components and minimal bespoke design; follow the [threat model](docs/THREAT_MODEL.md).
+- Work within this repository. Use Bun, except in `site/`, which uses its pinned pnpm/Node. Add no root site scripts.
+- Keep commands, events and components discoverable, and explain consequential invariants in comments.
+- Use Drizzle, `src/infrastructure/postgres/schema.ts` and `orm(client)` for transaction-bound state, audit and outbox writes. Applied SQL migrations are immutable; follow [PERSISTENCE](docs/PERSISTENCE.md) for SQL and restore checks.
+- Parse Lodestone in process, with selectors following upstream HEAD live. Commit verified `bun.lock` and `upstream-revisions.json` together for bundled refreshes.
+- Run checks appropriate to the changed behavior using the contributor guide's credential-free fixtures. Keep private fixtures out of Git.
+- Update affected user-facing site pages. Use placeholders, not private member or infrastructure data, secrets or ping URLs. Tester names and maintainer contacts belong only on Thank you. Site changes require a green Documentation site / Build.
 
 ## Deployment boundaries
 
@@ -24,20 +23,29 @@ The confirmed 2026-09-29 extension also remains verbatim:
 
 - Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
 
-Agents hold no host-access key, state, saved plan or state passphrase. Never enable, disable or cancel Deploy or Infrastructure. Never operate real infrastructure with `tofu plan`, `apply`, `import` or state edits, or run playbooks on a real host. Permitted checks are fmt/validate/mock tests, offline playbook checks, public run evidence and authorized throwaway-lab rehearsals. Do not retry a refused real-infrastructure action in another form. Environment changes, host rebuilds and DevBot's token move are owner steps.
+Agents hold no host-access key, state, saved plan or state passphrase, and never enable, disable or cancel live Deploy or Infrastructure workflows. Real provider operations, host playbooks, environment changes, host rebuilds and DevBot's token move remain owner steps. Use offline validation, mock tests, public evidence or authorized throwaway labs; never retry a refused live operation in another form. Ask before restarting shared DevBot, migrating it, editing its `.env` or writing to Discord. Never run one application in two places.
 
 ## Current operational contracts
 
-- Production still runs Compose against the owner-provisioned Linode managed database. Staging's implementation uses AlmaLinux 10, SELinux enforcing and rootless Quadlet. [DEPLOYMENT](docs/DEPLOYMENT.md) distinguishes implemented paths from proposals; nothing authorizes replacing/provisioning a cluster or changing cloud resources.
-- Infrastructure is currently dispatch-only: read-only `infra-plan` Plan, then owner-approved `infra` Apply. cloud-init sets public access keys and an optional console hash, never a host key. Configure runs reviewed `main`'s `site.yml` as root; bot deploy runs the release's `bot.yml`. Playbooks use `ansible.builtin` only, no Galaxy.
-- Preserve production's byte-identical Compose path until its separately reviewed 2.37.0 move: `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts` and deploy.yml's `deploy`/`notify` jobs are SHA-256-pinned in tests. Compose keeps its `FLOOR`. The unused legacy Quadlet modes in `deploy.sh` remain until 2.38.0 cleanup: do not extend, fix or rely on them.
+- Production currently uses Compose and the owner-provisioned Linode managed database. Existing staging and infrastructure implementation details are in [DEPLOYMENT](docs/DEPLOYMENT.md), not requirements to reproduce in the replacement. No source change authorizes a live cutover, new cluster or cloud-resource change.
+- Until the pipeline-reset authorization below is approved and merged to `main`, preserve the byte-identical production files and jobs: `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts` and deploy.yml's `deploy`/`notify` jobs. Keep Compose's `FLOOR` and leave unused legacy Quadlet modes untouched.
 - Keep “Modules loaded” (`src/main.ts`) and “Database writer lease acquired” (`src/application/lifecycle.ts`) at info, with their exact existing text. The live Compose deploy script relies on them to judge a new release.
 - Name no host, address, zone, account or cluster ID in new repository content or public workflow output. Values remain in environments; examples use `example.org` and documentation addresses. Historic evidence stays in Git, not copied into new examples.
 
+## Pipeline reset proposal
+
+**Effective only after the owner's approval and merge to `main`.**
+
+- Authorize a repository-only replacement or removal of build/deployment workflow definitions, supporting tooling, obsolete tests and redundant internal documentation.
+- For this reset, previous production source-file byte-identity pins and version-based retirement dates no longer constrain source changes. Product invariants, immutable applied migrations and live-operation boundaries remain binding.
+- Editing or removing Deploy and Infrastructure workflow definitions through reviewed source changes is permitted. This is distinct from enabling, disabling, cancelling or re-running live workflows through GitHub, which remains prohibited for agents.
+- Automate release building, publication, deployment and necessary database migrations. Retain the owner's GitHub `production` environment approval as the routine deployment gate; infrastructure provisioning may remain owner-operated.
+- This authorizes no live deployment, provisioning, host/database mutation, secret access, environment/protection-rule change, workflow dispatch or push. Preserve the running production system until a separately owner-approved cutover.
+
 ## Versioning and Git
 
-- Version bot releases, not repository commits. Documentation, tests, CI, pipeline and other maintenance need no application version, changelog or startup-plan change. Application changes may accumulate before an explicit release: increment SemVer, update `CHANGELOG.md` and synchronize the startup plan when releasing. Versions never decrease. Regenerate affected lockfiles whenever dependencies change; update session plans before authorized development sessions. Build/deploy a running bot only when authorized.
-- Use feature branches and PRs, never commit directly to `main`. Merges require an up-to-date CI/security gate and the owner's code-owner approval; merge commits only. A later push dismisses that approval. A published release can immediately configure staging as root.
-- Make frequent local commits for coherent, verified milestones. Inspect status, staged/unstaged diffs and recent history; explicitly stage intended files. Preserve chronology. Sign with configured SSH key `~/.ssh/id_git` (`gpg.format=ssh`); signing failure means stop and ask, never silently commit unsigned.
-- Keep credentials, `.env`, dumps, backups, generated output and local tool state out of Git. Tracked env examples are safe templates.
-- Do not push, rewrite history, discard others' changes, skip hooks or change Git configuration without explicit authorization.
+- Version bot releases, not maintenance commits. Documentation, tests, CI and pipeline work need no bot version, changelog or startup-plan change. Explicit releases increase SemVer and update `CHANGELOG.md` and the startup plan; versions never decrease.
+- Regenerate affected lockfiles for dependency changes. Update `test-plans/current.json` before authorized live development testing, not ordinary documentation or source-only sessions.
+- Use feature branches and PRs. Merge commits require current CI/security checks and the owner's code-owner approval; later pushes dismiss that approval.
+- Make signed local commits for coherent, verified milestones, staging only intended files after reviewing status and diffs. Use configured SSH signing with `~/.ssh/id_git`; signing failure means stop, never commit unsigned.
+- Keep credentials, `.env`, dumps, backups, generated output and local tool state out of Git. Do not push, rewrite history, discard others' changes, skip hooks or change Git configuration without explicit authorization.
