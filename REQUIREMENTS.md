@@ -1,6 +1,6 @@
 # Product and operating constraints
 
-This is a current constraint summary, not a second command reference or release diary. The original specification and approved amendments are preserved in [the requirements record](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md). Where detail matters, consult the linked approval; this cleanup does not revoke or alter it. The [documentation site](https://deconfined.github.io/tarubot/) describes supported behavior, and tests pin the executable contracts.
+This is a current constraint summary, not a second command reference or release diary. Historical decisions remain in [the requirements record](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md); product invariants and confirmed live-operation boundaries remain binding. The [documentation site](https://deconfined.github.io/tarubot/) describes supported behavior. Use [AGENTS.md](AGENTS.md) for source-work rules and the proposed pipeline-reset authorization.
 
 ## Product invariants
 
@@ -30,7 +30,9 @@ The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.
 
 > Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
 
-The implemented pipeline still requires owner approval for infrastructure Apply and production deployment. Production's Compose path remains frozen until its separately reviewed move. The existing managed database cluster is not replaced or newly provisioned by the current module. The [release-integrated safe-auto-apply specification](docs/PIPELINE.md) records future work, not permission to bypass today's gates.
+The implemented pipeline still requires owner approval for infrastructure Apply and production deployment. Until the [pipeline-reset proposal](AGENTS.md#pipeline-reset-proposal) is approved and merged to `main`, production's source files and jobs remain frozen. Once approved and merged, the reset may replace those files and workflow definitions without the previous byte-identity pins or version-based retirement dates. This is repository source authorization, not permission to operate live workflows, change environments or replace the managed database.
+
+The replacement should automate release building, publication, deployment and necessary database migrations, with the owner's GitHub production approval as the routine deployment gate. Infrastructure provisioning may remain owner-operated. Preserve the running production system until a separately owner-approved cutover; historical pipeline designs are not a requirement to reproduce obsolete machinery.
 
 ## Approval references
 
