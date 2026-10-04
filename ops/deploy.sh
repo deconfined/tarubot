@@ -5,14 +5,17 @@
 # environment overrides. No settings or deployment entry are changed by this script.
 set -Eeuo pipefail
 
-readonly FORM='^deploy ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19})$'
+readonly FORM='^deploy (production|staging) ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19})$'
+# The owner binds the target in authorized_keys, never in client environment.
 # Validate before filesystem access, locks or subprocesses, including positional argv.
-if (( $# != 0 )) || [[ ! ${SSH_ORIGINAL_COMMAND-} =~ $FORM ]]; then
+if (( $# != 1 )) || [[ $1 != production && $1 != staging ]] ||
+  [[ ! ${SSH_ORIGINAL_COMMAND-} =~ $FORM ]]; then
   printf '%s\n' 'result refused'
   exit 64
 fi
-readonly VERSION=${BASH_REMATCH[1]} COMMIT=${BASH_REMATCH[5]}
-readonly DIGEST=${BASH_REMATCH[6]} RUN=${BASH_REMATCH[7]}
+if [[ $1 != "${BASH_REMATCH[1]}" ]]; then printf '%s\n' 'result refused'; exit 64; fi
+readonly DEPLOY_TARGET=$1 VERSION=${BASH_REMATCH[2]} COMMIT=${BASH_REMATCH[6]}
+readonly DIGEST=${BASH_REMATCH[7]} RUN=${BASH_REMATCH[8]}
 readonly IMAGE=ghcr.io/deconfined/tarubot
 readonly ROOT=$HOME/tarubot STATE=$HOME/.local/state/tarubot-deploy
 readonly WORKTREE=$STATE/releases/$RUN-$COMMIT
@@ -32,7 +35,7 @@ refuse() { finished=true; printf '%s\n' 'result refused' >&3; exit 1; }
 compose() {
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_RESTART_POLICY=no timeout --kill-after=10 300 docker compose \
     --project-name tarubot --project-directory "$ROOT" --env-file "$ROOT/.env" \
-    -f "$WORKTREE/docker-compose.production.yml" "$@"
+    -f "$WORKTREE/docker-compose.$DEPLOY_TARGET.yml" "$@"
 }
 bot_ids() {
   timeout --kill-after=5 30 docker ps -aq \
@@ -77,9 +80,9 @@ trap 'exit 141' PIPE
 # Write then fsync the file and containing filesystem before crossing the boundary.
 durable_record() {
   local destination=$1
-  jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg digest "$DIGEST" \
+  jq -n --arg target "$DEPLOY_TARGET" --arg version "$VERSION" --arg commit "$COMMIT" --arg digest "$DIGEST" \
     --arg run "$RUN" --arg worktree "$WORKTREE" --arg schema "$SCHEMA" \
-    '{version:$version,commit:$commit,digest:$digest,run:$run,worktree:$worktree,schema:$schema}' \
+    '{target:$target,version:$version,commit:$commit,digest:$digest,run:$run,worktree:$worktree,schema:$schema}' \
     >"$destination.tmp"
   sync -f "$destination.tmp"
   mv "$destination.tmp" "$destination"
@@ -91,7 +94,30 @@ for tool in docker git jq flock timeout sync; do command -v "$tool"; done
 [[ $(stat -c '%a' "$ROOT/.env") == 600 && -O $ROOT/.env ]]
 exec 9>"$STATE/host.lock"
 flock -n 9 || refuse
-[[ ! -e $STATE/pending ]] || refuse
+[[ ! -e $STATE/pending && ! -L $STATE/pending ]] || refuse
+if [[ -e $STATE/current || -L $STATE/current ]]; then
+  [[ -f $STATE/current && ! -L $STATE/current ]] || refuse
+  jq -e --arg target "$DEPLOY_TARGET" '.target == $target' "$STATE/current" || refuse
+fi
+# These compiled guards only inspect settings: no Database, Discord client or
+# writer lease is constructed. Declare the future registration/database scope.
+readonly SCOPE_CHECK='
+  const target = process.argv.at(-1);
+  const {assertToolScope,databaseIdentity} = await import("./dist/src/config/deployment.js");
+  const {secretSetting} = await import("./dist/src/config/secrets.js");
+  const registrationScope = target === "production" ? "global" : process.env.TEST_GUILD_ID;
+  const deployment = assertToolScope(process.env, {
+    tool: "deploy preflight", guilds: target === "staging" ? [registrationScope] : [],
+    discord: "write", databases: ["DATABASE_URL"],
+    globalCommands: target === "production", registerScope: registrationScope
+  });
+  if (deployment.name !== target || process.env.TARUBOT_ENVIRONMENT !== target) throw Error("target");
+  console.log(JSON.stringify({
+    target: deployment.name, applicationId: deployment.applicationId,
+    guilds: deployment.guilds, registrationScope: deployment.registrationScope,
+    database: databaseIdentity(secretSetting(process.env, "DATABASE_URL"))
+  }));
+'
 # One ordinary running writer is required. Bootstrap/recovery is owner work.
 CID=$(bot_ids)
 [[ $CID =~ ^[0-9a-f]{12,64}$ ]] || refuse
@@ -115,6 +141,7 @@ else
   LIVE_DIGEST=${LIVE_REF#"$IMAGE@"}
   [[ $LIVE_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
 fi
+LIVE_SCOPE=$(timeout --kill-after=5 45 docker exec "$CID" bun -e "$SCOPE_CHECK" "$DEPLOY_TARGET")
 IFS=. read -r -a wanted <<<"$VERSION"
 IFS=. read -r -a live <<<"$LIVE_VERSION"
 for i in 0 1 2; do
@@ -144,8 +171,17 @@ jq -e --arg ref "$REF" --arg version "$VERSION" --arg commit "$COMMIT" \
   'length == 1 and (.[0].RepoDigests | index($ref) != null) and .[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $commit' <<<"$TARGET"
 TARGET_ID=$(jq -er '.[0].Id' <<<"$TARGET")
 [[ $TARGET_ID =~ ^sha256:[0-9a-f]{64}$ ]]
-compose config --format json | jq -e --arg wanted "$VERSION" --arg live "$LIVE_VERSION" \
-  '$wanted == $live or .services.tarubot.restart == "no"'
+CONFIG=$(compose config --format json)
+jq -e --arg wanted "$VERSION" --arg live "$LIVE_VERSION" --arg ref "$REF" --arg target "$DEPLOY_TARGET" \
+  '.services.tarubot as $bot | .services.backup as $backup |
+   $bot.image == $ref and $bot.environment.TARUBOT_ENVIRONMENT == $target and
+   ($wanted == $live or $bot.restart == "no") and
+   $backup.environment.DATABASE_URL == $bot.environment.DATABASE_URL and
+   $backup.environment.DATABASE_CA_CERT == $bot.environment.DATABASE_CA_CERT and
+   $backup.environment.PGSSLMODE == "verify-full" and ($backup.profiles | index("backup") != null)' <<<"$CONFIG"
+CANDIDATE_SCOPE=$(compose run --rm --no-deps --pull never -T tarubot bun -e "$SCOPE_CHECK" "$DEPLOY_TARGET")
+[[ $LIVE_SCOPE == "$CANDIDATE_SCOPE" ]] || refuse
+REGISTRATION_SCOPE=$(jq -er .registrationScope <<<"$CANDIDATE_SCOPE")
 # Each sample checks the same container, unchanged restart counter, local image
 # ID, requested immutable digest, labels, ready writer and actual schema checksum.
 observe() {
@@ -189,14 +225,18 @@ durable_record "$STATE/pending"
 public_step stop
 stop_writers
 public_step backup
-TARUBOT_ROOT=$ROOT TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.production.yml \
+TARUBOT_ROOT=$ROOT TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_HOST_LOCK_HELD=true \
-  timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh"
+  timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh" "$DEPLOY_TARGET"
 public_step migrate
 # migrate.js uses the existing transactional migration/writer lease guard.
 compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
 public_step register
-compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/register.js --global
+if [[ $DEPLOY_TARGET == production ]]; then
+  compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/register.js --global
+else
+  compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/register.js --guild "$REGISTRATION_SCOPE"
+fi
 public_step start
 compose up --detach --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 tarubot
 CID=$(bot_ids)

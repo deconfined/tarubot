@@ -10,6 +10,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  deployments,
+  MANAGED_DIRECT_PORTS,
+  STAGING_DATABASE,
+} from "../../src/config/deployment.js";
+import {
   deploy,
   deployScript,
   envContents,
@@ -18,6 +23,7 @@ import {
   hostToolsAvailable,
   knob,
   type HostSandbox,
+  type HostTarget,
 } from "../fixtures/host-runtime.js";
 
 setDefaultTimeout(120_000);
@@ -25,8 +31,8 @@ const boxes: HostSandbox[] = [];
 afterAll(() => {
   for (const box of boxes) rmSync(box.directory, { recursive: true, force: true });
 });
-const sandbox = (releases = true) => {
-  const box = hostSandbox(releases);
+const sandbox = (releases = true, target: HostTarget = "production") => {
+  const box = hostSandbox(releases, target);
   boxes.push(box);
   return box;
 };
@@ -34,12 +40,14 @@ const sandbox = (releases = true) => {
 for (const request of [
   "",
   "deploy",
-  "deploy 2.40.0 bad sha256:bad 1",
-  "rollback 2.40.0 a b 1",
-  `deploy 02.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1`,
-  `deploy 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 0`,
-  `deploy 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1\ntouch /tmp/unwanted`,
-  `deploy 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1 extra`,
+  "deploy staging 2.40.0 bad sha256:bad 1",
+  "rollback staging 2.40.0 a b 1",
+  `deploy staging 02.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1`,
+  `deploy staging 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 0`,
+  `deploy staging 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1\ntouch /tmp/unwanted`,
+  `deploy staging 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1 extra`,
+  `deploy development 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1`,
+  `deploy 2.40.0 ${"a".repeat(40)} sha256:${"a".repeat(64)} 1`,
 ]) {
   test(`refuses malformed forced commands before filesystem or tool access: ${JSON.stringify(request)}`, () => {
     const box = sandbox(false);
@@ -49,11 +57,24 @@ for (const request of [
     expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
   });
 }
-test("refuses positional arguments before filesystem or tool access", () => {
-  const box = sandbox(false);
-  expect(deploy(box, undefined, ["unexpected"]).code).toBe(64);
-  expect(existsSync(box.state)).toBe(false);
-});
+for (const args of [[], ["unexpected"], ["production", "staging"]]) {
+  test(`refuses missing, unknown or extra owner-bound targets: ${JSON.stringify(args)}`, () => {
+    const box = sandbox(false);
+    expect(deploy(box, undefined, args).code).toBe(64);
+    expect(existsSync(box.state)).toBe(false);
+    expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
+  });
+}
+for (const target of ["production", "staging"] as const) {
+  test(`refuses a request for the other target before accessing the ${target} host`, () => {
+    const box = sandbox(false, target);
+    const other = target === "staging" ? "production" : "staging";
+    const request = `deploy ${other} ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`;
+    expect(deploy(box, request)).toEqual({ code: 64, stdout: "result refused\n", stderr: "" });
+    expect(existsSync(box.state)).toBe(false);
+    expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
+  });
+}
 
 describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () => {
   test("stops, backs up offsite, migrates, registers globally and starts the exact digest", () => {
@@ -83,6 +104,10 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("migrate"));
     expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("register"));
     expect(actions.indexOf("register")).toBeLessThan(actions.indexOf("start"));
+    expect(actions).toContain("register-global");
+    expect(actions).not.toContain("register-guild");
+    expect(actions.indexOf("scope-live")).toBeLessThan(actions.indexOf("stop"));
+    expect(actions.indexOf("scope-candidate")).toBeLessThan(actions.indexOf("stop"));
     expect(actions.lastIndexOf("observe")).toBeLessThan(actions.indexOf("restart-policy"));
     expect(
       JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].HostConfig.RestartPolicy
@@ -93,6 +118,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     expect(existsSync(join(box.state, "pending"))).toBe(false);
     const current = JSON.parse(readFileSync(join(box.state, "current"), "utf8"));
     expect(current).toMatchObject({
+      target: "production",
       version: box.target.version,
       commit: box.target.commit,
       digest: box.target.digest,
@@ -126,7 +152,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       const box = sandbox();
       const result = deploy(
         box,
-        `deploy ${version} ${box.target.commit} ${box.target.digest} 1234`,
+        `deploy production ${version} ${box.target.commit} ${box.target.digest} 1234`,
       );
       expect(result.code).not.toBe(0);
       expect(result.stdout).toEndWith("result refused\n");
@@ -207,6 +233,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       expect(result.stdout).not.toContain("result deployed");
       expect(result.stderr).toBe("");
       expect(JSON.parse(readFileSync(join(box.state, "pending"), "utf8"))).toMatchObject({
+        target: "production",
         digest: box.target.digest,
         commit: box.target.commit,
       });
@@ -220,8 +247,10 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       if (["migrate", "register"].includes(failure)) expect(actions).not.toContain("start");
       expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
       expect(
-        deploy(box, `deploy ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`)
-          .stdout,
+        deploy(
+          box,
+          `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+        ).stdout,
       ).toEndWith("result refused\n");
     });
   }
@@ -232,7 +261,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     writeFileSync(join(box.sim, "events"), "");
     const result = deploy(
       box,
-      `deploy ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+      `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
     );
     expect(result.code).toBe(0);
     expect(result.stdout).toEndWith("result already-live\n");
@@ -243,9 +272,14 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     expect(actions.lastIndexOf("observe")).toBeLessThan(actions.indexOf("restart-policy"));
   });
 
-  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    test(`${signal} before acceptance preserves pending and cannot automatically restart the target`, async () => {
-      const box = sandbox();
+  for (const [targetName, signal] of [
+    ["production", "SIGTERM"],
+    ["production", "SIGKILL"],
+    ["staging", "SIGTERM"],
+    ["staging", "SIGKILL"],
+  ] as const) {
+    test(`${targetName} ${signal} before acceptance preserves pending and cannot automatically restart the target`, async () => {
+      const box = sandbox(true, targetName);
       writeFileSync(join(box.sim, "hold-observe"), "");
       // Signal only after the actual target reaches observation, not a guessed timer.
       let reachedBoundary!: () => void;
@@ -255,10 +289,10 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       const watcher = watch(box.sim, () => {
         if (existsSync(join(box.sim, "observe-held"))) reachedBoundary();
       });
-      const process = Bun.spawn(["bash", deployScript], {
+      const process = Bun.spawn(["bash", deployScript, box.deploymentTarget], {
         env: {
           ...box.environment,
-          SSH_ORIGINAL_COMMAND: `deploy ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`,
+          SSH_ORIGINAL_COMMAND: `deploy ${targetName} ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`,
         },
         stdin: "ignore",
         stdout: "pipe",
@@ -281,6 +315,9 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
         if (signal === "SIGTERM") expect(output).toEndWith("result needs-owner\n");
         else expect(output).not.toContain("result deployed");
         expect(existsSync(join(box.state, "pending"))).toBe(true);
+        expect(JSON.parse(readFileSync(join(box.state, "pending"), "utf8")).target).toBe(
+          targetName,
+        );
         const state = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
         expect(state.HostConfig.RestartPolicy.Name).toBe("no");
         expect(state.State.Running).toBe(signal === "SIGKILL");
@@ -292,4 +329,188 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       }
     });
   }
+});
+
+function changeScope(
+  box: HostSandbox,
+  location: "live" | "candidate",
+  settings: Record<string, string>,
+) {
+  if (location === "live") {
+    const file = join(box.sim, "live-env.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), ...settings }));
+  } else {
+    const file = join(box.root, ".env");
+    let contents = readFileSync(file, "utf8");
+    for (const [key, value] of Object.entries(settings))
+      contents = contents.replace(new RegExp(`^${key}=.*$`, "mu"), `${key}=${value}`);
+    writeFileSync(file, contents);
+  }
+}
+
+describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", () => {
+  test("uses the staging manifest, scoped guild registration, isolated backup keys and target-bound state", () => {
+    const box = sandbox(true, "staging");
+    const before = readFileSync(join(box.root, ".env"), "utf8");
+    const result = deploy(box);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toEndWith("result deployed\n");
+    expect(result.stderr).toBe("");
+    const actions = events(box);
+    expect(actions).toContain("register-guild");
+    expect(actions).not.toContain("register-global");
+    expect(actions.indexOf("scope-live")).toBeLessThan(actions.indexOf("stop"));
+    expect(actions.indexOf("scope-candidate")).toBeLessThan(actions.indexOf("stop"));
+    expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("backup"));
+    expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("migrate"));
+    expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("register-guild"));
+    expect(actions.indexOf("register-guild")).toBeLessThan(actions.indexOf("start"));
+    expect(actions.lastIndexOf("observe")).toBeLessThan(actions.indexOf("restart-policy"));
+    const current = JSON.parse(readFileSync(join(box.state, "current"), "utf8"));
+    expect(current).toMatchObject({
+      target: "staging",
+      digest: box.target.digest,
+      schema: "001_initial.sql",
+    });
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+    expect(readFileSync(join(box.sim, "upload-urls"), "utf8").split("\n").filter(Boolean)).toEqual([
+      "https://backups.example.org/staging/daily/tarubot-20261003T120000Z.dump.age",
+      "https://backups.example.org/staging/env/tarubot-env-20261003T120000Z.age",
+    ]);
+    expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
+    expect(
+      deploy(
+        box,
+        `deploy staging ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+      ).stdout,
+    ).toEndWith("result already-live\n");
+    expect(events(box).filter((action) => action === "register-guild")).toHaveLength(1);
+  });
+
+  for (const location of ["live", "candidate"] as const) {
+    const endpoint = `@database.example.org:${MANAGED_DIRECT_PORTS[0]}/`;
+    for (const [name, settings] of Object.entries({
+      application: { DISCORD_APPLICATION_ID: deployments.production.applicationId },
+      guild: { TEST_GUILD_ID: deployments.production.guilds[0] },
+      "missing-guild": { TEST_GUILD_ID: "" },
+      "production-database": {
+        DATABASE_URL: `postgresql://${STAGING_DATABASE}:private-database-password${endpoint}tarubot`,
+      },
+      "production-role": {
+        DATABASE_URL: `postgresql://tarubot:private-database-password${endpoint}${STAGING_DATABASE}`,
+      },
+      "pool-port": {
+        DATABASE_URL: `postgresql://${STAGING_DATABASE}:private-database-password@database.example.org:27521/${STAGING_DATABASE}`,
+      },
+      "missing-ca": { DATABASE_CA_CERT: "" },
+    })) {
+      test(`${location} ${name} refuses before pending, stop or backup`, () => {
+        const box = sandbox(true, "staging");
+        changeScope(box, location, settings);
+        const result = deploy(box);
+        expect(result.code).not.toBe(0);
+        expect(result.stdout).toEndWith("result refused\n");
+        expect(result.stderr).toBe("");
+        expect(events(box)).not.toContain("stop");
+        expect(events(box)).not.toContain("backup");
+        expect(existsSync(join(box.state, "pending"))).toBe(false);
+        expect(
+          JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+        ).toBe(true);
+      });
+    }
+  }
+
+  test("a healthy production-profile baseline cannot admit staging", () => {
+    const box = sandbox(true, "staging");
+    changeScope(box, "live", {
+      TARUBOT_ENVIRONMENT: "production",
+      DISCORD_APPLICATION_ID: deployments.production.applicationId,
+      TEST_GUILD_ID: "",
+      DATABASE_URL: `postgresql://tarubot:private-database-password@database.example.org:${MANAGED_DIRECT_PORTS[0]}/tarubot`,
+    });
+    expect(deploy(box).stdout).toEndWith("result refused\n");
+    expect(events(box)).not.toContain("stop");
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+  });
+
+  for (const target of ["production", "staging"] as const) {
+    test(`${target} refuses disagreement between individually valid live and candidate database endpoints`, () => {
+      const box = sandbox(true, target);
+      const file = join(box.root, ".env");
+      writeFileSync(
+        file,
+        readFileSync(file, "utf8").replace("database.example.org", "different.example.org"),
+      );
+      expect(deploy(box).stdout).toEndWith("result refused\n");
+      expect(events(box)).toContain("scope-candidate");
+      expect(events(box)).not.toContain("stop");
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+    });
+    for (const recordedTarget of [undefined, target === "production" ? "staging" : "production"]) {
+      test(`${target} refuses legacy or other-target current state without touching Docker`, () => {
+        const box = sandbox(true, target);
+        mkdirSync(box.state, { recursive: true });
+        const current = JSON.stringify({ ...box.live, target: recordedTarget, worktree: box.root });
+        writeFileSync(join(box.state, "current"), current);
+        expect(deploy(box).stdout).toEndWith("result refused\n");
+        expect(readFileSync(join(box.sim, "argv"), "utf8")).toBe("");
+        expect(readFileSync(join(box.state, "current"), "utf8")).toBe(current);
+      });
+    }
+  }
+
+  for (const failure of [
+    "backup",
+    "upload",
+    "migrate",
+    "register",
+    "start",
+    "probe",
+    "restart-policy",
+  ]) {
+    test(`staging ${failure} failure fences the writer and retains target-bound pending intent`, () => {
+      const box = sandbox(true, "staging");
+      knob(box, failure);
+      const result = deploy(box);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toEndWith("result needs-owner\n");
+      expect(JSON.parse(readFileSync(join(box.state, "pending"), "utf8"))).toMatchObject({
+        target: "staging",
+        digest: box.target.digest,
+      });
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+      ).toBe(false);
+      expect(events(box)).not.toContain("register-global");
+      expect(deploy(box).stdout).toEndWith("result refused\n");
+    });
+  }
+
+  for (const location of ["live", "candidate"] as const) {
+    for (const [name, settings] of Object.entries({
+      application: { DISCORD_APPLICATION_ID: deployments.devbot.applicationId },
+      "staging-database": {
+        DATABASE_URL: `postgresql://${STAGING_DATABASE}:private-database-password@database.example.org:${MANAGED_DIRECT_PORTS[0]}/${STAGING_DATABASE}`,
+      },
+    })) {
+      test(`production ${location} ${name} refuses without touching the existing writer`, () => {
+        const box = sandbox();
+        changeScope(box, location, settings);
+        expect(deploy(box).stdout).toEndWith("result refused\n");
+        expect(events(box)).not.toContain("stop");
+        expect(events(box)).not.toContain("backup");
+        expect(existsSync(join(box.state, "pending"))).toBe(false);
+      });
+    }
+  }
+
+  test("production live guild refuses without touching the existing writer", () => {
+    const box = sandbox();
+    changeScope(box, "live", { TEST_GUILD_ID: deployments.devbot.guilds[0] });
+    expect(deploy(box).stdout).toEndWith("result refused\n");
+    expect(events(box)).not.toContain("stop");
+    expect(events(box)).not.toContain("backup");
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+  });
 });

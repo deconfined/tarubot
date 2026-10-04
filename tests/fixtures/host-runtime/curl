@@ -13,6 +13,7 @@ done
 if [[ -n $input ]]; then
   [[ $config == 'user = "backup-access:backup-secret"' ]]
   [[ $(stat -c '%a' "$input") == 600 ]]
+  printf '%s\n' "$url" >>"$SIM/upload-urls"
   case $url in
     */daily/*) printf '%s\n' upload-database >>"$SIM/events" ;;
     */monthly/*) printf '%s\n' upload-monthly >>"$SIM/events" ;;

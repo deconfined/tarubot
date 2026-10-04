@@ -4,7 +4,12 @@
 # key or plaintext dump is kept on the host. Deploy may select a worktree manifest
 # using TARUBOT_COMPOSE_FILE while TARUBOT_ROOT keeps the settings central.
 set -Eeuo pipefail
-if (( $# != 0 )); then printf '%s\n' 'backup refused' >&2; exit 64; fi
+# The installed daily command and deployment caller both bind a target explicitly.
+if (( $# != 1 )) || [[ $1 != production && $1 != staging ]]; then
+  printf '%s\n' 'backup refused' >&2
+  exit 64
+fi
+readonly BACKUP_TARGET=$1
 umask 077
 export LC_ALL=C
 readonly ROOT=${TARUBOT_ROOT:-$HOME/tarubot}
@@ -22,18 +27,46 @@ else
   [[ -e /proc/$$/fd/9 && $(readlink "/proc/$$/fd/9") == "$STATE/host.lock" ]]
   flock -n 9
 fi
+# Legacy/mixed records require owner reconciliation even with a direct override.
+for record in current pending; do
+  if [[ -e $STATE/$record || -L $STATE/$record ]]; then
+    [[ -f $STATE/$record && ! -L $STATE/$record ]]
+    jq -e --arg target "$BACKUP_TARGET" '.target == $target' "$STATE/$record" >/dev/null
+  fi
+done
 COMPOSE_FILE=${TARUBOT_COMPOSE_FILE:-}
-if [[ -z $COMPOSE_FILE && -f $STATE/current ]]; then
-  COMPOSE_FILE=$(jq -er '.worktree + "/docker-compose.production.yml"' "$STATE/current")
+if [[ -z $COMPOSE_FILE ]]; then
+  [[ -f $STATE/current ]]
+  COMPOSE_FILE=$(jq -er --arg target "$BACKUP_TARGET" '.worktree + "/docker-compose." + $target + ".yml"' "$STATE/current")
   export TARUBOT_IMAGE_DIGEST
   TARUBOT_IMAGE_DIGEST=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$STATE/current")
 fi
-COMPOSE_FILE=${COMPOSE_FILE:-$ROOT/docker-compose.production.yml}
-[[ -f $COMPOSE_FILE && -s $RECIPIENTS ]]
+[[ ${COMPOSE_FILE##*/} == "docker-compose.$BACKUP_TARGET.yml" && -f $COMPOSE_FILE && -s $RECIPIENTS ]]
 compose() {
   docker compose --project-name tarubot --project-directory "$ROOT" \
     --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
+# Validate both the bot's resolved identity and the dump client's exact connection
+# before dumping or sending a heartbeat. This Bun check performs no network I/O.
+CONFIG=$(compose config --format json)
+jq -e --arg target "$BACKUP_TARGET" --arg digest "${TARUBOT_IMAGE_DIGEST:-}" \
+  '.services.tarubot as $bot | .services.backup as $backup |
+   ($digest | test("^sha256:[0-9a-f]{64}$")) and
+   $bot.image == ("ghcr.io/deconfined/tarubot@" + $digest) and
+   $bot.environment.TARUBOT_ENVIRONMENT == $target and
+   $backup.environment.DATABASE_URL == $bot.environment.DATABASE_URL and
+   $backup.environment.DATABASE_CA_CERT == $bot.environment.DATABASE_CA_CERT and
+   $backup.environment.PGSSLMODE == "verify-full" and ($backup.profiles | index("backup") != null)' <<<"$CONFIG" >/dev/null
+compose run --rm --no-deps --pull never -T tarubot bun -e '
+  const target = process.argv.at(-1);
+  const {assertToolScope} = await import("./dist/src/config/deployment.js");
+  const deployment = assertToolScope(process.env, {
+    tool: "backup preflight", guilds: [], discord: "read", databases: ["DATABASE_URL"]
+  });
+  if (deployment.name !== target || process.env.TARUBOT_ENVIRONMENT !== target) throw Error("target");
+' "$BACKUP_TARGET" >/dev/null
+PREFIX=
+if [[ $BACKUP_TARGET == staging ]]; then PREFIX=staging/; fi
 # Read only named single-line backup settings, never source/eval the .env. Quoted
 # values are supported, including curl config escaping; duplicates are refused.
 setting() {
@@ -109,8 +142,8 @@ age --encrypt --recipients-file "$RECIPIENTS" --output "$work/env.age" "$ENV_FIL
 env_bytes=$(stat -c %s "$work/env.age")
 [[ $env_bytes -gt 0 ]]
 step=upload
-put "$work/db.age" "daily/tarubot-$stamp.dump.age"
-if [[ $(date -u +%d) == 01 ]]; then put "$work/db.age" "monthly/tarubot-$stamp.dump.age"; fi
-put "$work/env.age" "env/tarubot-env-$stamp.age"
-notify '' "daily/tarubot-$stamp.dump.age: $db_bytes bytes; env/tarubot-env-$stamp.age: $env_bytes bytes"
+put "$work/db.age" "${PREFIX}daily/tarubot-$stamp.dump.age"
+if [[ $(date -u +%d) == 01 ]]; then put "$work/db.age" "${PREFIX}monthly/tarubot-$stamp.dump.age"; fi
+put "$work/env.age" "${PREFIX}env/tarubot-env-$stamp.age"
+notify '' "${PREFIX}daily/tarubot-$stamp.dump.age: $db_bytes bytes; ${PREFIX}env/tarubot-env-$stamp.age: $env_bytes bytes"
 printf 'backup ok: tarubot-%s\n' "$stamp"

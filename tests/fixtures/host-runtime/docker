@@ -42,10 +42,15 @@ case $1 in
     mv "$SIM/next.json" "$SIM/container.json"
     ;;
   exec)
-    record observe
-    touch "$SIM/observed"
-    [[ ${*: -2:1} == $(jq -r .target.version "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
-    fail probe
+    if [[ ${*: -1} == production || ${*: -1} == staging ]]; then
+      record scope-live
+      "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/live-env.json" "$SIM/runtime" "$5" "$6"
+    else
+      record observe
+      touch "$SIM/observed"
+      [[ ${*: -2:1} == $(jq -r .target.version "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
+      fail probe
+    fi
     ;;
   compose)
     shift
@@ -66,12 +71,19 @@ case $1 in
       config)
         record config
         fail config
-        policy=${TARUBOT_RESTART_POLICY:-unless-stopped}
-        [[ ! -e $SIM/fail-restart-config ]] || policy=unless-stopped
-        jq -n --arg policy "$policy" '{services:{tarubot:{restart:$policy}}}'
+        "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" >"$SIM/compose.json"
+        if [[ -e $SIM/fail-restart-config ]]; then
+          jq '.services.tarubot.restart = "unless-stopped"' "$SIM/compose.json"
+        else cat "$SIM/compose.json"; fi
         ;;
       run)
         case "$*" in
+          *'tarubot bun -e '*)
+            [[ $* == *'--pull never'* ]]
+            record scope-candidate
+            jq '.services.tarubot.environment' "$SIM/compose.json" >"$SIM/candidate-env.json"
+            "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/candidate-env.json" "$SIM/runtime" "${@: -2:1}" "${@: -1}"
+            ;;
           *backup)
             record backup
             fail backup
@@ -84,7 +96,15 @@ case $1 in
             printf '%s\n' 'Schema ready.'
             ;;
           *register.js*)
-            [[ $* == *'--pull never'* && $* == *'--global'* ]]
+            [[ $* == *'--pull never'* ]]
+            scope=$(jq -r .deploymentTarget "$SIM/config.json")
+            if [[ $scope == staging ]]; then
+              [[ $* == *'--guild '* && $* != *'--global'* && ${*: -1} == $(jq -r .TEST_GUILD_ID "$SIM/candidate-env.json") ]]
+              record register-guild
+            else
+              [[ $* == *'--global' && $* != *'--guild'* ]]
+              record register-global
+            fi
             record register
             fail register
             ;;

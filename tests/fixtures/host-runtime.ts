@@ -2,6 +2,12 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  deployments,
+  MANAGED_DIRECT_PORTS,
+  PRODUCTION_DATABASES,
+  STAGING_DATABASE,
+} from "../../src/config/deployment.js";
 
 const repository = fileURLToPath(new URL("../..", import.meta.url));
 const realGit = Bun.which("git");
@@ -14,6 +20,7 @@ export interface HostRelease {
   digest: string;
   id: string;
 }
+export type HostTarget = "production" | "staging";
 export interface HostSandbox {
   directory: string;
   root: string;
@@ -22,21 +29,35 @@ export interface HostSandbox {
   environment: Record<string, string>;
   live: HostRelease;
   target: HostRelease;
+  deploymentTarget: HostTarget;
 }
-export const envContents = [
-  "DATABASE_URL=postgresql://fixture:private-database-password@database.example.org:27520/tarubot",
-  "DATABASE_CA_CERT=private-ca",
-  "DISCORD_TOKEN=private-discord-token",
-  "DISCORD_APPLICATION_ID=123456789012345678",
-  "TARUBOT_IMAGE_TAG=legacy-mutable-tag",
-  "TARUBOT_IMAGE=legacy-image-override",
-  "BACKUP_STORAGE_ENDPOINT=backups.example.org",
-  "BACKUP_STORAGE_ACCESS_KEY=backup-access",
-  "BACKUP_STORAGE_SECRET_KEY=backup-secret",
-  "BACKUP_STORAGE_REGION=us-iad-2",
-  "HEALTHCHECKS_BACKUP_URL=https://health.example.org/private-check",
-  "",
-].join("\n");
+function hostEnvironment(target: HostTarget): Record<string, string> {
+  const staging = target === "staging";
+  const database = staging ? STAGING_DATABASE : PRODUCTION_DATABASES[0];
+  const user = staging ? STAGING_DATABASE : "tarubot";
+  return {
+    TARUBOT_ENVIRONMENT: target,
+    DATABASE_URL: `postgresql://${user}:private-database-password@database.example.org:${MANAGED_DIRECT_PORTS[0]}/${database}`,
+    DATABASE_CA_CERT: "private-ca",
+    DISCORD_TOKEN: "private-discord-token",
+    DISCORD_APPLICATION_ID: staging
+      ? deployments.devbot.applicationId
+      : deployments.production.applicationId,
+    TEST_GUILD_ID: staging ? deployments.devbot.guilds[0] : "",
+    PUBLIC_TEST_RESPONSES: "false",
+    TEST_PLAN_CHANNEL_ID: "",
+    TARUBOT_IMAGE_TAG: "legacy-mutable-tag",
+    TARUBOT_IMAGE: "legacy-image-override",
+    BACKUP_STORAGE_ENDPOINT: "backups.example.org",
+    BACKUP_STORAGE_ACCESS_KEY: "backup-access",
+    BACKUP_STORAGE_SECRET_KEY: "backup-secret",
+    BACKUP_STORAGE_REGION: "example-region",
+    HEALTHCHECKS_BACKUP_URL: "https://health.example.org/private-check",
+  };
+}
+export const envContents = `${Object.entries(hostEnvironment("production"))
+  .map(([key, value]) => `${key}=${value}`)
+  .join("\n")}\n`;
 
 export function subprocess(command: string[], environment: Record<string, string>, cwd?: string) {
   const process = Bun.spawnSync(command, {
@@ -51,7 +72,10 @@ export function subprocess(command: string[], environment: Record<string, string
   };
 }
 
-export function hostSandbox(releases = false): HostSandbox {
+export function hostSandbox(
+  releases = false,
+  deploymentTarget: HostTarget = "production",
+): HostSandbox {
   const directory = mkdtempSync(join(tmpdir(), "tarubot-host-"));
   const home = join(directory, "home");
   const root = join(home, "tarubot");
@@ -63,12 +87,24 @@ export function hostSandbox(releases = false): HostSandbox {
     cpSync(join(repository, "tests/fixtures/host-runtime", tool), join(bin, tool));
     chmodSync(join(bin, tool), 0o755);
   }
+  const runtime = join(sim, "runtime");
+  mkdirSync(join(runtime, "dist/src/config"), { recursive: true });
+  // Host scripts import their compiled guard paths; execute the real source guard
+  // through a runtime adapter rather than faking identity-check success.
+  for (const module of ["deployment", "secrets"])
+    writeFileSync(
+      join(runtime, `dist/src/config/${module}.js`),
+      `export * from ${JSON.stringify(join(repository, `src/config/${module}.ts`))};\n`,
+    );
   const environment = {
     HOME: home,
     PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
     SIM: sim,
     TMPDIR: join(directory, "tmp"),
     GIT_REAL: realGit ?? "/missing-git",
+    BUN_REAL: process.execPath,
+    COMPOSE_FIXTURE: join(repository, "tests/fixtures/host-runtime/compose-config.ts"),
+    SCOPE_FIXTURE: join(repository, "tests/fixtures/host-runtime/scope-run.ts"),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_AUTHOR_NAME: "Host test",
@@ -96,10 +132,11 @@ export function hostSandbox(releases = false): HostSandbox {
   const files = (path: string) => {
     mkdirSync(join(path, "ops"), { recursive: true });
     cpSync(join(repository, "ops/backup.sh"), join(path, "ops/backup.sh"));
-    cpSync(
-      join(repository, "docker-compose.production.yml"),
-      join(path, "docker-compose.production.yml"),
-    );
+    for (const target of ["production", "staging"])
+      cpSync(
+        join(repository, `docker-compose.${target}.yml`),
+        join(path, `docker-compose.${target}.yml`),
+      );
     writeFileSync(join(path, "ops/age-recipients.txt"), "age1testrecipient\n");
   };
   if (releases) {
@@ -120,8 +157,16 @@ export function hostSandbox(releases = false): HostSandbox {
     git(home, "clone", source, root);
     git(root, "checkout", "--detach", live.commit);
   } else files(root);
-  writeFileSync(join(root, ".env"), envContents, { mode: 0o600 });
-  writeFileSync(join(sim, "config.json"), JSON.stringify({ live, target }));
+  const settings = hostEnvironment(deploymentTarget);
+  writeFileSync(
+    join(root, ".env"),
+    `${Object.entries(settings)
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n")}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(join(sim, "live-env.json"), JSON.stringify(settings));
+  writeFileSync(join(sim, "config.json"), JSON.stringify({ live, target, deploymentTarget }));
   writeFileSync(
     join(sim, "container.json"),
     JSON.stringify([
@@ -144,19 +189,29 @@ export function hostSandbox(releases = false): HostSandbox {
   );
   writeFileSync(join(sim, "events"), "");
   writeFileSync(join(sim, "argv"), "");
-  return { directory, root, state, sim, environment, live, target };
+  return { directory, root, state, sim, environment, live, target, deploymentTarget };
 }
-export function deploy(box: HostSandbox, request?: string, args: string[] = []) {
+export function deploy(
+  box: HostSandbox,
+  request?: string,
+  args: string[] = [box.deploymentTarget],
+) {
   return subprocess(["bash", join(repository, "ops/deploy.sh"), ...args], {
     ...box.environment,
     SSH_ORIGINAL_COMMAND:
-      request ?? `deploy ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`,
+      request ??
+      `deploy ${box.deploymentTarget} ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`,
   });
 }
-export function backup(box: HostSandbox, extra: Record<string, string> = {}, args: string[] = []) {
+export function backup(
+  box: HostSandbox,
+  extra: Record<string, string> = {},
+  args: string[] = [box.deploymentTarget],
+) {
   return subprocess(["bash", join(repository, "ops/backup.sh"), ...args], {
     ...box.environment,
     TARUBOT_IMAGE_DIGEST: box.target.digest,
+    TARUBOT_COMPOSE_FILE: join(box.root, `docker-compose.${box.deploymentTarget}.yml`),
     ...extra,
   });
 }
