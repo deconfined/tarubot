@@ -111,24 +111,38 @@ describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => 
     });
   }
 
-  test("daily backup uses the durable successful worktree and digest without changing root settings", () => {
-    const box = sandbox();
-    const worktree = join(box.state, "releases/current");
-    mkdirSync(worktree, { recursive: true });
-    cpSync(
-      join(box.root, "docker-compose.production.yml"),
-      join(worktree, "docker-compose.production.yml"),
-    );
-    writeFileSync(
-      join(box.state, "current"),
-      JSON.stringify({ target: "production", worktree, digest: box.target.digest }),
-    );
-    expect(backup(box, { TARUBOT_IMAGE_DIGEST: "", TARUBOT_COMPOSE_FILE: "" }).code).toBe(0);
-    expect(readFileSync(join(box.sim, "argv"), "utf8")).toContain(
-      `-f ${worktree}/docker-compose.production.yml`,
-    );
-    expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
-  });
+  for (const target of ["production", "staging"] as const) {
+    test(`${target} daily backup uses the accepted manifest despite root checkout drift`, () => {
+      const box = sandbox(target);
+      const before = readFileSync(join(box.root, ".env"), "utf8");
+      const worktree = join(box.state, "releases/current");
+      const manifest = `docker-compose.${target}.yml`;
+      mkdirSync(worktree, { recursive: true });
+      cpSync(join(box.root, manifest), join(worktree, manifest));
+      const config = Bun.YAML.parse(readFileSync(join(box.root, manifest), "utf8")) as {
+        services: { backup: { environment: Record<string, string> } };
+      };
+      config.services.backup.environment.DATABASE_URL =
+        "postgresql://other:password@database.example.org:27520/other";
+      writeFileSync(join(box.root, manifest), JSON.stringify(config));
+      writeFileSync(
+        join(box.state, "current"),
+        JSON.stringify({ target, worktree, digest: box.target.digest }),
+      );
+      expect(backup(box, { TARUBOT_IMAGE_DIGEST: "", TARUBOT_COMPOSE_FILE: "" }).code).toBe(0);
+      const endpoint =
+        target === "staging"
+          ? "https://staging-backups.example.org"
+          : "https://backups.example.org";
+      expect(
+        readFileSync(join(box.sim, "upload-urls"), "utf8").split("\n").filter(Boolean),
+      ).toEqual([
+        `${endpoint}/daily/tarubot-20261003T120000Z.dump.age`,
+        `${endpoint}/env/tarubot-env-20261003T120000Z.age`,
+      ]);
+      expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
+    });
+  }
 
   test("an unheld inherited-lock flag is refused", () => {
     const box = sandbox();
@@ -169,39 +183,20 @@ describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => 
 });
 
 describe.skipIf(!hostToolsAvailable)("staging backup isolation and target refusal", () => {
-  test("staging writes only staging object keys without mutating host settings", () => {
+  test("staging writes common object keys to its own bucket without mutating host settings", () => {
     const box = sandbox("staging");
     writeFileSync(join(box.sim, "monthly"), "");
     const before = readFileSync(join(box.root, ".env"), "utf8");
     expect(backup(box).code).toBe(0);
     const urls = readFileSync(join(box.sim, "upload-urls"), "utf8").split("\n").filter(Boolean);
     expect(urls).toEqual([
-      "https://backups.example.org/staging/daily/tarubot-20261003T120000Z.dump.age",
-      "https://backups.example.org/staging/monthly/tarubot-20261003T120000Z.dump.age",
-      "https://backups.example.org/staging/env/tarubot-env-20261003T120000Z.age",
+      "https://staging-backups.example.org/daily/tarubot-20261003T120000Z.dump.age",
+      "https://staging-backups.example.org/monthly/tarubot-20261003T120000Z.dump.age",
+      "https://staging-backups.example.org/env/tarubot-env-20261003T120000Z.age",
     ]);
     expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
     expect(events(box)).not.toContain("register-global");
     expect(readdirSync(join(box.directory, "tmp"))).toEqual([]);
-  });
-
-  test("daily staging backup selects only its accepted worktree and digest", () => {
-    const box = sandbox("staging");
-    const worktree = join(box.state, "releases/current");
-    mkdirSync(worktree, { recursive: true });
-    cpSync(
-      join(box.root, "docker-compose.staging.yml"),
-      join(worktree, "docker-compose.staging.yml"),
-    );
-    writeFileSync(
-      join(box.state, "current"),
-      JSON.stringify({ target: "staging", worktree, digest: box.target.digest }),
-    );
-    expect(backup(box, { TARUBOT_IMAGE_DIGEST: "", TARUBOT_COMPOSE_FILE: "" }).code).toBe(0);
-    expect(readFileSync(join(box.sim, "argv"), "utf8")).toContain(
-      `-f ${worktree}/docker-compose.staging.yml`,
-    );
-    expect(readFileSync(join(box.sim, "upload-urls"), "utf8")).toContain("/staging/daily/");
   });
 
   for (const target of ["production", "staging"] as const) {
@@ -279,7 +274,7 @@ describe.skipIf(!hostToolsAvailable)("staging backup isolation and target refusa
         for (const url of readFileSync(join(box.sim, "upload-urls"), "utf8")
           .split("\n")
           .filter(Boolean))
-          expect(new URL(url).pathname).toStartWith("/staging/");
+          expect(new URL(url).hostname).toBe("staging-backups.example.org");
       expect(readdirSync(join(box.directory, "tmp"))).toEqual([]);
     });
   }

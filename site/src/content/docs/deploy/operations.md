@@ -118,7 +118,7 @@ docker compose exec -T postgres rm /tmp/tarubot.dump
 
 A dump is consistent even while the bot runs, because `pg_dump` reads one snapshot. Back up on a schedule (a daily `cron` job is plenty) and before every update, and keep copies **off the host**, encrypted: the dump holds your members' links and the ledger. A backup you haven't restored isn't proven; [rehearse a restore](#restore-rehearsal) now and then, with a dump taken while the bot is stopped.
 
-The upstream Linode deployment's `ops/backup.sh` also encrypts the database and host settings and uploads offsite; its private storage settings, age recipients and retention belong to that instance. Do not copy its credentials or assume its backups are proven. Its [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#backups-and-restore) covers configuration, pending recovery and restore drills.
+The upstream Linode deployment's `ops/backup.sh` also encrypts the database and host settings and uploads offsite. Production and staging have separate backup buckets and credentials; each uses `daily/` and `env/` with 30-day retention and `monthly/` with 365-day retention. Private storage settings and age recipients belong to each instance. Do not copy its credentials or assume its backups are proven. Its [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#backups-and-restore) covers configuration, pending recovery and restore drills.
 
 ## Restore rehearsal
 

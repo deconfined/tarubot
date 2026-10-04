@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Compose-only encrypted database and settings backup. The owner supplies the
-# private root .env, age recipients and offsite bucket credentials. No decryption
+# private root .env, age recipients and separate per-target buckets/credentials. No decryption
 # key or plaintext dump is kept on the host. Deploy may select a worktree manifest
 # using TARUBOT_COMPOSE_FILE while TARUBOT_ROOT keeps the settings central.
+# Both buckets use daily/monthly/env keys; target isolation is the bucket, not a prefix.
 set -Eeuo pipefail
 # The installed daily command and deployment caller both bind a target explicitly.
 if (( $# != 1 )) || [[ $1 != production && $1 != staging ]]; then
@@ -65,8 +66,6 @@ compose run --rm --no-deps --pull never -T tarubot bun -e '
   });
   if (deployment.name !== target || process.env.TARUBOT_ENVIRONMENT !== target) throw Error("target");
 ' "$BACKUP_TARGET" >/dev/null
-PREFIX=
-if [[ $BACKUP_TARGET == staging ]]; then PREFIX=staging/; fi
 # Read only named single-line backup settings, never source/eval the .env. Quoted
 # values are supported, including curl config escaping; duplicates are refused.
 setting() {
@@ -142,8 +141,8 @@ age --encrypt --recipients-file "$RECIPIENTS" --output "$work/env.age" "$ENV_FIL
 env_bytes=$(stat -c %s "$work/env.age")
 [[ $env_bytes -gt 0 ]]
 step=upload
-put "$work/db.age" "${PREFIX}daily/tarubot-$stamp.dump.age"
-if [[ $(date -u +%d) == 01 ]]; then put "$work/db.age" "${PREFIX}monthly/tarubot-$stamp.dump.age"; fi
-put "$work/env.age" "${PREFIX}env/tarubot-env-$stamp.age"
-notify '' "${PREFIX}daily/tarubot-$stamp.dump.age: $db_bytes bytes; ${PREFIX}env/tarubot-env-$stamp.age: $env_bytes bytes"
+put "$work/db.age" "daily/tarubot-$stamp.dump.age"
+if [[ $(date -u +%d) == 01 ]]; then put "$work/db.age" "monthly/tarubot-$stamp.dump.age"; fi
+put "$work/env.age" "env/tarubot-env-$stamp.age"
+notify '' "daily/tarubot-$stamp.dump.age: $db_bytes bytes; env/tarubot-env-$stamp.age: $env_bytes bytes"
 printf 'backup ok: tarubot-%s\n' "$stamp"

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Owner-applied backup retention; see docs/DEPLOYMENT.md "Backups and restore".
-  Production and staging have separate prefixes: daily/settings copies for 30 days,
-  and dumps from the 1st of each month for 365 days.
+  Apply this common policy separately to the production and staging buckets:
+  daily/settings copies for 30 days, and dumps from the 1st of each month for 365 days.
 -->
 <LifecycleConfiguration>
   <Rule>
@@ -20,24 +20,6 @@
   <Rule>
     <ID>monthly-dumps-365-days</ID>
     <Filter><Prefix>monthly/</Prefix></Filter>
-    <Status>Enabled</Status>
-    <Expiration><Days>365</Days></Expiration>
-  </Rule>
-  <Rule>
-    <ID>staging-daily-dumps-30-days</ID>
-    <Filter><Prefix>staging/daily/</Prefix></Filter>
-    <Status>Enabled</Status>
-    <Expiration><Days>30</Days></Expiration>
-  </Rule>
-  <Rule>
-    <ID>staging-settings-copies-30-days</ID>
-    <Filter><Prefix>staging/env/</Prefix></Filter>
-    <Status>Enabled</Status>
-    <Expiration><Days>30</Days></Expiration>
-  </Rule>
-  <Rule>
-    <ID>staging-monthly-dumps-365-days</ID>
-    <Filter><Prefix>staging/monthly/</Prefix></Filter>
     <Status>Enabled</Status>
     <Expiration><Days>365</Days></Expiration>
   </Rule>

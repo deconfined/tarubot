@@ -349,7 +349,7 @@ function changeScope(
 }
 
 describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", () => {
-  test("uses the staging manifest, scoped guild registration, isolated backup keys and target-bound state", () => {
+  test("uses the staging manifest, scoped guild registration, isolated backup bucket and target-bound state", () => {
     const box = sandbox(true, "staging");
     const before = readFileSync(join(box.root, ".env"), "utf8");
     const result = deploy(box);
@@ -374,8 +374,8 @@ describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", ()
     });
     expect(existsSync(join(box.state, "pending"))).toBe(false);
     expect(readFileSync(join(box.sim, "upload-urls"), "utf8").split("\n").filter(Boolean)).toEqual([
-      "https://backups.example.org/staging/daily/tarubot-20261003T120000Z.dump.age",
-      "https://backups.example.org/staging/env/tarubot-env-20261003T120000Z.age",
+      "https://staging-backups.example.org/daily/tarubot-20261003T120000Z.dump.age",
+      "https://staging-backups.example.org/env/tarubot-env-20261003T120000Z.age",
     ]);
     expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
     expect(

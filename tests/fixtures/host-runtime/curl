@@ -11,7 +11,11 @@ while (( $# )); do
   esac
 done
 if [[ -n $input ]]; then
-  [[ $config == 'user = "backup-access:backup-secret"' ]]
+  case $url in
+    https://backups.example.org/*) [[ $config == 'user = "backup-access:backup-secret"' ]] ;;
+    https://staging-backups.example.org/*) [[ $config == 'user = "staging-backup-access:staging-backup-secret"' ]] ;;
+    *) exit 1 ;;
+  esac
   [[ $(stat -c '%a' "$input") == 600 ]]
   printf '%s\n' "$url" >>"$SIM/upload-urls"
   case $url in
