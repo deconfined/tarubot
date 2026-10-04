@@ -19,9 +19,9 @@ Production and staging require a non-empty resolved database CA. Connections ver
 
 Compose deployments use central host-only variables. Generic Docker secrets can instead supply supported `NAME_FILE` settings through read-only mounts; retain the resolver behavior above. Never log secrets or put them in argv.
 
-## Production settings
+## Managed host settings
 
-Production settings remain in the private host `.env`; release worktrees reuse it. GitHub's production environment holds only SSH delivery credentials/pins, not database or Discord credentials. The repository variable `DEPLOY_ENABLED` controls activation. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
+Production and staging settings remain in separate private host `.env` files; release worktrees reuse the appropriate central file. Their GitHub environments hold only their own SSH delivery credentials/pins, not database or Discord credentials. Repository variables independently control activation: `DEPLOY_ENABLED` for production and `STAGING_DEPLOY_ENABLED` for staging. Use `production.env.example` or `staging.env.example` respectively, never a copied production secret file on staging. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
 
 Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; local DevBot uses its reports token for private previews. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 
@@ -33,7 +33,7 @@ Every Discord/database maintenance tool calls `src/config/deployment.ts` before 
 | --- | --- | --- |
 | `production` | Production application, managed guilds, global registration only; no test/public-response settings | Managed endpoint, verified CA, direct port 27520, user `tarubot`, database `tarubot` or `tarubot_restore` |
 | `rehearsal` | Production identity, read-only Discord; no registration/cleanup | Primary ends in `_rehearsal`; restore ends in `_restore_test`; managed endpoints require CA/direct port and a non-admin user |
-| `staging` | Retained managed DevBot tool guard, guild registration only; not a delivery lane | Managed endpoint, CA/direct port; user and database exactly `tarubot_staging`; no restore target or restore-rehearsal flag |
+| `staging` | Managed DevBot identity, guild registration only; explicit staging deployment target | Managed endpoint, CA/direct port; user and database exactly `tarubot_staging`; no restore target or restore-rehearsal flag |
 | `devbot` | DevBot identity and test guild, never global registration | Local endpoint, empty CA, primary `tarubot_dev`; restore ends in `_restore_test` |
 | `unmanaged` | Other developers/CI; may not use managed identities or guilds | No deployment-specific database rules |
 

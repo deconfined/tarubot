@@ -2,6 +2,10 @@
 
 Shared DevBot is not a disposable fixture. Stopping/restarting it, migrating its database, changing `.env` or writing to Discord needs owner authorization; read-only inspection is allowed. Use `src/config/deployment.ts` for identity, not real IDs copied into examples or tests.
 
+## Staging-host rehearsal
+
+The explicit `staging` deployment target uses DevBot's application and declared test guild with the managed `tarubot_staging` database, not local `tarubot_dev`. Follow the [staging-first owner checklist](DEPLOYMENT.md#staging-first-rehearsal-owner-checklist). The same application may not remain running locally while staging starts; fencing/moving the token, configuring delivery access and every host mutation remain owner steps. Staging has its own approval, activation, settings and backup namespace; it never uses production credentials or global command registration.
+
 ## Local isolation
 
 - Use the development application/token, test-guild scope and `tarubot_dev` database. The Compose overlay enforces database and guild scope; local tools also require the database URL to name `tarubot_dev`.

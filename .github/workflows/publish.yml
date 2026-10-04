@@ -205,6 +205,7 @@ jobs:
       actions: read
       attestations: read
     with:
+      target: production
       version: ${{ needs.verify.outputs.version }}
       commit: ${{ github.sha }}
       digest: ${{ needs.publish.outputs.digest }}

@@ -1,9 +1,12 @@
 name: Deploy
-run-name: Deploy ${{ inputs.version }}
+run-name: Deploy ${{ inputs.target }} ${{ inputs.version }}
 
 on:
   workflow_call:
     inputs:
+      target:
+        type: string
+        required: true
       version:
         type: string
         required: true
@@ -15,6 +18,12 @@ on:
         required: true
   workflow_dispatch:
     inputs:
+      target:
+        description: "Owner-approved delivery target"
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
       version:
         description: "Reviewed release X.Y.Z (never a downgrade)"
         type: string
@@ -38,6 +47,10 @@ defaults:
     shell: bash
 
 env:
+  TARGET: ${{ inputs.target }}
+  # Bind repository activation before a selected environment can supply runner variables.
+  REPO_PRODUCTION_DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+  REPO_STAGING_DEPLOY_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
   VERSION: ${{ inputs.version }}
   COMMIT: ${{ inputs.commit }}
   DIGEST: ${{ inputs.digest }}
@@ -45,14 +58,16 @@ env:
 jobs:
   validate:
     name: Validate signed release
-    if: github.ref == 'refs/heads/main' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      target: ${{ steps.admission.outputs.target }}
     steps:
       - name: Validate request, main ancestry, approval policy and provenance
+        id: admission
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
         run: |
           set -Eeuo pipefail
           umask 077
@@ -60,7 +75,11 @@ jobs:
           trap 'rm -rf -- "$private"' EXIT
           trap 'echo "::error::Release validation failed; no host connection was made."' ERR
           exec 2> "$private/errors"
-          [[ $DEPLOY_ENABLED == true ]]
+          case "$TARGET" in
+            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
+            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
+            *) exit 1 ;;
+          esac
           [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
           [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
@@ -69,14 +88,14 @@ jobs:
           version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
             "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
           [[ $version == "$VERSION" ]]
-          gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$private/environment"
+          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET" > "$private/environment"
           jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
             and .can_admins_bypass == false
             and ([.protection_rules[] | select(.type == "required_reviewers")]
               | length == 1 and .[0].prevent_self_review == false
                 and ([.[0].reviewers[] | {type, login: .reviewer.login}]
                   == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
-          gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" \
+          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET/deployment-branch-policies" \
             | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
           gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
             --repo deconfined/tarubot \
@@ -85,24 +104,29 @@ jobs:
             --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
             --format json > "$private/attestation"
           jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
-          echo 'Signed release validated; production approval is required.'
+          printf 'target=%s\n' "$TARGET" >> "$GITHUB_OUTPUT"
+          echo 'Signed release validated; selected environment approval is required.'
 
-  production:
-    name: Deploy production
+  deliver:
+    name: Deploy ${{ needs.validate.outputs.target }}
     needs: validate
-    if: github.ref == 'refs/heads/main' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
+    if: >-
+      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      ((needs.validate.outputs.target == 'production' && vars.DEPLOY_ENABLED == 'true') ||
+       (needs.validate.outputs.target == 'staging' && vars.STAGING_DEPLOY_ENABLED == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      TARGET: ${{ needs.validate.outputs.target }}
     concurrency:
-      group: production-deploy
+      group: ${{ needs.validate.outputs.target }}-deploy
       cancel-in-progress: false
-    # This is the only environment job in the complete release pipeline.
-    environment: production
+    # Exactly one selected environment job, including the routine production approval.
+    environment: ${{ needs.validate.outputs.target }}
     steps:
       - name: Recheck release and owner policy after approval and queue waits
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
         run: |
           set -Eeuo pipefail
           umask 077
@@ -110,7 +134,11 @@ jobs:
           trap 'rm -rf -- "$private"' EXIT
           trap 'echo "::error::Release revalidation failed; no host connection was made."' ERR
           exec 2> "$private/errors"
-          [[ $DEPLOY_ENABLED == true ]]
+          case "$TARGET" in
+            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
+            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
+            *) exit 1 ;;
+          esac
           [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
           [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
@@ -119,14 +147,14 @@ jobs:
           version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
             "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
           [[ $version == "$VERSION" ]]
-          gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$private/environment"
+          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET" > "$private/environment"
           jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
             and .can_admins_bypass == false
             and ([.protection_rules[] | select(.type == "required_reviewers")]
               | length == 1 and .[0].prevent_self_review == false
                 and ([.[0].reviewers[] | {type, login: .reviewer.login}]
                   == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
-          gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" \
+          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET/deployment-branch-policies" \
             | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
           gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
             --repo deconfined/tarubot \
@@ -135,10 +163,9 @@ jobs:
             --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
             --format json > "$private/attestation"
           jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
-          echo 'Signed release and production policy revalidated.'
+          echo 'Signed release and selected environment policy revalidated.'
       - name: Send the exact release to the pinned host entry
         env:
-          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -149,9 +176,13 @@ jobs:
           trap 'rm -rf -- "$dir"' EXIT
           trap 'echo "::error::Deployment did not complete; inspect the private host log and reconcile before a fresh dispatch."' ERR
           exec 2> "$dir/errors"
-          [[ $DEPLOY_ENABLED == true ]]
-          command="deploy $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
-          form='^deploy (0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) [0-9a-f]{40} sha256:[0-9a-f]{64} [1-9][0-9]{0,19}$'
+          case "$TARGET" in
+            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
+            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
+            *) exit 1 ;;
+          esac
+          command="deploy $TARGET $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
+          form='^deploy (production|staging) (0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) [0-9a-f]{40} sha256:[0-9a-f]{64} [1-9][0-9]{0,19}$'
           [[ $command =~ $form ]]
           host_form='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
           [[ $DEPLOY_HOST =~ $host_form ]]
