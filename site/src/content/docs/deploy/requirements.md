@@ -32,7 +32,7 @@ To use an external PostgreSQL instead, such as a managed database:
 - Use PostgreSQL 18, the version the project tests with, over a **direct session connection**. A transaction-mode pool (such as PgBouncer in transaction mode) can't hold the session lock that keeps a single bot writing to the database; see [the single writer](/tarubot/deploy/operations/#single-database-writer).
 - Give the bot its own database and user, which owns the schema: migrations create tables, functions and triggers.
 
-The upstream project uses this same Docker Compose runtime on an owner-provisioned Linode host with managed PostgreSQL. Its `docker-compose.production.yml` and production tool profile belong to that application, not your deployment. Its separate staging rehearsal uses its own application identity, guild-scoped commands and managed database, never production credentials. The [release/provisioning/cutover runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes those owner-operated paths from self-hosting and from unobserved live acceptance.
+The upstream project uses this same Docker Compose runtime on an owner-provisioned Linode host with managed PostgreSQL. Its `docker-compose.production.yml` and production tool profile belong to that application, not your deployment. Its separate staging rehearsal uses its own application identity, guild-scoped commands, managed database and backup bucket, never production credentials. The [release/provisioning/cutover runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes those owner-operated paths from self-hosting and from unobserved live acceptance.
 
 ## A Discord application
 
