@@ -1,15 +1,4 @@
-/**
- * File-delivered secrets (2.33.0, #50): on a Quadlet host the six secrets arrive as Podman secrets
- * mounted as files, and NAME_FILE names each file (since #62 the staging container's, written by
- * ops/ansible/bot.yml from the job's environment; tests/unit/bot-play.test.ts). These pin the
- * resolver in src/config/secrets.ts and every reader that goes through it:
- * - the rules: the file's text less one newline, both forms refused, an empty NAME_FILE unset,
- *   failures that name settings only, and process.env never written;
- * - configuration(): the same Configuration from plain variables as before and from files, and a
- *   CA required under the production and staging markers;
- * - Database's default CA, issue-report redaction of file-sourced values, commands.js's `run`;
- * - statically, that nothing under src/ or scripts/ reads one of the six from process.env itself.
- */
+/** File/plain secret precedence, private failure diagnostics and maintenance-tool scope. */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,7 +18,7 @@ import { Failure } from "../../src/domain/values.js";
 import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
 import { Database } from "../../src/infrastructure/postgres/database.js";
 import { run } from "../../scripts/commands.js";
-import { root } from "../fixtures/quadlet.js";
+const root = (path: string) => new URL(`../../${path}`, import.meta.url).pathname;
 
 /** Sentinels stand in for secret values and paths; no failure message may contain them. */
 const TOKEN = "file-token-sentinel-4b1d";
@@ -127,7 +116,7 @@ describe("the resolver", () => {
     const path = `${SECRET_DIR}/discord_token`;
     const read = (text: string) =>
       secretSetting({ DISCORD_TOKEN_FILE: path }, "DISCORD_TOKEN", files({ [path]: text }));
-    // bot.yml's `podman secret create` gets the value on stdin, with the newline Ansible adds.
+    // File injection may add one final newline; strip only that transport delimiter.
     expect(read(`${TOKEN}\n`)).toBe(TOKEN);
     // A value's own final newline survives, and a file without one is taken as it is.
     expect(read(`${CA}\n\n`)).toBe(`${CA}\n`);

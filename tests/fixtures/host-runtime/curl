@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'curl %s\n' "$*" >>"$SIM/argv"
+config=$(cat)
+input='' url='' data=''
+while (( $# )); do
+  case $1 in
+    --upload-file) input=$2; shift 2 ;;
+    --data-raw) data=$2; shift 2 ;;
+    *) url=$1; shift ;;
+  esac
+done
+if [[ -n $input ]]; then
+  [[ $config == 'user = "backup-access:backup-secret"' ]]
+  [[ $(stat -c '%a' "$input") == 600 ]]
+  case $url in
+    */daily/*) printf '%s\n' upload-database >>"$SIM/events" ;;
+    */monthly/*) printf '%s\n' upload-monthly >>"$SIM/events" ;;
+    */env/*) printf '%s\n' upload-settings >>"$SIM/events" ;;
+    *) exit 1 ;;
+  esac
+  mkdir -p "$SIM/uploads"
+  cp "$input" "$SIM/uploads/${url##*/}"
+  [[ ! -e $SIM/fail-upload ]]
+else
+  printf '%s\n' "$config" >>"$SIM/pings"
+  printf '%s\n' "$data" >>"$SIM/ping-data"
+fi

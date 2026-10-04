@@ -17,19 +17,13 @@ Use `src/config/secrets.ts` to resolve supported secret settings from either `NA
 
 Production and staging require a non-empty resolved database CA. Connections verify the certificate and hostname even when URL SSL flags would weaken verification. `RESTORE_DATABASE_URL` and `RESTORE_DATABASE_CA_CERT` have no file forms; an empty restore CA reuses the resolved primary CA.
 
-The staging playbook feeds secrets to Podman over stdin; the unit mounts them read-only and stores only `NAME_FILE` paths in its settings file. Compose deployments use plain variables. Never log secrets or pass them in argv.
+Compose deployments use central host-only variables. Generic Docker secrets can instead supply supported `NAME_FILE` settings through read-only mounts; retain the resolver behavior above. Never log secrets or put them in argv.
 
-## Staging settings
+## Production settings
 
-There is no staging `.env`. `ops/ansible/bot.yml` combines:
+Production settings remain in the private host `.env`; release worktrees reuse it. GitHub's production environment holds only SSH delivery credentials/pins, not database or Discord credentials. The repository variable `DEPLOY_ENABLED` controls activation. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
 
-1. Plain settings from the release's `vars/bot.yml` and `vars/targets/staging.yml`.
-2. Application and guild identity reported by the release image.
-3. Runtime and backup secrets from the `staging` GitHub environment. `REPORTS_GITHUB_TOKEN` maps to `GITHUB_REPORTS_TOKEN`, and `SUGGEST_APP_PRIVATE_KEY` to `GITHUB_APP_PRIVATE_KEY`: GitHub disallows secret names starting with `GITHUB_`.
-
-Target files declare required secrets and database identity. Missing/malformed values are refused before host writes. Single-line values must contain no whitespace; only PEM values may span lines. See [deployment](DEPLOYMENT.md) for setup and [host operations](HOSTING.md) for rotation.
-
-Private issue reports may not target the public repository. Public-suggestion app credentials belong only to production; local DevBot uses its reports token for private previews. Staging keeps suggestions off. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
+Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; local DevBot uses its reports token for private previews. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 
 ## Maintenance-tool profiles
 
@@ -39,7 +33,7 @@ Every Discord/database maintenance tool calls `src/config/deployment.ts` before 
 | --- | --- | --- |
 | `production` | Production application, managed guilds, global registration only; no test/public-response settings | Managed endpoint, verified CA, direct port 27520, user `tarubot`, database `tarubot` or `tarubot_restore` |
 | `rehearsal` | Production identity, read-only Discord; no registration/cleanup | Primary ends in `_rehearsal`; restore ends in `_restore_test`; managed endpoints require CA/direct port and a non-admin user |
-| `staging` | DevBot identity and test guild, guild registration only | Managed endpoint, CA/direct port; user and database exactly `tarubot_staging`; no restore target or restore-rehearsal flag |
+| `staging` | Retained managed DevBot tool guard, guild registration only; not a delivery lane | Managed endpoint, CA/direct port; user and database exactly `tarubot_staging`; no restore target or restore-rehearsal flag |
 | `devbot` | DevBot identity and test guild, never global registration | Local endpoint, empty CA, primary `tarubot_dev`; restore ends in `_restore_test` |
 | `unmanaged` | Other developers/CI; may not use managed identities or guilds | No deployment-specific database rules |
 
@@ -62,10 +56,10 @@ For an owner-run tool outside containers, use a clean clone of the deployed rele
 env -i HOME="$HOME" PATH="$PATH" bun --env-file=PATH dist/scripts/TOOL.js
 ```
 
-Never use root `bun run` aliases or the development `.env` for production. Container tools use the unit's settings and secrets, through `tarubot-tool` on staging or `docker compose … run` on production.
+Never use root `bun run` aliases or the development `.env` for production. Container tools use the matching release image, Compose manifest and central settings; see [deployment observation](DEPLOYMENT.md#everyday-observation-and-outcomes).
 
 ## Schema and host configuration
 
 Use [persistence](PERSISTENCE.md) for schema changes and transaction rules; never use automatic schema synchronization or Drizzle Kit push.
 
-Compose and Quadlet keep read-only bot roots, no capabilities and no-new-privileges. Host playbooks use `ansible.builtin` only. Bot templates must render in `tests/fixtures/bot-render.ts`, which CI compares to Ansible. See [the OpenTofu runbook](../ops/tofu/README.md) for infrastructure inputs and state.
+Compose keeps read-only bot roots, no capabilities and no-new-privileges. Infrastructure provisioning is manual; reviewed release worktrees provide the bot manifest, not host provisioning instructions.

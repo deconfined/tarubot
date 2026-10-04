@@ -1,831 +1,185 @@
-# A new published release deploys to staging through host.yml and requests the owner's production
-# approval. Maintenance Publish runs stop before registry/environment checks or notifications.
-# AGENTS.md carries the owner/agent boundaries; docs/DEPLOYMENT.md describes the current flow.
-#
-#   plan            Public data only (no secret, no environment): the release, its image digest,
-#                   signed build provenance and changes since the previous published version.
-#                   It writes migration/host-side evidence to the summary and selects targets.
-#   deploy          The `production` environment: it waits for @deconfined's approval, and only
-#                   then do the deploy key and the host settings load. It opens one SSH connection,
-#                   whose forced command is ops/deploy.sh's Compose path on the host; the host
-#                   checks the approval with GitHub itself. Unchanged until production moves to
-#                   host.yml in 2.37.0.
-#   deploy-staging  Calls .github/workflows/host.yml in the `staging` environment, which has no
-#                   reviewer: Configure (ops/ansible/site.yml at main's head, as root), then the
-#                   release's own ops/ansible/bot.yml, as the `action` input says. It runs beside
-#                   production's approval request: production never waits for it, and its failure
-#                   never holds production up.
-#   notify          One Pushover message from the `notify` environment, about production only.
-#
-# An automatic run (after a publish of main) asks for both targets and deploys staging; a dispatch
-# asks for the one its `target` input names, and for staging does what its `action` input names:
-# deploy (Configure, then the bot), bot (the bot alone: a rollback or a rotated secret), configure
-# (the host alone) or preflight (a new host's database and backup, with no bot). Production has a
-# switch, the repository variable DEPLOY_ENABLED: while it is off, production is left out. Staging
-# has none; to pause it, add a reviewer to its environment.
-#
-# No job here checks out the repository or runs an action; host.yml does both for staging. Every
-# ${{ }} reaches a script through env:. Re-runs are refused (every job requires the first attempt):
-# start a new run instead. This file has no concurrency group: several production approval requests
-# may wait, an older one approved later ends as superseded, and the production host's lock
-# serializes its runs; host.yml holds one concurrency group per target. The repository names no
-# host: DEPLOY_HOST and DEPLOY_KNOWN_HOSTS are production's variables, and staging's host is a
-# secret of its environment, read in host.yml.
 name: Deploy
-# The title names the target; production's ops/deploy.sh requires the same title before it acts,
-# and refuses every title that ends in " to staging". A staging dispatch whose action isn't deploy
-# names it: "Deploy 2.36.0 configure to staging".
-run-name: >-
-  ${{ github.event_name == 'workflow_dispatch'
-      && format('Deploy {0}{1}{2}{3}', inputs.version,
-                inputs.rollback && format(' rollback from {0}', inputs.from) || '',
-                inputs.target == 'staging' && inputs.action != 'deploy' && format(' {0}', inputs.action) || '',
-                inputs.target == 'staging' && ' to staging' || '')
-      || format('Deploy {0}', github.event.workflow_run.head_sha) }}
+run-name: Deploy ${{ inputs.version }}
 
 on:
-  workflow_run:
-    # publish.yml's name (tests/unit/deploy-workflow.test.ts keeps them in step).
-    workflows: ["Publish containers"]
-    types: [completed]
-    branches: [main]
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      commit:
+        type: string
+        required: true
+      digest:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       version:
-        description: "Release X.Y.Z (the live one is re-verified and its commands registered again; configure ignores it)"
+        description: "Reviewed release X.Y.Z (never a downgrade)"
+        type: string
         required: true
+      commit:
+        description: "Exact 40-character source commit on main"
         type: string
-      rollback:
-        description: "Production only: go back to an older release on the same schema"
-        type: boolean
-        default: false
-      from:
-        description: "Production rollback only: the live version you are leaving"
+        required: true
+      digest:
+        description: "Exact signed image index sha256:digest; never a tag"
         type: string
-        default: ""
-      target:
-        description: "Where to deploy: production waits for your approval, staging needs none"
-        type: choice
-        options: [production, staging]
-        default: production
-      action:
-        description: "Staging only: deploy (Configure, then the bot), bot (the bot alone), configure (the host alone) or preflight (a new host, no bot)"
-        type: choice
-        options: [deploy, bot, configure, preflight]
-        default: deploy
+        required: true
 
-permissions: {}
+permissions:
+  contents: read
+  actions: read
+  attestations: read
 
 defaults:
   run:
     shell: bash
 
+env:
+  VERSION: ${{ inputs.version }}
+  COMMIT: ${{ inputs.commit }}
+  DIGEST: ${{ inputs.digest }}
+
 jobs:
-  plan:
-    name: Plan
-    # Every run plans; production's switch, DEPLOY_ENABLED, is checked in the plan and again in its
-    # deploy job, and staging deploys whenever it is asked (to pause it, add a reviewer to its
-    # environment).
-    if: >-
-      github.run_attempt == '1' && (
-        (github.event_name == 'workflow_run'
-         && github.event.workflow_run.conclusion == 'success'
-         && github.event.workflow_run.run_attempt == 1
-         && github.event.workflow_run.event == 'push'
-         && github.event.workflow_run.head_branch == 'main'
-         && github.event.workflow_run.path == '.github/workflows/publish.yml'
-         && github.event.workflow_run.head_repository.full_name == github.repository)
-        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+  validate:
+    name: Validate signed release
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # No packages permission and no registry login: the package is public, so the digests and
-    # `gh attestation verify oci://…` resolve anonymously, and no job token is written to disk.
-    permissions:
-      contents: read # package.json, CHANGELOG.md, migrations/ and the compare API
-      actions: read # completed publication jobs and environment protection/branch policies
-      attestations: read # the image's build-provenance attestations, for gh attestation verify
-    outputs:
-      deploy: ${{ steps.plan.outputs.deploy }}
-      action: ${{ steps.plan.outputs.action }}
-      version: ${{ steps.plan.outputs.version }}
-      commit: ${{ steps.plan.outputs.commit }}
-      digest: ${{ steps.plan.outputs.digest }}
-      from: ${{ steps.plan.outputs.from }}
-      reason: ${{ steps.plan.outputs.reason }}
-      production: ${{ steps.plan.outputs.production }}
-      staging: ${{ steps.plan.outputs.staging }}
-      production_reason: ${{ steps.plan.outputs.production_reason }}
-      notify: ${{ steps.plan.outputs.notify }}
-      staging_action: ${{ steps.plan.outputs.staging_action }}
-      config_commit: ${{ steps.plan.outputs.config_commit }}
-      schema_head: ${{ steps.plan.outputs.schema_head }}
     steps:
-      - name: Plan the deploy
-        id: plan
+      - name: Validate request, main ancestry, approval policy and provenance
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          PUBLICATION_RUN: ${{ github.event.workflow_run.id }}
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_ROLLBACK: ${{ inputs.rollback }}
-          INPUT_FROM: ${{ inputs.from }}
-          INPUT_TARGET: ${{ inputs.target }}
-          INPUT_ACTION: ${{ inputs.action }}
-          # Main's head when this run was created: staging's Configure applies site.yml from it.
-          CONFIG_COMMIT: ${{ github.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
-          RELEASE_PIPELINE_ENABLED: ${{ vars.RELEASE_PIPELINE_ENABLED }}
         run: |
           set -Eeuo pipefail
-          export LC_ALL=C
-          R=$GITHUB_REPOSITORY
-          IMAGE=ghcr.io/deconfined/tarubot
-          VER='^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
-          # The one account that approves production (ops/deploy.sh's REVIEWER; the test keeps
-          # them equal).
-          REVIEWER=deconfined
-          # The first release whose own ops/ansible/bot.yml deploys staging (#62): staging's deploy,
-          # bot and preflight take nothing older, since each release deploys with its own bot.yml.
-          STAGING_MIN_RELEASE=2.36.0
-          # Files that run on a host, or shape its settings: on production's Docker host as a
-          # docker-group user, which is root-equivalent there; on the staging host, Configure runs
-          # ops/ansible/site.yml as root and the release's ops/ansible/bot.yml runs the bot as the
-          # unprivileged tarubot user.
-          HOST_SIDE='^(ops/|docker-compose\.production\.yml$|production\.env\.example$|staging\.env\.example$)'
-          HOST_RUN="on production's Docker host they run as a docker-group user, which is root-equivalent there; on the staging host Configure runs \`ops/ansible/site.yml\` as root, and the release's \`ops/ansible/bot.yml\` runs the bot as the unprivileged \`tarubot\` user"
-          out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
-          fail() { out reason "$1"; echo "::error::$2"; exit 1; }
-          summary() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
-          # The image index digest behind a tag, and the commit its amd64 image was built from.
-          digest_of() { docker buildx imagetools inspect "$IMAGE:$1" --format '{{json .Manifest}}' | jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))'; }
-          revision_of() { docker buildx imagetools inspect "$IMAGE:$1" --format '{{json .Image}}' | jq -er '."linux/amd64".config.Labels["org.opencontainers.image.revision"] | select(test("^[0-9a-f]{40}$"))'; }
-          raw() { gh api -H 'Accept: application/vnd.github.raw+json' "repos/$R/contents/$1?ref=$2"; }
-          older() { local -a a b; local i; IFS=. read -r -a a <<< "$1"; IFS=. read -r -a b <<< "$2"; for i in 0 1 2; do (( a[i] == b[i] )) && continue; (( a[i] < b[i] )); return; done; return 1; }
-          # GitHub's compare API lists at most 300 files and can't page past them, so a list of
-          # 300 may be cut short. The plan claims nothing from such a list: it refuses, since the
-          # approver couldn't see the host-side changes (the host would still decide migrations).
-          listed() {
-            local n
-            n=$(jq -e '.files | arrays | length' <<< "$1") || fail compare "The compare API's answer has no file list."
-            (( n < 300 )) || fail compare-too-large "$2 changes 300 files or more, more than GitHub's compare API lists, so the plan can't show the host-side changes or check the migrations. Deploy by hand per docs/HOSTING.md."
-          }
-
-          # Maintenance publication completes verification but skips this fixed, non-matrix job.
-          # Check its standard conclusion before touching images or environment/notify settings.
-          # A single complete page is enough for this fixed graph; never accept a truncated list.
-          if [[ $EVENT == workflow_run ]]; then
-            out notify false
-            [[ $PUBLICATION_RUN =~ ^[1-9][0-9]*$ ]] || fail publication "The publish run has no valid ID."
-            jobs=$(gh api "repos/$R/actions/runs/$PUBLICATION_RUN/attempts/1/jobs?per_page=100") || fail publication "The publication jobs could not be read."
-            published=$(jq -er '
-              if (.total_count | type == "number") and .total_count >= 0 and .total_count <= 100
-                and (.jobs | type == "array") and (.jobs | length) == .total_count
-              then [.jobs[] | select(.name == "Promote latest")]
-                | if length == 1 and .[0].status == "completed"
-                    and (.[0].conclusion == "success" or .[0].conclusion == "skipped")
-                  then .[0].conclusion else error("publication job") end
-              else error("incomplete jobs") end' <<< "$jobs") || fail publication "The publication job is missing, incomplete or unsuccessful."
-            if [[ $published == skipped ]]; then
-              out deploy false
-              out reason no-release
-              out production false
-              out staging false
-              out production_reason -
-              summary "## Deploy: no new release" "" "Publication verified a maintenance change and produced no release image."
-              exit 0
-            fi
-          fi
-
-          # 1. The targets: an automatic run asks for both, a dispatch for the one it names.
-          #    Production has a switch, DEPLOY_ENABLED: while it isn't exactly `true`, production is
-          #    left out, and a run left with nothing is paused. Staging has none (#62): pausing it
-          #    means adding a reviewer to its environment, whose job then waits for that reviewer.
-          #
-          #    First, before anything can fail: whether notify reports this run. It does for every
-          #    run that asks for production while DEPLOY_ENABLED reads as true to GitHub's
-          #    expressions, which ignore case (notify's own condition reads it so). The decision
-          #    is made here, when the run plans, because notify starts only after the Deploy job
-          #    ends: switching deploys off meanwhile must not silence the outcome of a request
-          #    already waiting or a deploy already running (a `paused` refusal, a NEEDS YOU). An
-          #    output written before `fail` still reaches the job, as `reason` does.
-          if [[ $EVENT == workflow_run || $INPUT_TARGET == production ]] && [[ ${DEPLOY_ENABLED,,} == true ]]; then
-            out notify true
-          else
-            out notify false
-          fi
-          # Why production is off in a run that goes on for staging: paused (its switch isn't
-          # exactly `true`) or gate; "-" when it deploys or wasn't asked for. Notify names it.
-          PRODUCTION=false STAGING=false PRODUCTION_REASON=- target_notes=()
-          # What staging does: an automatic run deploys, a staging dispatch names its action.
-          STAGING_ACTION=deploy
-          RELEASE_PIPELINE_ENABLED=${RELEASE_PIPELINE_ENABLED-false}
-          if [[ $EVENT == workflow_run ]]; then
-            requested=(production staging)
-          else
-            [[ $INPUT_TARGET == production || $INPUT_TARGET == staging ]] || fail target "The target must be production or staging."
-            requested=("$INPUT_TARGET")
-            # The dispatch's inputs, before anything else: `action` is staging's until production
-            # moves to host.yml (2.37.0), and a rollback is production's (staging goes back with
-            # action=bot and the older version).
-            [[ $INPUT_ACTION =~ ^(deploy|bot|configure|preflight)$ ]] || fail action "The action must be deploy, bot, configure or preflight."
-            if [[ $INPUT_TARGET == production ]]; then
-              [[ $INPUT_ACTION == deploy ]] || fail action "Production takes action=deploy (a rollback sets rollback and from); bot, configure and preflight are staging's until 2.37.0."
-            else
-              [[ $INPUT_ROLLBACK != true && -z $INPUT_FROM ]] || fail staging-rollback "Staging takes no rollback or from: dispatch the older version with action=bot."
-              STAGING_ACTION=$INPUT_ACTION
-            fi
-          fi
-          for target in "${requested[@]}"; do
-            if [[ $target == staging ]]; then
-              # The replacement orchestrator already deployed and accepted this automatic release
-              # inside publication. Do not deliver it twice. Explicit staging dispatch stays recovery.
-              if [[ $EVENT != workflow_run || $RELEASE_PIPELINE_ENABLED != true ]]; then STAGING=true; fi
-            elif [[ $DEPLOY_ENABLED == true ]]; then
-              PRODUCTION=true
-            else
-              PRODUCTION_REASON=paused
-              target_notes+=("**Production is paused:** \`DEPLOY_ENABLED\` isn't true.")
-            fi
-          done
-          if [[ $PRODUCTION == false && $STAGING == false ]]; then
-            out deploy false
-            out reason paused
-            out production false
-            out staging false
-            out production_reason "$PRODUCTION_REASON"
-            summary "## Deploy: paused" "" "Production's switch, \`DEPLOY_ENABLED\`, is off, so nothing is planned or deployed."
-            exit 0
-          fi
-          [[ $CONFIG_COMMIT =~ ^[0-9a-f]{40}$ ]] || fail config-commit "This run names no commit of main to configure the host from."
-          out staging_action "$STAGING_ACTION"
-          out config_commit "$CONFIG_COMMIT"
-
-          # 2. The gates are real. Production needs @deconfined alone and admins can't bypass it.
-          #    Every environment accepts only main (one a typo auto-created has no policy); staging
-          #    needs nothing more, since a reviewer there is how the owner pauses it. A failed gate
-          #    turns off only its own target; notify's fails the plan.
-          gate() {
-            local json
-            json=$(gh api "repos/$R/environments/$1") || return 1
-            jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}' <<< "$json" > /dev/null || return 1
-            [[ $(gh api "repos/$R/environments/$1/deployment-branch-policies" | jq -c '[.branch_policies[] | {name, type}]') == '[{"name":"main","type":"branch"}]' ]] || return 1
-            [[ $1 == production ]] || return 0
-            jq -e '.can_admins_bypass == false
-              and ([.protection_rules[] | select(.type == "required_reviewers")]
-                | length == 1
-                  and .[0].prevent_self_review == false
-                  and ([.[0].reviewers[] | {type, login: .reviewer.login}] == [{type: "User", login: "deconfined"}]))' <<< "$json" > /dev/null
-          }
-          gate notify || fail gate "The notify environment must accept only main."
-          if [[ $PRODUCTION == true ]] && ! gate production; then
-            PRODUCTION=false PRODUCTION_REASON=gate
-            echo "::error::The production environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main."
-            target_notes+=("**Production is off in this run:** its environment must require @deconfined alone (self-review allowed), refuse admin bypass and accept only main.")
-          fi
-          if [[ $STAGING == true ]] && ! gate staging; then
-            STAGING=false
-            echo "::error::The staging environment must accept only main."
-            target_notes+=("**Staging is off in this run:** its environment must accept only main.")
-          fi
-          [[ $PRODUCTION == true || $STAGING == true ]] || fail gate "No requested target passed its environment's gate."
-
-          # 3. A staging `configure` dispatch configures the host alone, from main's head: there is
-          #    no release, image or provenance to check.
-          if [[ $STAGING_ACTION == configure ]]; then
-            out production false
-            out staging true
-            out production_reason "$PRODUCTION_REASON"
-            out deploy true
-            out reason -
-            summary "## Configure staging" "" \
-              "**Staging** runs Configure at once, without approval: \`ops/ansible/site.yml\` at main's head ([\`${CONFIG_COMMIT:0:12}\`](https://github.com/$R/commit/$CONFIG_COMMIT)), as root on the staging host. The bot and its release don't change." ""
-            exit 0
-          fi
-
-          # 4. The target: version V, commit C and image digest D.
-          ACTION=deploy FROM=- C_FROM=
-          if [[ $EVENT == workflow_run ]]; then
-            [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || fail target "The publish run names no commit."
-            C=$HEAD_SHA
-            V=$(raw package.json "$C" | jq -er .version) || fail target "package.json can't be read at $C."
-            [[ $V =~ $VER ]] || fail version "package.json at $C doesn't hold a plain X.Y.Z version."
-            out version "$V"
-            D=$(digest_of "$V") || fail image "$IMAGE:$V isn't published."
-          else
-            V=$INPUT_VERSION
-            [[ $V =~ $VER ]] || fail version "The version must be X.Y.Z, with no pre-release."
-            out version "$V"
-            D=$(digest_of "$V") || fail image "$IMAGE:$V isn't published."
-            C=$(revision_of "$V") || fail image "$IMAGE:$V carries no revision label."
-            [[ $(raw package.json "$C" | jq -r .version || true) == "$V" ]] || fail version-mismatch "package.json at $C doesn't say $V."
-            if [[ $INPUT_ROLLBACK == true ]]; then
-              ACTION=rollback FROM=$INPUT_FROM
-              [[ $FROM =~ $VER ]] || fail from "A rollback names the live version it leaves in 'from'."
-              older "$V" "$FROM" || fail rollback-not-older "A rollback goes to an older release than $FROM."
-              C_FROM=$(revision_of "$FROM") || fail image "$IMAGE:$FROM carries no revision label."
-              back=$(gh api "repos/$R/compare/$C...$C_FROM") || fail compare "The compare API didn't answer."
-              listed "$back" "The way back from $FROM to $V"
-              across=$(jq '[.files[] | select((.filename | startswith("migrations/")) or ((.previous_filename // "") | startswith("migrations/")))] | length' <<< "$back")
-              [[ $across == 0 ]] || fail rollback-across-migration "Migrations lie between $V and $FROM; the way back is a fix release or a restore."
-            else
-              [[ -z $INPUT_FROM ]] || fail from "'from' is only for a rollback."
-            fi
-          fi
-
-          # 5. Binding: the version tag and the commit tag are the same image, and C is on main.
-          [[ $(digest_of "sha-$C" || true) == "$D" ]] || fail digest-mismatch "The tags $V and sha-$C point at different images."
-          status=$(gh api "repos/$R/compare/$C...main" --jq .status) || fail not-on-main "The compare API didn't answer."
-          [[ $status == identical || $status == ahead ]] || fail not-on-main "$C isn't on main."
-
-          # 6. Provenance, before any early exit and before either deploy job: main's publish.yml
-          #    built D from C on a GitHub-hosted runner and signed it (2.32.0 and later). Tags can
-          #    move, and any workflow in this repository could push one; only main's publish.yml can
-          #    make this signature. The signer is the certificate's exact identity: gh turns
-          #    --signer-workflow into a pattern anchored only at its start, which a workflow named
-          #    publish.yml-anything would match too. gh also exits 1 on network or TUF errors, so a
-          #    failure may be temporary: a new dispatch retries, since re-runs are refused.
-          verified=$(gh attestation verify "oci://$IMAGE@$D" --repo deconfined/tarubot \
+          umask 077
+          private=$(mktemp -d "$RUNNER_TEMP/release-validation.XXXXXX")
+          trap 'rm -rf -- "$private"' EXIT
+          trap 'echo "::error::Release validation failed; no host connection was made."' ERR
+          exec 2> "$private/errors"
+          [[ $DEPLOY_ENABLED == true ]]
+          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
+          [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$COMMIT...main" --jq .status)
+          [[ $status == identical || $status == ahead ]]
+          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
+          [[ $version == "$VERSION" ]]
+          gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$private/environment"
+          jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
+            and .can_admins_bypass == false
+            and ([.protection_rules[] | select(.type == "required_reviewers")]
+              | length == 1 and .[0].prevent_self_review == false
+                and ([.[0].reviewers[] | {type, login: .reviewer.login}]
+                  == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" \
+            | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
+          gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
+            --repo deconfined/tarubot \
             --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
-            --source-ref refs/heads/main --source-digest "$C" \
+            --source-ref refs/heads/main --source-digest "$COMMIT" \
             --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
-            --format json) ||
-            fail unattested "$IMAGE@$D isn't attested as built from $C by publish.yml on main, or the attestation couldn't be verified (gh fails on network and TUF errors too). Releases before 2.32.0 carry no attestation: deploy them by hand per docs/HOSTING.md. To retry, start a new dispatch; re-runs are refused."
-          jq -e 'type == "array" and length >= 1' <<< "$verified" > /dev/null 2>&1 ||
-            fail unattested "gh attestation verify returned no verified attestation for $IMAGE@$D. To retry, start a new dispatch; re-runs are refused."
-          provenance="Provenance verified: publish.yml on refs/heads/main, commit $C"
-          out action "$ACTION"
-          out commit "$C"
-          out digest "$D"
-          out from "$FROM"
+            --format json > "$private/attestation"
+          jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
+          echo 'Signed release validated; production approval is required.'
 
-          # 7. Staging takes STAGING_MIN_RELEASE or later: an older release has no bot.yml of its
-          #    own that knows staging. A dispatch fails; beside production, staging is left out.
-          if [[ $STAGING == true ]] && older "$V" "$STAGING_MIN_RELEASE"; then
-            STAGING=false
-            [[ $PRODUCTION == true ]] || fail below-floor "$V is older than $STAGING_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys staging."
-            echo "::warning::$V is older than $STAGING_MIN_RELEASE, the first release whose ops/ansible/bot.yml deploys staging; staging is off in this run."
-            target_notes+=("**Staging is off in this run:** $V is older than $STAGING_MIN_RELEASE, the first release whose \`ops/ansible/bot.yml\` deploys staging.")
-          fi
-
-          # 8. Show the whole released range, including work merged before a version-only bump.
-          # Maintenance may keep the release version across several first-parent commits. Walk
-          # back to the prior declaration; its published image gives the actual released commit.
-          host_files=() added=() previous=
-          if [[ $EVENT == workflow_run ]]; then
-            P=$(gh api "repos/$R/commits/$C" --jq '.parents[0].sha') || fail compare "The commits API didn't answer."
-            [[ $P =~ ^[0-9a-f]{40}$ ]] || fail compare "$C has no parent to compare with."
-            while :; do
-              previous=$(raw package.json "$P" | jq -er .version) || fail previous-release "The previous release version could not be read."
-              [[ $previous =~ $VER ]] || fail previous-release "Release history must name plain release versions."
-              [[ $previous == "$V" ]] || break
-              parent=$(gh api "repos/$R/commits/$P" --jq '.parents[0].sha') || fail previous-release "Earlier release history could not be read."
-              [[ $parent =~ ^[0-9a-f]{40}$ && $parent != "$P" ]] || fail previous-release "Release history has no valid earlier parent."
-              P=$parent
-            done
-            older "$previous" "$V" || fail previous-release "The previous declaration must name an older release version."
-            BASE=$(revision_of "$previous") || fail previous-release "The previous release image is unavailable; use an owner-authorized manual deployment."
-            [[ $BASE =~ ^[0-9a-f]{40}$ ]] || fail previous-release "The previous release image has no valid commit."
-            [[ $(raw package.json "$BASE" | jq -r .version || true) == "$previous" ]] || fail previous-release "The previous image commit does not match its version."
-            cmp=$(gh api "repos/$R/compare/$BASE...$C") || fail compare "The compare API didn't answer."
-            [[ $(jq -r .status <<< "$cmp") == ahead ]] || fail compare "The release must descend from the previous published version."
-            listed "$cmp" "This release"
-            mapfile -t host_files < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$cmp" | grep -E "$HOST_SIDE" || true)
-            # Applied migrations remain immutable throughout the accumulated released range.
-            changed=$(jq -r '.files[] | select((.filename | startswith("migrations/")) or ((.previous_filename // "") | startswith("migrations/"))) | select(.status != "added") | .filename' <<< "$cmp")
-            [[ -z $changed ]] || fail applied-migration-changed "This release edits, renames or removes an applied migration: $(tr -c 'A-Za-z0-9._/-' ' ' <<< "$changed")"
-            mapfile -t added < <(jq -r '.files[] | select(.status == "added" and (.filename | startswith("migrations/"))) | .filename' <<< "$cmp")
-          elif [[ $ACTION == rollback ]]; then
-            mapfile -t host_files < <(jq -r '.files[] | .filename, (.previous_filename // empty)' <<< "$back" | grep -E "$HOST_SIDE" || true)
-          fi
-          # The release's schema head: the newest migration at C (staging's summary names it).
-          newest=$(gh api "repos/$R/contents/migrations?ref=$C" --jq '[.[].name | select(test("^[0-9]{3}_[a-z0-9_]+\\.sql$"))] | sort | last // "none"') || newest=unknown
-          out schema_head "$newest"
-
-          # 9. The plan, public data only.
-          if [[ $ACTION == rollback ]]; then
-            summary "## Roll back from $FROM to $V" ""
-          else
-            summary "## Deploy $V" ""
-          fi
-          summary "| | |" "| --- | --- |" \
-            "| Version | \`$V\` |" \
-            "| Commit | [\`${C:0:12}\`](https://github.com/$R/commit/$C) |" \
-            "| Image | \`$IMAGE@$D\` |"
-          if [[ -n $previous ]]; then
-            summary "| Previous published release | \`$previous\` |" \
-              "| Released changes | [\`${BASE:0:12}...${C:0:12}\`](https://github.com/$R/compare/$BASE...$C) |"
-          fi
-          summary "| Newest migration at this commit | \`$newest\` |" ""
-          if [[ $PRODUCTION == true && $STAGING == true ]]; then
-            summary "**Targets:** production, once @$REVIEWER approves it, and staging, which deploys at once beside the approval request, without one."
-          elif [[ $PRODUCTION == true ]]; then
-            summary "**Target:** production, once @$REVIEWER approves it."
-          else
-            summary "**Target:** staging, which deploys at once, without approval."
-          fi
-          summary "${target_notes[@]}" "" "$provenance" ""
-          if [[ $EVENT == workflow_run ]]; then
-            if (( ${#added[@]} )); then
-              summary "**Migration files added in this release:** ${added[*]}"
-            else
-              summary "**Migration files added in this release:** none"
-            fi
-          fi
-          summary "If a host is older than the previous release, earlier migrations are included too; each host decides from what is live there." ""
-          # An automatic run lists this release's host-side changes, and a dispatch none: each
-          # host deploys from whatever is live, so both point at the files' history up to C.
-          history="[\`ops/\`](https://github.com/$R/commits/$C/ops), [\`docker-compose.production.yml\`](https://github.com/$R/commits/$C/docker-compose.production.yml) and [\`production.env.example\`](https://github.com/$R/commits/$C/production.env.example)"
-          label=
-          if [[ $ACTION == rollback ]]; then
-            label="**Host-side differences between $V and $FROM**"
-          elif [[ $EVENT == workflow_run ]]; then
-            label="**Host-side changes in this release**"
-          fi
-          if [[ -n $label ]] && (( ${#host_files[@]} )); then
-            summary "$label ($HOST_RUN):"
-            for f in "${host_files[@]}"; do summary "- \`$f\`"; done
-            if printf '%s\n' "${host_files[@]}" | grep -qE '^(docker-compose\.production\.yml|production\.env\.example)$'; then
-              summary "" "The Compose file or production's settings template changed: **check production's .env first.**"
-            fi
-            summary ""
-          elif [[ -n $label ]]; then
-            summary "$label: no file under \`ops/\`, \`docker-compose.production.yml\` or \`production.env.example\` changed." ""
-          fi
-          if [[ $PRODUCTION == true ]]; then check="Before approving, check"; else check="Check"; fi
-          if [[ $EVENT == workflow_run ]]; then
-            summary "If a host is older than the previous release, the host-side changes of the releases in between run too: check the history of $history up to this commit." ""
-          elif [[ $ACTION == deploy ]]; then
-            summary "**Host-side changes:** each host deploys from its live release to this commit. $check the history of $history up to this commit since the live release." ""
-          fi
-          day=$(date -u +%u) hm=$(date -u +%H%M)
-          if [[ $day == 2 ]] && (( 10#$hm >= 1800 && 10#$hm < 2300 )); then
-            echo "::warning::The database cluster's weekly maintenance runs Tuesdays 19:00-23:00 UTC; a migration deploy now may meet a restart."
-            summary "> [!WARNING]" "> The database cluster's weekly maintenance runs Tuesdays 19:00-23:00 UTC. A migration deploy in that window may meet a cluster restart; the host warns again if it runs one then." ""
-          fi
-          if (( 10#$hm >= 415 && 10#$hm < 445 )); then
-            echo "::warning::The daily backup runs around now; the host waits up to 5 minutes for it."
-            summary "> [!WARNING]" "> The daily backup runs around now. The host waits up to 5 minutes for it, and a migration that meets it rolls back safely." ""
-          fi
-          # Test on staging before approving production (#62, answer 6): this run's staging job,
-          # and DevBot there once it has moved.
-          if [[ $PRODUCTION == true && $STAGING == true ]]; then
-            summary "**Tried on staging?** Check before approving. Staging deploys beside this request: its **Deploy staging** job shows how $V went there, and once DevBot runs on staging, DevBot shows it." ""
-          elif [[ $PRODUCTION == true ]]; then
-            summary "**Tried on staging?** Check before approving: the **Deploy staging** job of $V's automatic run shows how it went there, and once DevBot runs on staging, DevBot shows it." ""
-          fi
-          # Production's host-side files run on its Docker host as a docker-group user, which is
-          # root-equivalent there. Staging's paragraphs below say how its files run.
-          if [[ $PRODUCTION == true && $ACTION == rollback ]]; then
-            summary "**Approving** rolls production back from $FROM to $V (\`${C:0:12}\`, \`$D\`), on the same schema: the host restarts onto $V, puts $FROM back automatically if $V never took the writer lease, then registers $V's commands globally and reads them back. Work only $FROM understands then fails as \`invalid_job\`: check \`/sync status\` and requeue it with \`retry.js\`." ""
-          elif [[ $PRODUCTION == true ]]; then
-            summary "**Approving** runs Deploy $V (\`${C:0:12}\`, \`$D\`) on production. The host restarts onto $V; or, if $V carries migration files the live release lacks, it stops the bot, takes an encrypted \`ops/backup.sh\` dump, runs \`migrate.js\` in $V's image and starts $V. It puts the previous release back automatically if $V never took the writer lease or the migration did not commit. It registers $V's commands globally and reads them back. It puts this commit's host-side files in place on production's Docker host, where they run as a docker-group user, which is root-equivalent there: the Compose file at once, \`ops/backup.sh\` for a migration's dump, and \`ops/deploy.sh\` from the next deploy on, including changes from releases production hasn't had yet. Approval comments are public." ""
-          fi
-          # Staging runs host.yml at once, without approval: Configure as root from main's head
-          # (not for action=bot), then the release's own bot.yml as the unprivileged tarubot user.
-          if [[ $PRODUCTION == true ]]; then when="at once, beside the approval request and without one"; else when="at once, without approval"; fi
-          if [[ $STAGING == true ]]; then
-            case $STAGING_ACTION in
-              deploy)
-                summary "**Staging** takes $V (\`${C:0:12}\`, \`$D\`) $when. Configure runs \`ops/ansible/site.yml\` at main's head (\`${CONFIG_COMMIT:0:12}\`) as root on the staging host; then $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It waits for healthy, then registers $V's commands in the test guild. While staging's environment holds no \`DISCORD_TOKEN\` and no bot runs there, a deploy only configures the host. A failed staging deploy never holds production up." ""
-                ;;
-              bot)
-                summary "**Staging** moves to $V (\`${C:0:12}\`, \`$D\`) $when, without Configure: $V's own \`ops/ansible/bot.yml\` writes the bot's secrets, settings and unit as the unprivileged \`tarubot\` user and restarts the bot, and \`migrate.js\` runs before the start, to the schema head \`$newest\`. It refuses before anything stops if a migration lies between the live release and $V. It waits for healthy, then registers $V's commands in the test guild." ""
-                ;;
-              preflight)
-                summary "**Staging** preflights $V (\`${C:0:12}\`, \`$D\`) $when. Configure runs \`ops/ansible/site.yml\` at main's head (\`${CONFIG_COMMIT:0:12}\`) as root on the staging host; then $V's own \`ops/ansible/bot.yml\` writes the database and backup secrets as the unprivileged \`tarubot\` user, runs \`migrate.js\` to the schema head \`$newest\` and one backup, and starts no bot. It refuses a host where a bot unit exists." ""
-                ;;
-            esac
-          fi
-          notes=$(raw CHANGELOG.md "$C" | awk -v v="$V" 'index($0, "## " v " ") == 1 { on = 1 } on && /^## / && index($0, "## " v " ") != 1 { exit } on { print }' || true)
-          if [[ -n $notes ]]; then
-            summary "<details><summary>Changelog</summary>" "" "$notes" "" "</details>"
-          fi
-
-          # 10. Outputs for the deploy jobs.
-          out production "$PRODUCTION"
-          out staging "$STAGING"
-          out production_reason "$PRODUCTION_REASON"
-          out deploy true
-          out reason -
-
-  # Production's job and staging's run beside each other, and production never needs staging's. A
-  # run can therefore fail because of its staging job while production deployed: whether production
-  # deployed a run is the Deploy job's conclusion together with the production approval, never the
-  # run's conclusion. Notify reads it that way. This job is byte-identical to 2.35.0's until
-  # production moves to host.yml in 2.37.0 (tests/unit/deploy-workflow.test.ts pins its SHA-256).
-  deploy:
-    name: Deploy
-    needs: plan
-    if: github.run_attempt == '1' && needs.plan.outputs.production == 'true' && (github.event_name == 'workflow_run' || inputs.target == 'production')
+  production:
+    name: Deploy production
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-24.04
-    # Longer than the reconnect deadline below, which covers the host's longest run (its waits and
-    # timeouts add up to about 68 minutes).
     timeout-minutes: 90
-    # @deconfined approves here; DEPLOY_SSH_KEY, DEPLOY_HOST and DEPLOY_KNOWN_HOSTS exist only then.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    # This is the only environment job in the complete release pipeline.
     environment: production
-    permissions: {}
-    outputs:
-      started: ${{ steps.start.outputs.started }}
-      outcome: ${{ steps.ssh.outputs.outcome || steps.start.outputs.outcome }}
-      reason: ${{ steps.ssh.outputs.reason || steps.start.outputs.reason }}
-      previous: ${{ steps.ssh.outputs.previous }}
-      path: ${{ steps.ssh.outputs.path }}
-      downtime: ${{ steps.ssh.outputs.downtime }}
-      commands: ${{ steps.ssh.outputs.commands }}
-      backup: ${{ steps.ssh.outputs.backup }}
-      restore_point: ${{ steps.ssh.outputs.restore_point }}
-      connected: ${{ steps.ssh.outputs.connected }}
-      warnings: ${{ steps.ssh.outputs.warnings }}
     steps:
-      - name: Check that deploys are still enabled
-        id: start
+      - name: Recheck release and owner policy after approval and queue waits
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
         run: |
-          echo started=true >> "$GITHUB_OUTPUT"
-          if [ "$DEPLOY_ENABLED" != true ]; then
-            printf 'outcome=refused\nreason=paused\n' >> "$GITHUB_OUTPUT"
-            echo "::error::Deploys were paused after this request; nothing changed."
-            exit 1
-          fi
-      - name: Run the deploy on the host
-        id: ssh
+          set -Eeuo pipefail
+          umask 077
+          private=$(mktemp -d "$RUNNER_TEMP/release-validation.XXXXXX")
+          trap 'rm -rf -- "$private"' EXIT
+          trap 'echo "::error::Release revalidation failed; no host connection was made."' ERR
+          exec 2> "$private/errors"
+          [[ $DEPLOY_ENABLED == true ]]
+          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
+          [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$COMMIT...main" --jq .status)
+          [[ $status == identical || $status == ahead ]]
+          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
+          [[ $version == "$VERSION" ]]
+          gh api "repos/$GITHUB_REPOSITORY/environments/production" > "$private/environment"
+          jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
+            and .can_admins_bypass == false
+            and ([.protection_rules[] | select(.type == "required_reviewers")]
+              | length == 1 and .[0].prevent_self_review == false
+                and ([.[0].reviewers[] | {type, login: .reviewer.login}]
+                  == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/environments/production/deployment-branch-policies" \
+            | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
+          gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
+            --repo deconfined/tarubot \
+            --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+            --source-ref refs/heads/main --source-digest "$COMMIT" \
+            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
+            --format json > "$private/attestation"
+          jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
+          echo 'Signed release and production policy revalidated.'
+      - name: Send the exact release to the pinned host entry
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
-          DEPLOY_ENVIRONMENT: production
-          # ops/deploy.sh's waits and timeouts add up to about 68 minutes in the worst case.
-          RECONNECT_SECONDS: "4800"
-          ACTION: ${{ needs.plan.outputs.action }}
-          VERSION: ${{ needs.plan.outputs.version }}
-          COMMIT: ${{ needs.plan.outputs.commit }}
-          DIGEST: ${{ needs.plan.outputs.digest }}
-          FROM: ${{ needs.plan.outputs.from }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           set -Eeuo pipefail
-          export LC_ALL=C
           umask 077
-          dir=$RUNNER_TEMP/ssh
-          mkdir "$dir"
+          dir=$(mktemp -d "$RUNNER_TEMP/deploy-ssh.XXXXXX")
+          trap 'rm -rf -- "$dir"' EXIT
+          trap 'echo "::error::Deployment did not complete; inspect the private host log and reconcile before a fresh dispatch."' ERR
+          exec 2> "$dir/errors"
+          [[ $DEPLOY_ENABLED == true ]]
+          command="deploy $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
+          form='^deploy (0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) [0-9a-f]{40} sha256:[0-9a-f]{64} [1-9][0-9]{0,19}$'
+          [[ $command =~ $form ]]
+          host_form='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+          [[ $DEPLOY_HOST =~ $host_form ]]
+          known=${DEPLOY_KNOWN_HOSTS%$'\n'}
+          known=${known%$'\r'}
+          key_form='^([^ ]+) ssh-ed25519 [A-Za-z0-9+/]+={0,2}$'
+          [[ $known != *$'\n'* && $known =~ $key_form && ${BASH_REMATCH[1]} == "$DEPLOY_HOST" ]]
+          [[ $DEPLOY_SSH_KEY == *'PRIVATE KEY'* ]]
+          printf '%s\n' "$known" > "$dir/known_hosts"
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
-          unset DEPLOY_SSH_KEY
-          out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
-          stop() { out reason "$1"; echo "::error::$2"; exit 1; }
-          # The job's two settings; everything else in this script is the same for both targets.
-          [[ $DEPLOY_ENVIRONMENT =~ ^(production|staging)$ && $RECONNECT_SECONDS =~ ^[1-9][0-9]{0,4}$ ]] ||
-            stop bad-request "The job's DEPLOY_ENVIRONMENT or RECONNECT_SECONDS is malformed."
-          grep -q 'PRIVATE KEY' "$dir/key" || stop no-key "DEPLOY_SSH_KEY isn't set in the $DEPLOY_ENVIRONMENT environment."
-
-          # The host and its pinned key come from the deploy environment's variables.
-          HOST_NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-          KNOWN_HOST='^([^ ]+) ssh-ed25519 [A-Za-z0-9+/]+={0,2}$'
-          [[ $DEPLOY_HOST =~ $HOST_NAME ]] || stop known-hosts "DEPLOY_HOST must be the $DEPLOY_ENVIRONMENT host's DNS name."
-          kh=${DEPLOY_KNOWN_HOSTS%$'\n'}
-          kh=${kh%$'\r'}
-          if [[ $kh == *$'\n'* ]] || ! [[ $kh =~ $KNOWN_HOST ]] || [[ ${BASH_REMATCH[1]} != "$DEPLOY_HOST" ]]; then
-            stop known-hosts "DEPLOY_KNOWN_HOSTS must be one line: DEPLOY_HOST, then ssh-ed25519 and the host's key."
-          fi
-          printf '%s\n' "$kh" > "$dir/kh"
-
-          # The v1 command contract, the same patterns as ops/deploy.sh.
-          DEPLOY_FORM='^deploy ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19})$'
-          ROLLBACK_FORM='^rollback ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})) ([0-9a-f]{40}) (sha256:[0-9a-f]{64}) ([1-9][0-9]{0,19}) ((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}))$'
-          RESULT_FORM='^result outcome=(deployed|already-live|superseded|refused|recovered|needs-you) version=(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) previous=((0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})|-) path=(plain|migration|rollback|none) downtime=([0-9]{1,5}|-) commands=(registered|failed|skipped) backup=(daily/tarubot-[0-9]{8}T[0-9]{6}Z\.dump\.age|-) restore_point=([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z|-) reason=([a-z0-9-]{1,40}|-)$'
-          STEP_LINE='^step [a-z-]{1,20}$'
-          WARNING_LINE='^warning [a-z0-9-]{1,40}$'
-          if [[ $ACTION == rollback ]]; then
-            CMD="rollback $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID $FROM"
-          else
-            CMD="deploy $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
-          fi
-          [[ $CMD =~ $DEPLOY_FORM || $CMD =~ $ROLLBACK_FORM ]] || stop bad-request "The plan's fields don't fit the command contract."
-
-          # One connection; only connection failures are retried, with the same command, which
-          # attaches to the same run on the host, until RECONNECT_SECONDS have passed (80 minutes
-          # for production, 5 for staging). ssh's own messages stay in a private file. `reached`
-          # stays false only while every attempt failed before sshd answered, which is the only
-          # case where nothing can have started on the host.
-          NO_CONNECTION='connect to host .* port [0-9]+: |Could not resolve hostname|Connection timed out during banner exchange|kex_exchange_identification'
-          : > "$dir/lines"
-          reason='' rc=0 reached=false
-          deadline=$((SECONDS + RECONNECT_SECONDS))
-          while :; do
-            set +e
-            ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
-              -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/kh" \
-              -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o CheckHostIP=no \
-              -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=20 -o ServerAliveInterval=15 \
-              -o ServerAliveCountMax=4 -o LogLevel=ERROR \
-              "tarubot@$DEPLOY_HOST" "$CMD" < /dev/null 2> "$dir/err" |
-              while IFS= read -r line; do
-                printf '%s\n' "$line" >> "$dir/lines"
-                if [[ $line =~ $STEP_LINE || $line =~ $RESULT_FORM ]]; then
-                  printf '%s\n' "$line"
-                elif [[ $line =~ $WARNING_LINE ]]; then
-                  echo "::warning::The host reports: ${line#warning }"
-                fi
-              done
-            rc=${PIPESTATUS[0]}
-            set -e
-            if [[ -s $dir/lines ]] || ! grep -qE "$NO_CONNECTION" "$dir/err"; then reached=true; fi
-            if grep -qE "$RESULT_FORM" "$dir/lines"; then break; fi
-            if grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$dir/err"; then reason=host-key; break; fi
-            if grep -qF 'Permission denied (publickey' "$dir/err"; then reason=key-rejected; break; fi
-            if (( rc != 255 )) || (( SECONDS >= deadline )); then break; fi
-            sleep 20
-          done
-
-          out connected "$reached"
-          warnings=$(grep -E "$WARNING_LINE" "$dir/lines" | sed 's/^warning //' | sort -u | tr '\n' ' ' || true)
-          out warnings "${warnings% }"
-          result=$(grep -E "$RESULT_FORM" "$dir/lines" | tail -n 1 || true)
-          if [[ -z $result ]]; then
-            if [[ -z $reason ]]; then
-              if (( rc == 64 )); then reason=bad-request
-              elif [[ $reached == true ]]; then reason=outcome-unknown
-              else reason=unreachable
-              fi
-            fi
-            stop "$reason" "No result from the host ($reason)."
-          fi
-          read -r -a fields <<< "${result#result }"
-          for field in "${fields[@]}"; do out "${field%%=*}" "${field#*=}"; done
-          case $result in
-            "result outcome=deployed "* | "result outcome=already-live "* | "result outcome=superseded "*) ;;
-            *) echo "::error::The deploy did not complete: ${result#result }"; exit 1 ;;
-          esac
-      - name: Remove the key
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/ssh"
-
-  # Staging deploys without approval: the `staging` environment has no reviewer and accepts only
-  # main. host.yml's job names that environment, so staging's secrets (its host, pinned host key,
-  # Configure key and the bot's settings) load there and nowhere else; `secrets: inherit` only lets
-  # the called job read them. It runs Configure (ops/ansible/site.yml at config_commit, main's head
-  # when this run was created) unless the action is bot, then the release's own
-  # ops/ansible/bot.yml unless the action is configure. Its concurrency group keeps two staging
-  # runs apart, and an environment without TARGET_HOST ends an automatic run green, with a notice.
-  deploy-staging:
-    name: Deploy staging
-    needs: plan
-    if: github.run_attempt == '1' && needs.plan.outputs.staging == 'true' && (github.event_name == 'workflow_run' || inputs.target == 'staging')
-    permissions:
-      contents: read # host.yml's two checkouts of this public repository, and nothing else
-    uses: ./.github/workflows/host.yml
-    with:
-      target: staging
-      action: ${{ needs.plan.outputs.staging_action }}
-      version: ${{ needs.plan.outputs.version }}
-      commit: ${{ needs.plan.outputs.commit }}
-      digest: ${{ needs.plan.outputs.digest }}
-      config_commit: ${{ needs.plan.outputs.config_commit }}
-    secrets: inherit
-
-  # About production only: staging dispatches are skipped, and a run's staging job never changes
-  # the message (it reads the Deploy job, not the run's conclusion). The plan decides whether this
-  # run is reported, at its start (its `notify` output), so a switch turned off while a request
-  # waits or a deploy runs never silences its outcome. Only a plan that never got to write that
-  # output (its runner failed) falls back to the switch as it reads now. This job is byte-identical
-  # to 2.35.0's until 2.37.0 (tests/unit/deploy-workflow.test.ts pins its SHA-256).
-  notify:
-    name: Notify
-    needs: [plan, deploy]
-    if: >-
-      github.run_attempt == '1' && always() && needs.plan.result != 'skipped' && (
-        needs.plan.outputs.notify == 'true'
-        || (needs.plan.outputs.notify == '' && vars.DEPLOY_ENABLED == 'true'
-            && (github.event_name == 'workflow_run' || inputs.target != 'staging')))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    environment: notify
-    permissions: {}
-    steps:
-      - name: Send one Pushover message
-        env:
-          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
-          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
-          PLAN_RESULT: ${{ needs.plan.result }}
-          PLAN_DEPLOY: ${{ needs.plan.outputs.deploy }}
-          PLAN_PRODUCTION: ${{ needs.plan.outputs.production }}
-          PLAN_PRODUCTION_REASON: ${{ needs.plan.outputs.production_reason }}
-          PLAN_VERSION: ${{ needs.plan.outputs.version }}
-          PLAN_REASON: ${{ needs.plan.outputs.reason }}
-          PLAN_ACTION: ${{ needs.plan.outputs.action }}
-          DEPLOY_RESULT: ${{ needs.deploy.result }}
-          STARTED: ${{ needs.deploy.outputs.started }}
-          OUTCOME: ${{ needs.deploy.outputs.outcome }}
-          REASON: ${{ needs.deploy.outputs.reason }}
-          PREVIOUS: ${{ needs.deploy.outputs.previous }}
-          DEPLOY_PATH: ${{ needs.deploy.outputs.path }}
-          DOWNTIME: ${{ needs.deploy.outputs.downtime }}
-          COMMANDS: ${{ needs.deploy.outputs.commands }}
-          BACKUP: ${{ needs.deploy.outputs.backup }}
-          RESTORE_POINT: ${{ needs.deploy.outputs.restore_point }}
-          WARNINGS: ${{ needs.deploy.outputs.warnings }}
-        run: |
-          set -Eeuo pipefail
-          export LC_ALL=C
-          # Every value is checked against its token pattern before it reaches the message.
-          tok() { if [[ $2 =~ $1 ]]; then printf '%s' "$2"; else printf '?'; fi; }
-          VER='^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$'
-          WORD='^[a-z0-9-]{1,40}$'
-          V=$(tok "$VER" "$PLAN_VERSION")
-          prev=$(tok "$VER" "$PREVIOUS")
-          reason=$(tok "$WORD" "$REASON")
-          down=$(tok '^[0-9]{1,5}$' "$DOWNTIME")
-          backup=$(tok '^daily/tarubot-[0-9]{8}T[0-9]{6}Z\.dump\.age$' "$BACKUP")
-          point=$(tok '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{15}Z$' "$RESTORE_POINT")
-          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          priority=0
-          if [[ $PLAN_RESULT != success ]]; then
-            msg="$V not deployable: $(tok "$WORD" "$PLAN_REASON") (see the run)"
-          elif [[ $PLAN_DEPLOY != true && $PLAN_REASON == paused ]]; then
-            # This job reports a paused plan only when DEPLOY_ENABLED reads as true to GitHub's
-            # expressions, which ignore case, while the plan's own check didn't find exactly
-            # `true` (say `True`). The plan stopped before it named a version.
-            msg="Deploys are paused: DEPLOY_ENABLED must be exactly true (lowercase). Nothing was planned or deployed."
-            priority=-1
-          elif [[ $PLAN_DEPLOY != true ]]; then
-            msg="$V: no runtime change in this merge. If an earlier release wasn't deployed, run Deploy with the newest version."
-            priority=-1
-          elif [[ $PLAN_PRODUCTION != true && $PLAN_PRODUCTION_REASON == paused ]]; then
-            # The plan went on for staging alone, with production's switch not exactly `true`.
-            msg="$V not deployed to production: DEPLOY_ENABLED must be exactly true (lowercase). Staging went ahead."
-            priority=-1
-          elif [[ $PLAN_PRODUCTION != true ]]; then
-            # The plan went on for staging alone: production's gate failed.
-            msg="$V not deployable: gate"
-          elif [[ $STARTED != true ]]; then
-            if [[ $DEPLOY_RESULT == cancelled ]]; then msg="$V: the run was cancelled before the deploy started"; else msg="$V not approved (rejected or expired)"; fi
-            priority=-1
-          else
-            case $OUTCOME in
-              deployed)
-                kind=$(tok '^(plain|migration|rollback)$' "$DEPLOY_PATH")
-                if [[ $kind == plain ]]; then kind=restart; fi
-                msg="$V deployed ($kind, down ${down}s; commands registered)"
-                if [[ $PLAN_ACTION == rollback ]]; then
-                  msg+=". Work only $prev understood fails as invalid_job: check /sync status and requeue it with retry.js."
-                fi
-                ;;
-              already-live) msg="$V is live and verified; commands registered"; priority=-1 ;;
-              superseded) msg="$V skipped: newer release $prev is live"; priority=-1 ;;
-              refused)
-                if [[ $reason == paused ]]; then
-                  msg="$V not deployed: deploys were paused after the request (nothing changed)"
-                  priority=-1
-                else
-                  msg="$V not deployed, nothing changed: $reason"
-                fi
-                ;;
-              recovered) msg="$V not deployed; $prev is back (down ${down}s): $reason"; priority=1 ;;
-              needs-you)
-                priority=1
-                if [[ $reason == commands-failed ]]; then
-                  msg="$V is live, but command registration failed; run Deploy with $V to retry"
-                else
-                  msg="NEEDS YOU: $V $reason"
-                  if [[ $RESTORE_POINT != - && -n $RESTORE_POINT ]]; then msg+="; restore point $point"; fi
-                  if [[ $BACKUP != - && -n $BACKUP ]]; then msg+="; backup $backup"; fi
-                  # The way back depends on the path: a restart can roll back, a rollback goes
-                  # forward again with an ordinary deploy, and a committed migration can't be undone.
-                  case $reason in
-                    new-release-took-lease | lease-evidence-incomplete | unstable | image-mismatch)
-                      case $DEPLOY_PATH in
-                        plain) msg+=". To go back, run Deploy with version=$prev rollback=true from=$V." ;;
-                        rollback) msg+=". To return to $prev, run Deploy with version=$prev." ;;
-                        migration) msg+=". The migration committed: the way back is a fix release or a point-in-time fork (HOSTING.md)." ;;
-                      esac
-                      ;;
-                  esac
-                fi
-                ;;
-              *)
-                priority=1
-                case $reason in
-                  host-key) msg="$V not deployed: the host key changed. Check the host before updating DEPLOY_KNOWN_HOSTS." ;;
-                  key-rejected) msg="$V not deployed: the host refused the deploy key" ;;
-                  known-hosts | no-key) msg="$V not deployed: DEPLOY_HOST, DEPLOY_KNOWN_HOSTS or DEPLOY_SSH_KEY isn't set up in the production environment" ;;
-                  unreachable) msg="$V not deployed: host unreachable, nothing started" ;;
-                  bad-request) msg="$V not deployed: the host refused the request format, nothing started" ;;
-                  *) msg="$V: outcome unknown; the host continues on its own (run $GITHUB_RUN_ID)" ;;
-                esac
-                ;;
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          rc=0
+          ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o CheckHostIP=no \
+            -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=20 -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 -o LogLevel=ERROR \
+            "tarubot@$DEPLOY_HOST" "$command" < /dev/null > "$dir/output" 2> "$dir/ssh-errors" || rc=$?
+          result=''
+          results=0
+          while IFS= read -r line; do
+            case "$line" in
+              'step preflight'|'step fetch'|'step pull'|'step stop'|'step backup'|'step migrate'|'step register'|'step start'|'step observe'|'step record')
+                printf '%s\n' "$line" ;;
+              'result deployed'|'result already-live'|'result refused'|'result needs-owner')
+                result=$line
+                results=$((results + 1))
+                printf '%s\n' "$line" ;;
             esac
-            if [[ $WARNINGS == *db-maintenance-window* ]]; then msg+=" The migration ran during the database maintenance window."; fi
-          fi
-          echo "Message (priority $priority): $msg"
-          if [[ -z $PUSHOVER_TOKEN || -z $PUSHOVER_USER ]]; then
-            echo "::notice::Pushover isn't set up in the notify environment; nothing was sent."
-            exit 0
-          fi
-          # The credentials reach curl on stdin, never in its arguments.
-          printf 'form-string = "token=%s"\nform-string = "user=%s"\n' "$PUSHOVER_TOKEN" "$PUSHOVER_USER" |
-            curl --config - --silent --show-error --fail --max-time 20 --retry 3 \
-              --form-string "title=TaruBot deploy" --form-string "message=$msg" \
-              --form-string "priority=$priority" --form-string "url=$run_url" \
-              --form-string "url_title=Deploy run" --output /dev/null \
-              https://api.pushover.net/1/messages.json ||
-            echo "::warning::The Pushover message could not be sent; the outcome is unchanged."
+          done < "$dir/output"
+          [[ $rc == 0 && $results == 1 && ( $result == 'result deployed' || $result == 'result already-live' ) ]]

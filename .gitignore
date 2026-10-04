@@ -13,9 +13,7 @@ coverage/
 !.env.example
 # Operator env files such as production.env; the production.env.example template stays tracked.
 *.env
-# OpenTofu's working files (#62): provider downloads, local state and saved plans, and value and
-# backend files, which hold the real hosts, keys and the state bucket. Only the committed example
-# values are tracked. ops/tofu/README.md's hand run keeps them outside the checkout anyway.
+# Ignore any private infrastructure state or inputs kept during owner operations.
 **/.terraform/
 *.tfstate
 *.tfstate.*
@@ -24,7 +22,6 @@ plan.bin
 *.tfvars
 *.tfvars.json
 backend.hcl
-!ops/tofu/examples/*.tfvars.json
 # Captures, reports, and diagnostics may contain guild-owned operational information.
 artifacts/
 # The supplied database dump is a local migration fixture and may contain private records.

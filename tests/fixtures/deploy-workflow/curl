@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# A simulated curl for the notify job in tests/unit/deploy-workflow.test.ts: it records its
-# arguments and the config it read on stdin, and succeeds.
-printf '%s\n' "$@" >"$STUB/curl-args"
-cat >"$STUB/curl-config"

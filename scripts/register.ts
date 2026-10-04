@@ -100,7 +100,7 @@ export async function registerCommands(
 if (import.meta.main) {
   const scope = registrationScope(process.argv.slice(2), process.env);
   assertToolScope(process.env, registerToolScope(scope));
-  // DISCORD_TOKEN, or the file DISCORD_TOKEN_FILE names inside a Quadlet host's container.
+  // Resolve the direct setting or its private NAME_FILE counterpart.
   const token = secretSetting(process.env, "DISCORD_TOKEN");
   if (!token) throw new Error("DISCORD_TOKEN is required");
   const application = id(process.env.DISCORD_APPLICATION_ID);

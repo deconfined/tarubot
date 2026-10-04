@@ -1,11 +1,11 @@
 ---
 title: Design decisions
-description: The main design choices behind TaruBot, and the alternatives they replaced.
+description: The current engineering rationale behind TaruBot's architecture and delivery.
 sidebar:
   order: 4
 ---
 
-This page records why TaruBot is built the way it is, including components it no longer has. The [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) has the full history.
+These are the current design choices and their engineering rationale. Implementation history belongs in Git and the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md), not a release-by-release diary.
 
 ## One writer per database
 
@@ -24,8 +24,6 @@ This page records why TaruBot is built the way it is, including components it no
 ## TaruBot's own Lodestone parser, in the bot
 
 **Decision.** The bot fetches Lodestone pages itself and parses them with its own parser, which applies the community [`xivapi/lodestone-css-selectors`](https://github.com/xivapi/lodestone-css-selectors) definitions in short-lived worker threads.
-
-**History.** TaruBot first used Nodestone, the parser library from the same community, in a separate sidecar container: a parser service the bot called over HTTP, built from a patched copy of Nodestone's source. The owner then asked to "get rid of Nodestone entirely, pull xivapi/lodestone-css-selectors for ourselves, and do the parsing internally". TaruBot's own parser replaced Nodestone first. Before the switch, both parsers read the same live pages (profiles, FC pages, first and last roster pages, searches) and produced identical output. Asked what the sidecar still bought once the parser was TaruBot's own, the owner chose to remove it: "I would rather reduce complexity and places where things can break." The parser, its request limits and the selector handling moved into the bot, and the sidecar's image, service and settings (`PAGE_REGION` became `LODESTONE_REGION`) went away.
 
 **Why.** One process and one image have fewer failure points than two services, and nothing is lost: each parse still runs in an isolated worker that is terminated at its deadline, under the same fetch limits and 429 cooldown.
 
@@ -49,15 +47,15 @@ This page records why TaruBot is built the way it is, including components it no
 
 ## One image, Docker Compose
 
-**Decision.** TaruBot ships as one multi-architecture container image, published from `main` after the full test suite passes, and runs with Docker Compose next to PostgreSQL.
+**Decision.** TaruBot ships as one scanned, attested AMD64/ARM64 image from protected `main` and runs with Docker Compose. The stock installation bundles PostgreSQL; upstream production uses an owner-provisioned Linode host and managed PostgreSQL.
 
-**Why.** An operator needs only a Compose file and a settings file, not a source checkout or toolchain. Pinning a published version makes updates deliberate, and the image carries the migrations and maintenance tools that match its code.
+**Why.** The image carries its matching migrations/tools; exact digest pinning makes updates deliberate. Upstream delivery automates backup, migration, command registration and startup under one production approval, while infrastructure provisioning and initial cutover remain owner operations. [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes implementation from observed live acceptance.
 
-## Not on DigitalOcean
+## A host the Lodestone accepts
 
-**Decision.** TaruBot runs on a host whose address the Lodestone accepts, and not on DigitalOcean.
+**Decision.** Verify outbound Lodestone access from a proposed host before relying on it.
 
-**Why.** The first production deployment ran on DigitalOcean App Platform. Within hours every profile refresh failed: the Lodestone answers DigitalOcean's addresses with HTTP 403, so no profile, claim or roster could be read from there. Production moved to another provider the same evening. Once the parser moved into the bot, App Platform couldn't serve even as a fallback, because the bot itself would fetch from a refused address, so its configuration was retired. Test a host's address before relying on it; see [Requirements](/tarubot/deploy/requirements/).
+**Why.** Some cloud addresses receive HTTP 403, preventing profile, claim and roster reads regardless of bot readiness. Provider choice alone is not proof of an accepted address; see [Requirements](/tarubot/deploy/requirements/).
 
 ## AGPL-3.0
 

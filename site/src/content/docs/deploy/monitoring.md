@@ -42,6 +42,8 @@ docker compose logs --since 1h tarubot
 
 Logs are structured JSON lines. Tokens, passwords, message payloads and command option values are never logged.
 
+For upstream automated delivery, Actions receives only fixed step/result tokens. Detailed host diagnostics stay in private deployment logs; inspect them privately as the owner. Repository checks do not establish which release is live. The [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-observation-and-outcomes) covers exact image/schema/writer observation.
+
 **Finding a member's error.** Every failure reply ends with `Code <code> · Ref <interaction ID>`, and the log entry for it carries the same ID in `operation`:
 
 ```sh
@@ -256,7 +258,7 @@ Match an unconfirmed attempt by time against the issue's creation. Removing a me
 The optional heartbeat catches what issue reports can't, because they come from inside the bot: the host is down, the container is gone, the process hangs, or the bot stays unready.
 
 1. Create a check at [healthchecks.io](https://healthchecks.io) with a period of 5 minutes and a grace time of about 10 minutes, and point its alerts wherever you'll see them.
-2. Put its ping URL in `.env` as `HEALTHCHECKS_PING_URL=https://hc-ping.com/<your-check-uuid>`, and recreate the bot with `docker compose up -d --wait`.
+2. Copy its private ping URL into `.env` as `HEALTHCHECKS_PING_URL`, and recreate the bot with `docker compose up -d --wait`. Never include the URL in screenshots, issues or repository examples.
 
 While readiness is fully green, the bot pings every five minutes, with a one-line status (version, pending and blocked work, failing FCs, the Lodestone cooldown, the selectors). It never sends a failure ping: an unready bot stays silent, and the check's grace time decides when that alerts, so an update restart or a Discord reconnect doesn't. A failed ping is retried a minute later and logged once as a warning.
 

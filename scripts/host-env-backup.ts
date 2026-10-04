@@ -1,13 +1,12 @@
 /**
- * An off-host, encrypted copy of the production host's `.env` (2.23.0; the owner's 2026-09-25
- * decision to make the host robust and disposable). Run it on the operator machine after changing
- * the host's settings: it reads `~/tarubot/.env` over SSH and encrypts it with `age` for the public
- * keys in `ops/age-recipients.txt`. Only the encrypted file is written; the settings never touch
- * this machine's disk or the terminal. docs/HOSTING.md ("Rebuilding the host") restores it.
+ * Owner-run encrypted copy of the production host's central `.env`.
+ * Read `~/tarubot/.env` over SSH and encrypt it with age for `ops/age-recipients.txt`.
+ * Only encrypted output is written; settings never touch this machine's disk or terminal.
+ * See docs/DEPLOYMENT.md for host recovery.
  *
  * Usage: bun scripts/host-env-backup.ts --host USER@HOST [--out DIRECTORY] [--identity KEY_FILE]
  *
- * --host is required: the production host as the operator reaches it over SSH (docs/HOSTING.md).
+ * --host is required: the production host as the owner reaches it over SSH.
  * With --identity (the private key), the new file is also decrypted in memory and compared with
  * what was read, proving the key opens it. The output names only the settings present, never values.
  */
@@ -17,9 +16,9 @@ import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-/** Settings a production `.env` must hold for the Compose file to start (docs/HOSTING.md). */
+/** Central runtime settings required by the production Compose manifest. */
 export const REQUIRED_SETTINGS = [
-  "TARUBOT_IMAGE_TAG",
+  "DISCORD_APPLICATION_ID",
   "DATABASE_URL",
   "DATABASE_CA_CERT",
   "DISCORD_TOKEN",

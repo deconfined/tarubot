@@ -1,6 +1,6 @@
 # Product and operating constraints
 
-This is a current constraint summary, not a second command reference or release diary. Historical decisions remain in [the requirements record](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md); product invariants and confirmed live-operation boundaries remain binding. The [documentation site](https://deconfined.github.io/tarubot/) describes supported behavior. Use [AGENTS.md](AGENTS.md) for source-work rules and the proposed pipeline-reset authorization.
+This summary preserves product invariants and confirmed live-operation boundaries. The [documentation site](https://deconfined.github.io/tarubot/) describes supported behavior; [CONTRIBUTING](CONTRIBUTING.md) covers source work and [DEPLOYMENT](docs/DEPLOYMENT.md) covers delivery and owner operations. Historical decisions remain in Git and PR history, not a second backlog.
 
 ## Product invariants
 
@@ -22,7 +22,7 @@ This is a current constraint summary, not a second command reference or release 
 
 ## Deployment authority
 
-The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.com/deconfined/tarubot/issues/41#issuecomment-5846407419)) and widened by the [pipeline amendments](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-pipeline-amendments-2026-09-29). The original confirmed wording remains binding and is carried verbatim in [AGENTS.md](AGENTS.md):
+The original confirmed wording remains binding and is carried verbatim in [AGENTS.md](AGENTS.md). References to retired environments or tooling in these quotations preserve the prohibition; they do not require those systems to exist.
 
 > Confirmed (question 1): the owner's approval of the `production` environment in GitHub is the go-ahead for a production deploy; a chat go-ahead doesn't replace it, and Claude sessions never approve a deployment. As before, a deploy by hand still needs the owner's explicit go-ahead, and provider, token, key, firewall and account changes stay separate owner steps.
 
@@ -30,19 +30,6 @@ The agent rule was confirmed by @deconfined on 2026-09-26 ([#41](https://github.
 
 > Agents, Claude sessions included, never hold `ANSIBLE_SSH_KEY` or any other environment secret; never approve, reject or re-run a deployment or an Infrastructure run; never change the `staging`, `production`, `notify`, `infra-plan` or `infra` environments, their secrets or their variables; and dispatch Deploy or Infrastructure only when the owner asks in that session.
 
-The implemented pipeline still requires owner approval for infrastructure Apply and production deployment. Until the [pipeline-reset proposal](AGENTS.md#pipeline-reset-proposal) is approved and merged to `main`, production's source files and jobs remain frozen. Once approved and merged, the reset may replace those files and workflow definitions without the previous byte-identity pins or version-based retirement dates. This is repository source authorization, not permission to operate live workflows, change environments or replace the managed database.
+Merged [PR #74](https://github.com/deconfined/tarubot/pull/74) authorizes the repository-only pipeline reset. Previous production source-file byte-identity pins and retirement dates no longer constrain source changes. This grants no permission to operate live workflows, access secrets, change environments, provision infrastructure or mutate the running host/database.
 
-The replacement should automate release building, publication, deployment and necessary database migrations, with the owner's GitHub production approval as the routine deployment gate. Infrastructure provisioning may remain owner-operated. Preserve the running production system until a separately owner-approved cutover; historical pipeline designs are not a requirement to reproduce obsolete machinery.
-
-## Approval references
-
-| Area | Original decision |
-| --- | --- |
-| Import, activation and access | [Launch](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-launch-amendments-2026-09-23) |
-| Replies and test sessions | [Reply sessions](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-reply-session-amendments-2026-09-24) |
-| Parser and selectors | [Lodestone](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-lodestone-amendments-2026-09-24) |
-| Private diagnostics and public input | [Issue reporting](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-issue-reporting-amendments-2026-09-24), [suggestions](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-public-suggestion-amendments-2026-09-25) |
-| Officer notices and update posts | [Lodestone notices](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-officer-notice-amendments-2026-09-25), [changelog](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-changelog-amendments-2026-09-25), [status](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-status-notice-amendments-2026-09-25) |
-| Documentation and privacy | [Site](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-documentation-site-amendments-2026-09-25) |
-| Deployment and infrastructure | [SSH deployment](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-ssh-deploy-amendments-2026-09-26), [staging](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-staging-amendments-2026-09-26), [pipeline](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-pipeline-amendments-2026-09-29) |
-| Least-privilege visibility | [Visibility](https://github.com/deconfined/tarubot/blob/b7ab3bc73f1107ad98fb12864c0cb8ffdb50f0d8/REQUIREMENTS.md#approved-visibility-amendments-2026-09-28) |
+The production baseline is an owner-provisioned Linode Compose host and managed PostgreSQL. Release delivery automates building, publication, deployment and necessary migrations, with exactly one owner's GitHub `production` approval per release. Infrastructure provisioning and the first host cutover remain separate owner operations. Repository implementation and credential-free tests do not establish that a live cutover or recovery drill occurred.

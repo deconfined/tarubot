@@ -1,4 +1,3 @@
-# Main publishes an absent version; maintenance preserves existing releases and dispatches verify.
 name: Publish containers
 
 on:
@@ -10,7 +9,6 @@ permissions:
   contents: read
 
 concurrency:
-  # Distinct release SHAs must finish independently, including when several merges arrive together.
   group: publish-${{ github.sha }}
   cancel-in-progress: false
 
@@ -20,129 +18,106 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Publish ${{ matrix.target }}
+    name: Publish image
     needs: verify
-    # A version bump declares a release; a later maintenance merge may finish its failed build.
-    # Existing version tags are preserved. Dispatches and reruns only verify.
-    if: >-
-      github.ref == 'refs/heads/main' && github.event_name == 'push'
-      && github.run_attempt == '1'
+    # Dispatches and reruns verify only; maintenance never overwrites an existing version.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     concurrency:
-      # Keep the absence check and publication of a version in the same serialized job.
-      group: publish-${{ github.repository }}-${{ needs.verify.outputs.version }}
+      group: publish-version-${{ needs.verify.outputs.version }}
       cancel-in-progress: false
     permissions:
       contents: read
-      packages: write # push the versioned and SHA image tags to GHCR
+      packages: write
     outputs:
-      # The index digest the build pushed, straight from build-push-action. The attest and latest
-      # jobs act on this value only and never read a tag back: any same-repository workflow can
-      # repoint a GHCR tag, so a digest read from one proves nothing (2.32.0, #50). Job outputs
-      # from a matrix keep only one entry's value, so the matrix must stay one image
-      # (tests/unit/publish-workflow.test.ts).
       digest: ${{ steps.build.outputs.digest }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: tarubot
-            suffix: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Authenticate to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Identify versioned images
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
-          # Publish immutable identities first; latest advances only after publication succeeds.
-          flavor: latest=false
-          tags: |
-            type=raw,value=${{ needs.verify.outputs.version }}
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.title=${{ matrix.target }}
-            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
-            org.opencontainers.image.licenses=AGPL-3.0-only
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
       - name: Check version publication
         id: publication
-        # Registry failures are not evidence of absence. An absent tag may finish an unpublished
-        # release after a maintenance fix; an existing version is never rebuilt or overwritten.
         env:
           VERSION: ${{ needs.verify.outputs.version }}
           RELEASE_REQUESTED: ${{ needs.verify.outputs.release }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          if [[ ! $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]; then
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Production requires stable X.Y.Z with at most four digits per component; this version is verification-only.'
+            exit 0
+          fi
           repository="${GITHUB_REPOSITORY,,}"
-          # Keep credentials out of process arguments; these platform-issued credentials are
-          # supplied through curl's standard stdin configuration instead.
-          if ! token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+          token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
             | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
-            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
-            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))'); then
-            echo "::error::Could not verify that the release version is unpublished."
-            exit 1
-          fi
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
+            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
           echo "::add-mask::$token"
-          if ! status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+          status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
             | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
-            --head --output /dev/null --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-            "https://ghcr.io/v2/${repository}/manifests/${VERSION}"); then
-            echo "::error::Could not verify that the release version is unpublished."
-            exit 1
-          fi
+              --head --output /dev/null --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository}/manifests/${VERSION}")
           case "$status" in
             404) echo 'publish=true' >> "$GITHUB_OUTPUT" ;;
             200)
               if [[ $RELEASE_REQUESTED == true ]]; then
-                echo "::error::This release version already exists; publish a new version instead."
+                echo '::error::This release version already exists; use a new version.'
                 exit 1
               fi
               echo 'publish=false' >> "$GITHUB_OUTPUT"
-              echo '::notice::This version is already published; maintenance produces no release image.' ;;
-            *)
-              echo "::error::Could not verify that the release version is unpublished."
-              exit 1 ;;
+              echo '::notice::Published maintenance version retained; no release image or deployment.' ;;
+            *) echo '::error::Could not establish release version absence.'; exit 1 ;;
           esac
-      - name: Build and publish both supported platforms
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: steps.publication.outputs.publish == 'true'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.publication.outputs.publish == 'true'
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: steps.publication.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        if: steps.publication.outputs.publish == 'true'
+        id: metadata
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.version }}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=tarubot
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Build and publish both platforms
         id: build
         if: steps.publication.outputs.publish == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          target: ${{ matrix.target }}
+          target: tarubot
           platforms: linux/amd64,linux/arm64
           push: true
-          # Refresh Alpine packages on each build even when the upstream Bun tag is unchanged.
           no-cache-filters: base
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          cache-from: type=gha,scope=tarubot
+          cache-to: type=gha,mode=max,scope=tarubot
 
   scan:
     name: Scan built platforms
     needs: publish
-    # A maintenance run that preserved an existing tag has no new digest to scan or sign.
-    if: needs.publish.outputs.digest != ''
+    if: needs.publish.outputs.digest != '' && github.run_attempt == '1'
     uses: ./.github/workflows/scan.yml
     with:
       digest: ${{ needs.publish.outputs.digest }}
@@ -152,104 +127,48 @@ jobs:
   attest:
     name: Sign build provenance
     needs: [publish, scan]
-    # Failed-job reruns can retain publish's earlier success, so every write job checks its attempt.
-    if: >-
-      github.ref == 'refs/heads/main' && github.event_name == 'push'
-      && github.run_attempt == '1'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # Since 2.32.0 (#50) GitHub signs SLSA build provenance for the index digest the build pushed,
-    # through Sigstore's public-good instance, and stores the attestation with the repository.
-    # Its certificate names this workflow, the ref (refs/heads/main) and the commit, which no pull
-    # request or branch workflow can mint. The BuildKit provenance and SBOM the build attaches stay
-    # unsigned. Nothing verifies the signature yet: the deploy plan's `gh attestation verify`
-    # arrives in 2.33.0.
-    # A separate job keeps the OIDC token out of the build and dependency installation, and
-    # keeps registry write access out of the job that can sign. The attestation isn't pushed to
-    # GHCR (push-to-registry stays off), so this job needs neither packages: write nor a login,
-    # and artifact-metadata storage records apply only to organization-owned repositories.
+    # The signing job neither installs dependencies nor holds registry write credentials.
     permissions:
       contents: read
-      id-token: write # request the Sigstore signing certificate
-      attestations: write # store the attestation with the repository
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
-      - name: Check the digest the build returned
-        # An empty subject-digest would make the action look for subjects elsewhere (the runner's
-        # artifacts list), so anything but one sha256 digest stops the job before it signs.
+      - name: Validate exact subject and reviewed exception freshness
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
-          if [[ ! $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::The build returned no index digest to sign."
-            exit 1
-          fi
-          echo "Signing ghcr.io/deconfined/tarubot@${DIGEST}"
-      - name: Recheck reviewed scanner exceptions before signing
-        # Only the reviewed source policy runs here; no packages or build scripts are installed.
-        # More than ten minutes of remaining life covers this job's hard signing deadline.
-        run: bun --no-env-file scripts/release-scan-exceptions.ts sign
-      - name: Attest build provenance
-        # With no sbom-path and no predicate input, actions/attest v4 runs in its "Provenance" mode
-        # and generates the SLSA build provenance itself (src/detect.ts, detectAttestationType, at
-        # this commit); predicate-type is required only alongside predicate or predicate-path.
-        # Versions before v3 needed a predicate. actions/attest-build-provenance v4 is only a
-        # wrapper around this action, and its README says new implementations should use this one.
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          bun --no-env-file scripts/release-scan-exceptions.ts sign
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          # The image name without a tag; the digest alone says which image is signed.
           subject-name: ghcr.io/deconfined/tarubot
           subject-digest: ${{ needs.publish.outputs.digest }}
           push-to-registry: false
 
-  release:
-    name: Replacement release orchestration
-    needs: [verify, publish, attest]
-    # Owner activation remains separate. This flag is never set/changed by repository code.
-    if: >-
-      github.ref == 'refs/heads/main' && github.event_name == 'push'
-      && github.run_attempt == '1' && vars.RELEASE_PIPELINE_ENABLED == 'true'
-    uses: ./.github/workflows/release.yml
-    permissions:
-      contents: read
-      actions: read
-      attestations: read
-    secrets: inherit
-    with:
-      version: ${{ needs.verify.outputs.version }}
-      commit: ${{ github.sha }}
-      digest: ${{ needs.publish.outputs.digest }}
-      publication_run: ${{ github.run_id }}
-
   latest:
     name: Promote latest
-    # latest never names an image whose provenance isn't signed.
-    needs: [publish, attest, release]
-    if: >-
-      always() && github.ref == 'refs/heads/main'
-      && github.event_name == 'push' && github.run_attempt == '1'
-      && needs.publish.result == 'success' && needs.attest.result == 'success'
-      && (vars.RELEASE_PIPELINE_ENABLED != 'true'
-          || (needs.release.result == 'success' && needs.release.outputs.accepted == 'true'))
+    needs: [publish, attest]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # Only mutable latest promotion is serialized; version/SHA publication has already completed.
     concurrency:
       group: ghcr-latest
       cancel-in-progress: false
     permissions:
       contents: read
-      packages: write # retag the image as latest in GHCR
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -260,26 +179,32 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Advance the latest tag after successful publication
-        # Since 2.21.0 there is one image: the Lodestone parser runs in the bot. Since 2.32.0 the
-        # source is the digest the build returned and attest signed, not the sha- tag, which
-        # another workflow could have repointed in between.
+      - name: Promote signed digest only while main is current
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
-          if [[ ! $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::The build returned no index digest to promote."
-            exit 1
-          fi
-          # Re-running an older successful workflow must not replace a newer main image.
+          set -Eeuo pipefail
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          bun --no-env-file scripts/release-scan-exceptions.ts promote
           current=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-          if [ "$current" != "$GITHUB_SHA" ]; then
-            echo "::notice::Main has advanced; retaining the current latest tag."
+          if [[ $current != "$GITHUB_SHA" ]]; then
+            echo '::notice::Main advanced; latest is unchanged.'
             exit 0
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          # Recheck after any release/approval/concurrency wait and immediately before the write.
-          # The source policy requires more remaining life than this ten-minute job can use.
-          bun --no-env-file scripts/release-scan-exceptions.ts promote
-          docker buildx imagetools create --tag "$image:latest" "$image@${DIGEST}"
+          docker buildx imagetools create --tag "$image:latest" "$image@$DIGEST"
+
+  deploy:
+    name: Production release
+    needs: [verify, publish, attest, latest]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      commit: ${{ github.sha }}
+      digest: ${{ needs.publish.outputs.digest }}

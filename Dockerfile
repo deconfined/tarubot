@@ -5,9 +5,9 @@ RUN apk upgrade --no-cache
 
 # Compile and verify all first-party code plus discoverable modules using pinned Bun.
 FROM base AS build
-# Host/workflow tests use Bash, GNU date and util-linux's flock/setsid options.
+# Host delivery tests use Bash, GNU date, Git, jq and util-linux's flock/setsid options.
 # These tools belong only in the build/test stage; the runtime retains the minimal base.
-RUN apk add --no-cache bash coreutils flock util-linux-misc
+RUN apk add --no-cache bash coreutils git jq flock util-linux-misc
 WORKDIR /app
 COPY package.json bun.lock bunfig.toml ./
 RUN bun install --frozen-lockfile

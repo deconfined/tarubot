@@ -1,18 +1,14 @@
 # Dependabot version updates for TaruBot.
 #
-# Every merged change set must raise package.json's SemVer above its base and add a CHANGELOG entry
-# (scripts/ci-version.ts, enforced on pull requests and again when main publishes images). Dependabot
-# cannot do that, so its pull requests are proposals that a maintainer completes with one signed
-# version commit before merging; see "Dependency updates" in docs/CI_CD.md. Groups, cooldowns, and
-# low pull-request limits keep the number of those version commits small.
+# Dependency-only maintenance may retain SemVer. A release version increase also needs its
+# CHANGELOG entry (scripts/ci-version.ts); the maintainer completes release metadata before merging.
+# Groups and cooldowns keep update proposals small.
 #
 # Deliberately not managed here:
 # - Bun packages (package.json and bun.lock). Dependabot's updater can't read Bun's lockfile
 #   version 2 (dependabot/dependabot-core#16026), so that entry failed on every run; it was removed
 #   in 2.32.1. The Dependency audit workflow (bun audit) covers their advisories, and updates go
 #   through a normal feature branch. Restore the entry once the updater supports the lockfile.
-# - ops/ansible/requirements*.txt: hash-pinned with a header Dependabot can't rewrite (its security
-#   update failed on them). Alerts still cover them; regenerate by hand (the files say how).
 # - lodestone-css-selectors: the bot follows its HEAD live, and only `bun run selectors:update`
 #   advances the bundled fallback, because it also rewrites
 #   src/infrastructure/lodestone/upstream-revisions.json and runs the contract suite. (Nodestone and
@@ -32,9 +28,7 @@ updates:
     cooldown:
       default-days: 7
 
-  # Documentation site (site/package.json and site/pnpm-lock.yaml; pnpm, not Bun). Build-time only:
-  # nothing here reaches the bot image. One grouped pull request a month, completed with a version
-  # commit like every other Dependabot pull request.
+  # Documentation build dependencies never reach the bot image.
   - package-ecosystem: "npm"
     directory: "/site"
     schedule:

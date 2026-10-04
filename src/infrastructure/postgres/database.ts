@@ -72,8 +72,8 @@ export class Database {
   healthy = false;
   /**
    * Bound connection/query waits and normalize all database-generated instants to UTC.
-   * `ca` defaults to DATABASE_CA_CERT, or the file DATABASE_CA_CERT_FILE names on a Quadlet host
-   * (src/config/secrets.ts); a second connection (for example check-restore against a PITR fork)
+   * `ca` defaults to DATABASE_CA_CERT or its private DATABASE_CA_CERT_FILE counterpart.
+   * A second connection (for example check-restore against a PITR fork)
    * can supply its own provider CA, and "" forces a connection without a provider CA.
    */
   constructor(

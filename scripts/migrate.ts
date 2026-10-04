@@ -45,7 +45,7 @@ if (import.meta.main) {
   const args = migrateArguments(process.argv.slice(2));
   // The database must belong to this env's deployment profile before any connection.
   assertToolScope(process.env, migrateToolScope(args));
-  // DATABASE_URL, or the file DATABASE_URL_FILE names inside a Quadlet host's container.
+  // Resolve the direct setting or its private NAME_FILE counterpart.
   const url = secretSetting(process.env, "DATABASE_URL");
   if (!url) throw new Error("DATABASE_URL is required");
   const db = new Database(url);

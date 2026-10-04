@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# The retry pause, recorded instead of waited for (tests/unit/deploy-workflow.test.ts).
-printf '%s\n' "$*" >>"$STUB/sleeps"

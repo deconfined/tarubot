@@ -9,6 +9,8 @@ Settings live in `.env` next to `docker-compose.yml`, copied from your release's
 
 The bot validates its settings at startup and refuses to start with an invalid one, naming the setting but never its value. Compose passes the bot container only the settings `docker-compose.yml` lists; a one-off `docker compose run` can add others with `-e NAME=value`. Settings removed in earlier releases are ignored; the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) records each removal.
 
+These settings describe the stock self-hosting Compose path. The upstream Linode/managed-PostgreSQL instance keeps a central host-only `.env` reused by exact release worktrees; its GitHub runner receives no database or Discord credentials. See [the owner deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md).
+
 ## Runtime
 
 Read by the running bot.
@@ -27,7 +29,7 @@ Read by the running bot.
 | `DATABASE_CA_CERT` | (empty) | A PEM root certificate for an external PostgreSQL over TLS. With it set, certificate and hostname checks are enforced, whatever the URL's SSL options say. Not needed for the bundled database. |
 | `GITHUB_REPORTS_TOKEN` | (empty) | A fine-grained GitHub token with read and write access to the issues of one repository, for [issue reports](/tarubot/deploy/monitoring/#issue-reports). Empty saves reports in the database without sending them. Secret. |
 | `GITHUB_REPORTS_REPO` | `deconfined/tarubot-reports` | The `owner/name` repository reports open issues in. The default is the upstream project's own private repository, so **set your own whenever you set the token**, or leave the token empty. It may never name TaruBot's public repository, `deconfined/tarubot`, in any letter case: the bot refuses to start, so private reports can't go public. |
-| `HEALTHCHECKS_PING_URL` | (empty) | A [healthchecks.io](https://healthchecks.io) ping URL, such as `https://hc-ping.com/<your-check-uuid>`, which the ready bot pings every five minutes. Empty turns the [heartbeat](/tarubot/deploy/monitoring/#heartbeat) off. Keep it private: anyone with it can ping your check. |
+| `HEALTHCHECKS_PING_URL` | (empty) | The private ping URL of your [healthchecks.io](https://healthchecks.io) check, which the ready bot pings every five minutes. Empty turns the [heartbeat](/tarubot/deploy/monitoring/#heartbeat) off. Never publish the URL: anyone with it can ping your check. |
 
 ## Lodestone
 

@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# A simulated mktemp for tests/unit/deploy-script.test.ts. ops/deploy.sh uses mktemp only to pin
-# .env, so the knob $SIM/knob/pin makes every pin fail; otherwise the real mktemp runs.
-if [[ -f $SIM/knob/pin ]]; then exit 1; fi
-exec /usr/bin/mktemp "$@"

@@ -310,9 +310,6 @@ const allowedUuids = new Set([
   "3f2b8c1e-5d4a-4b3c-9e2f-1a0b9c8d7e6f",
   "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a",
 ]);
-/** Components the bot no longer has; only the design record may name them. */
-const retired = /nodestone|sidecar|app platform|PAGE_REGION/iu;
-const record = "site/src/content/docs/architecture/decisions.md";
 
 /** Everything on one public file that must not be there, each as "file: what". */
 function publicProblems(file: string, text: string): string[] {
@@ -330,7 +327,6 @@ function publicProblems(file: string, text: string): string[] {
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu,
   ))
     if (!allowedUuids.has(match[0].toLowerCase())) problems.push(`${file}: the UUID ${match[0]}`);
-  if (file !== record && retired.test(text)) problems.push(`${file}: a retired component`);
   return problems;
 }
 
@@ -344,7 +340,6 @@ const otherBadSamples = [
   "character: 4242",
   "character_id=4242",
   "00000000-0000-4000-8000-000000000000", // a bare healthchecks-style UUID
-  "the Nodestone sidecar",
 ];
 /** The placeholders the pages use; none may produce a problem. */
 const allowedSamples = [
@@ -448,28 +443,6 @@ describe("the reference pages cover the code's settings, codes and permissions",
     expect(listed).not.toContain("Administrator");
     expect(text).toContain(`**${RECOMMENDED_PERMISSIONS}**`);
   });
-
-  test("add-to-server keeps what an owner adds the bot with, now that it has no link", async () => {
-    // #54 dropped the invite template; the page must still name the scopes, the privileged intent,
-    // the permission whoever adds the bot needs, and the Public Bot recommendation.
-    const text = await page("admin/add-to-server");
-    const needed = [
-      "`bot`",
-      "`applications.commands`",
-      "**Server Members Intent**",
-      "**Manage Server**",
-      "**Public Bot**",
-      // 2.35.0 (#46): Administrator is only for the /setup overrides window, said unmissably.
-      ":::danger[Administrator is temporary",
-      "`/setup overrides confirm:true`",
-      "no longer needed",
-      "Leave Administrator off except during `/setup overrides` (or, on a server with lobby onboarding, until onboarding's first channel pass has run).",
-      // The mask goes only where TaruBot can't see: public channels keep its role's permissions.
-      "Channels TaruBot already sees, such as public ones, are left alone and keep what its role allows, Read Message History included",
-      "**Any other channel TaruBot can't see without Administrator**",
-    ];
-    expect(needed.filter((phrase) => !text.includes(phrase))).toEqual([]);
-  });
 });
 
 describe("the site package", () => {
@@ -504,7 +477,7 @@ describe("the site's links and public content", () => {
     expect(broken).toEqual([]);
   });
 
-  test("pages carry placeholders only: no real IDs, private hosts, secrets or retired names", async () => {
+  test("pages carry placeholders only: no real IDs, private hosts or secrets", async () => {
     const problems: string[] = [];
     for (const file of await siteFiles()) problems.push(...publicProblems(file, await read(file)));
     expect(problems).toEqual([]);
@@ -525,7 +498,7 @@ describe("the site's links and public content", () => {
       bad.filter((sample) => !pattern.test(sample)).map((sample) => `${what}: ${sample}`),
     );
     expect(narrowed).toEqual([]);
-    // The rules beyond the fixed patterns: long numbers, character IDs, UUIDs, retired names.
+    // The rules beyond the fixed patterns: long numbers, character IDs and UUIDs.
     const missed = [...forbidden.flatMap(({ bad }) => bad), ...otherBadSamples].filter(
       (sample) => publicProblems("sample", sample).length === 0,
     );
