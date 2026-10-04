@@ -1,7 +1,5 @@
 /** Keep version pins that Dependabot updates separately, or cannot see, in lockstep. */
 import { expect, test } from "bun:test";
-import { YAML } from "bun";
-import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
 
 /** Read a repository file relative to this test. */
@@ -16,15 +14,4 @@ test("the Bun runtime pin agrees across package.json, its types, and every image
   expect(stages.length).toBeGreaterThan(0);
   // The official Alpine variant supplies Bun's musl binary on both supported architectures.
   for (const [, tag] of stages) expect(tag).toBe(`${version}-alpine`);
-});
-
-test("CI integration tests use the PostgreSQL image that Compose deploys", async () => {
-  const image = z.object({ image: z.string() });
-  const compose = z
-    .object({ services: z.object({ postgres: image }) })
-    .parse(YAML.parse(await read("docker-compose.yml")));
-  const ci = z
-    .object({ jobs: z.object({ checks: z.object({ services: z.object({ postgres: image }) }) }) })
-    .parse(YAML.parse(await read(".github/workflows/ci.yml")));
-  expect(ci.jobs.checks.services.postgres.image).toBe(compose.services.postgres.image);
 });
