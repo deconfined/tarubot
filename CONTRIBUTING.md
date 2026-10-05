@@ -29,6 +29,8 @@ SSHFP_FIXTURE_IMAGE=tarubot-sshfp-test bun test tests/sshfp
 
 It runs native BIND, Unbound and OpenSSH in isolated containers with `NET_ADMIN`, no published ports and only the runner helper mounted read-only. The explicit image variable enables these tests; ordinary unit/contract checks do not build or download the image. CI builds the fixture and enables it for the full suite.
 
+CI also runs `tests/fixtures/sshfp/host-profile-smoke.py` natively on Ubuntu 24.04 under the stock enforcing Unbound AppArmor profile. It requires root in private network and mount namespaces, launches the transport as the unprivileged runner, holds SSH at a local unauthenticated TCP peer, and verifies private resolver readiness and TERM cleanup. Private bind mounts isolate resolver/hosts/state changes; it creates no access key and uses no public network. The container fixture does not substitute for this host-profile check.
+
 ## Make a change
 
 1. Start a feature branch from an up-to-date `main`. Keep unrelated work separate.

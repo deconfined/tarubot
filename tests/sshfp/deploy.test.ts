@@ -41,6 +41,9 @@ type Run = {
   privateDirectoryObserved: boolean;
   privateDirectoryModes: number[];
   privateWorkRemaining: string[];
+  resolverDirectoryModes: number[];
+  resolverDirectoryOwners: number[];
+  resolverWorkRemaining: string[];
   unboundProcessesRemaining: number[];
   sshProcessesRemaining: number[];
   resolverPortFree: boolean;
@@ -156,6 +159,9 @@ function assertLifecycleAndPrivacy(run: Run, occupied = false) {
   expect(run.privateDirectoryObserved).toBe(true);
   expect(run.privateDirectoryModes).toEqual([0o700]);
   expect(run.privateWorkRemaining).toEqual([]);
+  expect(run.resolverDirectoryModes).toEqual([0o700]);
+  expect(run.resolverDirectoryOwners).toEqual([0]);
+  expect(run.resolverWorkRemaining).toEqual([]);
   expect(run.unboundProcessesRemaining).toEqual([]);
   expect(run.sshProcessesRemaining).toEqual([]);
   expect(run.resolverPortFree).toBe(!occupied);

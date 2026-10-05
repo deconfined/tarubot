@@ -31,6 +31,9 @@ cleanup() {
       [[ $status == 143 ]] || rc=1
     fi
   fi
+  if [[ -n ${resolver_dir:-} ]]; then
+    sudo -n rm -rf -- "$resolver_dir" || rc=1
+  fi
   rm -rf -- "$dir"
   exit "$rc"
 }
@@ -58,18 +61,20 @@ printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
 unset DEPLOY_SSH_KEY
 
 # Trust only the OS-maintained root anchor, not an AD bit received over an
-# untrusted network. The runner package step stops its newly installed service;
-# this process is private to this invocation and removed by the exit trap.
-cat > "$dir/unbound.conf" <<EOF
+# untrusted network. Ubuntu confines /usr/sbin/unbound with its packaged
+# AppArmor profile: daemon files must be root-owned under /var/lib/unbound.
+# The runner key remains separate; both private directories are removed on exit.
+resolver_dir=$(sudo -n mktemp -d /var/lib/unbound/deploy-ssh.XXXXXX)
+cat <<EOF | sudo -n tee "$resolver_dir/unbound.conf" > /dev/null
 server:
   interface: 127.0.0.1
   port: 53
   so-reuseport: no
   username: ""
   chroot: ""
-  directory: "$dir"
-  pidfile: "$dir/unbound.pid"
-  logfile: "$dir/unbound.log"
+  directory: "$resolver_dir"
+  pidfile: "$resolver_dir/unbound.pid"
+  logfile: "$resolver_dir/unbound.log"
   use-syslog: no
   verbosity: 0
   do-ip6: no
@@ -81,19 +86,21 @@ server:
 remote-control:
   control-enable: yes
   control-use-cert: no
-  control-interface: "$dir/resolver-control"
+  control-interface: "$resolver_dir/resolver-control"
 EOF
-# The runner owns diagnostics; track sudo directly for signal forwarding.
+# Redirect before exec so AppArmor never inherits a runner-temp diagnostic FD.
+# sudo tracks the exec'd daemon directly for signal forwarding.
 exec {resolver_output}> "$dir/resolver-start"
-sudo -n unbound-checkconf "$dir/unbound.conf" >&"$resolver_output" 2>&1
-sudo -n unbound -d -c "$dir/unbound.conf" >&"$resolver_output" 2>&1 &
-resolver_job=$!
+sudo -n unbound-checkconf "$resolver_dir/unbound.conf" >&"$resolver_output" 2>&1
 exec {resolver_output}>&-
+sudo -n sh -c 'exec /usr/sbin/unbound -d -c "$1" > "$2" 2>&1' \
+  sh "$resolver_dir/unbound.conf" "$resolver_dir/resolver-start" &
+resolver_job=$!
 # A private Unix control socket proves this invocation's resolver is ready.
 # Never switch DNS to an unrelated listener after a bind/startup failure.
 ready=false
 for ((attempt=0; attempt<20; attempt++)); do
-  if timeout 1 sudo -n unbound-control -c "$dir/unbound.conf" status > "$dir/resolver-status" 2>&1; then
+  if timeout 1 sudo -n unbound-control -c "$resolver_dir/unbound.conf" status > "$dir/resolver-status" 2>&1; then
     ready=true
     break
   fi

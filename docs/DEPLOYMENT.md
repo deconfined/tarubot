@@ -58,6 +58,8 @@ Activation values are GitHub workflow-context snapshots, not live repository-var
 
 The workflow installs current Ubuntu 24.04 `openssh-client`, `unbound` and `dns-root-data`. The helper enforces the [CVE-2025-26465 security backport](https://ubuntu.com/security/CVE-2025-26465), at least `1:9.6p1-3ubuntu13.8`. An invocation-local Unbound validates from the OS-maintained root trust anchor using direct recursion; the runner must permit outbound UDP/TCP DNS. Only its loopback replies supply the AD bit trusted by OpenSSH. Readiness uses a private Unix socket before resolver contents change.
 
+Unbound's config, PID, logs and control socket live in a root-owned, mode-700 invocation directory under `/var/lib/unbound`, within Ubuntu's stock AppArmor permissions. The runner-owned key and SSH diagnostics remain in a separate private temp directory. Do not disable AppArmor or add runner-temp allowances. CI separately exercises native startup under the enforcing package profile in private network/mount namespaces; the offline signed-zone fixture covers SSHFP acceptance, refusal and rotation.
+
 The workflow `exec`s the helper so runner cancellation reaches its entry PID. SSH runs as a tracked child behind an interruptible `wait`: INT/TERM cleanup terminates and reaps that client, restores resolver contents, stops the owned resolver and removes private transport state. A second cancellation signal cannot interrupt restoration already in progress. This cleans the runner, **not a remote rollback**; a host command may continue after disconnect, so reconcile its durable state before another dispatch.
 
 For each target, the owner derives SSHFP from the independently verified **public** host key in a private console, for example:

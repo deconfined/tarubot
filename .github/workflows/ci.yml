@@ -97,6 +97,13 @@ jobs:
           "$tool_dir/actionlint" -color
       - name: Compile the application
         run: bun run build
+      - name: Exercise native SSH resolver under Ubuntu AppArmor
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends openssh-client unbound dns-root-data
+          sudo -n unshare --mount --net -- \
+            python3 tests/fixtures/sshfp/host-profile-smoke.py \
+            "$USER" "$GITHUB_WORKSPACE/ops/deploy-ssh.sh" "$RUNNER_TEMP"
       - name: Build the credential-free DNSSEC SSHFP fixture
         run: docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
       - name: Generate synthetic integration input

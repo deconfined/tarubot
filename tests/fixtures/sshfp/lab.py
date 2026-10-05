@@ -311,6 +311,7 @@ def exercise(target, phase, identity, tampered, index):
     topology = (resolver.is_symlink(), os.readlink(resolver) if resolver.is_symlink() else None, resolver.lstat().st_ino)
     observations = {
         "privateDirectoryObserved": False, "privateDirectoryModes": [],
+        "resolverDirectoryModes": [], "resolverDirectoryOwners": [],
         "nativeProbe": None, "termSentToPid": None,
         "resolverActiveWhenTermSent": None,
         "cancelSentToPid": None, "cancelMonotonic": None,
@@ -327,6 +328,16 @@ def exercise(target, phase, identity, tampered, index):
                         mode = stat.S_IMODE(directory.stat().st_mode)
                         if mode not in observations["privateDirectoryModes"]:
                             observations["privateDirectoryModes"].append(mode)
+                except FileNotFoundError:
+                    pass
+            for directory in pathlib.Path("/var/lib/unbound").glob("deploy-ssh.*"):
+                try:
+                    info = directory.stat()
+                    mode = stat.S_IMODE(info.st_mode)
+                    if mode not in observations["resolverDirectoryModes"]:
+                        observations["resolverDirectoryModes"].append(mode)
+                    if info.st_uid not in observations["resolverDirectoryOwners"]:
+                        observations["resolverDirectoryOwners"].append(info.st_uid)
                 except FileNotFoundError:
                     pass
             if phase == "term" and observations["termSentToPid"] is None:
@@ -402,6 +413,7 @@ def exercise(target, phase, identity, tampered, index):
         "resolverOriginalSha256": hashlib.sha256(original).hexdigest(),
         "resolverFinalSha256": hashlib.sha256(resolver.read_bytes()).hexdigest(),
         "privateWorkRemaining": sorted(path.name for path in RUNNER_TEMP.iterdir()),
+        "resolverWorkRemaining": sorted(path.name for path in pathlib.Path("/var/lib/unbound").glob("deploy-ssh.*")),
         "unboundProcessesRemaining": unbound_processes(),
         "sshProcessesRemaining": runner_ssh_processes(runner.pw_uid),
         "cancelElapsedSeconds": exited_at - canceled_at if canceled_at is not None else None,
