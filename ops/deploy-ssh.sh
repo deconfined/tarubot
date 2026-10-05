@@ -8,6 +8,15 @@ dir=$(mktemp -d "${RUNNER_TEMP:?}/deploy-ssh.XXXXXX")
 cleanup() {
   local rc=$?
   trap - EXIT
+  # A second runner signal must not interrupt restoration already in progress.
+  trap '' INT TERM
+  if [[ -n ${ssh_job:-} ]]; then
+    if kill -0 "$ssh_job" 2> /dev/null; then
+      kill -TERM "$ssh_job" || rc=1
+    fi
+    # OpenSSH may return 255 when terminated; preserve the entry's signal status.
+    wait "$ssh_job" || :
+  fi
   if [[ -f $dir/resolv.conf.previous ]]; then
     sudo -n tee /etc/resolv.conf < "$dir/resolv.conf.previous" > /dev/null || rc=1
   fi
@@ -97,13 +106,17 @@ printf 'nameserver 127.0.0.1\noptions edns0 trust-ad\n' |
   sudo -n tee /etc/resolv.conf > /dev/null
 
 rc=0
+# wait is interruptible; a foreground ssh would defer INT/TERM traps.
 ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
   -o BatchMode=yes -o VerifyHostKeyDNS=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null \
   -o UpdateHostKeys=no -o CheckHostIP=no -o HostKeyAlgorithms=ssh-ed25519 \
   -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
   -o LogLevel=ERROR "tarubot@$DEPLOY_HOST" "$command" \
-  < /dev/null > "$dir/output" 2> "$dir/ssh-errors" || rc=$?
+  < /dev/null > "$dir/output" 2> "$dir/ssh-errors" &
+ssh_job=$!
+wait "$ssh_job" || rc=$?
+unset ssh_job
 result=''
 results=0
 while IFS= read -r line; do

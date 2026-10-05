@@ -12,6 +12,8 @@ type Scenario =
   | "mismatch"
   | "rotation"
   | "term"
+  | "cancel-int"
+  | "cancel-term"
   | "occupied";
 type Release = {
   target: Target;
@@ -40,9 +42,14 @@ type Run = {
   privateDirectoryModes: number[];
   privateWorkRemaining: string[];
   unboundProcessesRemaining: number[];
+  sshProcessesRemaining: number[];
   resolverPortFree: boolean;
   termSentToPid: number | null;
   resolverActiveWhenTermSent: boolean | null;
+  cancelSentToPid: number | null;
+  cancelElapsedSeconds: number | null;
+  resolverActiveWhenCanceled: boolean | null;
+  sshSessionActiveWhenCanceled: boolean | null;
   authoritativeServerSurvived: boolean;
   occupiedResolverSurvived?: boolean;
   remoteCommandEntered: boolean;
@@ -150,6 +157,7 @@ function assertLifecycleAndPrivacy(run: Run, occupied = false) {
   expect(run.privateDirectoryModes).toEqual([0o700]);
   expect(run.privateWorkRemaining).toEqual([]);
   expect(run.unboundProcessesRemaining).toEqual([]);
+  expect(run.sshProcessesRemaining).toEqual([]);
   expect(run.resolverPortFree).toBe(!occupied);
   expect(run.authoritativeServerSurvived).toBe(true);
   expect(run.stderr).toBe("");
@@ -250,6 +258,28 @@ describe.skipIf(!image)("DNSSEC-authenticated native deployment SSHFP", () => {
     assertRejected(run, "term");
     expect(run.termSentToPid).toBeGreaterThan(0);
   }, 120_000);
+
+  for (const scenario of ["cancel-int", "cancel-term"] as const) {
+    test(`${scenario}: entry-PID cancellation cleans a held native SSH session before remote publication`, async () => {
+      const report = await lab(scenario, "production");
+      const run = report.runs[0];
+      if (!run) throw new Error("Missing native cancellation run");
+      assertLifecycleAndPrivacy(run);
+      expect(run.code).toBe(scenario === "cancel-int" ? 130 : 143);
+      expect(run.cancelSentToPid).toBeGreaterThan(0);
+      expect(run.resolverActiveWhenCanceled).toBe(true);
+      expect(run.sshSessionActiveWhenCanceled).toBe(true);
+      expect(run.remoteCommandEntered).toBe(true);
+      expect(run.nativeProbe).toMatchObject({ status: "NOERROR", authenticated: true });
+      expect(run.executionMarker).toBeNull();
+      expect(run.releaseState).toBeNull();
+      expect(run.stdout).not.toContain("result deployed");
+      // The real runner escalates to SIGKILL 2.5 seconds after SIGTERM.
+      // Bound process cleanup, not application timer/wording behavior.
+      expect(run.cancelElapsedSeconds).not.toBeNull();
+      expect(run.cancelElapsedSeconds).toBeLessThan(2);
+    }, 120_000);
+  }
 
   test("mixed same-algorithm SSHFP refuses both host keys; a matching signed cutover restores delivery", async () => {
     const report = await lab("rotation", "production");

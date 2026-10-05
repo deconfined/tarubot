@@ -32,7 +32,7 @@ RUNNER_TEMP = ROOT / "runner-temp"
 DNS_ADDRESS = "192.0.2.53"
 SSH_ADDRESS = "192.0.2.10"
 SENTINEL = "PRIVATE KEY fixture-sentinel-not-a-key-or-access-credential"
-SCENARIOS = {"signed", "unsigned", "missing", "bogus", "mismatch", "rotation", "term", "occupied"}
+SCENARIOS = {"signed", "unsigned", "missing", "bogus", "mismatch", "rotation", "term", "occupied", "cancel-int", "cancel-term"}
 
 
 def command(arguments, **options):
@@ -226,6 +226,20 @@ def unbound_processes():
     return found
 
 
+def runner_ssh_processes(uid):
+    found = []
+    for path in pathlib.Path("/proc").glob("[0-9]*/comm"):
+        try:
+            if path.read_text().strip() != "ssh":
+                continue
+            owner = re.search(r"^Uid:\s+([0-9]+)", (path.parent / "status").read_text(), re.MULTILINE)
+            if owner is not None and int(owner[1]) == uid:
+                found.append(int(path.parent.name))
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return found
+
+
 def resolver_port_free():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
@@ -255,7 +269,7 @@ def inspect_dns(host):
     }
 
 
-def terminate_runner_bash(uid):
+def terminate_runner_bash(uid, signum):
     # Select the real non-root Bash process by kernel identity, not command
     # arguments, a shell stand-in, or production source-text instrumentation.
     for path in pathlib.Path("/proc").glob("[0-9]*/comm"):
@@ -266,7 +280,7 @@ def terminate_runner_bash(uid):
             owner = re.search(r"^Uid:\s+([0-9]+)", status, re.MULTILINE)
             if owner is not None and int(owner[1]) == uid:
                 pid = int(path.parent.name)
-                os.kill(pid, signal.SIGTERM)
+                os.kill(pid, signum)
                 return pid
         except (FileNotFoundError, ProcessLookupError):
             pass
@@ -299,6 +313,8 @@ def exercise(target, phase, identity, tampered, index):
         "privateDirectoryObserved": False, "privateDirectoryModes": [],
         "nativeProbe": None, "termSentToPid": None,
         "resolverActiveWhenTermSent": None,
+        "cancelSentToPid": None, "cancelMonotonic": None,
+        "resolverActiveWhenCanceled": None, "sshSessionActiveWhenCanceled": None,
     }
     finished = threading.Event()
 
@@ -318,14 +334,22 @@ def exercise(target, phase, identity, tampered, index):
                     observations["resolverActiveWhenTermSent"] = (
                         b"nameserver 127.0.0.1\n" in resolver.read_bytes()
                     )
-                    observations["termSentToPid"] = terminate_runner_bash(runner.pw_uid)
+                    observations["termSentToPid"] = terminate_runner_bash(runner.pw_uid, signal.SIGTERM)
             try:
                 active = b"nameserver 127.0.0.1\n" in resolver.read_bytes()
                 if phase not in {"term", "occupied"} and active and observations["nativeProbe"] is None:
                     observations["nativeProbe"] = inspect_dns(host)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            if phase != "term" and (REMOTE / "entered").exists() and observations["nativeProbe"] is not None and observations["privateDirectoryObserved"]:
+            held = (REMOTE / "entered").exists() and observations["nativeProbe"] is not None
+            if phase in {"cancel-int", "cancel-term"} and held and observations["cancelSentToPid"] is None:
+                observations["resolverActiveWhenCanceled"] = active
+                observations["sshSessionActiveWhenCanceled"] = bool(runner_ssh_processes(runner.pw_uid))
+                observations["cancelMonotonic"] = time.monotonic()
+                observations["cancelSentToPid"] = terminate_runner_bash(
+                    runner.pw_uid, signal.SIGINT if phase == "cancel-int" else signal.SIGTERM
+                )
+            if phase not in {"term", "cancel-int", "cancel-term"} and held and observations["privateDirectoryObserved"]:
                 (ROOT / "release-command").touch()
             finished.wait(0.001)
 
@@ -342,11 +366,12 @@ def exercise(target, phase, identity, tampered, index):
         f"REPO_STAGING_DEPLOY_ENABLED={'true' if target == 'staging' else 'false'}",
     ]
     helper = subprocess.Popen(
-        ["runuser", "-u", "runner", "--", "env", "-i", *environment, "bash", "/transport/deploy-ssh.sh"],
+        ["runuser", "-u", "runner", "--", "env", "-i", *environment, "bash", "-c", "exec bash /transport/deploy-ssh.sh"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
     )
     try:
         stdout, stderr = helper.communicate(timeout=45)
+        exited_at = time.monotonic()
     except subprocess.TimeoutExpired:
         os.killpg(helper.pid, signal.SIGTERM)
         try:
@@ -362,6 +387,7 @@ def exercise(target, phase, identity, tampered, index):
     while unbound_processes() and time.monotonic() < deadline:
         time.sleep(0.01)
     restored_topology = (resolver.is_symlink(), os.readlink(resolver) if resolver.is_symlink() else None, resolver.lstat().st_ino)
+    canceled_at = observations.pop("cancelMonotonic")
     marker_path = REMOTE / "execution-marker.json"
     state_path = REMOTE / "release.json"
     marker = json.loads(marker_path.read_text()) if marker_path.exists() else None
@@ -377,6 +403,8 @@ def exercise(target, phase, identity, tampered, index):
         "resolverFinalSha256": hashlib.sha256(resolver.read_bytes()).hexdigest(),
         "privateWorkRemaining": sorted(path.name for path in RUNNER_TEMP.iterdir()),
         "unboundProcessesRemaining": unbound_processes(),
+        "sshProcessesRemaining": runner_ssh_processes(runner.pw_uid),
+        "cancelElapsedSeconds": exited_at - canceled_at if canceled_at is not None else None,
         "resolverPortFree": resolver_port_free(),
         "remoteCommandEntered": (REMOTE / "entered").exists(),
         "executionMarker": marker, "releaseState": state,
@@ -418,7 +446,7 @@ def main():
         "# credential-free SSHFP fixture original resolver\n"
         "nameserver 192.0.2.254\nsearch fixture.example.org\noptions timeout:1 attempts:1\n"
     )
-    dns_scenario = "signed" if scenario in {"term", "occupied"} else scenario
+    dns_scenario = "signed" if scenario in {"term", "occupied", "cancel-int", "cancel-term"} else scenario
     phases = [(scenario, dns_scenario, 0, [identities[1] if scenario == "mismatch" else identities[0]])]
     if scenario == "rotation":
         phases = [

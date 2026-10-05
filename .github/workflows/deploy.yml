@@ -178,4 +178,4 @@ jobs:
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: bash ops/deploy-ssh.sh
+        run: exec bash ops/deploy-ssh.sh
