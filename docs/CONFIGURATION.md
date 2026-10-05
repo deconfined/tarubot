@@ -21,7 +21,7 @@ Compose deployments use central host-only variables. Generic Docker secrets can 
 
 ## Managed host settings
 
-Production and staging settings remain in separate private host `.env` files; release worktrees reuse the appropriate central file. Their GitHub environments hold only their own SSH delivery credentials/pins, not database or Discord credentials. Repository variables independently control activation: `DEPLOY_ENABLED` for production and `STAGING_DEPLOY_ENABLED` for staging. Use `production.env.example` or `staging.env.example` respectively, never a copied production secret file on staging. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
+Production and staging settings remain in separate private host `.env` files; release worktrees reuse the appropriate central file. Their GitHub environments hold only their own SSH delivery credential and DNS hostname, not database or Discord credentials. Host identity is authenticated through matching DNSSEC-signed SSHFP in the owner's zone; there is no manual known_hosts fallback. Repository variables independently control activation: `DEPLOY_ENABLED` for production and `STAGING_DEPLOY_ENABLED` for staging. Use `production.env.example` or `staging.env.example` respectively, never a copied production secret file on staging. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
 
 Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; local DevBot uses its reports token for private previews. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 

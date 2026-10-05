@@ -43,9 +43,10 @@ jobs:
           --health-cmd "pg_isready -U tarubot -d tarubot_test"
           --health-interval 5s --health-timeout 3s --health-retries 20
     env:
-      # This database and fixture contain synthetic test data only.
+      # These database and DNS fixtures contain synthetic test data only.
       TEST_DATABASE_URL: postgresql://tarubot:ci-only-password@localhost:5432/tarubot_test
       LEGACY_FIXTURE_PATH: .cache/ci/legacy.sql
+      SSHFP_FIXTURE_IMAGE: tarubot-sshfp-test
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,6 +97,15 @@ jobs:
           "$tool_dir/actionlint" -color
       - name: Compile the application
         run: bun run build
+      - name: Exercise native SSH resolver under Ubuntu AppArmor
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends openssh-client unbound dns-root-data
+          sudo -n unshare --mount --net -- \
+            python3 tests/fixtures/sshfp/host-profile-smoke.py \
+            "$USER" "$GITHUB_WORKSPACE/ops/deploy-ssh.sh" "$RUNNER_TEMP"
+      - name: Build the credential-free DNSSEC SSHFP fixture
+        run: docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
       - name: Generate synthetic integration input
         run: bun run test:fixture
       - name: Run unit, contract, and PostgreSQL integration tests
