@@ -1,6 +1,15 @@
 # Version history
 
-The current application version is **2.36.42**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.43**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.43 — Release the Linode Compose delivery reset
+
+- Release the reviewed production/staging Compose manifests and target-bound host entries as a new immutable image, without replacing the published 2.36.42 build.
+- Build and scan AMD64/ARM64 images, attest the exact published digest and retain the owner's GitHub environment approval before delivery.
+- Automate release admission, encrypted backup, required database migrations, scoped command registration, sustained readiness and writer-lease checks, with durable failure fencing.
+- Authenticate SSH hosts using DNSSEC-validated Ed25519 SSHFP, native OpenSSH and a runner-local validating Unbound. Keep resolver state within Ubuntu's stock AppArmor permissions and clean up tracked SSH/resolver processes on cancellation without claiming a remote rollback.
+- Keep production and staging backups in separate buckets with common object layouts; update PostgreSQL Compose, backup-client and CI images to 18.6.
+- Retire obsolete infrastructure/pipeline tooling and replace the stale OVH startup plan with a responsibility-separated staging-first acceptance plan. Publication does not perform the initial owner bootstrap or authorize a live cutover.
 
 ## 2.36.42 — Use a patched Alpine runtime image
 

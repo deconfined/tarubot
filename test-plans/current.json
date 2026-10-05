@@ -1,19 +1,20 @@
 {
-  "title": "Session: OVH infrastructure preparation",
-  "objective": "Prepare the selected OVH infrastructure, private inputs and planning consumers with offline verification, preserving production Compose and keeping the replacement pipeline inactive.",
+  "title": "Session: 2.36.43 Linode staging-first delivery",
+  "objective": "Rehearse the signed 2.36.43 Compose release on owner-operated Linode staging with its managed database and declared test guild, effects initially paused, and one DevBot writer. Production stays unchanged until its own readiness and approval.",
   "user": [
-    "Review the bounded infrastructure change and its offline evidence.",
-    "Verify the selected d2-2 flavor and AlmaLinux 10-UEFI image IDs, dual-stack public network and account-specific quote before separately authorized provisioning.",
-    "Keep environment credentials, real-service acceptance and live data migration outside agent sessions."
+    "Review the release and verify its published source/digest. Leave any production approval pending until production is separately ready.",
+    "Authorize the cutover window; fence the previous DevBot before moving its token or starting staging. Preserve its database and recovery boundary; bootstrap only managed staging.",
+    "Check exact image/version/schema, sustained readiness and sole writer lease, test-guild command inventory, and staging backup/restore evidence.",
+    "Keep effects paused initially. Authorize Discord mutation checks separately; enable staging delivery only after its healthy baseline and durable current state are accepted."
   ],
   "assistant": [
-    "Replace inactive provider-specific contracts and update affected consumers together, using standard OVH/OpenStack components.",
-    "Bind the selected S3 region throughout planning, saved-plan verification, Apply and encrypted control-record access.",
-    "Use invented inputs for offline source, OpenTofu and consumer refusal checks; preserve encryption, pending recovery and strict enrollment.",
-    "Make no live bot, host, database, environment or provider changes, and do not activate or dispatch the replacement pipeline."
+    "Prepare and verify the exact release with credential-free source, PostgreSQL, native DNSSEC/SSHFP and cancellation fixtures.",
+    "Use owner-reported results to diagnose scoped readiness, registration, backup and failure outcomes; record exercised checks and unverified cases.",
+    "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
-    "Do not restart or connect to Discord for this offline infrastructure preparation.",
-    "Continue the owner's existing deployment unchanged; pipeline maintenance does not declare a new bot release."
+    "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
+    "Acquire and reconcile roster/profiles within staging's declared scope, never production identities or global command registration.",
+    "Expose database, Discord and writer-lease readiness; report startup/version and effect state without pinging members."
   ]
 }
