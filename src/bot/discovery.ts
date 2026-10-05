@@ -46,8 +46,12 @@ async function files(directory: URL, kind: string): Promise<URL[]> {
   return found;
 }
 
-/** Imported JavaScript is unknown until its default export passes the module-type guard. */
-async function load<T>(
+/**
+ * Imported JavaScript is unknown until its default export passes the module-type guard. Exported
+ * for web page discovery (src/web/pages.ts), so the registration and command tools never import
+ * web code.
+ */
+export async function load<T>(
   directory: URL,
   kind: string,
   accepts: (value: unknown) => value is T,
@@ -69,7 +73,11 @@ async function load<T>(
 }
 
 /** Duplicate routes fail startup instead of silently replacing a handler by load order. */
-function index<T>(items: T[], key: (item: T) => string, kind: string): ReadonlyMap<string, T> {
+export function index<T>(
+  items: T[],
+  key: (item: T) => string,
+  kind: string,
+): ReadonlyMap<string, T> {
   const result = new Map<string, T>();
   for (const item of items) {
     const name = key(item);

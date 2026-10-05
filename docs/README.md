@@ -6,7 +6,7 @@ The [threat model](THREAT_MODEL.md) defines engineering scope: minimal complexit
 
 | Task | Reference |
 | --- | --- |
-| Add a command, event, component or service | [MODULES](MODULES.md) |
+| Add a command, event, component, service or web page | [MODULES](MODULES.md) |
 | Write queries or change the schema | [PERSISTENCE](PERSISTENCE.md) |
 | Change configuration or maintenance-tool guards | [CONFIGURATION](CONFIGURATION.md) |
 | Change Lodestone parsing or selectors | [LODESTONE](LODESTONE.md) |

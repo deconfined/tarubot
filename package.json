@@ -44,9 +44,11 @@
   "dependencies": {
     "discord.js": "14.27.0",
     "drizzle-orm": "0.45.3",
+    "hono": "4.13.12",
     "html-entities": "2.6.0",
     "linkedom": "0.16.11",
     "lodestone-css-selectors": "git+https://github.com/xivapi/lodestone-css-selectors.git#HEAD",
+    "oauth4webapi": "3.8.8",
     "pg": "8.23.0",
     "pino": "10.3.1",
     "zod": "4.6.5"

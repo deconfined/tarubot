@@ -237,13 +237,14 @@ function tally(work: readonly JobView[]): Tally {
 /**
  * A run's state. The service folds paused ('disabled') child work into 'blocked', so while
  * Discord changes are paused a blocked run is shown as paused: nothing can newly block then.
+ * Shared with the web's Status page (src/web/views/status.ts).
  */
-type RunState = SyncRunRow["status"] | "paused";
-const runState = (run: SyncRunRow, mode: EffectsMode): RunState =>
+export type RunState = SyncRunRow["status"] | "paused";
+export const runState = (run: SyncRunRow, mode: EffectsMode): RunState =>
   run.status === "blocked" && paused(mode) ? "paused" : run.status;
 
 /** How each run state reads in run lists, as approved (guests#43 and #44). */
-const RUN_LABEL: Readonly<Record<RunState, string>> = {
+export const RUN_LABEL: Readonly<Record<RunState, string>> = {
   queued: "In progress",
   completed: "Completed",
   blocked: "Waiting on the server",
@@ -252,7 +253,7 @@ const RUN_LABEL: Readonly<Record<RunState, string>> = {
 };
 
 /** What started a run, from its acquisition job's kind (approved guests#44). */
-function runType(run: SyncRunRow): string {
+export function runType(run: SyncRunRow): string {
   if (run.acquisition_kind === "roster") return "Lodestone fetch";
   if (run.acquisition_kind === "reconcile.guild") return "Cached roster";
   return "Refresh";

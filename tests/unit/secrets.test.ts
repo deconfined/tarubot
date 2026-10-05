@@ -269,6 +269,20 @@ describe("configuration()", () => {
     });
   });
 
+  test("web settings are carried as strings and never stop the bot (#43)", () => {
+    // Values src/web/settings.ts refuses: configuration() passes them on untouched, so a typo
+    // turns only the web off (with a report), never the bot's start.
+    const web = {
+      WEB_PUBLIC_ORIGIN: "not an origin",
+      WEB_PORT: "port",
+      DISCORD_CLIENT_SECRET: " spaced secret ",
+    };
+    expect(configuration({ ...PLAIN, ...web })).toEqual({ ...PLAIN_CONFIGURATION, ...web });
+    // Unset stays absent: no default stands in for a setting the web treats as "off".
+    const keys = Object.keys(configuration(PLAIN));
+    for (const key of Object.keys(web)) expect(keys).not.toContain(key);
+  });
+
   test("the file forms give the same Configuration, and process.env stays as it was", () => {
     withFiles(
       {

@@ -397,3 +397,20 @@ export const issueReports = pgTable("issue_reports", {
   first_at: instant("first_at").notNull().defaultNow(),
   last_at: instant("last_at").notNull().defaultNow(),
 });
+/**
+ * Browser sessions for the web pages (migration 011, issue #43): the SHA-256 of each cookie token,
+ * never the token, with the user and timestamps only. src/web/sessions.ts decides every expiry on
+ * the database clock; a restore deletes every row.
+ */
+export const webSessions = pgTable("web_sessions", {
+  /** 64 lowercase hex characters (the migration's CHECK). */
+  token_hash: text("token_hash").primaryKey(),
+  user_id: externalId("user_id").notNull(),
+  created_at: instant("created_at").notNull().defaultNow(),
+  /** When the user last signed in with Discord; v4 can require a recent one for sensitive writes. */
+  authenticated_at: instant("authenticated_at").notNull().defaultNow(),
+  /** Written at most every SESSION_TOUCH_MS; the idle expiry counts from it. */
+  last_seen_at: instant("last_seen_at").notNull().defaultNow(),
+  /** The absolute expiry, set at sign-in. */
+  expires_at: instant("expires_at").notNull(),
+});

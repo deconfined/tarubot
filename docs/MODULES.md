@@ -54,6 +54,36 @@ Messages outlive deployments. Add grammar/builder/parser tests together; retired
 
 Add cases to `tests/fixtures/replies/` and pin wording in the group's unit tests. [REPLIES.md](REPLIES.md#add-or-change-a-reply) lists the relevant checks. An intentionally added public command also needs the command inventory expectation updated.
 
+## Web pages
+
+The web pages (#43) run in the bot process: `src/main.ts` starts a second listener once the writer lease and Discord are ready, and the shutdown drain stops it. They stay off until `WEB_PUBLIC_ORIGIN` is set. `src/web/settings.ts` parses the web settings when the web starts, so a bad value turns the web off with a report naming the setting and never stops the bot. `src/web/http.ts` holds the header set and the POST checks; `src/web/server.ts` owns the fixed routes (`/`, sign-in, sign-out, `/health/ready` and the assets) and wires the request pipeline.
+
+### Add a page
+
+Default-export `definePage` from a `*.page.ts` file under `src/web/pages/`. The path is `/g/:guild/` followed by lowercase segments. `access` is required, with no default, so no page is public by omission. It's an any-of list: `officer` (officer authority, as commands use it) or `manager` (`authorizeRoleManager`). `requires` lists service keys, checked when the web starts; a missing one keeps the web off. `nav` lists the page in the server navigation for viewers it admits.
+
+The server refuses before the page runs: a malformed or unserved server, or someone who isn't a current member, gets 404, a signed-out visitor goes to sign-in, and a missing flag gets 403. `servePage` in `src/web/server.ts` has the exact order.
+
+The actor is resolved exactly as for a slash command: reused for up to 60 seconds on GET, resolved afresh on every POST. Application operations authorize it again.
+
+`get` loads a typed view model through `context.services`, and a pure function in `src/web/views/` renders it, as presenters do for Discord. Views import application, infrastructure, Drizzle and job modules as types only. Templates use `html` from `src/web/html.ts`, which escapes every interpolation:
+
+- untrusted text (server, member and role names, notes) goes through `untrusted()`, links through `href()`, and times through `time()` (UTC);
+- never write a `style=` attribute or a script: the CSP allows neither;
+- the unescaped `raw()` is allowed only in constant files that `tests/unit/web-boundary.test.ts` allow-lists.
+
+Throw catalog `Failure` values. The error page maps the category to a status and shows the approved message with its code and ref; anything else is a 500 that shows neither its text nor its stack.
+
+### Forms
+
+`post` runs only after the same-origin and form-type checks, a session and a fresh actor. Parse the form with zod and return `{ invalid }` (422, with messages that never echo values) or `{ redirect }` (303).
+
+Pages make no durable writes yet. The first write brings an idempotency key, one transaction with audit, and these rules for any job kind a page enqueues: carry `guild_id`; validate the payload before `enqueue()`; use a per-action dedupe key; use the `reconcile.` prefix only when generation fencing is intended; add a `JOB_KIND` label. Pages then say "queued", never "done".
+
+### Run and test pages
+
+`bun --no-env-file tests/fixtures/web-dev.ts` runs the real web server on `[::1]` with a fake Discord sign-in, in-memory sessions and invented data. Never start it through a root `bun run` alias, which loads `.env`. Test routes with `createWebApp` and `app.request()` (`tests/unit/web-server.test.ts`), and views with invented data and linkedom (`tests/unit/web-pages.test.ts`).
+
 ## Commenting conventions
 
 Explain consequential boundaries and invariants beside the implementation, especially authorization, transactions, stale context and ambiguous side effects. Keep general development rules in [CONTRIBUTING.md](../CONTRIBUTING.md).

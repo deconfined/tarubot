@@ -56,6 +56,13 @@ const schema = z.object({
   HEALTHCHECKS_PING_URL: z
     .union([z.literal(""), z.string().url().startsWith("https://")])
     .default(""),
+  // Web pages (#43): dormant until WEB_PUBLIC_ORIGIN is set. Plain optional strings with no default
+  // or transform, because src/web/settings.ts parses them only when the web starts: a bad value
+  // turns the web off with a report naming the setting, never stopping the bot. An empty string
+  // (Compose's ${VAR:-}) means unset. DISCORD_CLIENT_SECRET is the bot application's OAuth secret.
+  WEB_PUBLIC_ORIGIN: z.string().optional(),
+  WEB_PORT: z.string().optional(),
+  DISCORD_CLIENT_SECRET: z.string().optional(),
 });
 export type Configuration = z.infer<typeof schema>;
 

@@ -38,6 +38,7 @@ import { Lodestone } from "./infrastructure/lodestone/client.js";
 import { Database } from "./infrastructure/postgres/database.js";
 import { dispatcher } from "./jobs/dispatch.js";
 import { Queue } from "./jobs/queue.js";
+import { startWeb, type WebServer } from "./web/server.js";
 
 const config = configuration();
 // Issue reports include the newest log records (info and above, after this redaction).
@@ -129,6 +130,8 @@ const heartbeat = new Heartbeat(
   config.TEST_GUILD_ID ? "devbot" : "production",
   (level, fields, message) => log[level](fields, message),
 );
+// The web pages (#43): started below once the lease and Discord are ready; null while dormant.
+let web: WebServer | null = null;
 const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue, log, report, {
   // The heartbeat never throws; the reporter's errors are reported by the lifecycle.
   tick: async () => {
@@ -136,8 +139,11 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
     await reports.tick();
   },
   // A /suggest post still at GitHub finishes, and records its row, before the lease is released;
-  // a /setup overrides run stops and writes its audit row (2.35.0). Neither ever rejects.
-  drain: () => Promise.all([suggestions.drain(), roleAdministration.drain()]).then(() => {}),
+  // a /setup overrides run stops and writes its audit row (2.35.0); the web stops listening, and
+  // connections still open after 5 s are closed (their handlers aren't cancelled, like in-flight
+  // slash commands). None ever rejects.
+  drain: () =>
+    Promise.all([suggestions.drain(), roleAdministration.drain(), web?.stop()]).then(() => {}),
 });
 reports.useStatus(() => lifecycle.status());
 heartbeat.useStatus(() => lifecycle.status());
@@ -192,3 +198,10 @@ try {
   await lifecycle.stop();
   throw error;
 }
+// Never rejects: with WEB_PUBLIC_ORIGIN unset it returns null and nothing listens, and a web fault
+// is reported and leaves the bot running.
+web = await startWeb(
+  config,
+  { ...context, guilds: () => gateway.client.guilds.cache.map(({ id, name }) => ({ id, name })) },
+  log,
+);
