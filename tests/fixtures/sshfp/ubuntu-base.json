@@ -1,0 +1,11 @@
+{
+  "reference": "docker.io/library/ubuntu:24.04",
+  "immutableReference": "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+  "registryManifestURL": "https://registry-1.docker.io/v2/library/ubuntu/manifests/sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+  "indexDigest": "sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+  "verification": "The tag and immutable registry requests returned identical manifest bytes. Docker-Content-Digest matched the SHA-256 of those bytes. No image was built or started during metadata resolution.",
+  "platformDigests": {
+    "linux/amd64": "sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b",
+    "linux/arm64/v8": "sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7"
+  }
+}

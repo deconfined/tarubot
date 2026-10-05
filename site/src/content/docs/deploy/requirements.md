@@ -34,6 +34,8 @@ To use an external PostgreSQL instead, such as a managed database:
 
 The upstream project uses this same Docker Compose runtime on an owner-provisioned Linode host with managed PostgreSQL. Its `docker-compose.production.yml` and production tool profile belong to that application, not your deployment. Its separate staging rehearsal uses its own application identity, guild-scoped commands, managed database and backup bucket, never production credentials. The [release/provisioning/cutover runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes those owner-operated paths from self-hosting and from unobserved live acceptance.
 
+The upstream project's automated production/staging delivery authenticates SSH host keys through **DNSSEC-signed SSHFP**, with a complete signed delegation chain and a runner-local validating resolver. Missing, unsigned, invalid or mismatching records refuse delivery without a manual host-pin fallback. This is an upstream automation requirement, not an extra requirement for the stock self-hosted Compose installation.
+
 ## A Discord application
 
 Each deployment needs its own application and bot token: [create one](/tarubot/deploy/discord-application/). The bot token and the database password are the deployment's secrets; keep them in `.env`, which never belongs in Git.

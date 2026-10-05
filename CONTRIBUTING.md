@@ -20,6 +20,15 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
+The native DNSSEC/SSHFP transport fixture uses invented DNS zones and disposable server identities, with no client authentication key or live network access:
+
+```sh
+docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
+SSHFP_FIXTURE_IMAGE=tarubot-sshfp-test bun test tests/sshfp
+```
+
+It runs native BIND, Unbound and OpenSSH in isolated containers with `NET_ADMIN`, no published ports and only the runner helper mounted read-only. The explicit image variable enables these tests; ordinary unit/contract checks do not build or download the image. CI builds the fixture and enables it for the full suite.
+
 ## Make a change
 
 1. Start a feature branch from an up-to-date `main`. Keep unrelated work separate.
@@ -35,7 +44,7 @@ Do not commit credentials, `.env`, dumps, backups, generated output or local cod
 
 ## CI and dependencies
 
-`ci.yml` checks source, migration immutability, the application build, unit/contract tests and disposable PostgreSQL fixtures, plus `bash -n`/ShellCheck for `ops/*.sh`, pinned actionlint for workflows and credential-free production/staging Compose validation. PRs need no live credentials. `publish.yml` reuses CI, builds AMD64/ARM64 images for an explicit stable release, calls `scan.yml`, attests the exact index digest and calls `deploy.yml` with `target=production`. Routine deployment uses one owner-approved `production` job. Optional owner-dispatched staging rehearsal has its own activation, environment and approval; it is not a second production gate. Publication is not evidence of a live deploy. See [deployment](docs/DEPLOYMENT.md).
+`ci.yml` checks source, migration immutability, the application build, unit/contract tests, disposable PostgreSQL fixtures and native DNSSEC/SSHFP acceptance/refusal, plus `bash -n`/ShellCheck for `ops/*.sh`, pinned actionlint for workflows and credential-free production/staging Compose validation. PRs need no live credentials. `publish.yml` reuses CI, builds AMD64/ARM64 images for an explicit stable release, calls `scan.yml`, attests the exact index digest and calls `deploy.yml` with `target=production`. Routine deployment uses one owner-approved `production` job. Optional owner-dispatched staging rehearsal has its own activation, environment and approval; it is not a second production gate. Publication is not evidence of a live deploy. See [deployment](docs/DEPLOYMENT.md).
 
 CI's multi-platform image build runs unit/contract tests for both AMD64 and ARM64, with ARM64 under QEMU. Real Git/Bun CLI fixtures use explicit per-test subprocess budgets for emulation overhead; keep the ordinary test timeout unchanged and retain release-admission behavior coverage.
 
