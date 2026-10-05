@@ -90,10 +90,12 @@ def main():
         helper = subprocess.Popen([
             "runuser", "-u", username, "--", "env", "-i",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            f"HOME={user.pw_dir}", f"RUNNER_TEMP={runner_temp}", "TARGET=staging",
-            "STAGING_ENABLED=true", "VERSION=2.36.42", f"COMMIT_SHA={'a' * 40}",
-            "BACKUP_DAY=2026-10-05", "DEPLOY_HOST=smoke.example.org",
-            "DEPLOY_SSH_KEY=fixture-invalid-private-key-not-a-credential",
+            f"HOME={user.pw_dir}", f"USER={username}", f"LOGNAME={username}",
+            f"RUNNER_TEMP={runner_temp}", "TARGET=staging",
+            "REPO_STAGING_DEPLOY_ENABLED=true", "REPO_PRODUCTION_DEPLOY_ENABLED=false",
+            "VERSION=2.36.42", f"COMMIT={'a' * 40}", f"DIGEST=sha256:{'b' * 64}",
+            "GITHUB_RUN_ID=1234567", "DEPLOY_HOST=smoke.example.org",
+            "DEPLOY_SSH_KEY=PRIVATE KEY fixture-invalid-key-not-a-credential",
             "bash", "-c", 'exec bash "$1"', "--", str(helper_path),
         ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
