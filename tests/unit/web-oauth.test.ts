@@ -52,7 +52,7 @@ async function refusal(promise: Promise<unknown>): Promise<Failure> {
 }
 
 describe("start", () => {
-  test("the authorize URL carries exactly the client, redirect URI, scope, state and S256 challenge", async () => {
+  test("the authorize URL carries exactly the client, redirect URI, scope, state, S256 challenge and prompt", async () => {
     const { client } = signIn();
     const start = await client.start("/g/1/status");
     const url = start.authorizeUrl;
@@ -62,6 +62,7 @@ describe("start", () => {
       "client_id",
       "code_challenge",
       "code_challenge_method",
+      "prompt",
       "redirect_uri",
       "response_type",
       "scope",
@@ -75,6 +76,7 @@ describe("start", () => {
       state,
       code_challenge: createHash("sha256").update(verifier).digest("base64url"),
       code_challenge_method: "S256",
+      prompt: "none",
     });
     expect(DISCORD_SCOPE).toBe("identify");
     // 32 random bytes each, as unpadded base64url.

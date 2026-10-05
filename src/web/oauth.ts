@@ -4,7 +4,8 @@
  * Discord doesn't document PKCE). The handshake is stateless: one short-lived login cookie carries
  * the state, the verifier and the return path, so anonymous visitors cost no server memory. The
  * access token is used for one GET /users/@me and then dropped: never stored, logged or revoked
- * (revoking would end the user's authorization and bring back the consent screen).
+ * (revoking would end the user's authorization and bring back the consent screen). With
+ * `prompt=none`, a returning user skips Discord's authorization screen.
  *
  * oauth4webapi's strictness suits Discord's answers (tests/contract/discord-oauth.test.ts): the
  * authorization response carries no `iss`, which the library accepts because this metadata doesn't
@@ -27,6 +28,14 @@ export const DISCORD_TOKEN_URL = "https://discord.com/api/oauth2/token";
 export const DISCORD_USER_URL = "https://discord.com/api/v10/users/@me";
 /** The only scope requested: the user's ID. Never `guilds`, which lists every server they're in. */
 export const DISCORD_SCOPE = "identify";
+/**
+ * Skip Discord's authorization screen for a user who already authorized this application with
+ * DISCORD_SCOPE (owner's choice, #43, 2026-10-05; discord-api-docs#264). The authorization persists
+ * because the access token is never revoked. Discord documents `none` only for such returning users;
+ * what it does for a first-time user is undocumented, so staging's first sign-in checks it before
+ * the web is turned on. Any `error=` it might send ends on the sign-in error page, never in a loop.
+ */
+export const DISCORD_PROMPT = "none";
 
 /** How long one Discord request (token exchange or /users/@me) may take, body included. */
 export const DISCORD_TIMEOUT_MS = 10_000;
@@ -36,8 +45,8 @@ export const DISCORD_RETRY_FALLBACK_SECONDS = 60;
 /** The start of a sign-in: where to send the browser, and the login cookie to set first. */
 export interface SignInStart {
   /**
-   * The authorize URL: client_id, redirect_uri, response_type=code, scope, state, and the S256
-   * code_challenge.
+   * The authorize URL: client_id, redirect_uri, response_type=code, scope, state, the S256
+   * code_challenge and prompt=none.
    */
   readonly authorizeUrl: URL;
   /** The login cookie's value (state, verifier, return path), for LOGIN_COOKIE_MAX_AGE seconds. */
@@ -237,6 +246,7 @@ export class DiscordSignIn {
       ["state", handshake.state],
       ["code_challenge", await oauth.calculatePKCECodeChallenge(handshake.verifier)],
       ["code_challenge_method", "S256"],
+      ["prompt", DISCORD_PROMPT],
     ] as const)
       authorizeUrl.searchParams.set(name, value);
     return { authorizeUrl, loginCookie: encodeHandshake(handshake) };

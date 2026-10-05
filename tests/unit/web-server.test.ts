@@ -678,6 +678,8 @@ describe("sign-in", () => {
       );
       expect(authorize.searchParams.get("redirect_uri")).toBe(`${origin}/auth/callback`);
       expect(authorize.searchParams.get("scope")).toBe("identify");
+      // Returning users skip Discord's authorization screen (#43, 2026-10-05).
+      expect(authorize.searchParams.get("prompt")).toBe("none");
       const [handshake = ""] = login.headers.getSetCookie();
       expect(handshake.startsWith(`${loginCookie(w)}=`)).toBe(true);
       expect(handshake).toContain("Max-Age=600");
