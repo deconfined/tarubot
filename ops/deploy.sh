@@ -171,7 +171,8 @@ jq -e --arg ref "$REF" --arg version "$VERSION" --arg commit "$COMMIT" \
   'length == 1 and (.[0].RepoDigests | index($ref) != null) and .[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $commit' <<<"$TARGET"
 TARGET_ID=$(jq -er '.[0].Id' <<<"$TARGET")
 [[ $TARGET_ID =~ ^sha256:[0-9a-f]{64}$ ]]
-CONFIG=$(compose config --format json)
+# Compose omits inactive profiles from config; inspect the client without starting it.
+CONFIG=$(compose --profile backup config --format json)
 jq -e --arg wanted "$VERSION" --arg live "$LIVE_VERSION" --arg ref "$REF" --arg target "$DEPLOY_TARGET" \
   '.services.tarubot as $bot | .services.backup as $backup |
    $bot.image == $ref and $bot.environment.TARUBOT_ENVIRONMENT == $target and
