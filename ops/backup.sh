@@ -49,7 +49,8 @@ compose() {
 }
 # Validate both the bot's resolved identity and the dump client's exact connection
 # before dumping or sending a heartbeat. This Bun check performs no network I/O.
-CONFIG=$(compose config --format json)
+# Compose omits inactive profiles from config; inspect the client without starting it.
+CONFIG=$(compose --profile backup config --format json)
 jq -e --arg target "$BACKUP_TARGET" --arg digest "${TARUBOT_IMAGE_DIGEST:-}" \
   '.services.tarubot as $bot | .services.backup as $backup |
    ($digest | test("^sha256:[0-9a-f]{64}$")) and

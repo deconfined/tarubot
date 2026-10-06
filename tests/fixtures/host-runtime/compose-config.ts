@@ -22,4 +22,12 @@ function resolve(value: unknown): unknown {
     );
   return value;
 }
-console.log(JSON.stringify(resolve(manifest)));
+const activeProfiles = new Set(process.argv.slice(3));
+const config = resolve(manifest) as {
+  services: Record<string, { profiles?: string[] }>;
+};
+// Match native Compose: inactive services must not make validation pass only in tests.
+for (const [name, service] of Object.entries(config.services))
+  if (service.profiles?.length && !service.profiles.some((profile) => activeProfiles.has(profile)))
+    delete config.services[name];
+console.log(JSON.stringify(config));
