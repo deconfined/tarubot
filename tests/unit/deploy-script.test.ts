@@ -125,9 +125,22 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     const result = deploy(box);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toMatch(
-      /^(?:step (?:preflight|fetch|pull|stop|backup|migrate|register|start|observe|record)\n)*result deployed\n$/,
-    );
+    const stdoutLines = result.stdout.split("\n");
+    expect(stdoutLines.pop()).toBe("");
+    expect(stdoutLines.pop()).toBe("result deployed");
+    // Require each public phase once without pinning progress order.
+    expect(stdoutLines.sort()).toEqual([
+      "step backup",
+      "step fetch",
+      "step migrate",
+      "step observe",
+      "step preflight",
+      "step pull",
+      "step record",
+      "step register",
+      "step start",
+      "step stop",
+    ]);
     const actions = events(box);
     expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("backup"));
     expect(actions.indexOf("upload-database")).toBeLessThan(actions.indexOf("migrate"));
