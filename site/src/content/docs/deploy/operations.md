@@ -120,7 +120,7 @@ A dump is consistent even while the bot runs, because `pg_dump` reads one snapsh
 
 The upstream Linode deployment's `ops/backup.sh` also encrypts the database and host settings and uploads offsite. Production and staging have separate backup buckets and credentials; each uses `daily/` and `env/` with 30-day retention and `monthly/` with 365-day retention. Private storage settings and age recipients belong to each instance. Do not copy its credentials or assume its backups are proven. Its [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#backups-and-restore) covers configuration, pending recovery and restore drills.
 
-The managed-host scripts explicitly include the otherwise inactive `backup` profile in their configuration checks; inspection does not start its dump client.
+The managed-host scripts explicitly include the otherwise inactive `backup` profile in their configuration checks; inspection does not start its dump client. The deployment caller also selects that profile for the release-specific backup subprocess, including published payloads whose own configuration check does not select it. Installing the stable backup entry alone does not change those payloads.
 
 ## Restore rehearsal
 

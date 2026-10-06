@@ -226,7 +226,9 @@ durable_record "$STATE/pending"
 public_step stop
 stop_writers
 public_step backup
-TARUBOT_ROOT=$ROOT TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
+# The caller selects the dump client even when a pinned payload inspects default config.
+COMPOSE_PROFILES=backup TARUBOT_ROOT=$ROOT \
+  TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_HOST_LOCK_HELD=true \
   timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh" "$DEPLOY_TARGET"
 public_step migrate
