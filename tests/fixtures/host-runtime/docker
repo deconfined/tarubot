@@ -67,6 +67,9 @@ case $1 in
       esac
       shift 2
     done
+    if ((${#profiles[@]} == 0)) && [[ -n ${COMPOSE_PROFILES:-} ]]; then
+      IFS=, read -r -a profiles <<<"$COMPOSE_PROFILES"
+    fi
     [[ $project == tarubot && $root == "$HOME/tarubot" && $env_file == "$HOME/tarubot/.env" ]]
     [[ -f $manifest && ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
     case $1 in

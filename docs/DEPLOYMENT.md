@@ -124,7 +124,7 @@ Private state lives in `$HOME/.local/state/tarubot-deploy`: `host.lock` serializ
 
 Dumps stream through age without plaintext disk; production and staging each upload encrypted database and `.env` copies to their own bucket using the same `daily/`, `monthly/` and `env/` keys. Separate buckets and credentials provide target isolation; do not point both targets at the same bucket. The stable daily entry requires its owner-bound target argument, defaults to central `$HOME/tarubot/.env` and its `ops/age-recipients.txt`, and selects that target's successful `current.worktree` and `current.digest`. `TARUBOT_ROOT` and `TARUBOT_COMPOSE_FILE` override central settings and the release manifest when needed; mismatched target/configuration is refused. Delivery runs the exact new worktree's backup with the same target and digest under the inherited lock. The daily entry independently takes that shared host lock. A failed backup blocks migration/start. Keep independent copies: host upload credentials can delete objects, and same-account storage is not independent disaster recovery.
 
-Both host entries explicitly select the `backup` profile when inspecting Compose configuration, so the inactive dump client is included in validation. Configuration inspection starts no services.
+Both host entries explicitly select the `backup` profile when inspecting Compose configuration, so the inactive dump client is included in validation. Configuration inspection starts no services. Deploy also supplies `COMPOSE_PROFILES=backup` to the exact release worktree's backup subprocess; an immutable published payload that inspects default configuration still sees its dump client. Updating a stable host entry does not rewrite the release payload.
 
 Owner restore checklist:
 
