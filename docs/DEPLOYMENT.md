@@ -22,6 +22,8 @@ An unchanged version does not publish another image or deploy a maintenance comm
 
 Publication and both deployment targets accept stable numeric `X.Y.Z` only, each component at most four digits. The version gate can check prerelease SemVer, but publication treats non-stable versions as verification-only before registry reads/writes; it neither publishes nor deploys prerelease images.
 
+Publication explicitly forwards only `DEPLOY_SSH_KEY` to the reusable workflow, rather than inheriting unrelated repository secrets. The callee declares this binding optional because the caller has no environment; the approved `deliver` job resolves the selected environment's own key. Keep the key in that target's environment, not repository secrets. An empty runner key fails before DNS or SSH, so that attempt does not reach the host.
+
 ## Signed build provenance
 
 For owner verification of an exact image, substitute its index digest and full source commit:

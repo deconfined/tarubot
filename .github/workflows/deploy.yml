@@ -16,6 +16,10 @@ on:
       digest:
         type: string
         required: true
+    secrets:
+      DEPLOY_SSH_KEY:
+        description: "Optional caller binding; the selected environment supplies the delivery key."
+        required: false
   workflow_dispatch:
     inputs:
       target:
