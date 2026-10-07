@@ -1,6 +1,14 @@
 # Version history
 
-The current application version is **2.36.43**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.36.44**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.36.44 — Read character profiles only to verify ownership
+
+- Stop refreshing linked characters' Lodestone profiles every day. FC roster reads keep members' names and worlds current; a character's profile is read only to verify ownership, or to name a character the server's roster doesn't list. Refresh jobs an earlier version queued complete as skipped without a Lodestone read.
+- Name a character the server's latest FC roster lists from that roster on `/claim`, so claiming an FC member's character makes one Lodestone request: the `/verify` ownership check. `/assign` keeps its lookup.
+- Retire the automatic unlink after two Lodestone "not found" answers, and its officer notice. A deleted character stays linked until `/unclaim` or `/unassign`, and stops counting for Member when it leaves the roster.
+- Remove the Profile FC line from `/characters` and the First 404 column from member issue reports.
+- Retire `PROFILE_INTERVAL_SECONDS`; a value left in `.env` is ignored. No migration: the unused `characters.profile_retry_at` and `profile_missing_at` columns stay so an earlier image still runs after a rollback.
 
 ## 2.36.43 — Release the Linode Compose delivery reset
 
