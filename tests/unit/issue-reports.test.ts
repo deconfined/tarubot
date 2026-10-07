@@ -3,7 +3,9 @@
  * trouble, stacks keep first-party frames, and bodies stay within GitHub's limits and Markdown.
  */
 import { describe, expect, test } from "bun:test";
+import { IssueReports } from "../../src/application/issue-reports.js";
 import { RecentLogs } from "../../src/application/recent-logs.js";
+import { configuration } from "../../src/config/env.js";
 import {
   BODY_LIMIT,
   bounded,
@@ -19,6 +21,8 @@ import {
   when,
   yesNo,
 } from "../../src/domain/reports.js";
+import type { Database } from "../../src/infrastructure/postgres/database.js";
+import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
 
 describe("redact", () => {
   test("removes every credential shape a report could carry", () => {
@@ -56,6 +60,38 @@ describe("redact", () => {
     );
     // Short values would erase ordinary words, so they are left to the patterns.
     expect(redact("ok", ["ok"])).toBe("ok");
+  });
+
+  test("the web sign-in's client secret is one of this deployment's secrets (#43)", () => {
+    // Assembled at runtime, like the token samples above; an invented value.
+    const secret = ["invented", "Client", "Secret", "0123456789"].join("_");
+    /** The secret values a reporter built from these settings removes. */
+    const secrets = (extra: Record<string, string | undefined>) => {
+      const reports = new IssueReports(
+        configuration({
+          DATABASE_URL: "postgresql://tarubot:invented-password@db.example:5432/tarubot",
+          DISCORD_TOKEN: "invented-discord-token-value",
+          DISCORD_APPLICATION_ID: "1400000000000000001",
+          ...extra,
+        }),
+        // The constructor reads only the configuration.
+        null as unknown as Database,
+        null as unknown as Lodestone,
+        new RecentLogs(),
+        null,
+      );
+      return (reports as unknown as { secrets: string[] }).secrets;
+    };
+    const configured = secrets({ DISCORD_CLIENT_SECRET: secret });
+    expect(configured).toContain(secret);
+    // Its shape matches no pattern, so only the configured value removes it.
+    expect(redact(`Discord refused ${secret} today`)).toContain(secret);
+    expect(redact(`Discord refused ${secret} today`, configured)).toBe(
+      "Discord refused [secret redacted] today",
+    );
+    // Unset or empty (the web off) adds no value.
+    for (const value of [undefined, ""])
+      expect(secrets({ DISCORD_CLIENT_SECRET: value })).toEqual(secrets({}));
   });
 });
 

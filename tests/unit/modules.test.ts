@@ -8,6 +8,7 @@ import { InteractionRouter } from "../../src/bot/router.js";
 import { ServiceKey, Services } from "../../src/bot/services.js";
 import { viewerOf } from "../../src/discord/presenters/audience.js";
 import { Presented, reply } from "../../src/discord/presenters/reply.js";
+import { loadPages } from "../../src/web/pages.js";
 
 // Spawned processes run under QEMU in the arm64 image build; Bun scopes this to this file only.
 setDefaultTimeout(120_000);
@@ -193,17 +194,20 @@ test("removing the final module permits an empty feature directory after clean c
   expect((await loadCommands(missing)).size).toBe(0);
   expect((await loadEvents(missing)).size).toBe(0);
   expect((await loadComponents(missing)).size).toBe(0);
+  // Web pages (#43) use the same loader, so a release without pages starts with an empty web.
+  expect((await loadPages(missing)).size).toBe(0);
 });
 
 test("compiled output discovers the same module inventory as source", async () => {
   const source = await loadCommands();
+  const pages = await loadPages();
   // A subprocess imports compiled JS, avoiding mixed source/output class identities.
   // Its cold startup needs bounded headroom when image tests run under CPU emulation.
   const child = Bun.spawn(
     [
       process.execPath,
       "-e",
-      `import {loadCommands,loadEvents,loadComponents} from './dist/src/bot/discovery.js';console.log(JSON.stringify({commands:[...(await loadCommands()).keys()],events:(await loadEvents()).size,components:[...(await loadComponents()).keys()]}));`,
+      `import {loadCommands,loadEvents,loadComponents} from './dist/src/bot/discovery.js';import {loadPages} from './dist/src/web/pages.js';console.log(JSON.stringify({commands:[...(await loadCommands()).keys()],events:(await loadEvents()).size,components:[...(await loadComponents()).keys()],pages:[...(await loadPages()).keys()]}));`,
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
@@ -216,5 +220,8 @@ test("compiled output discovers the same module inventory as source", async () =
     commands: [...source.keys()],
     events: 15,
     components: ["config", "details", "guest-apply", "guest", "ledger", "sync", "verify"],
+    // Web page paths (#43) in discovery order, the same in compiled output as in source.
+    pages: [...pages.keys()],
   });
+  expect(pages.has("/g/:guild/status")).toBe(true);
 }, 30000);

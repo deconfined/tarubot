@@ -122,6 +122,8 @@ export class IssueReports {
       config.DISCORD_TOKEN,
       config.GITHUB_REPORTS_TOKEN,
       config.HEALTHCHECKS_PING_URL,
+      // The web sign-in's OAuth client secret (#43); unset until the web is configured.
+      config.DISCORD_CLIENT_SECRET ?? "",
       password,
     ].filter(Boolean);
   }

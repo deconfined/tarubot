@@ -1,8 +1,8 @@
 /**
- * Migration rehearsals (005 through 010) in private PostgreSQL schemas, isolated from
+ * Migration rehearsals (005 through 011) in private PostgreSQL schemas, isolated from
  * persistence.test.ts's public schema: import/activation backfill, the new CHECKs, the
- * guest-application switch, the changelog columns, the status-notice columns, an empty database,
- * and the real migrate() runner.
+ * guest-application switch, the changelog columns, the status-notice columns, the web sessions
+ * table, an empty database, and the real migrate() runner.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -596,6 +596,117 @@ describe.skipIf(!url)("migration 010 status notices", () => {
         },
         { column_name: "status_state", data_type: "jsonb", column_default: null },
       ]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+});
+
+const WEB_SESSIONS = "011_web_sessions.sql";
+
+describe.skipIf(!url)("migration 011 web sessions", () => {
+  if (!url) return;
+  const db = new Database(url);
+  afterAll(async () => {
+    await db.close();
+  });
+
+  test("an empty sessions table that holds a token hash, a user and timestamps only", async () => {
+    const client = await db.pool.connect();
+    /** Run a statement that must fail with `code`, inside a savepoint so the rehearsal continues. */
+    const refused = async (statement: string, values: unknown[], code: string) => {
+      await client.query("SAVEPOINT refused");
+      await expect(client.query(statement, values)).rejects.toMatchObject({ code });
+      await client.query("ROLLBACK TO SAVEPOINT refused");
+    };
+    try {
+      await client.query("BEGIN");
+      await client.query("CREATE SCHEMA m011_rehearsal");
+      await client.query("SET LOCAL search_path TO m011_rehearsal");
+      for (const file of (await migrationFiles()).filter((name) => name < WEB_SESSIONS))
+        await client.query(await migration(file));
+      // A schema-010 member, which the new table must neither need nor reference.
+      await client.query("INSERT INTO guilds (id) VALUES ('666666666666666743')");
+      await client.query("INSERT INTO users (id) VALUES ('94300001')");
+      await client.query(await migration(WEB_SESSIONS));
+      expect((await client.query("SELECT 1 FROM web_sessions")).rows).toEqual([]);
+      expect(
+        (
+          await client.query<{
+            column_name: string;
+            type: string;
+            is_nullable: string;
+            column_default: string | null;
+          }>(
+            `SELECT column_name, coalesce(domain_name, data_type) AS type, is_nullable, column_default
+             FROM information_schema.columns
+             WHERE table_schema='m011_rehearsal' AND table_name='web_sessions' ORDER BY ordinal_position`,
+          )
+        ).rows,
+      ).toEqual([
+        { column_name: "token_hash", type: "text", is_nullable: "NO", column_default: null },
+        { column_name: "user_id", type: "external_id", is_nullable: "NO", column_default: null },
+        {
+          column_name: "created_at",
+          type: "timestamp with time zone",
+          is_nullable: "NO",
+          column_default: "now()",
+        },
+        {
+          column_name: "authenticated_at",
+          type: "timestamp with time zone",
+          is_nullable: "NO",
+          column_default: "now()",
+        },
+        {
+          column_name: "last_seen_at",
+          type: "timestamp with time zone",
+          is_nullable: "NO",
+          column_default: "now()",
+        },
+        {
+          column_name: "expires_at",
+          type: "timestamp with time zone",
+          is_nullable: "NO",
+          column_default: null,
+        },
+      ]);
+      // "Sign out everywhere" has its index; the hourly sweep scans the small table. Of the table
+      // constraints (PostgreSQL 18 also lists NOT NULL), only the hash CHECK and the key: no foreign
+      // key ties a session to member state.
+      expect(
+        (
+          await client.query<{ indexname: string; indexdef: string }>(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='m011_rehearsal' AND tablename='web_sessions' ORDER BY 1",
+          )
+        ).rows.map((index) => [index.indexname, index.indexdef.replace(/^.* USING /u, "")]),
+      ).toEqual([
+        ["web_sessions_pkey", "btree (token_hash)"],
+        ["web_sessions_user", "btree (user_id)"],
+      ]);
+      expect(
+        (
+          await client.query<{ contype: string }>(
+            "SELECT contype FROM pg_constraint WHERE conrelid='m011_rehearsal.web_sessions'::regclass AND contype IN ('c', 'f', 'p', 'u', 'x') ORDER BY 1",
+          )
+        ).rows.map((row) => row.contype),
+      ).toEqual(["c", "p"]);
+      const insert =
+        "INSERT INTO web_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '30 days')";
+      // Only a lowercase SHA-256 hex digest is a key, and only an external ID is a user.
+      for (const hash of ["", "A".repeat(64), "a".repeat(63), "a".repeat(65), "z".repeat(64)])
+        await refused(insert, [hash, "94300001"], "23514");
+      await refused(insert, ["a".repeat(64), "0"], "23514");
+      // A user with no users row signs in fine: sessions don't depend on member state.
+      await client.query(insert, ["a".repeat(64), "94300002"]);
+      await refused(insert, ["a".repeat(64), "94300001"], "23505");
+      const [row] = (
+        await client.query<{ same: boolean; absolute: string }>(
+          "SELECT created_at = authenticated_at AND created_at = last_seen_at AS same, (expires_at - created_at)::text AS absolute FROM web_sessions",
+        )
+      ).rows;
+      expect(row).toEqual({ same: true, absolute: "30 days" });
     } finally {
       await client.query("ROLLBACK");
       client.release();
