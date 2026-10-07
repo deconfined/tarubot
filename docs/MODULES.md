@@ -94,6 +94,19 @@ Pages make no durable writes yet. The first write brings an idempotency key, one
 
 `bun --no-env-file tests/fixtures/web-dev.ts` runs the real web server on `[::1]` with a fake Discord sign-in, in-memory sessions and invented data. Never start it through a root `bun run` alias, which loads `.env`. Test routes with `createWebApp` and `app.request()` (`tests/unit/web-server.test.ts`), and views with invented data and linkedom (`tests/unit/web-pages.test.ts`).
 
+For a preview from another machine, `--host` selects the VM's LAN interface and `--cert` / `--key` supply its TLS certificate and key. Both the dashboard and fake sign-in bind and advertise that address over HTTPS; production's origin policy still rejects plain HTTP on routable addresses. Replace the documentation address below with the VM's LAN address before generating the certificate:
+
+```sh
+mkdir -p .cache/web-preview
+openssl req -x509 -newkey rsa:2048 -noenc \
+  -keyout .cache/web-preview/key.pem -out .cache/web-preview/cert.pem \
+  -days 2 -subj /CN=192.0.2.10 -addext subjectAltName=IP:192.0.2.10
+bun --no-env-file tests/fixtures/web-dev.ts --host 192.0.2.10 \
+  --cert .cache/web-preview/cert.pem --key .cache/web-preview/key.pem
+```
+
+Open the printed HTTPS address. A self-signed certificate may need a browser exception on both the dashboard and fake sign-in ports. The default command remains IPv6-loopback HTTP, and production passes none of these listener overrides.
+
 ## Commenting conventions
 
 Explain consequential boundaries and invariants beside the implementation, especially authorization, transactions, stale context and ambiguous side effects. Keep general development rules in [CONTRIBUTING.md](../CONTRIBUTING.md).

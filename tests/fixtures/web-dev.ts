@@ -1,19 +1,23 @@
 /**
  * A credential-free development harness for the web pages (#43, ADR E13): the real web server
- * (startWeb) on the IPv6 loopback, with a fake Discord, prototype-backed service fakes, in-memory
- * sessions and invented data. Nothing leaves the machine and no setting or secret is read.
+ * (startWeb), with a fake Discord, prototype-backed service fakes, in-memory sessions and invented
+ * data. No application environment, real Discord connection or database is used.
  *
  * Run it as `bun --no-env-file tests/fixtures/web-dev.ts`, never through a root `bun run` alias,
  * which would load the checkout's .env (CLAUDE.md). Open the printed address, choose "Sign in with
  * Discord", and pick an invented account on the fake authorize page.
+ * IPv6 loopback is the default; --host selects an explicit interface. LAN previews require
+ * --cert and --key to serve both listeners over HTTPS without weakening the web's origin policy.
  *
- * The fake authorize page runs on its own [::1] port. It redirects only to the redirect URI the
- * harness configured, and echoes no request data: its page holds fixed wording and an ID it made
- * itself. The token and /users/@me requests keep their https://discord.com URLs and are answered
- * by FakeDiscord through the injected fetch, so oauth4webapi's allowInsecureRequests is never used.
+ * The fake authorize page runs on its own port on the same interface and protocol as the web. It
+ * redirects only to the redirect URI the harness configured, and echoes no request data: its page
+ * holds fixed wording and an ID it made itself. The token and /users/@me requests keep their
+ * https://discord.com URLs and are answered by FakeDiscord through the injected fetch, so
+ * oauth4webapi's allowInsecureRequests is never used.
  * tests/unit/web-server.test.ts drives the same harness end to end.
  */
 import { randomUUID } from "node:crypto";
+import { parseArgs } from "node:util";
 import {
   ChannelFlagsBitField,
   Collection,
@@ -31,7 +35,7 @@ import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { WebGuild } from "../../src/web/access.js";
-import { startWeb, type WebServer } from "../../src/web/server.js";
+import { startWeb, type WebOptions, type WebServer } from "../../src/web/server.js";
 import { type DiscordAccount, FakeDiscord } from "./discord-oauth.js";
 import { MemorySessions } from "./web-sessions.js";
 import { CHANNEL, configGuild, configReport, fcRow, ROLE } from "./replies/configuration.js";
@@ -286,21 +290,30 @@ function authorizePage(discord: FakeDiscord, redirectUri: string) {
   };
 }
 
-/** A free port on the IPv6 loopback, so the web's origin can name it before the web binds it. */
-async function freePort(): Promise<number> {
-  const probe = Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response(null) });
-  const { port } = probe;
+/** Choose a free origin on the selected interface before startWeb uses it for redirects. */
+async function freeOrigin(hostname: string, tls: WebOptions["tls"]): Promise<string> {
+  const probe = Bun.serve({
+    hostname,
+    ...(tls && { tls }),
+    port: 0,
+    fetch: () => new Response(null),
+  });
+  const origin = probe.url.origin;
   await probe.stop(true);
-  if (port === undefined) throw new Error("No free loopback port");
-  return port;
+  return origin;
 }
 
-/** Start the fake authorize page and the real web server on [::1]. */
-export async function startHarness(log: Logger = pino({ level: "silent" })): Promise<Harness> {
+/** Start both listeners on the same interface and protocol; loopback HTTP remains the default. */
+export async function startHarness(
+  options: Pick<WebOptions, "hostname" | "tls"> = {},
+  log: Logger = pino({ level: "silent" }),
+): Promise<Harness> {
   const discord = new FakeDiscord(HARNESS_CLIENT_ID, HARNESS_CLIENT_SECRET);
-  const origin = `http://[::1]:${await freePort()}`;
+  const hostname = options.hostname ?? "::1";
+  const origin = await freeOrigin(hostname, options.tls);
   const authorize = Bun.serve({
-    hostname: "::1",
+    hostname,
+    ...(options.tls && { tls: options.tls }),
     port: 0,
     development: false,
     fetch: authorizePage(discord, `${origin}/auth/callback`),
@@ -328,7 +341,8 @@ export async function startHarness(log: Logger = pino({ level: "silent" })): Pro
         sessions: new MemorySessions(),
         fetch: discord.fetch,
         authorizeUrl: new URL("/oauth2/authorize", authorize.url).href,
-        hostname: "::1",
+        hostname,
+        ...(options.tls && { tls: options.tls }),
       },
     );
   } finally {
@@ -347,8 +361,22 @@ export async function startHarness(log: Logger = pino({ level: "silent" })): Pro
 }
 
 if (import.meta.main) {
+  const { values } = parseArgs({
+    options: {
+      host: { type: "string", default: "::1" },
+      cert: { type: "string" },
+      key: { type: "string" },
+    },
+    allowPositionals: false,
+  });
+  if (Boolean(values.cert) !== Boolean(values.key))
+    throw new Error("Pass --cert and --key together.");
+  const tls =
+    values.cert && values.key
+      ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
+      : undefined;
   const log = pino({ level: "debug" });
-  const harness = await startHarness(log);
+  const harness = await startHarness({ hostname: values.host, ...(tls && { tls }) }, log);
   console.log(
     `TaruBot web harness: open ${harness.url.href} (fake Discord: ${harness.authorizeUrl.origin})`,
   );
