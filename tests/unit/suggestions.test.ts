@@ -1040,7 +1040,6 @@ const settings = (overrides: Partial<Configuration> = {}): Configuration => ({
   TEST_GUILD_ID: "",
   PUBLIC_TEST_RESPONSES: false,
   ROSTER_INTERVAL_SECONDS: 21600,
-  PROFILE_INTERVAL_SECONDS: 86400,
   VERIFICATION_SECONDS: 1800,
   GUEST_COOLDOWN_SECONDS: 86400,
   HEALTH_PORT: 0,

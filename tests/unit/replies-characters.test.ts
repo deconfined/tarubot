@@ -161,12 +161,12 @@ describe("approved cards are reproduced exactly", () => {
         {
           name: "Example Character @ Diabolos · Main",
           value:
-            "[Lodestone profile](https://na.finalfantasyxiv.com/lodestone/character/12345678/)\nVerified with a Lodestone token · linked <t:1787270400:R>\nProfile FC: Example Company",
+            "[Lodestone profile](https://na.finalfantasyxiv.com/lodestone/character/12345678/)\nVerified with a Lodestone token · linked <t:1787270400:R>",
         },
         {
           name: "Example Alt @ Diabolos",
           value:
-            "[Lodestone profile](https://na.finalfantasyxiv.com/lodestone/character/23456789/)\nAssigned by an officer · linked <t:1789000000:R>\nProfile FC: none",
+            "[Lodestone profile](https://na.finalfantasyxiv.com/lodestone/character/23456789/)\nAssigned by an officer · linked <t:1789000000:R>",
         },
         { name: "Nickname sync", value: "On. Your nickname follows your main.", inline: true },
         {
@@ -188,12 +188,12 @@ describe("approved cards are reproduced exactly", () => {
       fields: [
         {
           name: "Example Character @ Diabolos · Main",
-          value: `[Lodestone](https://na.finalfantasyxiv.com/lodestone/character/12345678/) · ID \`12345678\`\nOfficer assignment · <t:1787270400:f>\nProfile FC: Example Company (\`9229001234567890123\`)\nLink \`${LINK_ID}\``,
+          value: `[Lodestone](https://na.finalfantasyxiv.com/lodestone/character/12345678/) · ID \`12345678\`\nOfficer assignment · <t:1787270400:f>\nLink \`${LINK_ID}\``,
         },
         {
           name: "Example Alt @ Diabolos",
           value:
-            "[Lodestone](https://na.finalfantasyxiv.com/lodestone/character/23456789/) · ID `23456789`\nLodestone token · <t:1789000000:f>\nProfile FC: none\nLink `8a1b2c3d-4e5f-4a6b-9c7d-0e1f2a3b4c5d`",
+            "[Lodestone](https://na.finalfantasyxiv.com/lodestone/character/23456789/) · ID `23456789`\nLodestone token · <t:1789000000:f>\nLink `8a1b2c3d-4e5f-4a6b-9c7d-0e1f2a3b4c5d`",
         },
         { name: "Nickname sync", value: "Paused (manual nickname detected)", inline: true },
         {
@@ -514,23 +514,17 @@ describe("/characters", () => {
     }
   });
 
-  test("the profile FC is its name, an unnamed FC, or none; officers also see its ID", () => {
-    const line = (overrides: Partial<CharacterRow>, officer: boolean) =>
-      onlyEmbed(
-        charactersReply(
-          { characters: [linkRow(overrides)] },
-          officer ? VIEWERS.officer : VIEWERS.member,
-          {
-            owner: TARGET_ID,
-            memberOption: officer,
-          },
-        ),
-      )
-        .fields?.[0]?.value.split("\n")
-        .find((value) => value.startsWith("Profile FC"));
-    expect(line({ fc_name: null }, false)).toBe("Profile FC: a Free Company");
-    expect(line({ fc_name: null }, true)).toBe("Profile FC: `9229001234567890123`");
-    expect(line({ fc_hint: null, fc_name: null }, true)).toBe("Profile FC: none");
+  test("neither layout shows a profile FC: profiles are read only to verify ownership (#86)", () => {
+    for (const officer of [false, true]) {
+      const value = onlyEmbed(
+        charactersReply({ characters: [linkRow()] }, officer ? VIEWERS.officer : VIEWERS.member, {
+          owner: TARGET_ID,
+          memberOption: officer,
+        }),
+      ).fields?.[0]?.value;
+      expect(value).toBeDefined();
+      expect(value).not.toContain("Profile FC");
+    }
   });
 
   test("many links show 8 plus 'Showing 8 of N', within 10 fields and 6,000 characters", () => {
@@ -539,8 +533,6 @@ describe("/characters", () => {
         numbered(index + 1, {
           name: LONG_NAME,
           world: LONG_NAME,
-          fc_name: stress.text(200),
-          fc_hint: stress.id,
           character_id: String(stress.id).slice(0, 19 - String(index).length) + index,
         }),
       ),

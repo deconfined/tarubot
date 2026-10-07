@@ -82,24 +82,12 @@ FROM jobs WHERE status IN ('queued','running','blocked','failed','disabled')
 ORDER BY created_at;"
 ```
 
-## Profile refreshes
+## Lodestone requests
 
-TaruBot refreshes each linked character's profile about once every `PROFILE_INTERVAL_SECONDS` (a day by default), to keep names and worlds current.
+TaruBot reads each tracked FC's roster every `ROSTER_INTERVAL_SECONDS`. It reads a character's profile only when a member verifies ownership, or when `/claim` or `/assign` names a character that roster doesn't list, never on a schedule.
 
-- **Pacing.** A character's profile is queued at most once an hour, whatever happens to the job.
 - **Throttling.** A Lodestone 429 pauses all Lodestone requests for a shared cooldown (15 seconds, doubling to 5 minutes). Jobs wait it out as `↻ WAITING` without using attempts, and readiness shows `lodestone.cooldownSeconds`.
-- **Private profiles** complete as private and wait for the next interval. Links are unaffected, because membership comes from the FC roster.
-- **Deleted characters.** A first "not found" is recorded. A second one at least an hour later ends every active link to the character, audited as an automatic unlink, with an officer notice per link. A profile read, a private answer or a roster listing in between clears the first.
-
-To see what's waiting, private or awaiting a second "not found":
-
-```sh
-docker compose exec -T postgres psql -U tarubot -d tarubot -c "
-SELECT id, name, world, profile_at, profile_retry_at, profile_missing_at
-FROM characters
-WHERE profile_missing_at IS NOT NULL OR profile_retry_at > now()
-ORDER BY profile_missing_at NULLS LAST, profile_retry_at;"
-```
+- **Retired profile refreshes.** Earlier versions refreshed linked characters' profiles daily. A `profile` job one of them queued before an upgrade completes as skipped, with `profile refreshes retired`, without reading the Lodestone.
 
 ## Officer notices
 
@@ -107,7 +95,6 @@ Officer notices are `officer.notify` jobs that post plain text to a server's off
 
 - **Lodestone degraded** (`officer:<guild>:degraded:<fc>`). Queued on the first roster failure since the FC's last accepted roster that isn't a wait, and posted only if it is still pending 5 minutes later. While the FC keeps failing it repeats at most once a day, counted from when the last one finished. A notice still waiting to post (held, paused or blocked) blocks new ones. Throttling and the queue's other waits post nothing.
 - **Recovered** (`officer:<guild>:recovered:<fc>`). One line after an accepted roster, only when a degraded notice posted (or was posting) during that outage.
-- **Character no longer on the Lodestone** (`officer:<guild>:missing:<link>`), one per link the [two-"not found" rule](#profile-refreshes) ends.
 - **FC roster accepted** (`officer:<guild>`), only on a development deployment's test server (`TEST_GUILD_ID`). Other servers get no line for a routine roster read.
 - **Missing channel overrides** (`officer:<guild>:visibility`). Queued when a server without onboarding has had channels missing TaruBot's own entry, counted as if Administrator were off, on two checks in a row, and posted 5 minutes later, or at the end of 24 hours after the last one that posted. The episode is recorded as a `visibility.missing` audit row. A server getting its first channel overrides usually gets one, even while TaruBot holds Administrator.
 - **Channel overrides restored** (`officer:<guild>:visibility:restored`). Once two checks in a row find nothing missing (a `visibility.restored` audit row), a waiting alert closes as `– SKIPPED` with `restored before posting`, and this line follows only if the alert posted. If channels go missing again before this line has been sent (a send being retried, or one paused or blocked), the new episode closes it as `– SKIPPED` with `superseded by a new episode`, so "complete again" never posts while channels are missing; one already being sent is left to finish.

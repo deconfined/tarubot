@@ -176,8 +176,6 @@ export interface CharacterRow {
   readonly ended_at: Date | null;
   readonly name: string;
   readonly world: string;
-  readonly fc_hint: string | null;
-  readonly fc_name: string | null;
   readonly primary_character_id: string | null;
   readonly nickname_enabled: boolean;
   readonly nickname_suspended: boolean;
@@ -392,19 +390,6 @@ export type GuestApplicationsResult =
     };
 
 /** /config fc unlink. */
-/**
- * What a profile job's 404 did (the two-404 rule, 2.17.0): recorded the first 404 or found it
- * still inside its confirmation window (`confirmed: false`), or confirmed the character gone and
- * ended `links` active links. Stored as the job's result, which /sync status shows officers.
- */
-export interface ProfileMissingResult {
-  readonly status: "missing";
-  readonly confirmed: boolean;
-  /** When the Lodestone first answered 404; absent only if the character row is gone. */
-  readonly firstMissingAt?: Date;
-  readonly links: number;
-}
-
 export interface FcUnlinkResult {
   readonly status: "unlinked";
   readonly effects: "queued";

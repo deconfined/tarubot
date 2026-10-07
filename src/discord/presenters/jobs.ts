@@ -27,7 +27,7 @@ export const JOB_KIND: Readonly<Record<string, { readonly label: string; readonl
       label: "Departure confirmation",
       done: "Departure confirmation finished",
     },
-    // Refreshes a linked character's public profile (name, world and FC hint) after a claim.
+    // Retired (#86): only refreshes an older version queued before an upgrade still carry this kind.
     profile: { label: "Character profile refresh", done: "Character profile refreshed" },
     "channels.access": { label: "Channel access", done: "Channel access secured" },
     "roles.layout": { label: "Role layout", done: "Role layout applied" },

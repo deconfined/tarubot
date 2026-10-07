@@ -57,10 +57,6 @@ If the existing link is wrong:
 1. Remove it with `/unassign`, naming the current owner and the character.
 2. The rightful owner claims the character with `/claim` and `/verify`, or you assign it with `/assign`.
 
-## Links TaruBot ends by itself
+## Deleted characters
 
-When the Lodestone answers "not found" for a linked character twice, at least an hour apart, TaruBot ends every link to it, audits the unlink as automatic, and posts an officer notice per link. A profile read, a private profile or a roster listing in between cancels the first "not found".
-
-To undo an automatic unlink, for example when a character reappears after a rename or a transfer, the owner claims and verifies the character again, or an officer runs `/assign`.
-
-A private Lodestone profile never ends a link: FC membership comes from the roster, which private profiles don't affect.
+TaruBot never ends a link by itself. It reads a character's Lodestone profile only to verify ownership, so it doesn't notice when a character is deleted. A deleted character stops counting for Member as soon as it leaves the FC roster, but stays linked until its owner runs `/unclaim` or you remove it with `/unassign`.

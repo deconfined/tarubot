@@ -26,8 +26,6 @@ const schema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   ROSTER_INTERVAL_SECONDS: z.coerce.number().int().min(60).default(21600),
-  // Display freshness is independent from roster authority and ownership verification.
-  PROFILE_INTERVAL_SECONDS: z.coerce.number().int().min(300).default(86400),
   VERIFICATION_SECONDS: z.coerce.number().int().min(60).max(86400).default(1800),
   GUEST_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(86400),
   HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(3000),

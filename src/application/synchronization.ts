@@ -9,7 +9,6 @@ import {
   type Actor,
 } from "../domain/policy.js";
 import { effectsPaused, WAITING_CODES } from "../domain/failures.js";
-import { PROFILE_RETRY_SECONDS } from "../domain/profiles.js";
 import { type Departure, statusObservation } from "../domain/status.js";
 import { Failure, json, nickname, normalized } from "../domain/values.js";
 import { desiredRankRole, rankAccess, rankDecisive } from "./rank-policy.js";
@@ -1179,7 +1178,11 @@ export class Synchronization {
         .where(scope);
     } else await db.update(t.guildUsers).set({ nickname_pending: false }).where(scope);
   }
-  /** Startup catch-up and jittered scheduling fetch only actively needed FCs/profiles. */
+  /**
+   * Startup catch-up and jittered scheduling fetch only actively needed FC rosters. Character
+   * profiles are read only to verify ownership (owner decision, #86): the roster lists each
+   * member's character ID, name and world, so linked characters need no scheduled refresh.
+   */
   async schedule(): Promise<void> {
     const db = this.app.db.orm;
     const companies = await db
@@ -1211,67 +1214,6 @@ export class Synchronization {
         null,
         Math.random() * 30,
       );
-    const characters = await db
-      .select({ id: t.characters.id })
-      .from(t.characters)
-      .where(
-        and(
-          or(
-            isNull(t.characters.profile_at),
-            lt(
-              t.characters.profile_at,
-              sql`now()-${this.app.config.PROFILE_INTERVAL_SECONDS}*interval '1 second'`,
-            ),
-          ),
-          // A profile queued, failed, found private or missing within its window waits it out.
-          or(isNull(t.characters.profile_retry_at), lte(t.characters.profile_retry_at, sql`now()`)),
-          exists(
-            db
-              .select({ id: t.links.id })
-              .from(t.links)
-              .innerJoin(
-                t.guildUsers,
-                and(
-                  eq(t.guildUsers.guild_id, t.links.guild_id),
-                  eq(t.guildUsers.user_id, t.links.user_id),
-                ),
-              )
-              .innerJoin(t.guilds, eq(t.guilds.id, t.links.guild_id))
-              .where(
-                and(
-                  eq(t.links.character_id, t.characters.id),
-                  eq(t.links.active, true),
-                  eq(t.guildUsers.present, true),
-                  eq(t.guilds.active, true),
-                ),
-              ),
-          ),
-        ),
-      )
-      .limit(100);
-    if (characters.length) {
-      // However the job ends (success clears the stamp; failure, a crash or a lost lease leave it),
-      // the scheduler queues this character again no sooner than PROFILE_RETRY_SECONDS from now.
-      await db
-        .update(t.characters)
-        .set({ profile_retry_at: sql`now()+${PROFILE_RETRY_SECONDS}*interval '1 second'` })
-        .where(
-          inArray(
-            t.characters.id,
-            characters.map((character) => character.id),
-          ),
-        );
-      // Jitter spreads a startup catch-up of up to 100 profiles over a minute instead of one burst.
-      for (const character of characters)
-        await scheduleJob(
-          this.app.db.pool,
-          "profile",
-          `profile:${character.id}`,
-          { characterId: character.id },
-          null,
-          Math.random() * 60,
-        );
-    }
     await db.delete(t.challenges).where(lt(t.challenges.expires_at, sql`now()-interval '7 days'`));
     await db
       .update(t.jobs)

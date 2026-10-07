@@ -99,7 +99,8 @@ type Call = [string, string, ...unknown[]];
 
 /**
  * A prototype-backed Service whose methods return `results[method]` (or throw it when it is an
- * Error), recording every call; the Lodestone profile lookup returns IDENTITY.
+ * Error), recording every call; the Lodestone profile lookup returns IDENTITY and is recorded in
+ * `reads`, and the stored roster lists `results.rosterCharacter` or nothing.
  */
 function stubService(results: Readonly<Record<string, unknown>>) {
   const calls: Call[] = [];
@@ -135,12 +136,21 @@ function stubService(results: Readonly<Record<string, unknown>>) {
         return result;
       },
     });
+  /** Every Lodestone profile read, by character ID. */
+  const reads: string[] = [];
   // /setup reads the test-guild setting for its default role prefix.
   Object.assign(app, {
-    lodestone: { profile: async () => IDENTITY },
+    // /claim asks the stored roster first (#86): nothing is listed unless a test supplies it.
+    rosterCharacter: async () => results.rosterCharacter ?? null,
+    lodestone: {
+      profile: async (id: string) => {
+        reads.push(id);
+        return IDENTITY;
+      },
+    },
     config: { TEST_GUILD_ID: undefined },
   });
-  return { app, calls };
+  return { app, calls, reads };
 }
 
 /** The fixture of the test being run, closed after each test. */
@@ -208,7 +218,7 @@ const PATHS: readonly {
     actor: MEMBER,
     results: { claim: R.claimPending },
     title: "Verify Example Character @ Diabolos",
-    call: ["claim", "400", IDENTITY],
+    call: ["claim", "400", IDENTITY, true],
     content: `\`\`\`\n${TOKEN}\n\`\`\``,
   },
   {
@@ -217,7 +227,7 @@ const PATHS: readonly {
     actor: MEMBER,
     results: { claim: R.claimLinked },
     title: "Already linked to you",
-    call: ["claim", "400", IDENTITY],
+    call: ["claim", "400", IDENTITY, true],
   },
   {
     command: verifyCommand,
@@ -482,6 +492,20 @@ async function routed(command: Command, options: unknown[], actor: Actor, error:
   await router.handle(fixture.slash(command.name, options));
   return { embed: embedOf(fixture.requests.at(-1)), sent: JSON.stringify(fixture.requests) };
 }
+
+test("/claim names a character the stored roster lists without a Lodestone read (#86)", async () => {
+  const listed = { ...IDENTITY, name: "Roster Character" };
+  const fromRoster = stubService({ rosterCharacter: listed, claim: R.claimPending });
+  await run(claimCommand, [text("character", "12345678")], MEMBER, fromRoster.app);
+  expect(fromRoster.reads).toEqual([]);
+  expect(fromRoster.calls.filter(([method]) => method !== "guild")).toEqual([
+    ["claim", "400", listed, false],
+  ]);
+  // A character the roster doesn't list is looked up on the Lodestone, as before.
+  const unlisted = stubService({ claim: R.claimPending });
+  await run(claimCommand, [text("character", "12345678")], MEMBER, unlisted.app);
+  expect(unlisted.reads).toEqual(["12345678"]);
+});
 
 test("ownership conflicts show the owner to officers on /assign and to no member (O3)", async () => {
   // Built the way the service's throw site builds it: the owner is only in the detail.

@@ -64,7 +64,6 @@ import {
   secureGuildChannels,
 } from "../jobs/queue.js";
 import { managedRoleOrder } from "../domain/role-layout.js";
-import { MISSING_CONFIRM_SECONDS } from "../domain/profiles.js";
 import {
   analyseVisibility,
   type VisibilityReport,
@@ -99,7 +98,6 @@ import type {
   LedgerReceipt,
   OfficerRankResult,
   PreferencesResult,
-  ProfileMissingResult,
   RoleLayoutResult,
   RosterEvidence,
   SyncStatusView,
@@ -220,6 +218,11 @@ interface TrustResult {
   readonly character: CharacterRef;
 }
 
+/** A validated character selector: a Lodestone ID, or an exact name and world. */
+export type CharacterQuery =
+  | { readonly id: string }
+  | { readonly name: string; readonly world: string };
+
 /** Guild-scoped operations reused by slash commands, components, and operational workflows. */
 export class Service {
   /** Dependencies are injected so persistence tests can control Discord/Lodestone outcomes. */
@@ -323,15 +326,12 @@ export class Service {
           ended_at: t.links.ended_at,
           name: t.characters.name,
           world: t.characters.world,
-          fc_hint: t.characters.fc_hint,
-          fc_name: t.freeCompanies.name,
           primary_character_id: t.guildUsers.primary_character_id,
           nickname_enabled: t.guildUsers.nickname_enabled,
           nickname_suspended: t.guildUsers.nickname_suspended,
         })
         .from(t.links)
         .innerJoin(t.characters, eq(t.characters.id, t.links.character_id))
-        .leftJoin(t.freeCompanies, eq(t.freeCompanies.id, t.characters.fc_hint))
         .innerJoin(
           t.guildUsers,
           and(
@@ -752,7 +752,10 @@ export class Service {
       .values({ id: value.id, ...data })
       .onConflictDoUpdate({ target: t.freeCompanies.id, set: data });
   }
-  /** Roster display updates must not advance profile freshness or overwrite independent FC hints. */
+  /**
+   * Store a character's name and world from a profile read (ownership verification and lookups)
+   * or a roster listing. A roster listing never overwrites the profile's independent FC hint.
+   */
   async storeCharacter(
     client: Connection,
     value: CharacterIdentity,
@@ -774,10 +777,6 @@ export class Service {
           ...display,
           fc_hint: profile ? value.fcId : t.characters.fc_hint,
           profile_at: profile ? sql`now()` : t.characters.profile_at,
-          // A read profile or a roster listing proves the character exists: any first 404 is void.
-          profile_missing_at: null,
-          // A fresh profile needs no retry pacing; a roster sighting leaves the profile's own.
-          profile_retry_at: profile ? null : t.characters.profile_retry_at,
         },
       });
   }
@@ -1499,8 +1498,59 @@ export class Service {
       character: identity,
     };
   }
-  /** Issue a bounded, replaceable challenge; plaintext is returned once and never persisted. */
-  async claim(actor: Actor, identity: CharacterIdentity): Promise<ClaimResult> {
+  /**
+   * The character the latest stored roster of this server's FC lists, by ID or by exact name and
+   * world (ignoring case, like the Lodestone search), or null. /claim names it without a Lodestone
+   * request (#86): roster reads keep its stored name and world current, and /verify's profile read
+   * is the claim's only Lodestone request. A name the roster lists more than once returns null, so
+   * the Lodestone search decides.
+   */
+  async rosterCharacter(guildId: string, query: CharacterQuery): Promise<CharacterIdentity | null> {
+    const db = this.db.orm;
+    const [guild] = await db
+      .select({ fc_id: t.guilds.fc_id })
+      .from(t.guilds)
+      .where(and(eq(t.guilds.id, guildId), eq(t.guilds.active, true)));
+    if (!guild?.fc_id) return null;
+    const [latest] = await db
+      .select({ id: t.rosterSnapshots.id })
+      .from(t.rosterSnapshots)
+      .where(eq(t.rosterSnapshots.fc_id, guild.fc_id))
+      .orderBy(desc(t.rosterSnapshots.observed_at))
+      .limit(1);
+    if (!latest) return null;
+    const rows = await db
+      .select({
+        id: t.characters.id,
+        name: t.characters.name,
+        world: t.characters.world,
+        dc: t.characters.dc,
+      })
+      .from(t.rosterMembers)
+      .innerJoin(t.characters, eq(t.characters.id, t.rosterMembers.character_id))
+      .where(
+        and(
+          eq(t.rosterMembers.snapshot_id, latest.id),
+          "id" in query
+            ? eq(t.characters.id, query.id)
+            : // Stored names are the Lodestone's canonical text; the query is compared as search does.
+              and(
+                sql`lower(${t.characters.name}) = ${normalized(query.name)}`,
+                sql`lower(${t.characters.world}) = ${normalized(query.world)}`,
+              ),
+        ),
+      )
+      .limit(2);
+    const [row] = rows;
+    if (!row || rows.length > 1) return null;
+    return { id: row.id, name: row.name, world: row.world, dc: row.dc ?? "", fcId: guild.fc_id };
+  }
+  /**
+   * Issue a bounded, replaceable challenge; plaintext is returned once and never persisted. `read`
+   * says the identity came from a Lodestone profile read, which is stored; a roster-named identity
+   * (rosterCharacter) is already stored by the roster read that listed it.
+   */
+  async claim(actor: Actor, identity: CharacterIdentity, read = true): Promise<ClaimResult> {
     const guild = await this.guild(actor);
     const member = await this.discord.member(actor.guildId, actor.userId);
     if (!member || member.bot) throw notCurrentMember();
@@ -1512,7 +1562,7 @@ export class Service {
       await client.query("SELECT pg_advisory_xact_lock(714882491)");
       const db = orm(client);
       await ensureUser(client, actor.guildId, actor.userId, member.joinedAt);
-      await this.storeCharacter(client, identity);
+      if (read) await this.storeCharacter(client, identity);
       const [existing] = await db
         .select({ user_id: t.links.user_id })
         .from(t.links)
@@ -1829,8 +1879,8 @@ export class Service {
    * End one active link the caller has locked (with its guild_users row and character, in that
    * order) and apply its consequences in the caller's transaction: record local member loss when no
    * other roster-backed link remains, clear the main character and queue its nickname restore when
-   * it was this one, and queue the owner's reconciliation. The caller audits. Shared by /unclaim,
-   * /unassign and the automatic unlink of a character the Lodestone no longer has.
+   * it was this one, and queue the owner's reconciliation. The caller audits. Shared by /unclaim
+   * and /unassign.
    */
   private async endLink(
     client: Connection,
@@ -1895,128 +1945,6 @@ export class Service {
       );
     await reconcileUser(client, guildId, owner);
     return { primaryCleared: cleared.length > 0, remainingActive: left?.count ?? 0 };
-  }
-  /**
-   * The Lodestone serves this character's profile as private. It exists, so any first 404 is void,
-   * and the scheduler leaves it until the normal profile interval instead of retrying hourly.
-   */
-  async profilePrivate(characterId: string): Promise<{ status: "private" }> {
-    await this.db.orm
-      .update(t.characters)
-      .set({
-        profile_missing_at: null,
-        profile_retry_at: sql`now()+${this.config.PROFILE_INTERVAL_SECONDS}*interval '1 second'`,
-      })
-      .where(eq(t.characters.id, characterId));
-    return { status: "private" };
-  }
-  /**
-   * The Lodestone answered 404 for a linked character's profile: the two-404 rule (owner decision,
-   * 2026-09-24). The first 404 is recorded and checked again after MISSING_CONFIRM_SECONDS. A 404
-   * at least that long after the first ends every active link to the character, in every guild,
-   * each audited as an automatic `character.unlink` with an officer notice. A 404 inside the window
-   * changes nothing. Each link is ended in its own transaction in /unclaim's lock order (member,
-   * character, link) and only if the first 404 still stands, so a sighting in between (a profile
-   * read or a roster listing clears it) or a concurrent unlink wins.
-   */
-  async profileMissing(characterId: string): Promise<ProfileMissingResult> {
-    const [marked] = await this.db.orm
-      .update(t.characters)
-      .set({
-        profile_missing_at: sql`coalesce(${t.characters.profile_missing_at}, now())`,
-        profile_retry_at: sql`coalesce(${t.characters.profile_missing_at}, now())+${MISSING_CONFIRM_SECONDS}*interval '1 second'`,
-      })
-      .where(eq(t.characters.id, characterId))
-      .returning({
-        firstMissingAt: t.characters.profile_missing_at,
-        confirmed: sql<boolean>`${t.characters.profile_missing_at} <= now()-${MISSING_CONFIRM_SECONDS}*interval '1 second'`,
-      });
-    if (!marked?.firstMissingAt) return { status: "missing", confirmed: false, links: 0 };
-    if (!marked.confirmed)
-      return {
-        status: "missing",
-        confirmed: false,
-        firstMissingAt: marked.firstMissingAt,
-        links: 0,
-      };
-    const links = await this.db.orm
-      .select({ id: t.links.id, guild_id: t.links.guild_id, user_id: t.links.user_id })
-      .from(t.links)
-      .where(and(eq(t.links.character_id, characterId), eq(t.links.active, true)));
-    let ended = 0;
-    for (const candidate of links)
-      if (await this.endMissingLink(candidate, characterId, marked.firstMissingAt)) ended++;
-    return {
-      status: "missing",
-      confirmed: true,
-      firstMissingAt: marked.firstMissingAt,
-      links: ended,
-    };
-  }
-  /** One automatic unlink of profileMissing, in its own transaction; false when it no longer applies. */
-  private async endMissingLink(
-    candidate: { id: string; guild_id: string; user_id: string },
-    characterId: string,
-    firstMissingAt: Date,
-  ): Promise<boolean> {
-    return this.db.transaction(async (client) => {
-      const db = orm(client);
-      await db
-        .select({ user_id: t.guildUsers.user_id })
-        .from(t.guildUsers)
-        .where(
-          and(
-            eq(t.guildUsers.guild_id, candidate.guild_id),
-            eq(t.guildUsers.user_id, candidate.user_id),
-          ),
-        )
-        .for("update");
-      const [identity] = await db
-        .select({
-          name: t.characters.name,
-          world: t.characters.world,
-          missing: t.characters.profile_missing_at,
-        })
-        .from(t.characters)
-        .where(eq(t.characters.id, characterId))
-        .for("update");
-      // A sighting since the confirming 404 cleared (or restarted) the mark: keep the link.
-      if (!identity?.missing || identity.missing.getTime() !== firstMissingAt.getTime())
-        return false;
-      const [link] = await db
-        .select({ id: t.links.id })
-        .from(t.links)
-        .where(
-          and(
-            eq(t.links.id, candidate.id),
-            eq(t.links.user_id, candidate.user_id),
-            eq(t.links.active, true),
-          ),
-        )
-        .for("update");
-      if (!link) return false;
-      await this.endLink(client, candidate.guild_id, candidate.user_id, characterId, link.id);
-      await audit(client, candidate.guild_id, null, "character.unlink", link.id, {
-        reason: "The Lodestone no longer has this character.",
-        automatic: "lodestone_not_found",
-        character: characterId,
-        firstMissingAt: firstMissingAt.toISOString(),
-      });
-      // A per-link key, so a roster notice queued for the guild can't overwrite this one.
-      await enqueue(
-        client,
-        "officer.notify",
-        `officer:${candidate.guild_id}:missing:${link.id}`,
-        {
-          // Mentions and timestamps render for officers; officer.notify never pings anyone.
-          message: `${identity.name} @ ${identity.world} (Lodestone ID ${characterId}) no longer exists on the Lodestone: it answered "not found" on two checks at least an hour apart, the first <t:${Math.floor(firstMissingAt.getTime() / 1000)}:f>. TaruBot removed the link from <@${candidate.user_id}> (${candidate.user_id}); their roles and nickname follow on reconciliation.`,
-        },
-        candidate.guild_id,
-        null,
-        5,
-      );
-      return true;
-    });
   }
   /**
    * Persist explicit primary/nickname intent and let the worker safely project or restore it. A

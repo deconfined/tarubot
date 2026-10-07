@@ -65,16 +65,13 @@ After a pass writes a member's roles, TaruBot records their Member, Guest, Offic
 
 ## Nicknames
 
-With nickname sync on, a member's nickname is their main character's name, cut to 32 characters, and follows a confirmed rename. TaruBot records the nickname it replaced and restores it when sync is turned off or the main link ends, unless the member changed it in the meantime. A nickname changed by anyone else suspends sync instead of being overwritten. Discord never lets a bot change the server owner's nickname, so TaruBot doesn't try.
+With nickname sync on, a member's nickname is their main character's name, cut to 32 characters, and follows a rename once the FC roster shows it. TaruBot records the nickname it replaced and restores it when sync is turned off or the main link ends, unless the member changed it in the meantime. A nickname changed by anyone else suspends sync instead of being overwritten. Discord never lets a bot change the server owner's nickname, so TaruBot doesn't try.
 
-## Profile refreshes
+## Lodestone reads
 
-Each linked character's profile is refreshed about daily, to keep names and worlds current; FC hints from profiles are stored separately from roster evidence and never decide access.
+TaruBot reads a character's Lodestone profile only to verify ownership (`/verify`), and when `/claim` or `/assign` names a character the server's latest FC roster doesn't list. `/claim` takes a listed character's name and world from that roster, so claiming an FC member's character costs one Lodestone request: the ownership check. It never refreshes linked characters' profiles: each FC roster read lists every member's character ID, name and world, so one read per FC keeps them current. A linked character on no tracked roster, such as a guest's, keeps the name and world it had when it was verified. A deleted character stays linked until it's removed by hand, and stops counting for Member when it leaves the roster.
 
-- A character is queued at most once an hour, whatever the outcome, so a failing profile can't hammer the Lodestone.
-- A private profile is an answer, not an outage: the refresh completes as private and waits for the next interval, and links stay.
-- A "not found" is recorded; a second one at least an hour later ends every link to the character, audited as automatic, with an officer notice. Any sighting in between clears the first.
-- After a Lodestone 429, every request waits out a shared cooldown, and queued jobs wait without spending attempts.
+After a Lodestone 429, every request waits out a shared cooldown, and queued jobs wait without spending attempts.
 
 ## Effects and delivery
 

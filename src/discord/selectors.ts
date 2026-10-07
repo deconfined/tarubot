@@ -5,7 +5,7 @@
  */
 import type { ChatInputCommandInteraction } from "discord.js";
 import { z } from "zod";
-import type { Service } from "../application/service.js";
+import type { CharacterQuery, Service } from "../application/service.js";
 import type { CharacterIdentity } from "../infrastructure/lodestone/client.js";
 import {
   type EntryRef,
@@ -100,6 +100,27 @@ export async function resolveCharacter(
   app: Service,
   interaction: ChatInputCommandInteraction,
 ): Promise<CharacterIdentity> {
+  return lookUp(app, characterQuery(interaction));
+}
+
+/**
+ * /claim's selector (#86): a character the server's latest stored roster lists is named from that
+ * roster, so the claim's only Lodestone request is /verify's ownership check. Any other character
+ * is looked up as resolveCharacter does; `read` says which happened.
+ */
+export async function resolveClaimCharacter(
+  app: Service,
+  interaction: ChatInputCommandInteraction,
+  guildId: string,
+): Promise<{ identity: CharacterIdentity; read: boolean }> {
+  const query = characterQuery(interaction);
+  const listed = await app.rosterCharacter(guildId, query);
+  if (listed) return { identity: listed, read: false };
+  return { identity: await lookUp(app, query), read: true };
+}
+
+/** Exactly one selector form, validated without any Lodestone request. */
+function characterQuery(interaction: ChatInputCommandInteraction): CharacterQuery {
   const options = interaction.options;
   const selector = options.getString("character");
   const forename = options.getString("forename");
@@ -113,7 +134,7 @@ export async function resolveCharacter(
         0,
         { kind: "option", option: "character" },
       );
-    return app.lodestone.profile(lodestoneId(selector, "character"));
+    return { id: lodestoneId(selector, "character") };
   }
   if (!forename?.trim() || !surname?.trim() || !world?.trim())
     throw new Failure(
@@ -122,15 +143,23 @@ export async function resolveCharacter(
       0,
       { kind: "option", option: "character" },
     );
-  const name = searchText(`${forename.trim()} ${surname.trim()}`, MAX_NAME, "forename");
-  const server = searchText(world.trim(), MAX_WORLD, "world");
-  const matches = await app.lodestone.search(name, server);
+  return {
+    name: searchText(`${forename.trim()} ${surname.trim()}`, MAX_NAME, "forename"),
+    world: searchText(world.trim(), MAX_WORLD, "world"),
+  };
+}
+
+/** Read the character's profile, after a complete paginated exact-match search for a name. */
+async function lookUp(app: Service, query: CharacterQuery): Promise<CharacterIdentity> {
+  if ("id" in query) return app.lodestone.profile(query.id);
+  const { name, world } = query;
+  const matches = await app.lodestone.search(name, world);
   if (!matches.length)
     throw new Failure(
       "not_found",
       "The Lodestone has no character with that exact name on that world.",
       0,
-      { kind: "resource", resource: "character", name, world: server },
+      { kind: "resource", resource: "character", name, world },
     );
   if (matches.length !== 1)
     // The detail carries every match's ID; the reply lists as many as fit.
@@ -142,7 +171,7 @@ export async function resolveCharacter(
         kind: "matches",
         resource: "character",
         name,
-        world: server,
+        world,
         ids: matches.map((value) => value.id),
       },
     );

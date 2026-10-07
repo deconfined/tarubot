@@ -402,7 +402,7 @@ export class IssueReports {
     const body = await this.render({
       source: "trouble",
       what: [
-        `TaruBot hasn't had an answer from the Lodestone since ${when(reach.failingSince)}; the latest request ended \`${reach.lastFailure}\`. Profile refreshes, verification and roster checks are waiting.`,
+        `TaruBot hasn't had an answer from the Lodestone since ${when(reach.failingSince)}; the latest request ended \`${reach.lastFailure}\`. Verification and roster checks are waiting.`,
         table(
           ["Last answer", "Failing since", "Last attempt", "Latest code"],
           [
@@ -813,7 +813,6 @@ export class IssueReports {
         world: t.characters.world,
         active: t.links.active,
         provenance: t.links.provenance,
-        missing: t.characters.profile_missing_at,
       })
       .from(t.links)
       .leftJoin(t.characters, eq(t.characters.id, t.links.character_id))
@@ -891,14 +890,13 @@ export class IssueReports {
         : "_TaruBot has no record of this member in this server._",
       links.length
         ? table(
-            ["Character", "World", "ID", "Active", "Provenance", "First 404"],
+            ["Character", "World", "ID", "Active", "Provenance"],
             links.map((row) => [
               row.name ?? "?",
               row.world ?? "?",
               `\`${row.character}\``,
               yesNo(row.active),
               row.provenance,
-              when(row.missing),
             ]),
           )
         : "_No character links._",
