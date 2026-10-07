@@ -1,6 +1,6 @@
 {
-  "title": "Session: 2.36.43 Linode staging-first delivery",
-  "objective": "Rehearse the signed 2.36.43 Compose release on owner-operated Linode staging with its managed database and declared test guild, effects initially paused, and one DevBot writer. Production stays unchanged until its own readiness and approval.",
+  "title": "Session: 2.36.44 Linode staging-first delivery",
+  "objective": "Rehearse the signed 2.36.44 Compose release on owner-operated Linode staging with its managed database and declared test guild, effects initially paused, and one DevBot writer. Production stays unchanged until its own readiness and approval.",
   "user": [
     "Review the release and verify its published source/digest. Leave any production approval pending until production is separately ready.",
     "Authorize the cutover window; fence the previous DevBot before moving its token or starting staging. Preserve its database and recovery boundary; bootstrap only managed staging.",
@@ -14,7 +14,7 @@
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Acquire and reconcile roster/profiles within staging's declared scope, never production identities or global command registration.",
+    "Acquire and reconcile rosters within staging's declared scope, reading character profiles only for /verify and characters the roster doesn't list, never production identities or global command registration.",
     "Expose database, Discord and writer-lease readiness; report startup/version and effect state without pinging members."
   ]
 }
