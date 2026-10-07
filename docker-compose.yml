@@ -33,7 +33,6 @@ services:
       TEST_PLAN_FILE: ${TEST_PLAN_FILE:-test-plans/current.json}
       # Identity refresh, proof lifetime, and roster authority have separate schedules.
       ROSTER_INTERVAL_SECONDS: ${ROSTER_INTERVAL_SECONDS:-21600}
-      PROFILE_INTERVAL_SECONDS: ${PROFILE_INTERVAL_SECONDS:-86400}
       VERIFICATION_SECONDS: ${VERIFICATION_SECONDS:-1800}
       GUEST_COOLDOWN_SECONDS: ${GUEST_COOLDOWN_SECONDS:-86400}
       # The Lodestone parser runs in the bot (2.21.0: no sidecar). Probes never fetch a page.

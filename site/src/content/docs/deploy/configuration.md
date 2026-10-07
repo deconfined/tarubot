@@ -22,7 +22,6 @@ Read by the running bot.
 | `ENABLE_EFFECTS` | `false` | The deployment-wide switch for Discord changes. With `false`, decisions are saved and Discord changes wait as paused work; a restart with `true` requeues them. Set `true` for a working deployment. |
 | `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Logs are structured JSON; tokens and option values are never logged. |
 | `ROSTER_INTERVAL_SECONDS` | `21600` | How often each linked FC's roster is read (at least 60), and how old a roster may be before it counts as stale. |
-| `PROFILE_INTERVAL_SECONDS` | `86400` | How often each character's profile is refreshed (at least 300). |
 | `VERIFICATION_SECONDS` | `1800` | How long a `/claim` token stays valid, from 60 to 86,400. |
 | `GUEST_COOLDOWN_SECONDS` | `86400` | How long a denied applicant waits before applying again (0 or more). |
 | `HEALTH_PORT` | `3000` | The port of `/health/live` and `/health/ready` inside the container. |

@@ -2,7 +2,6 @@
 import { escapeMarkdown } from "discord.js";
 import { z } from "zod";
 import { and, eq, lt, ne, sql } from "drizzle-orm";
-import { orm } from "../infrastructure/postgres/database.js";
 import * as t from "../infrastructure/postgres/schema.js";
 import type { Service } from "../application/service.js";
 import type { Synchronization } from "../application/synchronization.js";
@@ -15,7 +14,7 @@ import { effectsPaused } from "../domain/failures.js";
 import { RELEASE_NOTES } from "../domain/release-notes.js";
 import { Failure } from "../domain/values.js";
 import { managedRoleOrder } from "../domain/role-layout.js";
-import { enqueue, reconcileUser, type Job } from "./queue.js";
+import { enqueue, type Job } from "./queue.js";
 
 /**
  * Bind application capabilities once; each invocation revalidates its persisted payload. `notes`
@@ -58,71 +57,10 @@ export function dispatcher(
       return sync.guild(job.guild_id, job.id);
     }
     if (job.kind === "reconcile.user") return sync.user(job, guard);
-    if (job.kind === "profile") {
-      // Shared public profiles are needed only while a trusted linked owner is actually present.
-      const input = z.object({ characterId: z.string() }).parse(job.payload);
-      const owners = await app.db.orm
-        .select({ guild_id: t.links.guild_id, user_id: t.links.user_id })
-        .from(t.links)
-        .innerJoin(
-          t.guildUsers,
-          and(
-            eq(t.guildUsers.guild_id, t.links.guild_id),
-            eq(t.guildUsers.user_id, t.links.user_id),
-          ),
-        )
-        .innerJoin(t.guilds, eq(t.guilds.id, t.links.guild_id))
-        .where(
-          and(
-            eq(t.links.character_id, input.characterId),
-            eq(t.links.active, true),
-            eq(t.guildUsers.present, true),
-            eq(t.guilds.active, true),
-          ),
-        );
-      let present = false;
-      for (const owner of owners) {
-        const member = await app.discord.member(owner.guild_id, owner.user_id);
-        if (member && !member.bot) {
-          present = true;
-          break;
-        }
-        await app.db.orm
-          .update(t.guildUsers)
-          .set({ present: false })
-          .where(
-            and(eq(t.guildUsers.guild_id, owner.guild_id), eq(t.guildUsers.user_id, owner.user_id)),
-          );
-      }
-      if (!present) return { skipped: "no present linked owner" };
-      let identity: Awaited<ReturnType<typeof app.lodestone.profile>>;
-      try {
-        identity = await app.lodestone.profile(input.characterId);
-      } catch (error) {
-        // Answers about the character, not outages (2.17.0): a private profile waits for the
-        // normal interval, and a 404 follows the two-404 rule. Both complete the job rather than
-        // failing it, so neither is retried as if the Lodestone were down.
-        if (error instanceof Failure && error.code === "private_profile") {
-          await guard();
-          return app.profilePrivate(input.characterId);
-        }
-        if (error instanceof Failure && error.code === "not_found") {
-          await guard();
-          return app.profileMissing(input.characterId);
-        }
-        throw error;
-      }
-      await guard();
-      await app.db.transaction(async (client) => {
-        await app.storeCharacter(client, identity);
-        const links = await orm(client)
-          .select({ guild_id: t.links.guild_id, user_id: t.links.user_id })
-          .from(t.links)
-          .where(and(eq(t.links.character_id, input.characterId), eq(t.links.active, true)));
-        for (const link of links) await reconcileUser(client, link.guild_id, link.user_id);
-      });
-      return { status: "updated" };
-    }
+    // Scheduled profile refreshes were retired (#86): profiles are read only to verify ownership.
+    // A refresh an older image queued before the upgrade completes without a Lodestone request.
+    // A later release can drop this once no such job can remain queued.
+    if (job.kind === "profile") return { skipped: "profile refreshes retired" };
     // Outbound messages use current guild configuration, not a stale channel copied into a job.
     const [guild] = await app.db.orm
       .select()

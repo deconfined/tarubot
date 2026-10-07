@@ -44,8 +44,6 @@ export const linkRow = (overrides: Partial<CharacterRow> = {}): CharacterRow => 
   ended_at: null,
   name: CHARACTER.name,
   world: CHARACTER.world,
-  fc_hint: "9229001234567890123",
-  fc_name: "Example Company",
   primary_character_id: CHARACTER.id,
   nickname_enabled: true,
   nickname_suspended: false,
@@ -60,8 +58,6 @@ const altRow = (overrides: Partial<CharacterRow> = {}): CharacterRow =>
     provenance: "officer_assignment",
     created_at: new Date(1_789_000_000_000),
     name: "Example Alt",
-    fc_hint: null,
-    fc_name: null,
     ...overrides,
   });
 const oldRow = (overrides: Partial<CharacterRow> = {}): CharacterRow =>
@@ -72,8 +68,6 @@ const oldRow = (overrides: Partial<CharacterRow> = {}): CharacterRow =>
     created_at: new Date(1_780_000_000_000),
     ended_at: new Date(1_785_000_000_000),
     name: "Example Old Character",
-    fc_hint: null,
-    fc_name: null,
     ...overrides,
   });
 

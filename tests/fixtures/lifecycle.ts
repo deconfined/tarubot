@@ -116,7 +116,6 @@ export function lifecycleHarness(
     TEST_GUILD_ID: "",
     PUBLIC_TEST_RESPONSES: false,
     ROSTER_INTERVAL_SECONDS: 21600,
-    PROFILE_INTERVAL_SECONDS: 86400,
     VERIFICATION_SECONDS: 1800,
     GUEST_COOLDOWN_SECONDS: 86400,
     // Port 0 lets several lifecycles (and parallel test runs) listen side by side.

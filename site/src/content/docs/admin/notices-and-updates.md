@@ -13,7 +13,6 @@ Choose a staff-only text channel with [`/config officer_notifications`](/tarubot
 
 - **Lodestone trouble.** "Lodestone synchronization is degraded. Existing accepted membership evidence is retained; inspect /sync status." TaruBot keeps using the last roster it accepted, so nobody loses a role over an outage.
 - **Recovery.** "Lodestone synchronization recovered: the FC roster was accepted again." It follows only an outage that officers were told about.
-- **Characters unlinked automatically.** One notice per link TaruBot ended because the character's Lodestone page was gone on two checks at least an hour apart. See [Links TaruBot ends by itself](/tarubot/admin/member-links/#links-tarubot-ends-by-itself).
 - **Missing channel overrides**, and a recovery line once they're complete. See [below](#missing-channel-overrides).
 
 Routine roster reads post no notice here; departures they confirm appear in the [member status post](#member-status-changes).

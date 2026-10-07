@@ -186,11 +186,10 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         count: 0,
       };
     }
-    /** Per-character profile answers other than success (2.17.0: private profiles, 404s). */
-    profileFailures = new Map<string, Failure>();
+    /** Every profile read, in order (#86: only verification and lookups read profiles). */
+    profileReads: string[] = [];
     override async profile(characterId: string) {
-      const failure = this.profileFailures.get(characterId);
-      if (failure) throw failure;
+      this.profileReads.push(characterId);
       return {
         id: characterId,
         name: "Verified Character",
@@ -251,7 +250,6 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     TEST_GUILD_ID: "",
     PUBLIC_TEST_RESPONSES: false,
     ROSTER_INTERVAL_SECONDS: 21600,
-    PROFILE_INTERVAL_SECONDS: 86400,
     VERIFICATION_SECONDS: 1800,
     GUEST_COOLDOWN_SECONDS: 86400,
     HEALTH_PORT: 3000,
@@ -6434,10 +6432,10 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
   });
 
   test("scheduled work never pulls a backing-off job forward (2.17.0)", async () => {
-    const characterId = "77777790";
-    const key = `profile:${characterId}`;
+    const fcId = "9229009999999999990";
+    const key = `roster:${fcId}`;
     // A job backing off after a failure is due in ten minutes.
-    const backing = await enqueue(db.pool, "profile", key, { characterId }, null, null, 600);
+    const backing = await enqueue(db.pool, "roster", key, { fcId }, null, null, 600);
     const ahead = async (id: string) =>
       (
         await db.query<{ ahead: boolean }>(
@@ -6446,150 +6444,51 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         )
       )[0]?.ahead;
     // Before 2.17.0 the scheduler's enqueue pulled it to now on every 30-second tick.
-    expect(await scheduleJob(db.pool, "profile", key, { characterId })).toBeUndefined();
+    expect(await scheduleJob(db.pool, "roster", key, { fcId })).toBeUndefined();
     expect(await ahead(backing)).toBe(true);
     // Once the key has no active job, the scheduler queues a fresh one.
     await db.query("UPDATE jobs SET status='failed' WHERE id=$1", [backing]);
-    const fresh = await scheduleJob(db.pool, "profile", key, { characterId });
+    const fresh = await scheduleJob(db.pool, "roster", key, { fcId });
     expect(fresh).toBeString();
     expect(fresh).not.toBe(backing);
     await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [fresh]);
   });
 
-  test("profiles are paced hourly, private ones wait a day, and two 404s an hour apart unlink (2.17.0)", async () => {
+  test("no profile refresh is scheduled, and one an older version queued reads nothing (#86)", async () => {
     const owner = "90021";
     const characterId = "77777791";
     const key = `profile:${characterId}`;
     await service.assign(
       actor,
       owner,
-      { id: characterId, name: "Vanished Character", world: "Diabolos", dc: "Crystal", fcId: null },
-      "Two-404 fixture",
+      { id: characterId, name: "Linked Character", world: "Diabolos", dc: "Crystal", fcId: null },
+      "Profile refresh fixture",
     );
-    // A present owner whose main this character is, so the unlink's consequences show.
-    await db.query(
-      "UPDATE guild_users SET present=true, primary_character_id=$3 WHERE guild_id=$1 AND user_id=$2",
-      [guild, owner, characterId],
-    );
-    // Isolate the scheduler to this character: every other profile is paced into tomorrow.
-    await db.query(
-      "UPDATE characters SET profile_retry_at = CASE WHEN id=$1 THEN NULL ELSE now()+interval '1 day' END, profile_at = CASE WHEN id=$1 THEN NULL ELSE profile_at END",
-      [characterId],
-    );
-    const active = async () =>
-      (
-        await db.query<{ id: string }>(
-          "SELECT id FROM jobs WHERE dedupe_key=$1 AND status IN ('queued','running','blocked')",
-          [key],
-        )
-      )[0]?.id;
-    // A scheduled refresh stamps the character an hour ahead...
-    await sync.schedule();
-    const scheduled = await active();
-    expect(scheduled).toBeString();
-    expect(
-      (
-        await db.query<{ ahead: boolean }>(
-          "SELECT profile_retry_at > now()+interval '59 minutes' AS ahead FROM characters WHERE id=$1",
-          [characterId],
-        )
-      )[0]?.ahead,
-    ).toBe(true);
-    // ...so however its job ends, the next tick queues nothing for this character.
-    await db.query("UPDATE jobs SET status='failed' WHERE id=$1", [scheduled]);
-    await sync.schedule();
-    expect(await active()).toBeUndefined();
-
-    const run = dispatcher(service, sync, access);
-    /** One profile job through the dispatcher, as the queue would run it. */
-    const profileJob = async () => {
-      const id = await enqueue(db.pool, "profile", key, { characterId });
-      const result = await run(await leased(id), async () => {});
-      await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [id]);
-      return result;
-    };
-    const state = async () =>
-      (
-        await db.query<{ missing: Date | null; paced_a_day: boolean | null; active: boolean }>(
-          `SELECT c.profile_missing_at AS missing,
-                  c.profile_retry_at > now()+interval '23 hours' AS paced_a_day, l.active
-             FROM characters c JOIN links l ON l.character_id=c.id
-            WHERE c.id=$1 AND l.guild_id=$2 AND l.user_id=$3
-            ORDER BY l.created_at DESC LIMIT 1`,
-          [characterId, guild, owner],
-        )
-      )[0];
-
-    // A private profile is an answer, not an outage: the job completes and waits a profile interval.
-    lodestone.profileFailures.set(
+    // A present owner and a profile never read: before #86 the next tick queued a refresh.
+    await db.query("UPDATE guild_users SET present=true WHERE guild_id=$1 AND user_id=$2", [
+      guild,
+      owner,
+    ]);
+    await db.query("UPDATE characters SET profile_at=NULL, profile_retry_at=NULL WHERE id=$1", [
       characterId,
-      new Failure("private_profile", "The Lodestone profile is private."),
-    );
-    expect(await profileJob()).toEqual({ status: "private" });
-    expect(await state()).toMatchObject({ missing: null, paced_a_day: true, active: true });
-
-    // The first 404 is recorded and the link stays.
-    lodestone.profileFailures.set(characterId, new Failure("not_found", "No such character."));
-    expect(await profileJob()).toMatchObject({ status: "missing", confirmed: false, links: 0 });
-    const firstAt = (await state())?.missing;
-    expect(firstAt).toBeInstanceOf(Date);
-    // Another 404 inside the hour changes nothing.
-    expect(await profileJob()).toMatchObject({ confirmed: false, links: 0 });
-    expect((await state())?.missing?.getTime()).toBe(firstAt?.getTime());
-    expect((await state())?.active).toBe(true);
-    // Any sighting in between voids the first 404.
-    lodestone.profileFailures.delete(characterId);
-    expect(await profileJob()).toEqual({ status: "updated" });
-    expect((await state())?.missing).toBeNull();
-
-    // A fresh first 404, then another more than an hour later, ends the link.
-    lodestone.profileFailures.set(characterId, new Failure("not_found", "No such character."));
-    await profileJob();
-    await db.query(
-      "UPDATE characters SET profile_missing_at=now()-interval '61 minutes' WHERE id=$1",
-      [characterId],
-    );
-    expect(await profileJob()).toMatchObject({ status: "missing", confirmed: true, links: 1 });
-    const [link] = await db.query<{ id: string; active: boolean; ended: boolean }>(
-      "SELECT id, active, ended_at IS NOT NULL AS ended FROM links WHERE character_id=$1 AND guild_id=$2 AND user_id=$3 ORDER BY created_at DESC LIMIT 1",
-      [characterId, guild, owner],
-    );
-    expect(link).toMatchObject({ active: false, ended: true });
-    // Audited as automatic, with no human actor.
-    const [record] = await db.query<{ actor_id: string | null; details: Record<string, unknown> }>(
-      "SELECT actor_id, details FROM audit WHERE action='character.unlink' AND target=$1",
-      [link?.id],
-    );
-    expect(record).toMatchObject({
-      actor_id: null,
-      details: { automatic: "lodestone_not_found", character: characterId },
-    });
-    // The main is cleared for a nickname restore, the owner reconciles, and officers are told.
-    expect(
-      (
-        await db.query<{ primary_character_id: string | null; nickname_restore: boolean }>(
-          "SELECT primary_character_id, nickname_restore FROM guild_users WHERE guild_id=$1 AND user_id=$2",
-          [guild, owner],
-        )
-      )[0],
-    ).toEqual({ primary_character_id: null, nickname_restore: true });
+    ]);
+    await sync.schedule();
     expect(
       (
         await db.query<{ count: number }>(
-          "SELECT count(*)::int AS count FROM jobs WHERE dedupe_key=$1 AND status='queued'",
-          [`user:${guild}:${owner}`],
+          "SELECT count(*)::int AS count FROM jobs WHERE dedupe_key=$1",
+          [key],
         )
       )[0]?.count,
-    ).toBe(1);
-    const [notice] = await db.query<{ payload: { message: string } }>(
-      "SELECT payload FROM jobs WHERE kind='officer.notify' AND dedupe_key=$1",
-      [`officer:${guild}:missing:${link?.id}`],
-    );
-    expect(notice?.payload.message).toContain(`(Lodestone ID ${characterId}) no longer exists`);
-    expect(notice?.payload.message).toContain(`<@${owner}>`);
-    // With no active link left, the character is never refreshed again.
-    expect(await profileJob()).toEqual({ skipped: "no present linked owner" });
-    lodestone.profileFailures.delete(characterId);
+    ).toBe(0);
+    // A refresh an older image queued before the upgrade completes without a Lodestone read.
+    const reads = lodestone.profileReads.length;
+    const id = await enqueue(db.pool, "profile", key, { characterId });
+    expect(await dispatcher(service, sync, access)(await leased(id), async () => {})).toEqual({
+      skipped: "profile refreshes retired",
+    });
+    expect(lodestone.profileReads.length).toBe(reads);
+    await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [id]);
   });
 
   /** A GitHub fake for issue reports (2.18.0): records calls; issues can be closed by tests. */

@@ -30,7 +30,7 @@ TaruBot is a single TypeScript process on [Bun](https://bun.sh), with [discord.j
 
 - **Discord** delivers interactions (slash commands, buttons, forms) and gateway events (members joining, leaving and changing; roles and channels changing). TaruBot changes roles, nicknames and channel permissions, and posts messages.
 - **PostgreSQL** holds all state: links, rosters, grants, the ledger, settings, the audit trail and the work queue. Nothing important lives only in memory.
-- **The Lodestone** is Square Enix's public character site. TaruBot reads character profiles (for ownership proofs and names), FC pages and member lists (for membership and ranks), and character searches.
+- **The Lodestone** is Square Enix's public character site. TaruBot reads character profiles (for ownership proofs), FC pages and member lists (for membership and ranks), and character searches.
 - **GitHub** supplies the Lodestone CSS selectors TaruBot's parser follows, `/version`'s commit history, and, when configured, the repository that receives issue reports. The project's own deployment also posts `/suggest` ideas to TaruBot's public repository, as a GitHub App.
 - **healthchecks.io** receives an optional heartbeat, so an outside check notices when the bot goes silent.
 
@@ -60,7 +60,7 @@ Every command, button namespace and gateway listener lives in its own file (`*.c
 3. **A presenter** turns the result into the reply. The reply reports what was saved, and describes queued Discord work as queued, never as done.
 4. **The job queue** runs the work: workers lease jobs from PostgreSQL, perform the Discord change, and record the outcome. A job that meets a missing permission is parked as blocked; a temporary error is retried with backoff; a newer change supersedes older queued work for the same thing. Everything survives restarts.
 
-Background work follows the same path without an interaction: a scheduler, which runs every 30 seconds, queues roster reads and profile refreshes when they're due, and gateway events queue reconciliation for the members and channels they touch.
+Background work follows the same path without an interaction: a scheduler, which runs every 30 seconds, queues roster reads when they're due, and gateway events queue reconciliation for the members and channels they touch.
 
 ## Lifecycle and the single writer
 

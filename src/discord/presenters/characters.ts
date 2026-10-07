@@ -438,18 +438,6 @@ function provenance(value: string, officerLayout: boolean): string {
   return Object.hasOwn(table, value) ? (table[value] ?? value) : value;
 }
 
-/**
- * The profile FC line, from the character's public profile (not roster authority): the FC's
- * stored name, with its ID for officers; 'a Free Company' (members) or the bare ID (officers) before
- * its first Lodestone read; or 'none'.
- */
-function profileFc(row: CharacterRow, officerLayout: boolean): string {
-  if (!row.fc_hint) return "Profile FC: none";
-  const name = row.fc_name?.trim() ? plain(row.fc_name, HOUSE_LIMITS.characterName) : null;
-  if (!officerLayout) return `Profile FC: ${name ?? "a Free Company"}`;
-  return `Profile FC: ${name ? `${name} (${code(row.fc_hint)})` : code(row.fc_hint)}`;
-}
-
 /** One active link as a field: the main is named as such (approved characters#18 and #20). */
 function activeField(row: CharacterRow, officerLayout: boolean): FieldSpec {
   const character = { id: row.character_id, name: row.name, world: row.world };
@@ -458,13 +446,11 @@ function activeField(row: CharacterRow, officerLayout: boolean): FieldSpec {
     ? [
         `${link("Lodestone", lodestone.character(row.character_id))} · ID ${code(row.character_id)}`,
         `${provenance(row.provenance, true)} · ${when(row.created_at, "f")}`,
-        profileFc(row, true),
         `Link ${code(row.id)}`,
       ]
     : [
         link("Lodestone profile", lodestone.character(row.character_id)),
         `${provenance(row.provenance, false)} · linked ${when(row.created_at, "R")}`,
-        profileFc(row, false),
       ];
   return {
     name: title(characterName(character, "title"), main && "Main"),
