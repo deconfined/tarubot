@@ -69,7 +69,7 @@ With nickname sync on, a member's nickname is their main character's name, cut t
 
 ## Lodestone reads
 
-TaruBot reads a character's Lodestone profile only to verify ownership (`/verify`) and when a command looks a character up. It never refreshes linked characters' profiles: each FC roster read lists every member's character ID, name and world, so one read per FC keeps them current. A linked character on no tracked roster, such as a guest's, keeps the name and world it had when it was verified. A deleted character stays linked until it's removed by hand, and stops counting for Member when it leaves the roster.
+TaruBot reads a character's Lodestone profile only to verify ownership (`/verify`), and when `/claim` or `/assign` names a character the server's latest FC roster doesn't list. `/claim` takes a listed character's name and world from that roster, so claiming an FC member's character costs one Lodestone request: the ownership check. It never refreshes linked characters' profiles: each FC roster read lists every member's character ID, name and world, so one read per FC keeps them current. A linked character on no tracked roster, such as a guest's, keeps the name and world it had when it was verified. A deleted character stays linked until it's removed by hand, and stops counting for Member when it leaves the roster.
 
 After a Lodestone 429, every request waits out a shared cooldown, and queued jobs wait without spending attempts.
 

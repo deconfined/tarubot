@@ -3,7 +3,7 @@ import { applicationKey } from "../../application/keys.js";
 import { defineCommand } from "../../bot/command.js";
 import { command, string } from "../../discord/options.js";
 import { claimReply } from "../../discord/presenters/characters.js";
-import { resolveCharacter } from "../../discord/selectors.js";
+import { resolveClaimCharacter } from "../../discord/selectors.js";
 
 export default defineCommand({
   data: command("claim", "Claim a character by proving control of its Lodestone biography")
@@ -16,8 +16,10 @@ export default defineCommand({
     const app = services.get(applicationKey);
     // Refuse an unconfigured server before searching the Lodestone.
     await app.guild(actor);
+    // A character the server's FC roster lists needs no Lodestone request here (#86).
+    const { identity, read } = await resolveClaimCharacter(app, interaction, actor.guildId);
     // The plaintext token exists only in this reply's copyable content and temporary verification
     // memory; PostgreSQL stores its hash, and the embed never repeats it.
-    return claimReply(await app.claim(actor, await resolveCharacter(app, interaction)), viewer);
+    return claimReply(await app.claim(actor, identity, read), viewer);
   },
 });

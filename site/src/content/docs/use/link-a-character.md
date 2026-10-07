@@ -61,4 +61,4 @@ Run [`/unclaim`](/tarubot/reference/commands/#unclaim) and pick the character fr
 
 It works even while the Lodestone is down, because it uses what TaruBot has stored. Your roles are rechecked right away. If it was your main character, TaruBot puts back the nickname you had before it changed yours, when it can; choose another main with `/main`.
 
-TaruBot also removes a link by itself when the Lodestone no longer has the character: after two "not found" answers at least an hour apart, it ends the link and tells the officers. If that happens by mistake, for example after a name change, claim the character again or ask an officer to assign it.
+TaruBot never removes a link by itself, even when a character is deleted. Remove a deleted character's link with `/unclaim`.

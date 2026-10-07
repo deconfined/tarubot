@@ -218,6 +218,11 @@ interface TrustResult {
   readonly character: CharacterRef;
 }
 
+/** A validated character selector: a Lodestone ID, or an exact name and world. */
+export type CharacterQuery =
+  | { readonly id: string }
+  | { readonly name: string; readonly world: string };
+
 /** Guild-scoped operations reused by slash commands, components, and operational workflows. */
 export class Service {
   /** Dependencies are injected so persistence tests can control Discord/Lodestone outcomes. */
@@ -1493,8 +1498,59 @@ export class Service {
       character: identity,
     };
   }
-  /** Issue a bounded, replaceable challenge; plaintext is returned once and never persisted. */
-  async claim(actor: Actor, identity: CharacterIdentity): Promise<ClaimResult> {
+  /**
+   * The character the latest stored roster of this server's FC lists, by ID or by exact name and
+   * world (ignoring case, like the Lodestone search), or null. /claim names it without a Lodestone
+   * request (#86): roster reads keep its stored name and world current, and /verify's profile read
+   * is the claim's only Lodestone request. A name the roster lists more than once returns null, so
+   * the Lodestone search decides.
+   */
+  async rosterCharacter(guildId: string, query: CharacterQuery): Promise<CharacterIdentity | null> {
+    const db = this.db.orm;
+    const [guild] = await db
+      .select({ fc_id: t.guilds.fc_id })
+      .from(t.guilds)
+      .where(and(eq(t.guilds.id, guildId), eq(t.guilds.active, true)));
+    if (!guild?.fc_id) return null;
+    const [latest] = await db
+      .select({ id: t.rosterSnapshots.id })
+      .from(t.rosterSnapshots)
+      .where(eq(t.rosterSnapshots.fc_id, guild.fc_id))
+      .orderBy(desc(t.rosterSnapshots.observed_at))
+      .limit(1);
+    if (!latest) return null;
+    const rows = await db
+      .select({
+        id: t.characters.id,
+        name: t.characters.name,
+        world: t.characters.world,
+        dc: t.characters.dc,
+      })
+      .from(t.rosterMembers)
+      .innerJoin(t.characters, eq(t.characters.id, t.rosterMembers.character_id))
+      .where(
+        and(
+          eq(t.rosterMembers.snapshot_id, latest.id),
+          "id" in query
+            ? eq(t.characters.id, query.id)
+            : // Stored names are the Lodestone's canonical text; the query is compared as search does.
+              and(
+                sql`lower(${t.characters.name}) = ${normalized(query.name)}`,
+                sql`lower(${t.characters.world}) = ${normalized(query.world)}`,
+              ),
+        ),
+      )
+      .limit(2);
+    const [row] = rows;
+    if (!row || rows.length > 1) return null;
+    return { id: row.id, name: row.name, world: row.world, dc: row.dc ?? "", fcId: guild.fc_id };
+  }
+  /**
+   * Issue a bounded, replaceable challenge; plaintext is returned once and never persisted. `read`
+   * says the identity came from a Lodestone profile read, which is stored; a roster-named identity
+   * (rosterCharacter) is already stored by the roster read that listed it.
+   */
+  async claim(actor: Actor, identity: CharacterIdentity, read = true): Promise<ClaimResult> {
     const guild = await this.guild(actor);
     const member = await this.discord.member(actor.guildId, actor.userId);
     if (!member || member.bot) throw notCurrentMember();
@@ -1506,7 +1562,7 @@ export class Service {
       await client.query("SELECT pg_advisory_xact_lock(714882491)");
       const db = orm(client);
       await ensureUser(client, actor.guildId, actor.userId, member.joinedAt);
-      await this.storeCharacter(client, identity);
+      if (read) await this.storeCharacter(client, identity);
       const [existing] = await db
         .select({ user_id: t.links.user_id })
         .from(t.links)
@@ -1823,8 +1879,8 @@ export class Service {
    * End one active link the caller has locked (with its guild_users row and character, in that
    * order) and apply its consequences in the caller's transaction: record local member loss when no
    * other roster-backed link remains, clear the main character and queue its nickname restore when
-   * it was this one, and queue the owner's reconciliation. The caller audits. Shared by /unclaim,
-   * /unassign and the automatic unlink of a character the Lodestone no longer has.
+   * it was this one, and queue the owner's reconciliation. The caller audits. Shared by /unclaim
+   * and /unassign.
    */
   private async endLink(
     client: Connection,

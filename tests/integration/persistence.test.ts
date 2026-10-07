@@ -6491,6 +6491,68 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [id]);
   });
 
+  test("/claim names a character the latest stored roster lists, by ID or name, and rewrites nothing (#86)", async () => {
+    const guildId = "888888888888888886";
+    const fcId = "9230000000000098086";
+    await displayGuild(guildId, fcId);
+    const self: Actor = { guildId, userId: "98086", officer: false, manageRoles: false };
+    await db.orm.insert(t.characters).values([
+      { id: "77980861", name: "Listed Character", world: "Diabolos", dc: "Crystal" },
+      { id: "77980862", name: "Departed Character", world: "Diabolos", dc: "Crystal" },
+    ]);
+    const snapshot = async (hoursAgo: number, members: string[]) => {
+      const observed = new Date(Date.now() - hoursAgo * 3_600_000);
+      const [row] = await db.orm
+        .insert(t.rosterSnapshots)
+        .values({
+          fc_id: fcId,
+          started_at: observed,
+          observed_at: observed,
+          member_count: members.length,
+          evidence: {},
+        })
+        .returning({ id: t.rosterSnapshots.id });
+      if (!row) throw new Error("Missing snapshot");
+      await db.orm
+        .insert(t.rosterMembers)
+        .values(members.map((character_id) => ({ snapshot_id: row.id, character_id })));
+    };
+    // An older roster listed both characters; only the latest one counts.
+    await snapshot(2, ["77980861", "77980862"]);
+    await snapshot(1, ["77980861"]);
+    const listed = {
+      id: "77980861",
+      name: "Listed Character",
+      world: "Diabolos",
+      dc: "Crystal",
+      fcId,
+    };
+    expect(await service.rosterCharacter(guildId, { id: "77980861" })).toEqual(listed);
+    // A name matches as the Lodestone search does, ignoring case.
+    expect(
+      await service.rosterCharacter(guildId, { name: "listed character", world: "DIABOLOS" }),
+    ).toEqual(listed);
+    expect(await service.rosterCharacter(guildId, { id: "77980862" })).toBeNull();
+    expect(
+      await service.rosterCharacter(guildId, { name: "Departed Character", world: "Diabolos" }),
+    ).toBeNull();
+    // Another server's FC roster names nothing here.
+    expect(await service.rosterCharacter(guild, { id: "77980861" })).toBeNull();
+    // A roster-named claim issues its token without rewriting the roster's stored character.
+    expect(await service.claim(self, { ...listed, name: "Stale Name" }, false)).toMatchObject({
+      status: "pending",
+      character: "77980861",
+    });
+    expect(
+      (
+        await db.query<{ name: string; profile_at: Date | null }>(
+          "SELECT name, profile_at FROM characters WHERE id=$1",
+          ["77980861"],
+        )
+      )[0],
+    ).toEqual({ name: "Listed Character", profile_at: null });
+  });
+
   /** A GitHub fake for issue reports (2.18.0): records calls; issues can be closed by tests. */
   class FakeIssues extends GitHubIssues {
     calls: { op: string; number?: number; title?: string; body: string; labels?: string[] }[] = [];

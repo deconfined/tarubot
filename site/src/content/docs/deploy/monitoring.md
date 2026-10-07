@@ -84,7 +84,7 @@ ORDER BY created_at;"
 
 ## Lodestone requests
 
-TaruBot reads each tracked FC's roster every `ROSTER_INTERVAL_SECONDS`. It reads a character's profile only when a member verifies ownership or a command looks a character up, never on a schedule.
+TaruBot reads each tracked FC's roster every `ROSTER_INTERVAL_SECONDS`. It reads a character's profile only when a member verifies ownership, or when `/claim` or `/assign` names a character that roster doesn't list, never on a schedule.
 
 - **Throttling.** A Lodestone 429 pauses all Lodestone requests for a shared cooldown (15 seconds, doubling to 5 minutes). Jobs wait it out as `↻ WAITING` without using attempts, and readiness shows `lodestone.cooldownSeconds`.
 - **Retired profile refreshes.** Earlier versions refreshed linked characters' profiles daily. A `profile` job one of them queued before an upgrade completes as skipped, with `profile refreshes retired`, without reading the Lodestone.
