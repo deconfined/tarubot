@@ -48,9 +48,9 @@ function hostEnvironment(target: HostTarget): Record<string, string> {
     TEST_PLAN_CHANNEL_ID: "",
     TARUBOT_IMAGE_TAG: "legacy-mutable-tag",
     TARUBOT_IMAGE: "legacy-image-override",
-    BACKUP_STORAGE_ENDPOINT: "backups.example.org",
-    BACKUP_STORAGE_ACCESS_KEY: "backup-access",
-    BACKUP_STORAGE_SECRET_KEY: "backup-secret",
+    BACKUP_STORAGE_ENDPOINT: staging ? "staging-backups.example.org" : "backups.example.org",
+    BACKUP_STORAGE_ACCESS_KEY: staging ? "staging-backup-access" : "backup-access",
+    BACKUP_STORAGE_SECRET_KEY: staging ? "staging-backup-secret" : "backup-secret",
     BACKUP_STORAGE_REGION: "example-region",
     HEALTHCHECKS_BACKUP_URL: "https://health.example.org/private-check",
   };

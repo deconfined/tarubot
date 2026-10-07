@@ -55,23 +55,28 @@ case $1 in
   compose)
     shift
     root='' env_file='' manifest='' project=''
+    profiles=()
     while [[ $1 == --* || $1 == -f ]]; do
       case $1 in
         --project-name) project=$2 ;;
         --project-directory) root=$2 ;;
         --env-file) env_file=$2 ;;
         -f) manifest=$2 ;;
+        --profile) profiles+=("$2") ;;
         *) exit 90 ;;
       esac
       shift 2
     done
+    if ((${#profiles[@]} == 0)) && [[ -n ${COMPOSE_PROFILES:-} ]]; then
+      IFS=, read -r -a profiles <<<"$COMPOSE_PROFILES"
+    fi
     [[ $project == tarubot && $root == "$HOME/tarubot" && $env_file == "$HOME/tarubot/.env" ]]
     [[ -f $manifest && ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
     case $1 in
       config)
         record config
         fail config
-        "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" >"$SIM/compose.json"
+        "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" "${profiles[@]}" >"$SIM/compose.json"
         if [[ -e $SIM/fail-restart-config ]]; then
           jq '.services.tarubot.restart = "unless-stopped"' "$SIM/compose.json"
         else cat "$SIM/compose.json"; fi

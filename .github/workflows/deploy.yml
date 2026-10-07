@@ -16,6 +16,10 @@ on:
       digest:
         type: string
         required: true
+    secrets:
+      DEPLOY_SSH_KEY:
+        description: "Optional caller binding; the selected environment supplies the delivery key."
+        required: false
   workflow_dispatch:
     inputs:
       target:
@@ -164,53 +168,18 @@ jobs:
             --format json > "$private/attestation"
           jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
           echo 'Signed release and selected environment policy revalidated.'
-      - name: Send the exact release to the pinned host entry
+      - name: Check out the reviewed workflow transport
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the DNSSEC SSH transport
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends openssh-client unbound dns-root-data
+          # The transport starts and cleans up its own validating resolver.
+          sudo systemctl stop unbound
+      - name: Send the exact release to the DNSSEC-authenticated host entry
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: |
-          set -Eeuo pipefail
-          umask 077
-          dir=$(mktemp -d "$RUNNER_TEMP/deploy-ssh.XXXXXX")
-          trap 'rm -rf -- "$dir"' EXIT
-          trap 'echo "::error::Deployment did not complete; inspect the private host log and reconcile before a fresh dispatch."' ERR
-          exec 2> "$dir/errors"
-          case "$TARGET" in
-            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
-            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
-            *) exit 1 ;;
-          esac
-          command="deploy $TARGET $VERSION $COMMIT $DIGEST $GITHUB_RUN_ID"
-          form='^deploy (production|staging) (0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) [0-9a-f]{40} sha256:[0-9a-f]{64} [1-9][0-9]{0,19}$'
-          [[ $command =~ $form ]]
-          host_form='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-          [[ $DEPLOY_HOST =~ $host_form ]]
-          known=${DEPLOY_KNOWN_HOSTS%$'\n'}
-          known=${known%$'\r'}
-          key_form='^([^ ]+) ssh-ed25519 [A-Za-z0-9+/]+={0,2}$'
-          [[ $known != *$'\n'* && $known =~ $key_form && ${BASH_REMATCH[1]} == "$DEPLOY_HOST" ]]
-          [[ $DEPLOY_SSH_KEY == *'PRIVATE KEY'* ]]
-          printf '%s\n' "$known" > "$dir/known_hosts"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
-          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
-          rc=0
-          ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
-            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts" \
-            -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o CheckHostIP=no \
-            -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=20 -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=4 -o LogLevel=ERROR \
-            "tarubot@$DEPLOY_HOST" "$command" < /dev/null > "$dir/output" 2> "$dir/ssh-errors" || rc=$?
-          result=''
-          results=0
-          while IFS= read -r line; do
-            case "$line" in
-              'step preflight'|'step fetch'|'step pull'|'step stop'|'step backup'|'step migrate'|'step register'|'step start'|'step observe'|'step record')
-                printf '%s\n' "$line" ;;
-              'result deployed'|'result already-live'|'result refused'|'result needs-owner')
-                result=$line
-                results=$((results + 1))
-                printf '%s\n' "$line" ;;
-            esac
-          done < "$dir/output"
-          [[ $rc == 0 && $results == 1 && ( $result == 'result deployed' || $result == 'result already-live' ) ]]
+        run: exec bash ops/deploy-ssh.sh

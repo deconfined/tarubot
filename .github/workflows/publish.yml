@@ -200,6 +200,9 @@ jobs:
     needs: [verify, publish, attest, latest]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
     uses: ./.github/workflows/deploy.yml
+    # Bind only the delivery secret; its value comes from the approved environment.
+    secrets:
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
     permissions:
       contents: read
       actions: read

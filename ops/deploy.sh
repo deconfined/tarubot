@@ -171,7 +171,8 @@ jq -e --arg ref "$REF" --arg version "$VERSION" --arg commit "$COMMIT" \
   'length == 1 and (.[0].RepoDigests | index($ref) != null) and .[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $commit' <<<"$TARGET"
 TARGET_ID=$(jq -er '.[0].Id' <<<"$TARGET")
 [[ $TARGET_ID =~ ^sha256:[0-9a-f]{64}$ ]]
-CONFIG=$(compose config --format json)
+# Compose omits inactive profiles from config; inspect the client without starting it.
+CONFIG=$(compose --profile backup config --format json)
 jq -e --arg wanted "$VERSION" --arg live "$LIVE_VERSION" --arg ref "$REF" --arg target "$DEPLOY_TARGET" \
   '.services.tarubot as $bot | .services.backup as $backup |
    $bot.image == $ref and $bot.environment.TARUBOT_ENVIRONMENT == $target and
@@ -225,7 +226,9 @@ durable_record "$STATE/pending"
 public_step stop
 stop_writers
 public_step backup
-TARUBOT_ROOT=$ROOT TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
+# The caller selects the dump client even when a pinned payload inspects default config.
+COMPOSE_PROFILES=backup TARUBOT_ROOT=$ROOT \
+  TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_HOST_LOCK_HELD=true \
   timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh" "$DEPLOY_TARGET"
 public_step migrate

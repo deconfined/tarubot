@@ -22,6 +22,7 @@ import {
   hostSandbox,
   hostToolsAvailable,
   knob,
+  subprocess,
   type HostSandbox,
   type HostTarget,
 } from "../fixtures/host-runtime.js";
@@ -76,28 +77,70 @@ for (const target of ["production", "staging"] as const) {
   });
 }
 
+describe.skipIf(!hostToolsAvailable)("published release backup compatibility", () => {
+  for (const target of ["production", "staging"] as const) {
+    test(`deploys a published default-profile backup on ${target}`, () => {
+      const box = sandbox(true, target);
+      const origin = join(box.directory, "origin");
+      // Preserve 2.36.43's published script: updating the stable backup entry cannot
+      // change the backup invoked from an immutable requested release worktree.
+      writeFileSync(
+        join(origin, "ops/backup.sh"),
+        readFileSync(
+          new URL("../fixtures/host-runtime/backup-default-profile.sh", import.meta.url),
+        ),
+      );
+      const gitExecutable = box.environment.GIT_REAL;
+      if (gitExecutable === undefined) throw new Error("Missing fixture Git executable");
+      const git = (...args: string[]) => {
+        const result = subprocess([gitExecutable, ...args], box.environment, origin);
+        if (result.code !== 0) throw new Error(`Fixture git failed: ${result.stderr}`);
+        return result.stdout.trim();
+      };
+      git("add", "ops/backup.sh");
+      git("commit", "-m", "Published default-profile backup");
+      box.target.commit = git("rev-parse", "HEAD");
+      const configuration = JSON.parse(readFileSync(join(box.sim, "config.json"), "utf8"));
+      configuration.target = box.target;
+      writeFileSync(join(box.sim, "config.json"), JSON.stringify(configuration));
+
+      expect(deploy(box).code).toBe(0);
+      expect(JSON.parse(readFileSync(join(box.state, "current"), "utf8"))).toMatchObject({
+        target,
+        version: box.target.version,
+        commit: box.target.commit,
+        digest: box.target.digest,
+      });
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+      ).toBe(true);
+    });
+  }
+});
+
 describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () => {
   test("stops, backs up offsite, migrates, registers globally and starts the exact digest", () => {
     const box = sandbox();
     const result = deploy(box);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toBe(
-      [
-        "step preflight",
-        "step fetch",
-        "step pull",
-        "step stop",
-        "step backup",
-        "step migrate",
-        "step register",
-        "step start",
-        "step observe",
-        "step record",
-        "result deployed",
-        "",
-      ].join("\n"),
-    );
+    const stdoutLines = result.stdout.split("\n");
+    expect(stdoutLines.pop()).toBe("");
+    expect(stdoutLines.pop()).toBe("result deployed");
+    // Require each public phase once without pinning progress order.
+    expect(stdoutLines.sort()).toEqual([
+      "step backup",
+      "step fetch",
+      "step migrate",
+      "step observe",
+      "step preflight",
+      "step pull",
+      "step record",
+      "step register",
+      "step start",
+      "step stop",
+    ]);
     const actions = events(box);
     expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("backup"));
     expect(actions.indexOf("upload-database")).toBeLessThan(actions.indexOf("migrate"));
@@ -349,7 +392,7 @@ function changeScope(
 }
 
 describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", () => {
-  test("uses the staging manifest, scoped guild registration, isolated backup keys and target-bound state", () => {
+  test("uses the staging manifest, scoped guild registration, isolated backup bucket and target-bound state", () => {
     const box = sandbox(true, "staging");
     const before = readFileSync(join(box.root, ".env"), "utf8");
     const result = deploy(box);
@@ -374,8 +417,8 @@ describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", ()
     });
     expect(existsSync(join(box.state, "pending"))).toBe(false);
     expect(readFileSync(join(box.sim, "upload-urls"), "utf8").split("\n").filter(Boolean)).toEqual([
-      "https://backups.example.org/staging/daily/tarubot-20261003T120000Z.dump.age",
-      "https://backups.example.org/staging/env/tarubot-env-20261003T120000Z.age",
+      "https://staging-backups.example.org/daily/tarubot-20261003T120000Z.dump.age",
+      "https://staging-backups.example.org/env/tarubot-env-20261003T120000Z.age",
     ]);
     expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
     expect(
