@@ -9,7 +9,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { Hono } from "hono";
 import { pino } from "pino";
 import { z } from "zod";
-import { applicationKey, lifecycleKey } from "../../src/application/keys.js";
+import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import type { SyncStatusView } from "../../src/application/results.js";
 import { Service } from "../../src/application/service.js";
@@ -35,8 +35,14 @@ import { SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
 import { type WebSettings, webSettings } from "../../src/web/settings.js";
 import { type DiscordAccount, discordOAuthError, FakeDiscord } from "../fixtures/discord-oauth.js";
 import { THROWN } from "../fixtures/web-pages/throws/boom.page.js";
-import { HARNESS_ACCOUNTS, HARNESS_GUILDS, startHarness } from "../fixtures/web-dev.js";
+import {
+  HARNESS_ACCOUNTS,
+  HARNESS_GUILDS,
+  harnessGateway,
+  startHarness,
+} from "../fixtures/web-dev.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
+import { configGuild, configReport } from "../fixtures/replies/configuration.js";
 
 const HTTPS = "https://example.org";
 const DEV = "http://localhost:8080";
@@ -125,6 +131,7 @@ function services(world: Pick<World, "lifecycle">, syncStatus: () => Promise<Syn
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fixture");
   app.syncStatus = syncStatus;
+  app.validate = async () => configReport({ guild: configGuild({ id: GUILD }) });
   const lifecycle: unknown = Object.create(ApplicationLifecycle.prototype);
   if (!(lifecycle instanceof ApplicationLifecycle)) throw new Error("Invalid lifecycle fixture");
   // Only `ready` may reach the probe; the rest carries numbers a leak would show.
@@ -153,7 +160,10 @@ function services(world: Pick<World, "lifecycle">, syncStatus: () => Promise<Syn
     },
     visibility: { missing: 7776, onboardingPending: 7777, checked: 7778, checkedAt: null },
   });
-  return new Services().provide(applicationKey, app).provide(lifecycleKey, lifecycle);
+  return new Services()
+    .provide(applicationKey, app)
+    .provide(lifecycleKey, lifecycle)
+    .provide(gatewayKey, harnessGateway());
 }
 
 /** The bot's resolver over invented membership: an officer, a member, and Unknown Member. */
@@ -630,9 +640,9 @@ describe("server pages (D12)", () => {
     const text = await response.text();
     expect(text).toContain("<h1>Status</h1>");
     expect(text).toContain('<span dir="auto">&lt;img src=x onerror=alert(1)&gt; FC</span>');
-    expect(text).not.toContain("<img");
-    expect(text).toContain(`<a href="${status}" aria-current="page">Status</a>`);
-    expect(text).toContain(`<a href="/g/${GUILD}/form">Form</a>`);
+    expect(text).not.toContain("<img src=x");
+    expect(text).toContain(`href="${status}" aria-current="page"`);
+    expect(text).toContain(`href="/g/${GUILD}/form"`);
     // HEAD answers like GET, without the body.
     const head = await officer.request(status, { method: "HEAD" });
     expect(head.status).toBe(200);
@@ -643,7 +653,7 @@ describe("server pages (D12)", () => {
     const w = await world();
     const officer = await signedIn(w);
     const text = await (await officer.get("/")).text();
-    expect(text).toContain(`<a href="/g/${GUILD}/status">Status</a>`);
+    expect(text).toContain(`href="/g/${GUILD}/status"`);
     expect(text).not.toContain("Unserved FC");
     expect(text).toContain("Sign out everywhere");
     const visitor = await (await new Browser(w).get("/")).text();

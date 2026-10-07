@@ -53,13 +53,14 @@ export function newRef(): string {
 }
 
 /**
- * The Content-Security-Policy on every response. No script source at all, styles and images only
- * from this origin, forms post only here, and no framing. Templates must therefore never emit a
- * `style=` attribute or a script.
+ * The Content-Security-Policy on every response. No script source. The two design fonts use
+ * Google's stylesheet/font hosts; all other styles and images stay on this origin. Forms post
+ * only here and pages cannot be framed.
  */
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
-  "style-src 'self'",
+  "style-src 'self' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
   "img-src 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
@@ -107,7 +108,8 @@ export function securityHeaderRecord(secure: boolean): Record<string, string> {
 const SECURE_HEADER_OPTIONS = {
   contentSecurityPolicy: {
     defaultSrc: ["'none'"],
-    styleSrc: ["'self'"],
+    styleSrc: ["'self'", "https://fonts.googleapis.com"],
+    fontSrc: ["https://fonts.gstatic.com"],
     imgSrc: ["'self'"],
     formAction: ["'self'"],
     frameAncestors: ["'none'"],

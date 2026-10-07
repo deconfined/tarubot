@@ -1,22 +1,15 @@
 /**
- * The Status page body (#43, ADR D9): this process's health as words, and this server's queued,
- * running, blocked, paused and failed work plus recent /refresh runs. Each job shows its marker,
- * kind label and catalog code only; stored diagnostics carry Discord mentions and wait for #43's
- * mention renderer. Never global queue metrics or visibility counts. Pure: typed data in,
- * markup out; application types are imported as types only (tests/unit/web-boundary.test.ts).
+ * Read-only background work for officers: filtered process health, a limited server-work sample
+ * and actual recent refresh runs. Pure typed data in, safely escaped markup out.
  */
 import type { ApplicationLifecycle } from "../../application/lifecycle.js";
-import type {
-  EffectsMode,
-  JobView,
-  SyncRunRow,
-  SyncStatusView,
-} from "../../application/results.js";
+import type { EffectsMode, SyncRunRow, SyncStatusView } from "../../application/results.js";
 import { shortId } from "../../discord/presenters/format.js";
-import { jobCode, jobLabel, jobMarker } from "../../discord/presenters/jobs.js";
+import { jobLabel, jobMarker } from "../../discord/presenters/jobs.js";
 import { CHECK, type Check, MARKER } from "../../discord/presenters/style.js";
 import { RUN_LABEL, runState, runType } from "../../discord/presenters/synchronization.js";
-import { html, type SafeHtml } from "../html.js";
+import { html, type SafeHtml, untrusted } from "../html.js";
+import { EMPTY_NAMES, mentionText, type WebNames, userName } from "../mentions.js";
 import { time } from "../time.js";
 
 /** The process booleans Status shows, with the Lodestone gate as a word. */
@@ -33,6 +26,7 @@ export interface StatusView {
   readonly process: ProcessStatus;
   /** app.syncStatus(actor, null) for this server. */
   readonly sync: SyncStatusView;
+  readonly names?: WebNames;
 }
 
 /**
@@ -102,77 +96,145 @@ const at = (instant: Date): SafeHtml => {
 const grouping = new Intl.NumberFormat("en-US");
 const grouped = (value: number): string => grouping.format(value);
 
-/** A catalog code from a stored last_error, never the message after it. */
-const codeOf = (lastError: string | null): SafeHtml | "" => {
-  const code = jobCode(lastError);
-  return code === null ? "" : html` · Code <code>${code}</code>`;
-};
+/** Full stored diagnostics are officer-only text, resolved without exposing hidden channel names. */
+function diagnostic(text: string | null, names: WebNames): SafeHtml {
+  return text === null
+    ? html`<p class="note">No diagnostic recorded.</p>`
+    : html`<p class="diagnostic">${mentionText(text, names)}</p>`;
+}
 
-/**
- * One run: short ID (as /sync status shows it, so the two can be matched), start time, type, state
- * and progress, in the approved run wording (guests#43 and #44); the acquisition's code, not its
- * text.
- */
-function runItem(run: SyncRunRow, mode: EffectsMode): SafeHtml {
-  const paused = mode !== "live";
-  const state = runState(run, mode);
-  const blocked =
+/** A run's aggregate outcome is distinct from the acquisition job's outcome. */
+function runRow(run: SyncRunRow, mode: EffectsMode, names: WebNames): SafeHtml {
+  const acquisition =
+    run.acquisition_status === null
+      ? null
+      : jobMarker({
+          status: run.acquisition_status,
+          last_error: run.last_error,
+          result: run.result,
+        });
+  return html`<tr>
+<th scope="row"><code>${untrusted(shortId(run.id))}</code></th>
+<td>${runType(run)}</td>
+<td>${RUN_LABEL[runState(run, mode)]}</td>
+<td>${grouped(run.work_completed)}/${grouped(run.work_total)} done${
     run.work_blocked > 0
-      ? html` · ${grouped(run.work_blocked)} ${paused ? "held" : "blocked"}`
-      : "";
-  const failed = run.work_failed > 0 ? html` · ${grouped(run.work_failed)} failed` : "";
-  return html`<li><code>${shortId(run.id)}</code> · ${at(run.created_at)} · ${runType(run)} · ${RUN_LABEL[state]} · ${grouped(run.work_completed)}/${grouped(run.work_total)} done${blocked}${failed}${codeOf(run.last_error)}</li>`;
-}
-
-/**
- * One job: its marker word, kind label and short ID, then the facts its state needs (attempts,
- * when it runs next, when it was added) and its catalog code. The stored diagnostic after the
- * code is never shown here: it can hold Discord mentions and upstream text (#43's mention
- * renderer will render it).
- */
-function workItem(job: JobView): SafeHtml {
-  const state = jobMarker(job);
-  const attempt = job.attempts > 0 ? html` · attempt ${grouped(job.attempts)}` : "";
-  let facts: SafeHtml | "";
-  switch (state.marker) {
-    case "queued":
-      facts = html` · next ${at(job.due_at)}`;
-      break;
-    case "waiting":
-      facts = html`${attempt} · next ${at(job.due_at)}`;
-      break;
-    case "running":
-    case "failed":
-      facts = attempt;
-      break;
-    default:
-      facts = html` · added ${at(job.created_at)}`;
+      ? html` · ${grouped(run.work_blocked)} ${mode === "live" ? "blocked" : "held"}`
+      : ""
+  }${run.work_failed > 0 ? html` · ${grouped(run.work_failed)} failed` : ""}</td>
+<td>Started ${at(run.created_at)}${
+    run.completed_at === null ? "" : html`<br>Completed ${at(run.completed_at)}`
+  }</td>
+<td>${
+    acquisition === null
+      ? html`<span class="note">No acquisition job recorded.</span>`
+      : html`<span class="marker marker-${acquisition.marker}">${MARKER[acquisition.marker]}</span>`
   }
-  const dm = state.dmBlocked ? html` · the recipient's DMs are closed` : "";
-  return html`<li><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span> ${jobLabel(job.kind)} <code>${shortId(job.id)}</code>${facts}${codeOf(job.last_error)}${dm}</li>`;
+<details class="job-details"><summary>Run details ${untrusted(shortId(run.id))}</summary>
+<dl class="facts">
+<dt>Run ID</dt><dd><code>${untrusted(run.id)}</code></dd>
+<dt>Requester</dt><dd>${run.requester_id === null ? "Not recorded" : userName(run.requester_id, names)}</dd>
+<dt>Stored run status</dt><dd><code>${run.status}</code></dd>
+<dt>Acquisition kind</dt><dd>${run.acquisition_kind === null ? "Not recorded" : html`<code>${untrusted(run.acquisition_kind)}</code>`}</dd>
+<dt>Acquisition status</dt><dd>${run.acquisition_status === null ? "Not recorded" : html`<code>${untrusted(run.acquisition_status)}</code>`}</dd>
+${run.enumeration_completed_at === null ? "" : html`<dt>Enumeration finished</dt><dd>${at(run.enumeration_completed_at)}</dd>`}
+</dl>
+${acquisition?.dmBlocked ? html`<p class="note">The recipient's DMs are closed; the decision still stands.</p>` : ""}
+${acquisition?.skipped === undefined ? "" : html`<p class="diagnostic">Skipped: ${mentionText(acquisition.skipped, names)}</p>`}
+${diagnostic(run.last_error, names)}
+</details></td>
+</tr>`;
 }
 
-/**
- * The Status page's main content, in the Discord presenters' vocabulary (jobLabel, jobMarker,
- * jobCode, MARKER and the run wording), as text (the house status words, never color alone).
- */
+/** A sampled job, with facts only for timestamps the service actually supplies. */
+function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml {
+  const state = jobMarker(job);
+  return html`<tr>
+<td><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span>${
+    state.dmBlocked
+      ? html`<p class="note">The recipient's DMs are closed; the decision still stands.</p>`
+      : ""
+  }</td>
+<td>${untrusted(jobLabel(job.kind))}</td>
+<td><code>${untrusted(job.kind)}</code></td>
+<th scope="row"><code>${untrusted(shortId(job.id))}</code></th>
+<td>${grouped(job.attempts)}</td>
+<td>${
+    state.marker === "queued" || state.marker === "waiting"
+      ? html`${state.wait === "retrying" ? "Retry" : "Next"} ${at(job.due_at)}<br>`
+      : ""
+  }Added ${at(job.created_at)}${
+    job.completed_at === null
+      ? ""
+      : html`<br>${state.marker === "failed" ? "Stopped" : "Completed"} ${at(job.completed_at)}`
+  }</td>
+<td><details class="job-details"><summary>Job details ${untrusted(shortId(job.id))}</summary>
+<dl class="facts">
+<dt>Job ID</dt><dd><code>${untrusted(job.id)}</code></dd>
+<dt>User</dt><dd>${job.user_id === null ? "No user attached" : userName(job.user_id, names)}</dd>
+<dt>Stored status</dt><dd><code>${untrusted(job.status)}</code></dd>
+</dl>
+${state.skipped === undefined ? "" : html`<p class="diagnostic">Skipped: ${mentionText(state.skipped, names)}</p>`}
+${diagnostic(job.last_error, names)}
+</details></td>
+</tr>`;
+}
+
+/** Counts are only of displayed jobs, split by the same markers the table uses. */
+function sampleMetrics(work: SyncStatusView["work"]): SafeHtml {
+  const counts = { blocked: 0, running: 0, queued: 0, waiting: 0, paused: 0, failed: 0 };
+  for (const job of work) {
+    const { marker } = jobMarker(job);
+    if (marker in counts) counts[marker as keyof typeof counts] += 1;
+  }
+  return html`<dl class="metrics">${Object.entries(counts).map(
+    ([marker, count]) =>
+      html`<div><dt><span class="marker marker-${marker}">${MARKER[marker as keyof typeof counts]}</span></dt><dd>${grouped(count)}</dd></div>`,
+  )}</dl>`;
+}
+
+/** The Status route stays stable; Background work is its read-only officer dashboard. */
 export function renderStatus(view: StatusView): SafeHtml {
   const { runs, work, effectsMode } = view.sync;
-  return html`<h2>Health</h2>
+  const names = view.names ?? EMPTY_NAMES;
+  return html`<div class="dashboard-intro">
+<div>
+<p class="lead">Recent refresh runs, outstanding work and what needs attention on this server.</p>
+<p class="note">Read-only. Times are UTC; changes and retries are managed through Discord.</p>
+</div>
+<section class="panel featured" aria-labelledby="process-health">
+<h2 id="process-health">Process health</h2>
 <ul class="items">${healthLines(view.process, effectsMode).map(
     (line) =>
       html`<li><span class="check check-${line.check}">${CHECK[line.check]}</span> ${line.text}</li>`,
   )}</ul>
-<h2>Sync runs</h2>
-${
-  runs.length === 0
-    ? html`<p>No sync runs yet.</p>`
-    : html`<ul class="items">${runs.map((run) => runItem(run, effectsMode))}</ul>`
-}
-<h2>Outstanding work</h2>
+</section>
+</div>
+<section aria-labelledby="displayed-work">
+<h2 id="displayed-work">Outstanding work</h2>
+<p class="note" id="work-sample">Limited sample: ${grouped(work.length)} displayed jobs, up to 25 of the latest outstanding jobs for this server. Counts below describe only this sample, not server-wide or global totals. Succeeded-job history is not included.</p>
+${sampleMetrics(work)}
 ${
   work.length === 0
-    ? html`<p>Nothing is queued, running, blocked, paused or failed.</p>`
-    : html`<ul class="items">${work.map(workItem)}</ul>`
-}`;
+    ? html`<p>No outstanding work in this limited sample.</p>`
+    : html`<div class="table-scroll" tabindex="0" role="region" aria-labelledby="work-caption"><table class="data-table" aria-describedby="work-sample">
+<caption id="work-caption">Displayed outstanding jobs — limited sample</caption>
+<thead><tr><th scope="col">Status</th><th scope="col">Work</th><th scope="col">Kind</th><th scope="col">Job</th><th scope="col">Attempt</th><th scope="col">When (UTC)</th><th scope="col">Details and diagnostic</th></tr></thead>
+<tbody>${work.map((job) => workRow(job, names))}</tbody>
+</table></div>`
+}
+</section>
+<section aria-labelledby="recent-runs">
+<h2 id="recent-runs">Recent refresh runs</h2>
+<p class="note">Up to 10 recent runs. Progress counts belong to each run; acquisition status is shown separately.</p>
+${
+  runs.length === 0
+    ? html`<p>No recent refresh runs to display.</p>`
+    : html`<div class="table-scroll" tabindex="0" role="region" aria-labelledby="run-caption"><table class="data-table">
+<caption id="run-caption">Recent refresh runs and acquisition outcomes</caption>
+<thead><tr><th scope="col">Run</th><th scope="col">Type</th><th scope="col">Run status</th><th scope="col">Progress</th><th scope="col">When (UTC)</th><th scope="col">Acquisition and details</th></tr></thead>
+<tbody>${runs.map((run) => runRow(run, effectsMode, names))}</tbody>
+</table></div>`
+}
+</section>`;
 }

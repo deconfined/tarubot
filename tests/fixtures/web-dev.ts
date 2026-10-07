@@ -14,8 +14,14 @@
  * tests/unit/web-server.test.ts drives the same harness end to end.
  */
 import { randomUUID } from "node:crypto";
+import {
+  ChannelFlagsBitField,
+  Collection,
+  PermissionFlagsBits,
+  PermissionsBitField,
+} from "discord.js";
 import { type Logger, pino } from "pino";
-import { applicationKey, lifecycleKey } from "../../src/application/keys.js";
+import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import { createReporter } from "../../src/application/reporting.js";
 import type { SyncStatusView } from "../../src/application/results.js";
@@ -23,10 +29,12 @@ import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { WebGuild } from "../../src/web/access.js";
 import { startWeb, type WebServer } from "../../src/web/server.js";
 import { type DiscordAccount, FakeDiscord } from "./discord-oauth.js";
 import { MemorySessions } from "./web-sessions.js";
+import { CHANNEL, configGuild, configReport, fcRow, ROLE } from "./replies/configuration.js";
 
 /** The invented application: its ID doubles as the OAuth client ID, as in production. */
 export const HARNESS_CLIENT_ID = "300000000000000001";
@@ -133,12 +141,76 @@ function syncView(): SyncStatusView {
     ],
   };
 }
+/** SDK-shaped invented caches: no gateway connection, fetched names or member data. */
+export function harnessGateway(): DiscordGateway {
+  const gateway: unknown = Object.create(DiscordGateway.prototype);
+  if (!(gateway instanceof DiscordGateway)) throw new Error("Invalid gateway fake");
+  const roles = new Collection(
+    Object.entries(ROLE).map(([label, id]) => [
+      id,
+      { id, name: label === "bot" ? "TaruBot" : `${label[0]?.toUpperCase()}${label.slice(1)}` },
+    ]),
+  );
+  const channels = new Collection(
+    Object.entries(CHANNEL).map(([label, id]) => [
+      id,
+      {
+        id,
+        name:
+          {
+            ledger: "fc-ledger",
+            notices: "officer-notices",
+            reviews: "guest-review",
+            lobby: "lobby",
+            officers: "officers",
+            changelog: "tarubot-updates",
+          }[label] ?? label,
+        flags: new ChannelFlagsBitField(),
+        isThread: () => false,
+        permissionsFor: () => new PermissionsBitField(PermissionFlagsBits.ViewChannel),
+      },
+    ]),
+  );
+  const guild = {
+    roles: { cache: roles },
+    channels: { cache: channels },
+    members: {
+      me: {},
+      cache: new Collection(
+        Object.values(HARNESS_ACCOUNTS).map((account) => [
+          account.id,
+          {
+            id: account.id,
+            displayName: account.label,
+          },
+        ]),
+      ),
+    },
+  };
+  Object.defineProperty(gateway, "client", {
+    value: { guilds: { cache: new Map([[HARNESS_GUILDS.example.id, guild]]) } },
+  });
+  return gateway;
+}
 
-/** The services the Status page requires, as prototype-backed fakes (tests/unit/commands.test.ts). */
+/** Read-only dashboard services, answered with the existing invented configuration fixtures. */
 function harnessServices(): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
   app.syncStatus = async () => syncView();
+  app.validate = async () =>
+    configReport({
+      guild: configGuild({
+        id: HARNESS_GUILDS.example.id,
+        access_policy_enabled: false,
+        lobby_channel_id: null,
+        officer_channel_id: null,
+      }),
+      fc: fcRow({
+        last_successful_roster_at: new Date(Date.now() - 12 * 60_000),
+        last_attempt_at: new Date(Date.now() - 12 * 60_000),
+      }),
+    });
   const lifecycle: unknown = Object.create(ApplicationLifecycle.prototype);
   if (!(lifecycle instanceof ApplicationLifecycle)) throw new Error("Invalid lifecycle fake");
   lifecycle.status = () => ({
@@ -166,7 +238,10 @@ function harnessServices(): Services {
     },
     visibility: { missing: null, onboardingPending: null, checked: null, checkedAt: null },
   });
-  return new Services().provide(applicationKey, app).provide(lifecycleKey, lifecycle);
+  return new Services()
+    .provide(applicationKey, app)
+    .provide(lifecycleKey, lifecycle)
+    .provide(gatewayKey, harnessGateway());
 }
 
 /**

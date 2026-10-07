@@ -74,6 +74,16 @@ The actor is resolved exactly as for a slash command: reused for up to 60 second
 
 Throw catalog `Failure` values. The error page maps the category to a status and shows the approved message with its code and ref; anything else is a 500 that shows neither its text nor its stack.
 
+### Dashboard data and presentation
+
+The first dashboard remains read-only. `/g/:guild/configuration` uses `Service.validate()` and the same `configurationChecks()` checklist as Discord. Validation is single-flight per application service and server, with successful results reused for 30 seconds from completion. Every lookup, including a memo hit, reauthorizes the officer; rejected checks are not retained. The page prints the check's actual UTC completion time.
+
+`/g/:guild/status` is labelled **Background work** in navigation. Its process health keeps only readiness, Discord, database and the Lodestone cooldown state. It shows up to 10 recent refresh runs and 25 outstanding jobs from `syncStatus()`, with counts explicitly limited to the displayed sample, not server-wide or global totals. Native `<details>` disclose officer diagnostics without scripts; arbitrary job payloads and process-wide diagnostics are not rendered.
+
+`src/web/mentions.ts` snapshots names from this server's gateway cache at render time, never stores them, and turns Discord mentions and timestamps into escaped, isolated text and UTC `<time>` elements. Uncached names fall back to IDs; obfuscated or permission-denied channels never expose cached names. Both pages declare `gatewayKey` alongside their data services.
+
+`src/web/theme.ts` bundles the generated design-system token stylesheet; `assets.ts` adds the responsive console layout. Token changes come from the design export's `tokens.json`, regenerated to `tokens.css` before rebundling. The device's light palette uses the exported light tokens. The only external assets are the design's Chakra Petch and Martian Mono fonts: the CSP admits Google's stylesheet and font hosts, not scripts or inline styles. The supplied `design/` reference mockups are not runtime source and are excluded from Biome checks.
+
 ### Forms
 
 `post` runs only after the same-origin and form-type checks, a session and a fresh actor. Parse the form with zod and return `{ invalid }` (422, with messages that never echo values) or `{ redirect }` (303).

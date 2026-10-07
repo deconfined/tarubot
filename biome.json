@@ -8,6 +8,7 @@
       "!**/dist",
       "!**/.astro",
       "!**/artifacts",
+      "!design",
       "!**/bun.lock",
       "!tarubot_backup.sql",
       "!REQUIREMENTS.md"

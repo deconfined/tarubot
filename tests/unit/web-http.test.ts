@@ -126,7 +126,7 @@ describe("the header set", () => {
     // is never Hono's default no-referrer, which makes browsers send Origin: null; no COEP.
     const SPEC = {
       "Content-Security-Policy":
-        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Resource-Policy": "same-origin",
       "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",

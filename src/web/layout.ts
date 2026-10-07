@@ -66,12 +66,17 @@ const navItem = (link: NavLink): SafeHtml =>
  * Sign-out is a POST (E1), so it is a form; the empty form still sends the urlencoded type that
  * formOnly() requires. Sign-in, by contrast, is a link (servers.ts).
  */
-const ACCOUNT = html`<div class="account">
-  <form method="post" action="${PATHS.logout}"><button type="submit">Sign out</button></form>
-  <form method="post" action="${PATHS.logoutAll}">
-    <button type="submit" class="secondary">Sign out everywhere</button>
-  </form>
-</div>`;
+const ACCOUNT = html`<details class="account">
+  <summary>Account</summary>
+  <div class="account-menu">
+    <form method="post" action="${PATHS.logout}">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+    <form method="post" action="${PATHS.logoutAll}">
+      <button type="submit" class="secondary">Sign out everywhere</button>
+    </form>
+  </div>
+</details>`;
 
 /** The whole document around `main`. Views never render `<h1>`, `<html>` or the sign-out forms. */
 export function layout(model: LayoutModel, main: SafeHtml): SafeHtml {
@@ -85,14 +90,18 @@ export function layout(model: LayoutModel, main: SafeHtml): SafeHtml {
 <title>${title}</title>
 <link rel="icon" href="${FAVICON.path}" type="${FAVICON.contentType}">
 <link rel="stylesheet" href="${STYLESHEET.path}">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600&amp;family=Martian+Mono:wght@400;500&amp;display=swap">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="masthead">
 <div class="bar">
-<a class="brand" href="${PATHS.home}">${BRAND}</a>
+<a class="brand" href="${PATHS.home}"><img src="${FAVICON.path}" alt="" width="28" height="28">${BRAND}</a>
+${guild ? html`<a class="server-switch" href="${PATHS.home}">Switch server</a>` : ""}
 ${model.signedIn ? ACCOUNT : ""}
 </div>
+</header>
+<div class="${guild ? "workspace console" : "workspace landing"}">
 ${
   guild
     ? html`<nav class="server-nav" aria-label="Server pages">
@@ -101,11 +110,11 @@ ${
 </nav>`
     : ""
 }
-</header>
 <main id="main">
 <h1>${model.title}</h1>
 ${main}
 </main>
+</div>
 <footer class="site-footer">
 <p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a></p>
 </footer>
