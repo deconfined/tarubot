@@ -266,7 +266,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     }
     return page(
       c,
-      layout({ title: BRAND, signedIn: true }, renderHome({ signedIn: true, servers })),
+      layout({ title: "Your servers", signedIn: true }, renderHome({ signedIn: true, servers })),
     );
   });
   allow(PATHS.home, GET_ONLY);

@@ -114,20 +114,19 @@ function runRow(run: SyncRunRow, mode: EffectsMode, names: WebNames): SafeHtml {
           result: run.result,
         });
   return html`<tr>
-<th scope="row"><code>${untrusted(shortId(run.id))}</code></th>
-<td>${runType(run)}</td>
-<td>${RUN_LABEL[runState(run, mode)]}</td>
-<td>${grouped(run.work_completed)}/${grouped(run.work_total)} done${
+<th scope="row"><span class="cell-title">${runType(run)}</span><span class="cell-meta">Run <code>${untrusted(shortId(run.id))}</code></span></th>
+<td><span class="cell-title">${RUN_LABEL[runState(run, mode)]}</span></td>
+<td><span class="cell-title">${grouped(run.work_completed)}/${grouped(run.work_total)} done</span>${
     run.work_blocked > 0
-      ? html` · ${grouped(run.work_blocked)} ${mode === "live" ? "blocked" : "held"}`
+      ? html`<span class="cell-meta">${grouped(run.work_blocked)} ${mode === "live" ? "blocked" : "held"}</span>`
       : ""
-  }${run.work_failed > 0 ? html` · ${grouped(run.work_failed)} failed` : ""}</td>
-<td>Started ${at(run.created_at)}${
-    run.completed_at === null ? "" : html`<br>Completed ${at(run.completed_at)}`
-  }</td>
+  }${run.work_failed > 0 ? html`<span class="cell-meta">${grouped(run.work_failed)} failed</span>` : ""}</td>
+<td><div class="time-stack"><span>Started ${at(run.created_at)}</span>${
+    run.completed_at === null ? "" : html`<span>Completed ${at(run.completed_at)}</span>`
+  }</div></td>
 <td>${
     acquisition === null
-      ? html`<span class="note">No acquisition job recorded.</span>`
+      ? html`<span class="cell-meta">No acquisition job recorded.</span>`
       : html`<span class="marker marker-${acquisition.marker}">${MARKER[acquisition.marker]}</span>`
   }
 <details class="job-details"><summary>Run details ${untrusted(shortId(run.id))}</summary>
@@ -150,30 +149,24 @@ ${diagnostic(run.last_error, names)}
 function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml {
   const state = jobMarker(job);
   return html`<tr>
-<td><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span>${
-    state.dmBlocked
-      ? html`<p class="note">The recipient's DMs are closed; the decision still stands.</p>`
-      : ""
-  }</td>
-<td>${untrusted(jobLabel(job.kind))}</td>
-<td><code>${untrusted(job.kind)}</code></td>
-<th scope="row"><code>${untrusted(shortId(job.id))}</code></th>
-<td>${grouped(job.attempts)}</td>
-<td>${
+<th scope="row"><span class="cell-title">${untrusted(jobLabel(job.kind))}</span><span class="cell-meta"><code>${untrusted(job.kind)}</code></span><span class="cell-meta">Job <code>${untrusted(shortId(job.id))}</code></span></th>
+<td><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span><span class="cell-meta">Attempts: ${grouped(job.attempts)}</span></td>
+<td><div class="time-stack">${
     state.marker === "queued" || state.marker === "waiting"
-      ? html`${state.wait === "retrying" ? "Retry" : "Next"} ${at(job.due_at)}<br>`
+      ? html`<span>${state.wait === "retrying" ? "Retry" : "Next"} ${at(job.due_at)}</span>`
       : ""
-  }Added ${at(job.created_at)}${
+  }<span>Added ${at(job.created_at)}</span>${
     job.completed_at === null
       ? ""
-      : html`<br>${state.marker === "failed" ? "Stopped" : "Completed"} ${at(job.completed_at)}`
-  }</td>
+      : html`<span>${state.marker === "failed" ? "Stopped" : "Completed"} ${at(job.completed_at)}</span>`
+  }</div></td>
 <td><details class="job-details"><summary>Job details ${untrusted(shortId(job.id))}</summary>
 <dl class="facts">
 <dt>Job ID</dt><dd><code>${untrusted(job.id)}</code></dd>
 <dt>User</dt><dd>${job.user_id === null ? "No user attached" : userName(job.user_id, names)}</dd>
 <dt>Stored status</dt><dd><code>${untrusted(job.status)}</code></dd>
 </dl>
+${state.dmBlocked ? html`<p class="note">The recipient's DMs are closed; the decision still stands.</p>` : ""}
 ${state.skipped === undefined ? "" : html`<p class="diagnostic">Skipped: ${mentionText(state.skipped, names)}</p>`}
 ${diagnostic(job.last_error, names)}
 </details></td>
@@ -197,42 +190,42 @@ function sampleMetrics(work: SyncStatusView["work"]): SafeHtml {
 export function renderStatus(view: StatusView): SafeHtml {
   const { runs, work, effectsMode } = view.sync;
   const names = view.names ?? EMPTY_NAMES;
-  return html`<div class="dashboard-intro">
-<div>
-<p class="lead">Recent refresh runs, outstanding work and what needs attention on this server.</p>
-<p class="note">Read-only. Times are UTC; changes and retries are managed through Discord.</p>
+  return html`<div class="dashboard-intro status-intro">
+<div class="intro-copy">
+<p class="lead">Track this server's refresh runs and outstanding work.</p>
+<p class="notice">Read-only. All times are UTC. Manage changes and retries in Discord.</p>
 </div>
 <section class="panel featured" aria-labelledby="process-health">
-<h2 id="process-health">Process health</h2>
-<ul class="items">${healthLines(view.process, effectsMode).map(
-    (line) =>
-      html`<li><span class="check check-${line.check}">${CHECK[line.check]}</span> ${line.text}</li>`,
+<div class="panel-heading"><h2 id="process-health">Process health</h2></div>
+<ul class="checklist">${healthLines(view.process, effectsMode).map(
+    (line, index) =>
+      html`<li class="check-row${index === 0 ? " health-summary" : ""}"><span class="check check-${line.check}">${CHECK[line.check]}</span><span class="check-copy">${line.text}</span></li>`,
   )}</ul>
 </section>
 </div>
 <section aria-labelledby="displayed-work">
-<h2 id="displayed-work">Outstanding work</h2>
-<p class="note" id="work-sample">Limited sample: ${grouped(work.length)} displayed jobs, up to 25 of the latest outstanding jobs for this server. Counts below describe only this sample, not server-wide or global totals. Succeeded-job history is not included.</p>
+<div class="section-heading"><h2 id="displayed-work">Outstanding work</h2><p class="section-description">${grouped(work.length)} displayed</p></div>
+<p class="section-description" id="work-sample">Limited sample: up to 25 latest outstanding jobs for this server. Counts cover displayed jobs only, not server-wide or global totals. Successful-job history is not shown.</p>
 ${sampleMetrics(work)}
 ${
   work.length === 0
-    ? html`<p>No outstanding work in this limited sample.</p>`
+    ? html`<div class="empty-state"><p class="cell-title">No outstanding work in this limited sample.</p><p class="note">Request work in Discord, then reload this page to see its progress.</p></div>`
     : html`<div class="table-scroll" tabindex="0" role="region" aria-labelledby="work-caption"><table class="data-table" aria-describedby="work-sample">
 <caption id="work-caption">Displayed outstanding jobs — limited sample</caption>
-<thead><tr><th scope="col">Status</th><th scope="col">Work</th><th scope="col">Kind</th><th scope="col">Job</th><th scope="col">Attempt</th><th scope="col">When (UTC)</th><th scope="col">Details and diagnostic</th></tr></thead>
+<thead><tr><th scope="col">Work</th><th scope="col">Status</th><th scope="col">When (UTC)</th><th scope="col">Details and diagnostic</th></tr></thead>
 <tbody>${work.map((job) => workRow(job, names))}</tbody>
 </table></div>`
 }
 </section>
 <section aria-labelledby="recent-runs">
-<h2 id="recent-runs">Recent refresh runs</h2>
-<p class="note">Up to 10 recent runs. Progress counts belong to each run; acquisition status is shown separately.</p>
+<div class="section-heading"><h2 id="recent-runs">Recent refresh runs</h2><p class="section-description">${grouped(runs.length)} displayed</p></div>
+<p class="section-description" id="run-sample">Up to 10 recent runs for this server. Progress and aggregate outcome belong to the run; acquisition has its own status.</p>
 ${
   runs.length === 0
-    ? html`<p>No recent refresh runs to display.</p>`
-    : html`<div class="table-scroll" tabindex="0" role="region" aria-labelledby="run-caption"><table class="data-table">
+    ? html`<div class="empty-state"><p class="cell-title">No recent refresh runs to display.</p><p class="note">Request a refresh in Discord to start a new run.</p></div>`
+    : html`<div class="table-scroll" tabindex="0" role="region" aria-labelledby="run-caption"><table class="data-table" aria-describedby="run-sample">
 <caption id="run-caption">Recent refresh runs and acquisition outcomes</caption>
-<thead><tr><th scope="col">Run</th><th scope="col">Type</th><th scope="col">Run status</th><th scope="col">Progress</th><th scope="col">When (UTC)</th><th scope="col">Acquisition and details</th></tr></thead>
+<thead><tr><th scope="col">Refresh run</th><th scope="col">Aggregate outcome</th><th scope="col">Progress</th><th scope="col">When (UTC)</th><th scope="col">Acquisition and details</th></tr></thead>
 <tbody>${runs.map((run) => runRow(run, effectsMode, names))}</tbody>
 </table></div>`
 }

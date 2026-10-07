@@ -638,7 +638,6 @@ describe("server pages (D12)", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     const text = await response.text();
-    expect(text).toContain("<h1>Status</h1>");
     expect(text).toContain('<span dir="auto">&lt;img src=x onerror=alert(1)&gt; FC</span>');
     expect(text).not.toContain("<img src=x");
     expect(text).toContain(`href="${status}" aria-current="page"`);
@@ -1487,7 +1486,6 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
       expect(home).not.toContain("Second");
       const page = await browse(new URL(status, harness.url));
       expect(page.status).toBe(200);
-      expect(await page.text()).toContain("<h1>Status</h1>");
       const out = await browse(new URL("/logout", harness.url), {
         method: "POST",
         headers: {

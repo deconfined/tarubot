@@ -85,7 +85,7 @@ function officerAccess(report: ConfigurationReport): SafeHtml {
 }
 
 function checkItem(row: HealthCheck, names: WebNames): SafeHtml {
-  return html`<li><span class="check check-${row.check}">${CHECK[row.check]}</span> ${mentionText(row.text, names)}</li>`;
+  return html`<li class="check-row"><span class="check check-${row.check}">${CHECK[row.check]}</span><span class="check-copy">${mentionText(row.text, names)}</span></li>`;
 }
 
 /** Group the shared Discord checklist without hiding any section, unset resource or warning. */
@@ -97,9 +97,9 @@ function checklist(checks: readonly HealthCheck[], names: WebNames): SafeHtml[] 
     else sections.set(row.section, [row]);
   }
   return [...sections].map(
-    ([section, rows]) => html`<section class="settings-section">
+    ([section, rows]) => html`<section class="check-group">
 <h3>${section}</h3>
-<ul class="items">${rows.map((row) => checkItem(row, names))}</ul>
+<ul class="checklist">${rows.map((row) => checkItem(row, names))}</ul>
 </section>`,
   );
 }
@@ -109,10 +109,12 @@ function healthSummary(checks: readonly HealthCheck[], checkedAt: Date): SafeHtm
   let attention = 0;
   let waiting = 0;
   let passed = 0;
+  let disabled = 0;
   for (const row of checks) {
     if (row.check === "fail" || row.check === "warn") attention++;
     else if (row.check === "wait") waiting++;
     else if (row.check === "ok") passed++;
+    else if (row.check === "off") disabled++;
   }
   const title =
     attention > 0
@@ -121,11 +123,13 @@ function healthSummary(checks: readonly HealthCheck[], checkedAt: Date): SafeHtm
         ? "Ready, with work waiting."
         : "All checks passed.";
   return html`<section class="panel featured" aria-labelledby="configuration-health">
-<p class="note">Health check · checked ${at(checkedAt)}</p>
+<div class="panel-heading">
+<p class="note">Health snapshot</p>
 <h2 id="configuration-health">${title}</h2>
-<p>${passed} ${passed === 1 ? "check" : "checks"} passed. Nothing was changed.</p>
-<p><a class="button" href="#configuration-checklist">View health checklist</a></p>
-<p class="note">Review the full checklist below. Fix what a check names using <code>/config</code> in Discord.</p>
+</div>
+<p class="health-summary"><strong>${passed}</strong> passed · <strong>${waiting}</strong> waiting · <strong>${disabled}</strong> off</p>
+<p class="note">Checked ${at(checkedAt)}</p>
+<div class="panel-footer"><a class="button" href="#configuration-checklist">View health checklist</a></div>
 </section>`;
 }
 
@@ -136,34 +140,44 @@ export function renderConfiguration(view: ConfigurationView): SafeHtml {
   const checks = configurationChecks(report);
   const effects = EFFECTS[report.effectsMode];
   return html`<div class="dashboard-intro">
-<div>
+<div class="intro-copy">
 <p class="lead">${company(report, fc)}</p>
-<p class="note">Discord changes ${effects.text} · Onboarding ${guild.access_policy_enabled ? "On" : "Off"} · Role layout ${guild.role_layout_enabled ? "On" : "Off"}</p>
-<p>Read-only view. Change settings with <code>/config</code> in Discord; this dashboard does not change roles, channels or configuration.</p>
+<div class="state-strip" aria-label="Current configuration state">
+<span class="state-pill"><span class="check check-${effects.check}">${CHECK[effects.check]}</span> Discord changes <strong>${effects.text}</strong></span>
+<span class="state-pill">Onboarding <strong>${guild.access_policy_enabled ? "On" : "Off"}</strong></span>
+<span class="state-pill">Role layout <strong>${guild.role_layout_enabled ? "On" : "Off"}</strong></span>
+</div>
+<p class="notice">Read-only. Update settings with <code>/config</code> in Discord.</p>
 </div>
 ${healthSummary(checks, checkedAt)}
 </div>
 <section aria-labelledby="configuration-settings">
+<div class="section-heading">
 <h2 id="configuration-settings">Settings</h2>
+<p class="section-description">Saved configuration, including resources kept while a feature is off.</p>
+</div>
 <div class="settings-grid">
 <section class="settings-section">
 <h3>Free Company</h3>
+<p class="settings-description">Linked identity and the latest roster read.</p>
 <dl class="facts">
 <dt>Company</dt><dd>${company(report, fc)}</dd>
 <dt>Roster read</dt><dd>${roster(report, fc)}</dd>
 <dt>FC ID</dt><dd>${guild.fc_id ? html`<code>${guild.fc_id}</code>` : "Not linked"}</dd>
 ${fc?.last_attempt_at ? html`<dt>Last roster attempt</dt><dd>${at(fc.last_attempt_at)}</dd>` : ""}
-${fc?.last_error ? html`<dt>Last roster error</dt><dd><code>${untrusted(fc.last_error)}</code></dd>` : ""}
+${fc?.last_error ? html`<dt>Last roster error</dt><dd><details class="job-details"><summary>View roster diagnostic</summary><pre><code>${untrusted(fc.last_error)}</code></pre></details></dd>` : ""}
 </dl>
 </section>
 <section class="settings-section">
 <h3>Access roles</h3>
+<p class="settings-description">Saved roles used for company access.</p>
 <dl class="facts">${ROLES.map(
     ([field, label]) => html`<dt>${label}</dt><dd>${roleName(guild[field], names)}</dd>`,
   )}</dl>
 </section>
 <section class="settings-section">
 <h3>Channels</h3>
+<p class="settings-description">Destinations for logs, alerts and applications.</p>
 <dl class="facts">${CHANNELS.map(
     ([field, label]) => html`<dt>${label}</dt><dd>${channelName(guild[field], names)}</dd>`,
   )}
@@ -171,13 +185,26 @@ ${fc?.last_error ? html`<dt>Last roster error</dt><dd><code>${untrusted(fc.last_
 </dl>
 </section>
 <section class="settings-section">
-<h3>Officers and switches</h3>
+<h3>Officers</h3>
+<p class="settings-description">How officer access is granted.</p>
 <dl class="facts">
 <dt>Officer access</dt><dd>${officerAccess(report)}</dd>
 <dt>In-game rank</dt><dd>${guild.officer_rank_name ? untrusted(guild.officer_rank_name) : "Not set"}</dd>
+</dl>
+</section>
+<section class="settings-section">
+<h3>Onboarding</h3>
+<p class="settings-description">Access rooms remain listed when onboarding is off.</p>
+<dl class="facts">
 <dt>Onboarding</dt><dd>${guild.access_policy_enabled ? "On" : "Off"}</dd>
 <dt>Lobby</dt><dd>${channelName(guild.lobby_channel_id, names)}</dd>
 <dt>Officer room</dt><dd>${channelName(guild.officer_channel_id, names)}</dd>
+</dl>
+</section>
+<section class="settings-section">
+<h3>Discord automation</h3>
+<p class="settings-description">Activation, role ordering and the saved revision.</p>
+<dl class="facts">
 <dt>Discord changes</dt><dd><span class="check check-${effects.check}">${CHECK[effects.check]}</span> ${effects.text} · <code>${report.effectsMode}</code></dd>
 <dt>Role layout</dt><dd>${guild.role_layout_enabled ? "On · FC Leader > Officer > Member > Guest" : "Off · display and order untouched"}</dd>
 ${
@@ -193,8 +220,11 @@ ${
 </div>
 </section>
 <section aria-labelledby="configuration-checklist">
+<div class="section-heading">
 <h2 id="configuration-checklist">Health checklist</h2>
-<p class="note">The same resource and visibility checks as <code>/config validate</code>, checked ${at(checkedAt)}. Successful checks are reused for up to 30 seconds.</p>
+<p class="section-description">Every resource and visibility check from <code>/config validate</code>.</p>
+</div>
+<p class="note">Checked ${at(checkedAt)}. Successful checks are reused for up to 30 seconds.</p>
 <div class="settings-grid">${checklist(checks, names)}</div>
 </section>`;
 }

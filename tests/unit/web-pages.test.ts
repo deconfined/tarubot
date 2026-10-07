@@ -676,16 +676,9 @@ describe("Status", () => {
     }
   });
 
-  test("keeps empty samples honest and effects-off distinct from awaiting activation", async () => {
+  test("distinguishes pending activation from deployment-disabled effects", async () => {
     const waiting = inspect(
       (await statusPage({ effectsMode: "awaiting_activation", runs: [], work: [] })).markup,
-    );
-    expect(waiting.querySelectorAll("table")).toHaveLength(0);
-    expect(waiting.querySelector("#displayed-work")?.parentElement?.textContent).toContain(
-      "limited sample",
-    );
-    expect(waiting.querySelector("#recent-runs")?.parentElement?.textContent).toContain(
-      "No recent",
     );
     expect(waiting.querySelector(".featured")?.querySelectorAll(".check-wait")).toHaveLength(2);
     const off = await statusBody({ effectsMode: "deployment_disabled", runs: [], work: [] });

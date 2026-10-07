@@ -102,7 +102,7 @@ async function resolveActor(guildId: string, userId: string): Promise<Actor> {
   return actor;
 }
 
-/** Status's invented data: a failed roster run, and work in several states. */
+/** Background work's invented data: a completed roster run, and work in several states. */
 function syncView(): SyncStatusView {
   const at = new Date(Date.now() - 12 * 60_000);
   const job = (kind: string, status: string, last_error: string | null = null) => ({
@@ -126,7 +126,7 @@ function syncView(): SyncStatusView {
         enumeration_completed_at: at,
         requester_id: HARNESS_ACCOUNTS.officer.id,
         acquisition_kind: "roster",
-        acquisition_status: "completed",
+        acquisition_status: "succeeded",
         last_error: null,
         result: null,
         status: "completed",

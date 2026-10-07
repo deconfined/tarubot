@@ -6,7 +6,7 @@ import { processStatus, renderStatus } from "../views/status.js";
 
 export default definePage({
   path: "/g/:guild/status",
-  title: "Status",
+  title: "Background work",
   access: ["officer"],
   requires: [applicationKey, lifecycleKey, gatewayKey],
   nav: "Background work",
