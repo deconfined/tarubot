@@ -3,7 +3,9 @@
  * snapshot (the view's one holographic card) and the state readouts under it, the Settings cards
  * in a grid that adds columns as the page widens, and the health checklist as one card of
  * grouped rows. Shared vocabulary (cards, stats, status tokens, notes, notices, mentions,
- * checklist rows, disclosures) lives in components.ts; this module only arranges it.
+ * checklist rows, disclosures) lives in components.ts; this module only arranges it. Every grid of
+ * cards here and on Background work uses the same 16px gutter, so stacked grids with the same
+ * number of columns share their column edges.
  *
  * Nothing here adds glass: every surface is an .orr-card, so the reduced-transparency, forced-colors
  * and print fallbacks in media.ts already cover it.
@@ -13,7 +15,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 /* The summary: the health snapshot and the state readouts, closer together than sections. */
 .config-summary {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 /*
@@ -26,11 +28,15 @@ export const CONFIGURATION_CSS = `/* Server configuration */
   gap: var(--space-4);
 }
 
+/* The serif's smallest size at every width; a long count wraps onto a second line instead. */
 .health-card__title {
-  font-size: clamp(24px, 6vw, var(--display-sm));
+  font-size: var(--display-sm);
 }
 
-/* A tone tile behind the mark, by the worst check; the heading's words carry the meaning. */
+/*
+ * A tone tile behind the mark, by the worst check; the heading's words carry the meaning. The tile
+ * is a fixed 44px, so its icon keeps a fixed size too.
+ */
 .health-card__mark {
   display: inline-grid;
   place-items: center;
@@ -120,7 +126,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 .state-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-2);
+  gap: var(--space-4);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -156,7 +162,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 
 .settings-notice > .orr-icon {
   margin-top: 1px;
-  font-size: 16px;
+  font-size: 1rem;
   color: var(--info);
 }
 
@@ -234,7 +240,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 }
 
 .check-group__fold > summary .orr-icon {
-  font-size: 16px;
+  font-size: 1rem;
   color: var(--success);
 }
 

@@ -113,10 +113,10 @@ export const FONT_FACES = `/* Fonts: SIL Open Font License 1.1, notices at ${NOT
 `;
 
 /**
- * The dashboard's stylesheet (D4, D12): the shared design tokens, then the Orrery design system's
- * base, effects and components as ported in styles/, the console and entry frames, each page's
- * own rules, and last the viewer's preferences and print, which must win. One file at one hashed
- * path; STYLESHEET puts the font faces before it.
+ * The dashboard's stylesheet: the design tokens shared with the docs site, then the Orrery design
+ * system's base, effects and components as ported in styles/, the console and entry frames, each
+ * page's own rules, and last the viewer's preferences and print, which must win. One file at one
+ * hashed path; STYLESHEET puts the font faces before it.
  */
 const CSS = [
   TOKENS_CSS,

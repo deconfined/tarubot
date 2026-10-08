@@ -8,10 +8,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
 import { ASSETS, FONT_FACES, FONTS, NOTICES, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
-import { ICON_NAMES, type IconName, icon } from "../../src/web/icons.js";
+import { ICON_NAMES, icon } from "../../src/web/icons.js";
 import { errorPage, layout } from "../../src/web/layout.js";
 import { TOKENS_CSS } from "../../src/web/styles/tokens.js";
 import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
@@ -90,37 +91,16 @@ describe("assets", () => {
 });
 
 describe("icons", () => {
-  /** The vocabulary the dashboard's pages draw on (D11). */
-  const REQUIRED: readonly IconName[] = [
-    "activity",
-    "arrow-up-right",
-    "book-open",
-    "chevron-down",
-    "chevron-right",
-    "circle-check",
-    "circle-x",
-    "clock",
-    "compass",
-    "external-link",
-    "inbox",
-    "info",
-    "layout-dashboard",
-    "list",
-    "log-in",
-    "log-out",
-    "orbit",
-    "refresh-cw",
-    "scroll-text",
-    "server",
-    "settings",
-    "shield-check",
-    "telescope",
-    "triangle-alert",
-    "users",
-  ];
-
-  test("every required icon exists, and the names list is complete", () => {
-    expect([...ICON_NAMES].sort()).toEqual([...REQUIRED].sort());
+  test("every icon is one a page draws: the shell, a view or a page module names it", async () => {
+    // icons.ts holds only the icons in use. An icon name is quoted where it is drawn (icon("…"),
+    // a page's icon option, a view's mark or readout table), so a name quoted nowhere else is an
+    // icon no page renders.
+    const web = fileURLToPath(new URL("../../src/web/", import.meta.url));
+    let source = "";
+    for await (const path of new Bun.Glob("**/*.ts").scan({ cwd: web }))
+      if (path !== "icons.ts") source += await Bun.file(`${web}${path}`).text();
+    expect(ICON_NAMES.filter((name) => !source.includes(`"${name}"`))).toEqual([]);
+    expect(ICON_NAMES.length).toBeGreaterThan(0);
   });
 
   for (const name of ICON_NAMES)
@@ -196,6 +176,28 @@ describe("the stylesheet", () => {
     return blocks.join("\n");
   };
 
+  /** One rule: its selectors, one per comma-separated entry, and its declarations. */
+  interface Rule {
+    readonly selectors: readonly string[];
+    readonly body: string;
+  }
+
+  /** The style rules in `text`, nested ones included; at-rule preludes are left out. */
+  const rules = (text: string): Rule[] =>
+    [...text.replace(/@[^{;]*\{/gu, "{").matchAll(/([^{}]+)\{([^{}]*)\}/gu)].map((match) => ({
+      selectors: (match[1] ?? "").split(",").map((selector) => selector.trim()),
+      body: match[2] ?? "",
+    }));
+
+  /**
+   * The selectors of the rules in every `@media <query>` block that make `declaration`: a
+   * selector counts only in the rule that declares it, not anywhere in the block.
+   */
+  const declaring = (query: string, declaration: string): string[] =>
+    rules(mediaBlock(query))
+      .filter((rule) => rule.body.includes(declaration))
+      .flatMap((rule) => rule.selectors);
+
   test("is dark only, with no light palette or theme switch", () => {
     expect(css).toContain("color-scheme: dark;");
     expect(css).not.toContain("prefers-color-scheme");
@@ -226,37 +228,50 @@ describe("the stylesheet", () => {
     expect(css).not.toMatch(/outline: none/u);
   });
 
-  test("reduced motion stops the loops, the entrance, the spinner, the sheen, lift and press", () => {
-    const block = mediaBlock("(prefers-reduced-motion: reduce)");
-    for (const selector of [
-      ".orr-enter",
-      ".orr-holo-text",
-      ".orr-holo-edge::before",
-      ".orr-starfield::before",
-      ".orr-orbit__ring",
-      ".orr-pulse-dot",
-      ".orr-spinner",
-      ".orr-btn--primary",
-      ".orr-btn--primary::after",
-      ".orr-btn:active:not(:disabled)",
-      ".orr-card--interactive:hover",
-    ])
-      expect({ selector, stopped: block.includes(selector) }).toEqual({ selector, stopped: true });
-    expect(block).toContain("animation: none !important;");
-    expect(block).toContain("transition-duration: 0s !important;");
+  test("reduced motion stops every animation, the sheen, the press and the nudge", () => {
+    const motion = "(prefers-reduced-motion: reduce)";
+    // Every rule that starts an animation is named in the rule that stops animations.
+    const animated = rules(css)
+      .filter((rule) => /(?:^|[;{\s])animation:(?!\s*none\b)/u.test(rule.body))
+      .flatMap((rule) => rule.selectors);
+    expect(animated).toEqual(
+      expect.arrayContaining([
+        ".orr-enter",
+        ".orr-holo-edge::before",
+        ".orr-starfield::before",
+        ".orr-orbit__ring",
+        ".orr-btn--primary",
+      ]),
+    );
+    const stopped = declaring(motion, "animation: none !important;");
+    for (const selector of animated)
+      expect({ selector, stopped: stopped.includes(selector) }).toEqual({
+        selector,
+        stopped: true,
+      });
+    expect(declaring(motion, "display: none;")).toContain(".orr-btn--primary::after");
+    expect(declaring(motion, "transform: none;")).toEqual(
+      expect.arrayContaining([
+        ".orr-btn:active:not(:disabled)",
+        ".server-tile__link:hover > .orr-icon:last-child",
+      ]),
+    );
+    expect(declaring(motion, "transition-duration: 0s !important;")).toEqual(
+      expect.arrayContaining(["*", "*::before", "*::after"]),
+    );
   });
 
   test("reduced transparency, forced colors and print each have their fallback", () => {
-    for (const glass of [".orr-card", ".sidebar", ".topbar", ".orr-btn--secondary"])
-      expect(mediaBlock("(prefers-reduced-transparency: reduce)")).toContain(glass);
-    const forced = mediaBlock("(forced-colors: active)");
-    for (const edged of [".orr-card", ".orr-badge", ".check", ".marker", ".orr-btn"])
-      expect(forced).toContain(edged);
-    expect(forced).toContain("border: 1px solid");
-    const print = mediaBlock("print");
-    expect(print).toContain("color: #000 !important;");
-    for (const chrome of [".sidebar", ".topbar", ".entry-bar", ".entry-backdrop"])
-      expect(print).toContain(chrome);
+    expect(declaring("(prefers-reduced-transparency: reduce)", "backdrop-filter: none;")).toEqual(
+      expect.arrayContaining([".orr-card", ".sidebar", ".topbar", ".orr-btn--secondary"]),
+    );
+    expect(declaring("(forced-colors: active)", "border: 1px solid")).toEqual(
+      expect.arrayContaining([".orr-card", ".check", ".marker", ".orr-btn"]),
+    );
+    expect(declaring("print", "color: #000 !important;")).toContain("*");
+    expect(declaring("print", "display: none !important;")).toEqual(
+      expect.arrayContaining([".sidebar", ".topbar", ".entry-bar", ".entry-backdrop"]),
+    );
   });
 
   test("every class the shell and the entry pages render has a rule", async () => {

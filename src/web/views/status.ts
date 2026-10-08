@@ -6,9 +6,8 @@
  * one featured card, laid out like the design's bot status card; the sample counts are a row of
  * stats; work and runs are tables in their own scroll regions, like the design's log table, with
  * each row's facts and diagnostic in a native disclosure. The view has no controls: changes and
- * retries happen in Discord. The test-pinned hooks stay beside the design's classes (D12):
- * .featured, the bracketed .check tokens, the .marker badges, .metrics dd, #work-sample and
- * .diagnostic.
+ * retries happen in Discord. The test-pinned hooks stay beside the design's classes: .featured,
+ * the bracketed .check tokens, the .marker badges, .metrics dd, #work-sample and .diagnostic.
  */
 import type { ApplicationLifecycle } from "../../application/lifecycle.js";
 import type { EffectsMode, SyncRunRow, SyncStatusView } from "../../application/results.js";
@@ -101,7 +100,7 @@ function healthLines(process: ProcessStatus, mode: EffectsMode): HealthLine[] {
  */
 function processHealth(process: ProcessStatus, mode: EffectsMode): SafeHtml {
   return html`<section class="orr-card orr-card--holo orr-holo-edge featured process-health" aria-labelledby="process-health">
-<div class="orr-card__head"><div class="orr-card__titles"><p class="orr-label">TaruBot</p><h2 class="orr-card__title" id="process-health">Process health</h2></div></div>
+<div class="orr-card__head"><div class="orr-card__titles"><h2 class="orr-card__title" id="process-health">Process health</h2></div></div>
 <div class="orr-card__body">
 <ul class="checklist process-health__checks">${healthLines(process, mode).map(
     (line, index) =>
@@ -266,12 +265,12 @@ export function renderStatus(view: StatusView): SafeHtml {
 <p class="notice">Read-only. All times are UTC. Manage changes and retries in Discord.</p>
 ${processHealth(view.process, effectsMode)}
 <section class="status-section" aria-labelledby="displayed-work">
-<div class="section-heading"><h2 id="displayed-work">Outstanding work</h2><p class="section-description">${grouped(work.length)} displayed</p></div>
+<div class="section-heading"><h2 id="displayed-work">Outstanding work</h2><p class="section-description section-count">${grouped(work.length)} displayed</p></div>
 <p class="section-description" id="work-sample">Limited sample: up to 25 latest outstanding jobs for this server. Counts cover displayed jobs only, not server-wide or global totals. Successful-job history is not shown.</p>
 ${sampleMetrics(work)}
 ${
   work.length === 0
-    ? html`<p class="empty-state">No outstanding work in this limited sample.</p>`
+    ? html`<div class="empty-state"><p class="cell-title">No outstanding work in this limited sample.</p><p class="note">Request work in Discord, then reload this page to see its progress.</p></div>`
     : dataTable(
         "work",
         "Displayed outstanding jobs — limited sample",
@@ -281,11 +280,11 @@ ${
 }
 </section>
 <section class="status-section" aria-labelledby="recent-runs">
-<div class="section-heading"><h2 id="recent-runs">Recent refresh runs</h2><p class="section-description">${grouped(runs.length)} displayed</p></div>
+<div class="section-heading"><h2 id="recent-runs">Recent refresh runs</h2><p class="section-description section-count">${grouped(runs.length)} displayed</p></div>
 <p class="section-description" id="run-sample">Up to 10 recent runs for this server. Progress and aggregate outcome belong to the run; acquisition has its own status.</p>
 ${
   runs.length === 0
-    ? html`<p class="empty-state">No recent refresh runs to display.</p>`
+    ? html`<div class="empty-state"><p class="cell-title">No recent refresh runs to display.</p><p class="note">Request a refresh in Discord to start a new run.</p></div>`
     : dataTable(
         "run",
         "Recent refresh runs and acquisition outcomes",

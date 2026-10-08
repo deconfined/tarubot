@@ -1,7 +1,9 @@
 /**
- * The Orrery design system's effect utilities (styles/effects.css): keyframes, glass, the
- * holographic text and edge, glows, the mono instrument label, the scale and hairline dividers,
- * the starfield, the orbit rings, the pulse dot, the spinner and the page entrance.
+ * The Orrery design system's effect utilities (styles/effects.css) that TaruBot's pages render:
+ * keyframes, the holographic edge, the mono instrument label, the scale and hairline dividers, the
+ * starfield, the orbit rings and the page entrance. The glass utilities (cards and the shell draw
+ * their own glass), the holographic text, the glows, the pulse dot and the spinner are not ported
+ * until a page renders them.
  *
  * Changes from the export:
  * - the holographic edge draws its own conic gradient from --holo-angle, so its rotation shows
@@ -10,7 +12,7 @@
  * - the orbit rings' geometry, which the design's kit sets in style attributes the CSP refuses,
  *   is a set of modifier classes;
  * - every reduced-motion rule lives in styles/media.ts, which also stops what the export's own
- *   rule missed (the entrance, the spinner, the button sheen, lift and press).
+ *   rule missed (the entrance, the button sheen and press, the server links' arrow nudge).
  */
 export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/effects.css */
 @keyframes orr-holo-drift {
@@ -44,18 +46,6 @@ export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/e
   }
 }
 
-@keyframes orr-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.15);
-  }
-}
-
 @keyframes orr-rise-in {
   from {
     opacity: 0;
@@ -65,35 +55,6 @@ export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/e
     opacity: 1;
     transform: none;
   }
-}
-
-/* Glass: only over a backdrop to blur, and never inside other glass. */
-.orr-glass {
-  background: var(--glass-fill);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-edge), var(--shadow-1);
-}
-
-.orr-glass-strong {
-  background: var(--glass-fill-strong);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-edge), var(--shadow-3);
-}
-
-/* Holographic text: one italic word in a heading, at most once per page. */
-.orr-holo-text {
-  background: var(--holo-text);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-  animation: orr-holo-drift calc(var(--dur-holo) * 1.6) linear infinite;
-  filter: drop-shadow(0 0 18px oklch(0.8 0.13 250 / 0.28));
 }
 
 /*
@@ -120,18 +81,6 @@ export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/e
   pointer-events: none;
   opacity: var(--holo-edge-opacity, 0.85);
   transition: opacity var(--dur-slow) var(--ease-out);
-}
-
-.orr-glow-text {
-  text-shadow: var(--text-glow);
-}
-
-.orr-glow {
-  box-shadow: var(--glow-cyan);
-}
-
-.orr-glow-violet {
-  box-shadow: var(--glow-violet);
 }
 
 /* The mono instrument label: written in sentence case, uppercased here. */
@@ -299,28 +248,6 @@ export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/e
 
 .orr-orbit__planet--violet {
   --planet: var(--violet-400);
-}
-
-/* Status pulse dot, in its parent's color. */
-.orr-pulse-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 10px currentColor;
-  animation: orr-pulse var(--dur-pulse) var(--ease-in-out) infinite;
-}
-
-.orr-spinner {
-  flex-shrink: 0;
-  width: 1em;
-  height: 1em;
-  border-radius: 50%;
-  border: 1.5px solid currentColor;
-  border-right-color: transparent;
-  border-bottom-color: transparent;
-  opacity: 0.85;
-  animation: orr-spin 900ms linear infinite;
 }
 
 /* The page entrance; server-rendered pages replay it on every load. */

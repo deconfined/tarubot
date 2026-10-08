@@ -70,7 +70,7 @@ html {
 
 /* The type-only wordmark (no logo exists); the design's one serif use below 28px. */
 .wordmark {
-  font: 400 22px/1 var(--font-display);
+  font: 400 var(--text-2xl) / 1 var(--font-display);
   font-synthesis: none;
   letter-spacing: var(--tracking-display);
   white-space: nowrap;
@@ -119,14 +119,28 @@ html {
 
 .server-switch__name {
   overflow: hidden;
-  font: 600 14px/1.2 var(--font-sans);
+  font: 600 var(--text-md) / 1.2 var(--font-sans);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/*
+ * The name itself is the isolate (untrusted() gives it dir="auto"), so the ellipsis goes on it:
+ * there it cuts the name's end in the name's own direction. On the line box around it, a name in
+ * a right-to-left script would lose its start and show only a trailing Latin part. A name that
+ * fits stays at the left, beside the initials, whatever its direction.
+ */
+.server-switch__name > [dir="auto"] {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
 .server-switch__hint {
   overflow: hidden;
-  font: 500 10px/1.2 var(--font-mono);
+  font: 500 var(--text-2xs) / 1.2 var(--font-mono);
   letter-spacing: 0.08em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -135,7 +149,7 @@ html {
 }
 
 .server-switch > .orr-icon {
-  font-size: 16px;
+  font-size: 1rem;
   color: var(--text-muted);
 }
 
@@ -177,7 +191,7 @@ html {
 }
 
 .nav-item .orr-icon {
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .nav-item:hover,
@@ -253,7 +267,7 @@ html {
 }
 
 .account__summary .orr-icon {
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--text-muted);
   transition: transform var(--dur-fast) var(--ease-out);
 }
@@ -337,7 +351,7 @@ html {
 
 .page-header__title {
   color: var(--text-primary);
-  font: 400 clamp(28px, 6vw, 44px) / 1.05 var(--font-display);
+  font: 400 clamp(var(--display-sm), 6vw, 2.75rem) / 1.05 var(--font-display);
   font-synthesis: none;
   letter-spacing: var(--tracking-display);
 }
@@ -374,11 +388,59 @@ html {
 }
 
 /*
+ * The bar, below 64rem. The open account menu hangs under the whole bar, at the bar's edge, so it
+ * never covers the navigation strip; while it is open the scroll padding grows past its panel, so
+ * the panel can't hide whatever takes focus either (WCAG 2.4.11). A disclosure stays open until
+ * its summary is used again, so the panel must stay clear of focus by itself.
+ */
+@media (max-width: 63.99rem) {
+  .sidebar > .account {
+    position: static;
+  }
+  .sidebar .account__menu {
+    right: var(--space-4);
+  }
+}
+
+@media (min-width: 40rem) and (max-width: 63.99rem) {
+  .sidebar .account__menu {
+    right: var(--gutter);
+  }
+}
+
+@media (max-width: 63.99rem) and (min-height: 30rem) {
+  html:has(.sidebar > .account[open]) {
+    scroll-padding-top: 15.5rem;
+  }
+}
+
+/*
+ * A short viewport, such as a phone in landscape or 400% zoom: a sticky bar would take half the
+ * screen, so it scrolls away with the page and no longer needs the scroll padding.
+ */
+@media (max-width: 63.99rem) and (max-height: 29.99rem) {
+  .sidebar {
+    position: relative;
+  }
+  html {
+    scroll-padding-top: 0;
+  }
+}
+
+/*
  * Narrow phones: the switcher keeps the server's name, moving its hint to assistive text, and on
- * the narrowest drops the decorative initials too.
+ * the narrowest drops the decorative initials too. The navigation tabs get the smaller UI size and
+ * tighter padding, and below 360px lose their icons, so each label keeps to one line; a larger
+ * text setting may still wrap one, rather than spill out of its tab.
  */
 @media (max-width: 23.99rem) {
   .server-switch .orr-avatar {
+    display: none;
+  }
+}
+
+@media (max-width: 22.49rem) {
+  .nav-item .orr-icon {
     display: none;
   }
 }
@@ -394,11 +456,15 @@ html {
   .server-switch > .orr-icon {
     display: none;
   }
+  .nav-item {
+    padding-inline: 4px;
+    font: var(--type-ui-sm);
+  }
 }
 
 @media (min-width: 30rem) {
   .wordmark {
-    font-size: 26px;
+    font-size: 1.625rem;
   }
 }
 
@@ -455,7 +521,7 @@ html {
   .side-nav__caption {
     display: block;
     padding: 6px 10px 8px;
-    font-size: 10px;
+    font-size: var(--text-2xs);
   }
   .side-nav__list {
     grid-auto-flow: row;
@@ -470,7 +536,7 @@ html {
     text-align: left;
   }
   .nav-item .orr-icon {
-    font-size: 18px;
+    font-size: 1.125rem;
   }
   .nav-item:hover {
     background: var(--surface-hover);
@@ -486,11 +552,24 @@ html {
   }
   .side-nav__context {
     display: grid;
-    gap: 4px;
+    gap: var(--space-2);
     margin-top: auto;
     padding: var(--space-4) 10px 0;
     color: var(--text-muted);
     font: var(--type-caption);
+  }
+  /* Two notes, not one ragged paragraph: what the pages cover, then where changes happen. */
+  .side-nav__context > :first-child {
+    color: var(--text-secondary);
+  }
+  .side-nav__note {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+  .side-nav__note > .orr-icon {
+    margin-top: 0.15em;
+    color: var(--info);
   }
   .sidebar > .account {
     padding-top: var(--space-3);
@@ -513,6 +592,7 @@ html {
     left: 0;
     width: auto;
   }
+  /* The label starts where the page's column starts, however wide the screen (as .main). */
   .topbar {
     position: sticky;
     top: 0;
@@ -520,7 +600,7 @@ html {
     display: flex;
     align-items: center;
     height: var(--topbar-h);
-    padding: 0 var(--gutter);
+    padding: 0 max(var(--gutter), calc((100% - var(--content-max)) / 2));
     background: oklch(0.12 0.03 280 / 0.6);
     -webkit-backdrop-filter: var(--glass-blur);
     backdrop-filter: var(--glass-blur);

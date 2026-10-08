@@ -1,10 +1,11 @@
 /**
- * One design source, two copies (D4): the docs site's files are the originals, and the dashboard
+ * One design source, two copies: the docs site's files are the originals, and the dashboard
  * carries copies because it serves nothing from disk and the site can't import from src/. The
  * design tokens, the favicon, the third-party notices and the four self-hosted fonts must be
- * identical on both surfaces, and each font must be the WOFF2 file its pinned SHA-256 names.
- * Fixing a failure here means copying the site file over (tokens.ts, notices.ts, the favicon in
- * assets.ts) or regenerating fonts.ts with `bun --no-env-file scripts/web-fonts.ts`.
+ * identical on both surfaces, and each font must be a whole WOFF2 file, the very file its
+ * Fontsource package ships. Fixing a failure here means copying the site file over (tokens.ts,
+ * notices.ts, the favicon in assets.ts) or regenerating fonts.ts with
+ * `bun --no-env-file scripts/web-fonts.ts`; a deliberate font update also updates UPSTREAM.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -26,6 +27,22 @@ const root = (path: string) => fileURLToPath(new URL(`../../${path}`, import.met
 const bytes = async (path: string) => new Uint8Array(await Bun.file(root(path)).arrayBuffer());
 /** Hex SHA-256 of some bytes. */
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
+
+/**
+ * The SHA-256 of each font file in its upstream npm package: @fontsource/instrument-serif 5.3.0,
+ * @fontsource-variable/manrope 5.3.0 and @fontsource-variable/jetbrains-mono 5.3.0, package/files/.
+ * Pinned here, apart from the generated file, because fonts.ts takes its SHA-256 from the same
+ * site file it encodes: a damaged site font, regenerated, would otherwise match itself.
+ */
+const UPSTREAM: Readonly<Record<string, string>> = {
+  "instrument-serif-latin-400-normal":
+    "5eb09b5ac0e28b67c2f041c8ba6d244604ca0c0980d65912ab2d47fed84ddc31",
+  "instrument-serif-latin-400-italic":
+    "5a51946dfffa82972bc98745359c46761515641fda557c25116459a9f83da4a7",
+  "manrope-latin-wght-normal": "a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972",
+  "jetbrains-mono-latin-wght-normal":
+    "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e",
+};
 
 /** Where the site keeps the fonts, and the generated constant for each file. */
 const FONT_DIRECTORY = "site/src/assets/fonts";
@@ -61,10 +78,15 @@ describe("the dashboard's copies equal the docs site's files", () => {
   });
 
   for (const font of GENERATED)
-    test(`${font.stem}: the same bytes, the pinned SHA-256 and WOFF2`, async () => {
+    test(`${font.stem}: the same bytes, a whole WOFF2 file, the upstream SHA-256`, async () => {
       const decoded = Uint8Array.fromBase64(font.base64);
       expect(new TextDecoder().decode(decoded.subarray(0, 4))).toBe("wOF2");
+      // The header's total length (bytes 8-11, big-endian) is the file's: nothing cut off.
+      expect(new DataView(decoded.buffer, decoded.byteOffset).getUint32(8)).toBe(
+        decoded.byteLength,
+      );
       expect(sha256(decoded)).toBe(font.sha256);
+      expect(font.sha256).toBe(UPSTREAM[font.stem] ?? "no upstream SHA-256 pinned");
       expect(decoded).toEqual(await bytes(`${FONT_DIRECTORY}/${font.stem}.woff2`));
     });
 

@@ -91,11 +91,11 @@ function hue(id: string): number {
 }
 
 /**
- * A server's initials avatar (D24): the first letter or digit of each of the name's first two
- * words, on a hue picked by the ID. It is decorative and aria-hidden, since the name sits beside
- * it. The initials are deliberately not isolated: they hold letters and digits only, so no bidi
- * control, and each page must still isolate a server's name exactly once (web-pages.test.ts).
- * A name with neither shows the server icon instead.
+ * A server's initials avatar: the first letter or digit of each of the name's first two words, on
+ * a hue picked by the ID. It is decorative and aria-hidden, since the name sits beside it. The
+ * initials are deliberately not isolated: they hold letters and digits only, so no bidi control,
+ * and each page must still isolate a server's name exactly once (web-pages.test.ts). A name with
+ * neither shows the server icon instead.
  */
 export function serverAvatar(server: ServerIdentity): SafeHtml {
   const initials = server.name
@@ -108,7 +108,7 @@ export function serverAvatar(server: ServerIdentity): SafeHtml {
   return html`<span class="orr-avatar orr-avatar--square orr-avatar--hue-${hue(server.id)}" aria-hidden="true">${initials === "" ? icon("server") : initials}</span>`;
 }
 
-/** The type-only wordmark (D13), a link to the start page. */
+/** The type-only wordmark (the design has no logo), a link to the start page. */
 const WORDMARK = html`<a class="wordmark" href="${PATHS.home}">${BRAND}</a>`;
 
 /** One navigation item; the label is constant wording and the target passes href(). */
@@ -120,9 +120,9 @@ const navItem = (link: NavLink): SafeHtml => {
 };
 
 /**
- * The server switcher (D22): a link to the server list, styled as the design's switcher. It is the
- * one place a server page shows the server's name; the shell knows no member count or other
- * server data, so it shows none.
+ * The server switcher: a link to the server list, styled as the design's switcher. It is the one
+ * place a server page shows the server's name; the shell knows no member count or other server
+ * data, so it shows none.
  */
 const switcher = (guild: ServerIdentity): SafeHtml =>
   html`<a class="server-switch" href="${PATHS.home}">${serverAvatar(guild)}<span class="server-switch__text"><span class="server-switch__name">${untrusted(guild.name)}</span> <span class="server-switch__hint">Switch server</span></span>${icon("chevron-right")}</a>`;
@@ -180,7 +180,7 @@ ${switcher(guild)}
 <nav class="side-nav" aria-label="Server pages">
 <p class="orr-label side-nav__caption">Workspace</p>
 <ul class="side-nav__list">${guild.nav.map(navItem)}</ul>
-<div class="side-nav__context"><p>Settings and background work</p><p>Changes are managed in Discord.</p></div>
+<div class="side-nav__context"><p>Settings and background work</p><p class="side-nav__note">${icon("info")}Changes are managed in Discord.</p></div>
 </nav>
 ${model.signedIn ? ACCOUNT : ""}
 </header>

@@ -35,7 +35,7 @@ const AUDIENCE =
 
 /**
  * The sign-in link (/login takes no return path here, so it comes back to this list): the view's
- * one primary, holographic button (D9).
+ * one primary, holographic button, the design's whole holographic budget for a button.
  */
 const SIGN_IN = html`<a class="orr-btn orr-btn--primary orr-btn--lg orr-btn--block" href="${PATHS.login}">${icon("log-in")}Sign in with Discord</a>`;
 

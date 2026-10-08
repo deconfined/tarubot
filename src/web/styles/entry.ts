@@ -133,7 +133,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 
 .server-tile__name {
   color: var(--text-primary);
-  font: 600 16px/1.3 var(--font-sans);
+  font: 600 var(--text-lg) / 1.3 var(--font-sans);
   letter-spacing: var(--tracking-ui);
 }
 
@@ -164,7 +164,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .server-tile__link .orr-icon {
-  font-size: 16px;
+  font-size: 1rem;
   color: var(--cyan-400);
 }
 
@@ -217,7 +217,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .entry--welcome .page-header__title {
-  font-size: clamp(56px, 13vw, 88px);
+  font-size: clamp(3.5rem, 13vw, var(--display-2xl));
   line-height: 0.98;
   letter-spacing: -0.02em;
 }
@@ -231,7 +231,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .welcome-copy__title {
-  font: 400 clamp(28px, 4vw, 36px) / 1.1 var(--font-display);
+  font: 400 clamp(var(--display-sm), 4vw, var(--display-md)) / 1.1 var(--font-display);
 }
 
 .welcome-copy__lead {
@@ -270,7 +270,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
   color: var(--text-muted);
 }
 
-/* A feature's icon tile: one of the places the design lets an icon glow. */
+/* A feature's icon tile, a fixed size: one of the places the design lets an icon glow. */
 .feature__icon {
   display: inline-grid;
   flex-shrink: 0;
@@ -303,7 +303,7 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .sign-in__title {
-  font: 400 clamp(28px, 4vw, 36px) / 1.1 var(--font-display);
+  font: 400 clamp(var(--display-sm), 4vw, var(--display-md)) / 1.1 var(--font-display);
 }
 
 .sign-in__text {

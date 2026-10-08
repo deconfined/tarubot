@@ -228,7 +228,7 @@ describe("the shell and /", () => {
     expect(document.querySelector("h1")?.textContent).toBe("TaruBot");
     expect(document.querySelector('a[href="/login"]')?.textContent).toBe("Sign in with Discord");
     expect(document.querySelectorAll("form, button")).toHaveLength(0);
-    // The design's holographic budget (D9): the sign-in link is the one primary button, and the
+    // The design's holographic budget: the sign-in link is the one primary button, and the
     // login card the one card with the turning edge.
     expect(
       [...document.querySelectorAll(".orr-btn--primary")].map((link) => link.getAttribute("href")),
@@ -262,7 +262,7 @@ describe("the shell and /", () => {
     expect(document.querySelectorAll("main img")).toHaveLength(0);
     expect(isolated(document)).toEqual(HOSTILE);
     expect(document.querySelectorAll('.servers a[href$="/status"]')).toHaveLength(HOSTILE.length);
-    // Each tile's initials: letters and digits only, decorative, outside dir="auto" (D24).
+    // Each tile's initials: letters and digits only, decorative, outside dir="auto".
     const initials = [...document.querySelectorAll(".servers .orr-avatar")].map((avatar) => [
       avatar.getAttribute("aria-hidden"),
       avatar.textContent,
@@ -792,15 +792,26 @@ describe("Status", () => {
     }
   });
 
-  test("an empty sample says so in one sentence each and draws no table", async () => {
+  test("an empty sample says so, says how to start work, and draws no table", async () => {
     const document = inspect(
       (await statusPage({ effectsMode: "live", runs: [], work: [] })).markup,
     );
     const main = document.querySelector("main");
     expect(main?.querySelectorAll("table, .table-scroll")).toHaveLength(0);
-    expect([...(main?.querySelectorAll(".empty-state") ?? [])].map((p) => p.textContent)).toEqual([
-      "No outstanding work in this limited sample.",
-      "No recent refresh runs to display.",
+    // Each empty state is its statement, then the guidance, in one box.
+    expect(
+      [...(main?.querySelectorAll(".empty-state") ?? [])].map((box) =>
+        [...box.children].map((paragraph) => [paragraph.tagName, paragraph.textContent]),
+      ),
+    ).toEqual([
+      [
+        ["P", "No outstanding work in this limited sample."],
+        ["P", "Request work in Discord, then reload this page to see its progress."],
+      ],
+      [
+        ["P", "No recent refresh runs to display."],
+        ["P", "Request a refresh in Discord to start a new run."],
+      ],
     ]);
     expect([...(main?.querySelectorAll(".metrics dd") ?? [])].map((dd) => dd.textContent)).toEqual([
       "0",

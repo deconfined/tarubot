@@ -1,21 +1,24 @@
 /**
- * Components for the dashboard: the parts of the Orrery design system's styles/components.css a
- * view-only TaruBot uses (icon, button, badge, tag, avatar, card, stat, tabs, table, kbd), then the
- * vocabulary TaruBot's pages share on top of them: status tokens, mentions, notes and notices,
- * section headings, fact lists, checklists, disclosures and empty states.
+ * Components for the dashboard: the parts of the Orrery design system's styles/components.css that
+ * TaruBot's pages render (icon, button, badge, avatar, card, stat and table), then the vocabulary
+ * the pages share on top of them: status tokens, mentions, notes and notices, section headings,
+ * fact lists, checklists, disclosures and empty states. A part no page renders is left out until
+ * one does, so every rule here styles markup that exists.
  *
  * Left out on purpose: the form controls, switches, sliders, dialog, tooltip and toast (v3 pages
  * have no controls; disclosures are `<details>`), the icon-only button (every control has a visible
- * label), the danger button and the Discord message preview.
+ * label), the danger button and the Discord message preview. Not yet rendered, so not ported:
+ * tags, tabs, keyboard keys, the badge's own classes and dot, the interactive, solid and padding
+ * card variants, the card actions, and the stat's unit and meta lines.
  *
  * Fixes to the export, each marked where it applies: link components don't inherit the link
- * hover (base.ts lowers its specificity), tabs also read aria-current, a table styles only its
- * column headers as labels and keeps row headers and captions readable, glass never nests inside
- * glass, and focus keeps base.ts's outline with the design's glow beside it.
+ * hover (base.ts lowers its specificity), a table styles only its column headers as labels and
+ * keeps row headers and captions readable, glass never nests inside glass, and focus keeps
+ * base.ts's outline with the design's glow beside it.
  *
  * TaruBot's test-pinned semantic classes (.check-*, .marker-*, .mention, .featured, .ref) stay on
- * the markup next to the design's classes (D12); the status tokens below are styled through them,
- * so a view needs no mapping from a token to a badge tone.
+ * the markup next to the design's classes; the status tokens are styled as badges through them, so
+ * a view needs no mapping from a token to a badge tone.
  */
 export const COMPONENTS_CSS = `/* Components: from the Orrery design system's styles/components.css */
 
@@ -27,10 +30,6 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   height: 1em;
   vertical-align: -0.125em;
   stroke-width: var(--icon-stroke, 1.85);
-}
-
-.orr-icon--glow {
-  filter: drop-shadow(0 0 6px currentColor);
 }
 
 /* Button: primary (holographic, one per page), secondary (glass) and ghost. */
@@ -59,7 +58,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 }
 
 .orr-btn .orr-icon {
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .orr-btn:focus-visible {
@@ -86,18 +85,18 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 }
 
 .orr-btn--sm .orr-icon {
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .orr-btn--lg {
   min-height: var(--control-lg);
   padding: 0 var(--space-5);
   border-radius: var(--radius-lg);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .orr-btn--lg .orr-icon {
-  font-size: 18px;
+  font-size: 1.125rem;
 }
 
 .orr-btn--block {
@@ -184,20 +183,19 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 
 /*
  * Never glass inside glass (the design's rule): a secondary button on a glass surface, and a card
- * nested in a card, turn solid. This holds even when a view forgets the solid variant.
+ * nested in a card, turn solid by where they sit, with no variant class for a view to forget.
  */
-:where(.orr-card, .orr-glass, .orr-glass-strong, .sidebar, .topbar) .orr-btn--secondary {
+:where(.orr-card, .sidebar, .topbar) .orr-btn--secondary {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   background: var(--surface-2);
 }
 
 /*
- * Badge: a short mono, uppercase status word. TaruBot's status tokens are badges too: a check
- * ([OK], [WARN], ...) and a job marker keep their exact text and pinned classes, which pick the
- * tone. Text always carries the meaning; the tone only reinforces it.
+ * Badge: a short mono, uppercase status word. TaruBot's status tokens are the design's badges: a
+ * check ([OK], [WARN], ...) and a job marker keep their exact text and pinned classes, which pick
+ * the tone. Text always carries the meaning; the tone only reinforces it.
  */
-.orr-badge,
 .check,
 .marker {
   display: inline-flex;
@@ -206,7 +204,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   min-height: 20px;
   padding: 0 8px;
   border-radius: var(--radius-pill);
-  font: 500 10.5px/1 var(--font-mono);
+  font: 500 0.65625rem / 1 var(--font-mono);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -216,16 +214,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   font-variant-emoji: text;
 }
 
-.orr-badge__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
-}
-
 /* Accent: work in progress and checks waiting on something. */
-.orr-badge--accent,
 .check-wait,
 .marker-running,
 .marker-saved {
@@ -235,14 +224,12 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 }
 
 /* Violet: work that will retry or continue later. */
-.orr-badge--violet,
 .marker-waiting {
   color: var(--violet-400);
   background: oklch(0.8 0.13 298 / 0.12);
   box-shadow: inset 0 0 0 1px oklch(0.8 0.13 298 / 0.3);
 }
 
-.orr-badge--success,
 .check-ok,
 .marker-done {
   color: var(--success);
@@ -250,7 +237,6 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   box-shadow: inset 0 0 0 1px oklch(0.8 0.13 162 / 0.3);
 }
 
-.orr-badge--warning,
 .check-warn,
 .marker-blocked {
   color: var(--warning);
@@ -258,7 +244,6 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   box-shadow: inset 0 0 0 1px oklch(0.82 0.13 78 / 0.3);
 }
 
-.orr-badge--danger,
 .check-fail,
 .marker-failed {
   color: var(--danger);
@@ -268,54 +253,10 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 
 /* Neutral is the base look: .check-off and the queued, paused, skipped and unchanged markers. */
 
-.orr-badge--holo {
-  color: var(--text-primary);
-  background: var(--holo-fill);
-  box-shadow: none;
-}
-
-.orr-badge--holo::before {
-  --holo-edge-opacity: 0.9;
-}
-
-/* Tag: a role or channel chip. */
-.orr-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 26px;
-  padding: 0 9px;
-  border-radius: var(--radius-sm);
-  font: 500 12.5px/1.2 var(--font-sans);
-  color: var(--text-secondary);
-  background: var(--surface-2);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
-  transition:
-    box-shadow var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.orr-tag__dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--night-300);
-}
-
-.orr-tag .orr-icon {
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-a.orr-tag:hover {
-  color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-}
-
 /*
- * Avatar: initials only (the CSP admits no Discord images), a 28% squircle for a server. The size
- * and hue are classes, since the design's per-avatar custom properties would need style
- * attributes; layout.ts picks the hue from the server ID.
+ * Avatar: initials only (the CSP admits no Discord images), a 28% squircle for a server. The hue
+ * is a class, since the design's per-avatar custom properties would need style attributes;
+ * layout.ts picks it from the server ID, and a frame sets the size through --size.
  */
 .orr-avatar {
   --size: 40px;
@@ -335,18 +276,6 @@ a.orr-tag:hover {
 
 .orr-avatar--square {
   border-radius: 28%;
-}
-
-.orr-avatar--sm {
-  --size: 28px;
-}
-
-.orr-avatar--md {
-  --size: 34px;
-}
-
-.orr-avatar--lg {
-  --size: 52px;
 }
 
 .orr-avatar--hue-0 {
@@ -387,7 +316,8 @@ a.orr-tag:hover {
 
 /*
  * Card: glass by default, solid inside another card, holographic (with .orr-holo-edge) for the
- * page's one featured card. Its head holds an eyebrow (.orr-label), a title and a description.
+ * page's one featured card. Its head holds an optional eyebrow (.orr-label), a title and a
+ * description.
  */
 .orr-card {
   --card-pad: var(--space-5);
@@ -408,7 +338,6 @@ a.orr-tag:hover {
     box-shadow var(--dur-base) var(--ease-out);
 }
 
-.orr-card--solid,
 :where(.orr-card) .orr-card {
   background: var(--surface-1);
   -webkit-backdrop-filter: none;
@@ -423,31 +352,6 @@ a.orr-tag:hover {
     var(--glass-edge),
     var(--shadow-2),
     var(--glow-holo);
-}
-
-/* A whole card that is a link: it lifts and shows its holographic edge on hover. */
-a.orr-card {
-  color: inherit;
-  text-decoration: none;
-}
-
-.orr-card--interactive.orr-holo-edge::before {
-  --holo-edge-opacity: 0;
-}
-
-.orr-card--interactive:hover,
-.orr-card--interactive:focus-visible {
-  transform: translateY(-2px);
-  box-shadow:
-    inset 0 0 0 1px transparent,
-    var(--glass-edge),
-    var(--shadow-2),
-    var(--glow-holo);
-}
-
-.orr-card--interactive:hover.orr-holo-edge::before,
-.orr-card--interactive:focus-visible.orr-holo-edge::before {
-  --holo-edge-opacity: 0.9;
 }
 
 .orr-card__head {
@@ -465,7 +369,7 @@ a.orr-card {
 }
 
 .orr-card__title {
-  font: 600 15px/1.3 var(--font-sans);
+  font: 600 0.9375rem / 1.3 var(--font-sans);
   letter-spacing: var(--tracking-ui);
   color: var(--text-primary);
 }
@@ -473,14 +377,6 @@ a.orr-card {
 .orr-card__desc {
   font: var(--type-caption);
   color: var(--text-muted);
-}
-
-.orr-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
 }
 
 .orr-card__body {
@@ -507,14 +403,6 @@ a.orr-card {
   --card-pad: var(--space-4);
 }
 
-.orr-card--pad-lg {
-  --card-pad: var(--space-6);
-}
-
-.orr-card--pad-none > .orr-card__body {
-  padding: 0;
-}
-
 /* Stat: a label over a mono readout; as a dl, dt is the label and dd the value. */
 .orr-stat {
   display: grid;
@@ -530,7 +418,7 @@ a.orr-card {
 }
 
 .orr-stat__label .orr-icon {
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--text-muted);
 }
 
@@ -539,105 +427,10 @@ a.orr-card {
   align-items: baseline;
   gap: 6px;
   margin: 0;
-  font: 400 30px/1 var(--font-mono);
+  font: 400 1.875rem / 1 var(--font-mono);
   letter-spacing: -0.02em;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
-}
-
-.orr-stat__unit {
-  font: var(--type-label);
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  text-transform: uppercase;
-}
-
-.orr-stat__meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font: var(--type-caption);
-  color: var(--text-muted);
-}
-
-/*
- * Tabs: links to sibling views, never in-place switching (no script). The current one carries
- * aria-current="page", read here as well as the design's aria-selected.
- */
-.orr-tabs {
-  display: flex;
-  gap: 2px;
-  overflow-x: auto;
-  box-shadow: inset 0 -1px 0 var(--border-subtle);
-}
-
-.orr-tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: var(--type-ui);
-  font-weight: 600;
-  white-space: nowrap;
-  text-decoration: none;
-  transition: color var(--dur-fast) var(--ease-out);
-}
-
-.orr-tab .orr-icon {
-  font-size: 16px;
-}
-
-.orr-tab:hover {
-  color: var(--text-primary);
-}
-
-.orr-tab::after {
-  content: "";
-  position: absolute;
-  right: 10px;
-  bottom: 0;
-  left: 10px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--cyan-400);
-  box-shadow:
-    0 0 10px var(--cyan-400),
-    0 0 2px var(--cyan-400);
-  opacity: 0;
-  transform: scaleX(0.4);
-  transition:
-    opacity var(--dur-base),
-    transform var(--dur-slow) var(--ease-out);
-}
-
-.orr-tab[aria-current="page"],
-.orr-tab[aria-selected="true"] {
-  color: var(--text-primary);
-}
-
-.orr-tab[aria-current="page"]::after,
-.orr-tab[aria-selected="true"]::after {
-  opacity: 1;
-  transform: none;
-}
-
-.orr-tab__count {
-  padding: 3px 6px;
-  border-radius: var(--radius-pill);
-  font: 500 10.5px/1 var(--font-mono);
-  background: var(--surface-2);
-  color: var(--text-muted);
-}
-
-.orr-tab[aria-current="page"] .orr-tab__count,
-.orr-tab[aria-selected="true"] .orr-tab__count {
-  background: var(--info-bg);
-  color: var(--cyan-400);
 }
 
 /*
@@ -706,27 +499,6 @@ a.orr-card {
   background: var(--surface-hover);
 }
 
-.orr-table .orr-table__mono {
-  font: var(--type-code);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.orr-kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 5px;
-  border-radius: 5px;
-  font: 500 11px/1 var(--font-mono);
-  color: var(--text-muted);
-  background: var(--surface-2);
-  box-shadow:
-    inset 0 0 0 1px var(--border-default),
-    inset 0 -1px 0 var(--border-default);
-}
-
 /* TaruBot's shared page vocabulary */
 
 /* The page's lede, directly under the page header; and quieter supporting text. */
@@ -757,21 +529,36 @@ a.orr-card {
   margin-top: calc(var(--space-4) - var(--space-8));
 }
 
+/* A chip that wraps onto another line gets its padding and corners on every line. */
 main code {
   padding: 1px 5px;
   border-radius: var(--radius-xs);
   color: var(--text-primary);
   background: var(--surface-2);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
-/* A section of a page: its heading row (serif title, muted count or description), then content. */
+/*
+ * A section of a page: its heading row, then content. The serif title shares its row only with a
+ * short count, kept at the end like the design's "All logs"; a description sentence wraps under
+ * the title, where it reads as the title's own.
+ */
 .section-heading {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2) var(--space-6);
+  gap: var(--space-1) var(--space-6);
   margin-bottom: var(--space-4);
+}
+
+.section-heading > .section-description {
+  grid-column: 1 / -1;
+}
+
+.section-heading > .section-count {
+  grid-row: 1;
+  grid-column: 2;
 }
 
 .section-description {
@@ -786,6 +573,8 @@ main code {
   color: var(--cyan-200);
   background: oklch(0.8 0.13 210 / 0.16);
   font-weight: 500;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 /*
@@ -820,7 +609,11 @@ main code {
   color: var(--text-primary);
 }
 
-/* A checklist: one row per check, its status token in a fixed column so the texts line up. */
+/*
+ * A checklist: one row per check, its status token in a fixed column so the texts line up. The
+ * column fits the widest token ([WARN], [FAIL], [WAIT]) with the 1px border forced colors and
+ * print give it, and no more, so a phone keeps most of the row for the sentence.
+ */
 .checklist {
   margin: 0;
   padding: 0;
@@ -829,9 +622,9 @@ main code {
 
 .check-row {
   display: grid;
-  grid-template-columns: 4.75rem minmax(0, 1fr);
+  grid-template-columns: 3.875rem minmax(0, 1fr);
   align-items: start;
-  gap: var(--space-3);
+  column-gap: 10px;
   padding: 10px 0;
 }
 
@@ -885,7 +678,7 @@ main details > summary:hover {
   color: var(--text-link-hover);
 }
 
-/* An empty table or list: one short statement, centered, no illustration. */
+/* An empty table or list: a statement, then how to start work; centered, no illustration. */
 .empty-state {
   display: grid;
   justify-items: center;

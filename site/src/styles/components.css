@@ -181,7 +181,7 @@
 
   /* ---------- Page content ---------- */
 
-  /* Links stay underlined, so colour is never the only cue: a quiet line that firms up on hover. */
+  /* Links stay underlined, so color is never the only cue: a quiet line that firms up on hover. */
   .sl-markdown-content a:not(.sl-anchor-link):not(:where(.not-content *)) {
     text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
     text-decoration-thickness: 1px;
@@ -195,7 +195,7 @@
     text-decoration-color: currentColor;
   }
 
-  /* Hover lightens body links; a link inside a callout keeps the callout's colour. */
+  /* Hover lightens body links; a link inside a callout keeps the callout's color. */
   .sl-markdown-content a:hover:not(:where(.not-content *, .starlight-aside *)) {
     color: var(--text-link-hover);
   }
@@ -232,20 +232,36 @@
   }
 
   /*
-   * Tables: a solid card that hugs the table, with the design's mono capital column heads.
-   * Starlight makes the table a block that scrolls inside its own area, which stays: fit-content
-   * sizes the card to the table, and max-width keeps a table wider than the column from widening
-   * the page.
+   * Tables: a solid card with the design's mono capital column heads. The build puts each Markdown
+   * table in a labelled scroll region the keyboard can focus (astro.config.mjs), and the region is
+   * the card: fit-content hugs the table, and a table wider than the column scrolls inside it
+   * rather than widening the page. Starlight makes the table itself the scrolling block; here it
+   * is a table again. A narrow column stacks the rows instead (the @container rule below), so the
+   * column is a container for it.
    */
-  .sl-markdown-content table:not(:where(.not-content *)) {
+  .sl-markdown-content:has(.table-scroll) {
+    container: markdown / inline-size;
+  }
+
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)) {
     width: fit-content;
     max-width: 100%;
+    overflow-x: auto;
     border-radius: var(--radius-lg);
-    font-size: 0.9375rem;
     background-color: var(--surface-1);
     box-shadow:
       inset 0 0 0 1px var(--border-subtle),
       var(--inner-highlight);
+  }
+
+  .sl-markdown-content .table-scroll:focus-visible {
+    outline-offset: 2px;
+  }
+
+  .sl-markdown-content table:not(:where(.not-content *)) {
+    display: table;
+    overflow: visible;
+    font-size: 0.9375rem;
   }
 
   .sl-markdown-content :is(th, td):not(:where(.not-content *)) {
@@ -265,13 +281,13 @@
     border-bottom: 0;
   }
 
-  .sl-markdown-content tbody tr:hover > td:not(:where(.not-content *)) {
+  .sl-markdown-content tbody tr:hover:not(:where(.not-content *)) {
     background-color: var(--surface-hover);
   }
 
   /*
    * Callouts (Starlight's asides): the design's tinted tone panels. A real border rather than an
-   * inset shadow, so the panel keeps its edge in forced colours.
+   * inset shadow, so the panel keeps its edge in forced colors.
    */
   .starlight-aside {
     padding: 1rem 1.25rem;
@@ -524,6 +540,36 @@
     font-weight: 600;
     line-height: 1.3;
   }
+
+  /*
+   * In "Who these pages are for" each lead is a link to its section: the same white title as the
+   * other grid's leads, keeping its underline as the link cue. The link covers its whole card,
+   * which lifts on hover or keyboard focus like the previous and next links.
+   */
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a) {
+    position: relative;
+    transition:
+      transform var(--dur-base) var(--ease-out),
+      border-color var(--dur-base) var(--ease-out),
+      box-shadow var(--dur-base) var(--ease-out);
+  }
+
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a:is(:hover, :focus-visible)) {
+    transform: translateY(-2px);
+    border-color: var(--border-accent);
+    box-shadow: var(--glass-edge), var(--shadow-2), var(--glow-holo);
+  }
+
+  .hero + .sl-markdown-content > ul > li > strong:first-child > a {
+    color: inherit;
+  }
+
+  .hero + .sl-markdown-content > ul > li > strong:first-child > a::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-lg);
+  }
 }
 
 @media screen and (min-width: 50rem) {
@@ -548,9 +594,13 @@
     border-radius: var(--radius-xl);
   }
 
-  /* Wider than Starlight's 7fr 4fr, so the drawing has room and the four actions fit one row. */
+  /*
+   * The drawing beside the title. Up to 72rem it keeps a fixed 14rem, so the four actions fit one
+   * row from about 900px (narrower, the last wraps); from there it widens with the page, past
+   * Starlight's 7fr 4fr.
+   */
   .hero {
-    grid-template-columns: 5fr 3fr;
+    grid-template-columns: 1fr 14rem;
   }
 
   .hero > .hero-html {
@@ -558,7 +608,87 @@
   }
 }
 
-/* Every focus ring is an outline in the accent, which forced colours keep. */
+@media screen and (min-width: 72rem) {
+  .hero {
+    grid-template-columns: 5fr 3fr;
+  }
+}
+
+/*
+ * A column narrower than 32rem (a phone, or between both sidebars on a small laptop) can't show a
+ * table's columns side by side, and scrolling one sideways hides its prose columns entirely. Each
+ * row stacks instead: the first cell leads, the cells after it follow, each named by its column
+ * (data-label, from the build), and the last starts its own line. A two-column table needs no
+ * names, since its second cell explains its first. The header row stays for assistive technology,
+ * which still reads the cells as a table through their explicit roles. Screen only, as the
+ * container is.
+ */
+@container markdown (max-width: 32rem) {
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)) {
+    width: auto;
+  }
+
+  .sl-markdown-content .table-scroll :is(table, tbody, td):not(:where(.not-content *)) {
+    display: block;
+  }
+
+  /* As blocks they would take Starlight's 1rem gap between Markdown siblings; table parts don't. */
+  .sl-markdown-content .table-scroll :is(tbody, tr, td):not(:where(.not-content *)) {
+    margin: 0;
+  }
+
+  .sl-markdown-content .table-scroll thead:not(:where(.not-content *)) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .sl-markdown-content .table-scroll tr:not(:where(.not-content *)) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.375rem 1rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .sl-markdown-content .table-scroll tr:last-child:not(:where(.not-content *)) {
+    border-bottom: 0;
+  }
+
+  /* min-width lets a cell shrink below a long URL, which then breaks like the rest of the text. */
+  .sl-markdown-content .table-scroll td:not(:where(.not-content *)) {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .sl-markdown-content .table-scroll td:first-child:not(:where(.not-content *)) {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .sl-markdown-content .table-scroll td:last-child:not(:first-child, :where(.not-content *)) {
+    flex-basis: 100%;
+  }
+
+  .sl-markdown-content
+    .table-scroll
+    td[data-label]:not(:first-child, :nth-child(2):last-child, :where(.not-content *))::before {
+    content: attr(data-label);
+    margin-inline-end: 0.5rem;
+    font: 500 0.6875rem / 1.3 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+}
+
+/* Every focus ring is an outline in the accent, which forced colors keep. */
 @media screen {
   :focus-visible {
     outline: 2px solid var(--focus-ring);
@@ -598,26 +728,28 @@
   }
 
   .sl-link-button,
-  .pagination-links a {
+  .pagination-links a,
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a) {
     transition: none;
   }
 
   .sl-link-button:active,
-  .pagination-links a:hover {
+  .pagination-links a:hover,
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a:is(:hover, :focus-visible)) {
     transform: none;
   }
 }
 
 /*
- * Forced colours drop backgrounds and shadows, which draw most of the design's edges and states.
+ * Forced colors drop backgrounds and shadows, which draw most of the design's edges and states.
  * Give the panels and controls a real border, keep the current page marked with the system's
- * selection colours, and show the holographic word as plain text.
+ * selection colors, and show the holographic word as plain text.
  */
 @media (forced-colors: active) {
   .sl-link-button,
   .sl-menu-button,
   .pagination-links a,
-  .sl-markdown-content table:not(:where(.not-content *)),
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)),
   .hero + .sl-markdown-content > ul > li {
     border: 1px solid CanvasText;
   }
@@ -642,7 +774,7 @@
 
 /*
  * Print. Starlight's print.css lightens the page, but code blocks keep the single dark code theme,
- * whose pale syntax colours would all but vanish on white paper once the browser drops
+ * whose pale syntax colors would all but vanish on white paper once the browser drops
  * backgrounds. Print code as plain dark text in a light frame instead, from print.css's palette.
  */
 @media print {

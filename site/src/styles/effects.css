@@ -48,7 +48,7 @@
   /*
    * Page backdrops. A fixed layer behind everything instead of background-attachment: fixed, which
    * repaints on every scroll in some engines and is ignored on iOS. z-index -1 puts it under the
-   * page content but over the canvas, which body's background colour paints.
+   * page content but over the canvas, which body's background color paints.
    */
   body::before {
     content: "";
@@ -217,6 +217,17 @@
   /* Entrance: each page's content rises in once as it loads. */
   main {
     animation: orr-rise-in var(--dur-enter) var(--ease-out) backwards;
+  }
+
+  /*
+   * Each orbit ring is a square box with round corners, and a turning square reaches past the
+   * drawing's column at its corners, so the splash would scroll sideways by a width that changes
+   * as the rings spin. Clip at main, not at the hero: the hero ends where the drawing does, which
+   * would cut the outer planet and its glow in half at three o'clock, while main leaves the page
+   * gutter for them. Clip makes no scroll container, and the splash has nothing sticky in main.
+   */
+  html[data-has-hero] main {
+    overflow-x: clip;
   }
 }
 

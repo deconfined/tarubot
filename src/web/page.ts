@@ -59,8 +59,8 @@ export interface PageOptions {
   /** The page's label in the server navigation; omitted pages aren't listed there. */
   readonly nav?: string;
   /**
-   * The decorative icon beside the page's navigation label and its link on the server list (D11),
-   * by icons.ts name; omitted, the label stands alone.
+   * The decorative icon beside the page's navigation label and its link on the server list, by
+   * icons.ts name; omitted, the label stands alone.
    */
   readonly icon?: IconName;
 }

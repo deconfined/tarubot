@@ -4,11 +4,13 @@
  * - process health, the featured card, laid out like the design's bot status card: phones list
  *   each check as a row, the token in a column; wider screens put readiness on its own line as
  *   the headline and the other checks in a grid, token over sentence, above the instrument scale;
- * - the six sample counts, a row of stat cards (two, three, then six across);
+ * - the six sample counts, a row of stat cards (two, three, then six across), on the same 16px
+ *   gutter as every other card grid;
  * - the work and run tables, like the design's log table: mono times under small labels, marker
  *   badges, and each row's facts and diagnostic in a disclosure that opens on a solid panel (never
  *   glass inside the glass card). Each table keeps a minimum width and scrolls in its own region
- *   on a narrow screen, so the page itself never scrolls sideways.
+ *   on a narrow screen, so the page itself never scrolls sideways; opening a disclosure never
+ *   moves the columns.
  *
  * Every class here is the view's own; the shared vocabulary (status tokens, facts, checklists,
  * section headings, notes, notices, empty states, disclosures) lives in components.ts.
@@ -44,7 +46,7 @@ export const STATUS_CSS = `/* Background work */
 .metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
+  gap: var(--space-4);
   margin: 0;
 }
 
@@ -57,6 +59,11 @@ export const STATUS_CSS = `/* Background work */
   color: var(--text-muted);
 }
 
+/* At a large text setting, a badge wraps inside its card rather than run out of it. */
+.metrics .marker {
+  white-space: normal;
+}
+
 /* The tables: the card is the scroll region, so it is a block, not the card's flex column. */
 .status-section > .table-scroll {
   display: block;
@@ -64,11 +71,42 @@ export const STATUS_CSS = `/* Background work */
 
 /*
  * The narrowest a table may be before its region scrolls, so long names wrap instead of squeezing
- * every column. Unbreakable badges, times and column labels set most of the width: the work table
- * fits a tablet's column, the run table a desktop's.
+ * every column. Unbreakable badges and times set most of the width; the column labels wrap
+ * between words, so both tables fit a tablet's column. Words break only when nothing else fits
+ * (body's overflow-wrap: anywhere would split "Completed" sooner than widen a column).
  */
 .status-table {
   min-width: 40rem;
+  overflow-wrap: break-word;
+}
+
+.status-table thead th {
+  white-space: normal;
+}
+
+/* Cells keep 12px a side between columns, and the design's 16px at the table's outer edges. */
+.status-table thead th,
+.status-table tbody th,
+.status-table td {
+  padding-inline: 12px;
+}
+
+.status-table tr > :first-child {
+  padding-left: 16px;
+}
+
+.status-table tr > :last-child {
+  padding-right: 16px;
+}
+
+/*
+ * The details column has its share of the table before any disclosure opens. An open panel adds
+ * nothing to the column's width (its inline size is contained, so the table never reflows) and
+ * lays out in the space the column has: its facts sit beside their labels where the column is
+ * wide, and under them where it isn't.
+ */
+.status-table thead th:last-child {
+  width: 32%;
 }
 
 .cell-title,
@@ -179,12 +217,8 @@ export const STATUS_CSS = `/* Background work */
   white-space: nowrap;
 }
 
-.row-details[open] {
-  min-width: 18rem;
-  max-width: 30rem;
-}
-
 .row-details__panel {
+  container-type: inline-size;
   display: grid;
   gap: var(--space-2);
   margin-top: var(--space-1);
@@ -209,6 +243,20 @@ export const STATUS_CSS = `/* Background work */
   overflow-wrap: anywhere;
 }
 
+/* A narrow panel (the column's width, see .status-table above): each value under its label. */
+@container (max-width: 18rem) {
+  .row-details .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .row-details .facts > dt {
+    padding-bottom: 0;
+  }
+  .row-details .facts > dd {
+    padding-top: 2px;
+    border-top: 0;
+  }
+}
+
 .row-details__panel > .note,
 .row-details__panel > .diagnostic {
   padding-top: var(--space-2);
@@ -227,7 +275,6 @@ export const STATUS_CSS = `/* Background work */
 @media (min-width: 40rem) {
   .metrics {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 14px;
   }
   .metrics > .orr-stat {
     padding: var(--space-4);

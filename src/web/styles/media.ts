@@ -1,26 +1,24 @@
 /**
  * The viewer's preferences and the printed page, last in the stylesheet so they win:
  * - reduced motion stops all of the design's motion: the ambient loops it already stopped, plus
- *   the page entrance, the spinner, the button sheen and press, and every lift and transition
- *   (D10);
+ *   the page entrance, the button sheen and press, the server links' arrow nudge and every
+ *   transition. Every rule that starts an animation lists its selector here, and
+ *   web-assets.test.ts checks that none is missing;
  * - reduced transparency swaps every glass surface for a solid one;
  * - forced colors (Windows contrast themes) drop the box-shadows the design draws every edge
- *   with, so cards, badges, buttons and the current page get real borders (D33). Focus is already
- *   an outline (base.ts), which forced colors keep.
- * - print is dark text on white without the shell, the backdrops, glass, glow or motion (D18);
- *   a dark-only page would otherwise print pale text that browsers strip of its background.
+ *   with, so cards, status badges, buttons and the current page get real borders. Focus is
+ *   already an outline (base.ts), which forced colors keep.
+ * - print is dark text on white without the shell, the backdrops, glass, glow or motion; a
+ *   dark-only page would otherwise print pale text that browsers strip of its background.
  *
  * `!important` appears only where a preference must beat every component rule at once.
  */
 export const MEDIA_CSS = `/* Preferences and print */
 @media (prefers-reduced-motion: reduce) {
   .orr-enter,
-  .orr-holo-text,
   .orr-holo-edge::before,
   .orr-starfield::before,
   .orr-orbit__ring,
-  .orr-pulse-dot,
-  .orr-spinner,
   .orr-btn--primary {
     animation: none !important;
   }
@@ -33,16 +31,12 @@ export const MEDIA_CSS = `/* Preferences and print */
     display: none;
   }
   .orr-btn:active:not(:disabled),
-  .orr-card--interactive:hover,
-  .orr-card--interactive:focus-visible,
   .server-tile__link:hover > .orr-icon:last-child {
     transform: none;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .orr-glass,
-  .orr-glass-strong,
   .orr-card,
   .orr-btn--secondary,
   .feature {
@@ -63,11 +57,8 @@ export const MEDIA_CSS = `/* Preferences and print */
 
 @media (forced-colors: active) {
   .orr-card,
-  .orr-badge,
   .check,
   .marker,
-  .orr-tag,
-  .orr-kbd,
   .notice,
   .empty-state,
   .feature,
@@ -112,9 +103,6 @@ export const MEDIA_CSS = `/* Preferences and print */
   html {
     background: #fff !important;
   }
-  .orr-holo-text {
-    -webkit-text-fill-color: currentColor;
-  }
   .skip,
   .sidebar,
   .topbar,
@@ -136,7 +124,6 @@ export const MEDIA_CSS = `/* Preferences and print */
     text-decoration: underline;
   }
   .orr-card,
-  .orr-badge,
   .orr-btn,
   .check,
   .marker,

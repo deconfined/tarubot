@@ -1,7 +1,7 @@
 /*
  * The site's three type families, self-hosted: Instrument Serif for display headings, Manrope for
  * text and JetBrains Mono for code and labels. They are Fontsource's latin subsets under the SIL
- * Open Font License 1.1; each licence sits beside its font in src/assets/fonts, and the published
+ * Open Font License 1.1; each license sits beside its font in src/assets/fonts, and the published
  * notices are /tarubot/third-party-licenses.txt. Relative url()s let the build fingerprint each
  * file and add the /tarubot/ base. The dashboard declares the same faces at its own asset paths.
  */

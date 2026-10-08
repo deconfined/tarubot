@@ -1,7 +1,7 @@
 /**
- * The development harness's opt-in review states (D25): harnessOptions maps each --state-* flag,
- * and the harness, started on loopback with a state and signed in as the invented officer, shows
- * that state on the rendered pages. The default data stays web-server.test.ts's and
+ * The development harness's opt-in review states: harnessOptions maps each --state-* flag, and
+ * the harness, started on loopback with a state and signed in as the invented officer, shows that
+ * state on the rendered pages. The default data stays web-server.test.ts's and
  * web-mentions.test.ts's. Assertions use the pinned semantic hooks (bracketed .check tokens,
  * .marker-* classes, .featured, dt/dd facts, the work-sample table) and approved copy, not layout
  * markup. Credential-free: invented IDs, no network beyond loopback.

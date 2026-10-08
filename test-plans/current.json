@@ -1,6 +1,6 @@
 {
   "title": "Session: 2.38.0 dashboard and documentation redesign review",
-  "objective": "Review the 2.38.0 redesign in a browser on owner-authorized staging: the dashboard and documentation site are dark only, fonts and icons come from TaruBot itself with no third-party request, and routes, data, access and read-only behaviour are unchanged. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "objective": "Review the 2.38.0 redesign in a browser on owner-authorized staging: the dashboard and documentation site are dark only, fonts and icons come from TaruBot itself with no third-party request, and routes, data, access and read-only behavior are unchanged. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
     "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; this release adds no migration and changes no setting.",
     "Sign in as an officer and review the server list, Server configuration and Background work on a phone and a desktop: dark only, the server name once in the switcher, exact check tokens and UTC times.",

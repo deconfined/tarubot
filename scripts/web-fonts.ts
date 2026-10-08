@@ -28,9 +28,17 @@ for (const { name, stem } of FONTS) {
   const bytes = new Uint8Array(
     await Bun.file(new URL(`../${SOURCE}/${stem}.woff2`, import.meta.url)).arrayBuffer(),
   );
-  // A renamed or truncated file must fail here, not as a font the browser silently drops.
+  // A renamed or truncated file must fail here, not as a font the browser silently drops: a WOFF2
+  // header opens with the magic and records the file's total length at bytes 8-11 (big-endian).
   if (new TextDecoder().decode(bytes.subarray(0, 4)) !== WOFF2_MAGIC)
     throw new Error(`${SOURCE}/${stem}.woff2 is not a WOFF2 file.`);
+  if (
+    bytes.byteLength < 12 ||
+    new DataView(bytes.buffer, bytes.byteOffset).getUint32(8) !== bytes.byteLength
+  )
+    throw new Error(
+      `${SOURCE}/${stem}.woff2 is not as long as its header says: truncated or padded.`,
+    );
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   // Laid out the way Biome formats it, so a regenerated file needs no formatting pass.
   constants.push(

@@ -1,11 +1,11 @@
 /*
  * Starlight's custom properties, bound to the design tokens in tokens.css. Starlight's components
- * and Pagefind's search UI (which Starlight themes through the same properties) take their colours,
+ * and Pagefind's search UI (which Starlight themes through the same properties) take their colors,
  * shadows and type from here, so most of the site follows the design system without a selector.
  *
  * This file and the two after it are unlayered, so they win over all of Starlight's own CSS, which
  * sits in @layer starlight.*. That is why broad element selectors are scoped the way Starlight
- * scopes its own Markdown styles, and why the colours below are inside @media screen: Starlight's
+ * scopes its own Markdown styles, and why the colors below are inside @media screen: Starlight's
  * print.css forces its light palette by redefining these same properties, but it is linked before
  * this file and is also unlayered, so an unconditional override here would print pale text on
  * white paper. Fonts and sizes apply in print too.
@@ -48,7 +48,7 @@
 
     /*
      * Asides use one hue each: -low is the tinted background, the base hue draws the rule, and
-     * -high colours the title and links. Each tone keeps its own colour for all three uses, as the
+     * -high colors the title and links. Each tone keeps its own color for all three uses, as the
      * design system's badges do: note is info, tip is the second accent, caution is warning.
      */
     --sl-color-blue-low: var(--info-bg);

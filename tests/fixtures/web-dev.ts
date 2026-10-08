@@ -11,9 +11,9 @@
  * For an isolated reverse-proxy lab, --origin supplies the public URL and --port the private
  * HTTP listener; the fake Discord stays on its own local HTTP port.
  *
- * Review states (D25) are opt-in, so a reviewer can see every view state; without them the data
- * is the healthy, live default that tests/unit/web-server.test.ts and web-mentions.test.ts rely
- * on. Each flag switches one thing on, and they combine (startHarness takes the same switches as
+ * Review states are opt-in, so a reviewer can see every view state; without them the data is the
+ * healthy, live default that tests/unit/web-server.test.ts and web-mentions.test.ts rely on. Each
+ * flag switches one thing on, and they combine (startHarness takes the same switches as
  * `states`):
  * - --state-checks=warn: Server configuration's checklist has warnings and no failures (a stale
  *   roster, Administrator still needed, a core permission only from @everyone, a permission it
@@ -113,7 +113,7 @@ export const HARNESS_ACCOUNTS = {
 
 export type HarnessAccount = keyof typeof HARNESS_ACCOUNTS;
 
-/** The opt-in review states (D25); the header comment describes each one. None is on by default. */
+/** The opt-in review states; the header comment describes each one. None is on by default. */
 export interface HarnessStates {
   /** --state-checks: configuration warnings, or failures too, and process health to match. */
   readonly checks?: "warn" | "fail";

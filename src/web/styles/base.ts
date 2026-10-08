@@ -4,6 +4,10 @@
  * page needs on top of it: an outline focus ring, the skip link, a visually hidden utility and the
  * default look of headings inside a page.
  *
+ * Text is sized with the type tokens (tokens.ts) or rem, never a px literal, so the scale follows
+ * the reader's default font size wherever the tokens do; px stays for boxes of a fixed size and
+ * the icons inside them.
+ *
  * The page background is split in two. The root carries the flat --bg-app color, and the body
  * stays transparent, so a backdrop that a frame fixes behind the page at z-index -1 (the console's
  * nebula wash, the entry pages' starfield) paints above the root color and below the content.
@@ -72,6 +76,21 @@ a {
   text-decoration-thickness: 1px;
 }
 
+/*
+ * A link inside running text, such as the Free Company's name, is underlined: its cyan is too
+ * close to the text around it to mark a link by color alone (WCAG 1.4.1). Link components carry a
+ * class and keep their own look.
+ */
+main :is(p, dd) a:not([class]) {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+}
+
+main :is(p, dd) a:not([class]):hover {
+  text-decoration-color: currentColor;
+}
+
 code,
 kbd {
   font: var(--type-code);
@@ -82,9 +101,10 @@ kbd {
   color: var(--text-primary);
 }
 
+/* The thumb is often the only sign that a table scrolls, so it keeps 3:1 against every surface. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--night-600) transparent;
+  scrollbar-color: var(--night-400) transparent;
 }
 
 button,
