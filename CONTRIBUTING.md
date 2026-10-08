@@ -58,6 +58,8 @@ Do not commit credentials, `.env`, dumps, backups, generated output or local cod
 
 `ci.yml` checks source, migration immutability, the application build, unit/contract tests, disposable PostgreSQL fixtures and native DNSSEC/SSHFP acceptance/refusal, plus `bash -n`/ShellCheck for `ops/*.sh`, pinned actionlint for workflows and credential-free production/staging Compose validation. PRs need no live credentials. `publish.yml` reuses CI, builds AMD64/ARM64 images for an explicit stable release, calls `scan.yml`, attests the exact index digest and calls `deploy.yml` with `target=production`. Routine deployment uses one owner-approved `production` job. Optional owner-dispatched staging rehearsal has its own activation, environment and approval; it is not a second production gate. Publication is not evidence of a live deploy. See [deployment](docs/DEPLOYMENT.md).
 
+For local workflow validation, put ShellCheck on `PATH` before running the pinned actionlint. Check `command -v shellcheck` first: actionlint skips unavailable external linters, so a YAML-only pass is not CI parity. `actionlint -verbose` reports disabled integrations.
+
 CI's multi-platform image build runs unit/contract tests for both AMD64 and ARM64, with ARM64 under QEMU. Real Git/Bun CLI fixtures use explicit per-test subprocess budgets for emulation overhead; keep the ordinary test timeout unchanged and retain release-admission behavior coverage.
 
 Actions use full-SHA pins; checkouts do not persist credentials. `pages.yml` builds the separate site, `dependency-audit.yml` audits locked Bun dependencies, and CodeQL uses GitHub default setup. The owner maintains required checks and branch/environment protections.

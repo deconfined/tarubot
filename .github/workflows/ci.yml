@@ -122,7 +122,7 @@ jobs:
           # Check both bot-only and optional-web models with invented settings.
           for profiles in '' web; do
             export COMPOSE_PROFILES="$profiles"
-            export WEB_PUBLIC_ORIGIN= DISCORD_CLIENT_SECRET=
+            export WEB_PUBLIC_ORIGIN='' DISCORD_CLIENT_SECRET=''
             if [[ $profiles == web ]]; then
               export WEB_PUBLIC_ORIGIN=https://tarubot.example.org DISCORD_CLIENT_SECRET=fixture-only
             fi
