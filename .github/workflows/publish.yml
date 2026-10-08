@@ -170,18 +170,17 @@ jobs:
           case "$status" in
             404) echo 'publish=true' >> "$GITHUB_OUTPUT" ;;
             200)
-              if [[ $RELEASE_REQUESTED != true ]]; then
-                echo 'publish=false' >> "$GITHUB_OUTPUT"
-                echo '::notice::Published maintenance version retained; no release image or deployment.'
-                exit 0
-              fi
-              # Re-run all jobs finds this run's own release: resume it rather than refuse it.
+              # Re-run all jobs finds this run's own release, including a maintenance commit that
+              # finished a release whose tag was never published: resume it, never skip it.
               if own_release; then
                 echo 'publish=true' >> "$GITHUB_OUTPUT"
                 echo '::notice::This commit already published this version; resuming with its own index.'
               elif (( $? == 2 )); then
                 echo '::error::Could not read the published tags; re-run once GHCR answers.'
                 exit 1
+              elif [[ $RELEASE_REQUESTED != true ]]; then
+                echo 'publish=false' >> "$GITHUB_OUTPUT"
+                echo '::notice::Published maintenance version retained; no release image or deployment.'
               else
                 echo '::error::This release version was already published from another commit; release a new version.'
                 exit 1
@@ -249,6 +248,7 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
           AMD64: ${{ needs.amd64.outputs.digest }}
           ARM64: ${{ needs.arm64.outputs.digest }}
+          RELEASE_REQUESTED: ${{ needs.gate.outputs.release }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -305,6 +305,11 @@ jobs:
               elif (( $? == 2 )); then
                 echo '::error::Could not read the published tags; re-run once GHCR answers.'
                 exit 1
+              elif [[ $RELEASE_REQUESTED != true ]]; then
+                # A maintenance commit merged while its release was still publishing: the release
+                # tagged first. No digest is written, so scan, signing and delivery skip.
+                echo '::notice::Published maintenance version retained; no release image or deployment.'
+                exit 0
               else
                 echo '::error::This release version was already published from another commit; release a new version.'
                 exit 1

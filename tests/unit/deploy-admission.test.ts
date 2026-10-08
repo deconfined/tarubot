@@ -43,6 +43,8 @@ type Replies = {
   deployments: unknown;
   /** Statuses by deployment ID, newest first; absent answers with 55 held for approval. */
   statuses: Record<string, unknown>;
+  /** Fail only the approval lookups (jobs, deployments, statuses) with this exit status. */
+  approvalApiExit: number;
 };
 
 type Fixture = {
@@ -73,6 +75,7 @@ function fixture(): Fixture {
     jobs: null,
     deployments: null,
     statuses: {},
+    approvalApiExit: 0,
   };
   writeFileSync(
     join(bin, "gh"),
@@ -97,6 +100,7 @@ if (args[0] === "attestation" && args[1] === "verify") {
   const jobs = endpoint?.match(/^repos\\/deconfined\\/tarubot\\/actions\\/runs\\/([0-9]+)\\/attempts\\/([0-9]+)\\/jobs\\?per_page=100$/);
   const deployments = endpoint?.match(/^repos\\/deconfined\\/tarubot\\/deployments\\?environment=(production|staging)&sha=([0-9a-f]{40})&per_page=30$/);
   const statuses = endpoint?.match(/^repos\\/deconfined\\/tarubot\\/deployments\\/([0-9]+)\\/statuses\\?per_page=100$/);
+  if ((jobs || deployments || statuses) && replies.approvalApiExit) { console.error(diagnostic); process.exit(replies.approvalApiExit); }
   if (jobs) {
     if (jobs[1] !== run || jobs[2] !== process.env.GITHUB_RUN_ATTEMPT) process.exit(70);
     console.log(JSON.stringify(replies.jobs ?? { jobs: [
@@ -361,57 +365,78 @@ test("an identical main commit remains eligible for owner-selected staging rehea
 describe("delivery uses only an approval given in this attempt", () => {
   const url = (job: number) =>
     `https://github.com/deconfined/tarubot/actions/runs/37000000001/job/${job}`;
-  const notHeld = (f: Fixture, changes: Record<string, string> = {}) => {
-    const result = f.run(recheck, changes);
+  const as = (target: Target) => ({
+    TARGET: target,
+    REPO_PRODUCTION_DEPLOY_ENABLED: target === "production" ? "true" : "false",
+    REPO_STAGING_DEPLOY_ENABLED: target === "staging" ? "true" : "false",
+  });
+  const notHeld = (f: Fixture, target: Target, changes: Record<string, string> = {}) => {
+    const result = f.run(recheck, { ...as(target), ...changes });
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout.toString()).toContain(
-      "::error::This delivery was not held for the production approval in this attempt",
+      `::error::This delivery was not held for the ${target} approval in this attempt`,
     );
     redacted(result);
   };
 
-  test("a job held for the reviewer in this attempt is admitted, in a dispatch or a called workflow", () => {
-    for (const name of ["Deploy staging", "Production release / Deploy staging"]) {
-      const f = fixture();
-      f.replies.jobs = { jobs: [{ id: 777, name, status: "in_progress" }] };
-      expect(f.run(recheck).exitCode).toBe(0);
-    }
-  });
+  for (const target of ["staging", "production"] as const) {
+    describe(target, () => {
+      test("a job held for the reviewer in this attempt is admitted, dispatched or called", () => {
+        for (const name of [`Deploy ${target}`, `Production release / Deploy ${target}`]) {
+          const f = fixture();
+          f.replies.jobs = { jobs: [{ id: 777, name, status: "in_progress" }] };
+          expect(f.run(recheck, as(target)).exitCode).toBe(0);
+        }
+      });
 
-  test("a re-run let through on an earlier approval is refused before any host contact", () => {
+      test("a re-run let through on an earlier approval is refused before any host contact", () => {
+        const f = fixture();
+        f.replies.statuses["55"] = [
+          { state: "in_progress", target_url: url(777) },
+          { state: "queued", target_url: url(777) },
+        ];
+        notHeld(f, target);
+      });
+
+      test("an earlier attempt's approval doesn't count for this attempt's job", () => {
+        const f = fixture();
+        f.replies.deployments = [{ id: 56 }, { id: 55 }];
+        f.replies.statuses["56"] = [
+          { state: "success", target_url: url(700) },
+          { state: "waiting", target_url: url(700) },
+        ];
+        f.replies.statuses["55"] = [{ state: "in_progress", target_url: url(777) }];
+        notHeld(f, target);
+      });
+
+      test("a missing, ambiguous or finished own job is refused", () => {
+        const other = target === "staging" ? "production" : "staging";
+        for (const jobs of [
+          [],
+          [{ id: 777, name: `Deploy ${target}`, status: "completed" }],
+          [{ id: 777, name: `Deploy ${other}`, status: "in_progress" }],
+          [
+            { id: 777, name: `Deploy ${target}`, status: "in_progress" },
+            { id: 778, name: `Deploy ${target}`, status: "in_progress" },
+          ],
+        ]) {
+          const f = fixture();
+          f.replies.jobs = { jobs };
+          notHeld(f, target);
+        }
+      });
+    });
+  }
+
+  test("an unreadable approval record asks for a re-run instead of blaming the approval", () => {
     const f = fixture();
-    f.replies.statuses["55"] = [
-      { state: "in_progress", target_url: url(777) },
-      { state: "queued", target_url: url(777) },
-    ];
-    notHeld(f);
-  });
-
-  test("an earlier attempt's approval doesn't count for this attempt's job", () => {
-    const f = fixture();
-    f.replies.deployments = [{ id: 56 }, { id: 55 }];
-    f.replies.statuses["56"] = [
-      { state: "success", target_url: url(700) },
-      { state: "waiting", target_url: url(700) },
-    ];
-    f.replies.statuses["55"] = [{ state: "in_progress", target_url: url(777) }];
-    notHeld(f);
-  });
-
-  test("a missing, ambiguous or finished own job is refused", () => {
-    for (const jobs of [
-      [],
-      [{ id: 777, name: "Deploy staging", status: "completed" }],
-      [{ id: 777, name: "Deploy production", status: "in_progress" }],
-      [
-        { id: 777, name: "Deploy staging", status: "in_progress" },
-        { id: 778, name: "Deploy staging", status: "in_progress" },
-      ],
-    ]) {
-      const f = fixture();
-      f.replies.jobs = { jobs };
-      notHeld(f);
-    }
+    f.replies.approvalApiExit = 1;
+    const result = f.run(recheck);
+    expect(result.exitCode).not.toBe(0);
+    const stdout = result.stdout.toString();
+    expect(stdout).toContain("::error::Could not read this attempt's approval record from GitHub");
+    expect(stdout).not.toContain("not held for");
+    redacted(result);
   });
 
   test("a malformed run, attempt or commit is refused", () => {
@@ -422,7 +447,10 @@ describe("delivery uses only an approval given in this attempt", () => {
       { GITHUB_RUN_ID: "" },
       { GITHUB_SHA: "main" },
     ]) {
-      notHeld(fixture(), changes);
+      const result = fixture().run(recheck, changes);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout.toString()).toMatch(/^::error::/mu);
+      redacted(result);
     }
   });
 });

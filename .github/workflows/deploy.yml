@@ -177,18 +177,23 @@ jobs:
           # and a re-run gets a new job ID. So this job finds its own deployment and requires that
           # it began "waiting": a re-run let through on an earlier approval is refused here, before
           # any host contact. Re-run all jobs and a fresh dispatch both ask for approval again.
-          trap 'echo "::error::This delivery was not held for the production approval in this attempt, so it will not use an earlier approval. Re-run all jobs or dispatch Deploy again to be asked; no host connection was made."' ERR
+          trap 'echo "::error::Could not read this attempt'"'"'s approval record from GitHub; re-run once its API answers. No host connection was made."' ERR
           [[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]{0,19}$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]{0,2}$ ]]
           [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$private/jobs"
+          gh api "repos/$GITHUB_REPOSITORY/deployments?environment=$TARGET&sha=$GITHUB_SHA&per_page=30" > "$private/deployments"
+          not_held="This delivery was not held for the $TARGET approval in this attempt, so it will not use an earlier approval. Re-run all jobs or dispatch Deploy again to be asked; no host connection was made."
+          trap 'echo "::error::$not_held"' ERR
           job=$(jq -er --arg name "Deploy $TARGET" '
             [.jobs[] | select(.status == "in_progress" and (.name == $name or (.name | endswith(" / " + $name)))) | .id]
             | if length == 1 then .[0] else empty end' "$private/jobs")
           [[ $job =~ ^[1-9][0-9]{0,19}$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/deployments?environment=$TARGET&sha=$GITHUB_SHA&per_page=30" > "$private/deployments"
           held=false
           for deployment in $(jq -r '.[] | .id | select(type == "number")' "$private/deployments"); do
-            gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses?per_page=100" > "$private/statuses"
+            if ! gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses?per_page=100" > "$private/statuses"; then
+              echo "::error::Could not read this attempt's approval record from GitHub; re-run once its API answers. No host connection was made."
+              exit 1
+            fi
             # Statuses arrive newest first, so the last of this job's statuses is its first.
             if jq -e --arg job "/actions/runs/$GITHUB_RUN_ID/job/$job" '
                 [.[] | select((.target_url // "") | endswith($job))] as $mine

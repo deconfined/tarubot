@@ -334,6 +334,17 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
       jobs: Record<string, { if?: string; steps?: { env?: Record<string, string> }[] }>;
     };
     expect(ci.jobs.images?.if).toContain("inputs.platform-tests == true");
+    // The applied-migration check also runs in the fallback, against the push base.
+    const checks = (ci.jobs.checks?.steps ?? []) as {
+      name?: string;
+      if?: string;
+      env?: Record<string, string>;
+    }[];
+    const migrations = checks.find(
+      (candidate) => candidate.name === "Refuse edits to applied migrations",
+    );
+    expect(migrations?.if).toBe("github.event_name != 'workflow_dispatch'");
+    expect(migrations?.env?.BASE_SHA).toContain("github.event.before");
     const required = ci.jobs.result?.steps?.find((candidate) => candidate.env?.IMAGES_REQUIRED);
     expect(required?.env?.IMAGES_REQUIRED).toContain("inputs.platform-tests == true");
   });

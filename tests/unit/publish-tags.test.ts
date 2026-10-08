@@ -47,26 +47,43 @@ function fixture(registry: Registry) {
   const output = join(directory, "github-output");
   writeFileSync(state, JSON.stringify(registry));
   writeFileSync(calls, "");
-  // Answers the token request and HEAD requests by tag, as GHCR does: the status code with
-  // --write-out, the Docker-Content-Digest header with --dump-header (and --fail on errors).
+  // Answers like GHCR and curl do, so a script that drops a flag fails here too: credentials come
+  // only from --config - on stdin; manifests need the bearer token and the index media type;
+  // --fail turns >= 400 into exit 22; output goes only to --write-out and to --dump-header -.
   writeFileSync(
     join(bin, "curl"),
     `#!${process.execPath}
 import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
-// The scripts pipe their credentials into --config -; read them so the writer never sees EPIPE.
-await new Response(Bun.stdin.stream()).text();
+const config = await new Response(Bun.stdin.stream()).text();
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(["curl", ...args]) + "\\n");
 const url = args.find((arg) => arg.startsWith("https://"));
-if (url?.startsWith("https://ghcr.io/token?")) { console.log(JSON.stringify({ token: "invented-token" })); process.exit(0); }
+const flag = (name) => args.includes(name);
+const after = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+const answer = (code, headers = "") => {
+  if (flag("--fail") && code >= 400) {
+    if (flag("--write-out")) process.stdout.write(String(code));
+    process.exit(22);
+  }
+  if (after("--dump-header") === "-") process.stdout.write("HTTP/2 " + code + "\\r\\n" + headers + "\\r\\n");
+  if (flag("--write-out")) process.stdout.write(String(code));
+  process.exit(0);
+};
+if (!args.includes("--config") || after("--config") !== "-") process.exit(70);
+if (url?.startsWith("https://ghcr.io/token?")) {
+  if (!config.includes('user = "invented-user:invented-github-token"')) answer(401);
+  process.stdout.write(JSON.stringify({ token: "invented-token" }));
+  process.exit(0);
+}
 const match = url?.match(/^https:\\/\\/ghcr\\.io\\/v2\\/deconfined\\/tarubot\\/manifests\\/([A-Za-z0-9._-]+)$/);
-if (!match || !args.includes("--head")) process.exit(70);
+if (!match || !flag("--head")) process.exit(70);
+if (!config.includes('header = "Authorization: Bearer invented-token"')) answer(401);
+if (!(after("--header") ?? "").includes("application/vnd.oci.image.index.v1+json")) answer(404);
 const registry = JSON.parse(readFileSync(${JSON.stringify(state)}, "utf8"));
 const tag = match[1];
-const code = registry.failing.includes(tag) ? 500 : registry.tags[tag] ? 200 : 404;
-if (args.includes("--write-out")) { process.stdout.write(String(code)); process.exit(0); }
-if (code !== 200) process.exit(args.includes("--fail") ? 22 : 0);
-process.stdout.write("HTTP/2 200\\r\\ndocker-content-digest: " + registry.tags[tag] + "\\r\\n\\r\\n");
+if (registry.failing.includes(tag)) answer(500);
+if (!registry.tags[tag]) answer(404);
+answer(200, "docker-content-digest: " + registry.tags[tag] + "\\r\\n");
 `,
     { mode: 0o700 },
   );
@@ -161,6 +178,16 @@ describe("version publication check", () => {
     expect(run.stdout).toContain("resuming with its own index");
   });
 
+  test("a maintenance commit that finished an unpublished release resumes it after Re-run all jobs", () => {
+    const run = fixture({
+      tags: { "2.38.0": mergedIndex, [commitTag]: mergedIndex },
+      failing: [],
+    }).run(prepare, { RELEASE_REQUESTED: "false" });
+    expect(run.code).toBe(0);
+    expect(run.output).toEqual(["publish=true"]);
+    expect(run.stdout).toContain("resuming with its own index");
+  });
+
   test("another commit's release is refused", () => {
     for (const tags of [{ "2.38.0": OTHER }, { "2.38.0": OTHER, [commitTag]: mergedIndex }]) {
       const run = fixture({ tags, failing: [] }).run(prepare);
@@ -229,6 +256,17 @@ describe("tagging one index of both platforms", () => {
     expect(run.code).toBe(0);
     expect(run.creates()).toEqual([]);
     expect(run.output).toEqual([`digest=${mergedIndex}`]);
+  });
+
+  test("a maintenance commit that lost the race to its release finishes without a digest", () => {
+    const run = fixture({ tags: { "2.38.0": OTHER }, failing: [] }).run(merge, {
+      RELEASE_REQUESTED: "false",
+    });
+    expect(run.code).toBe(0);
+    expect(run.creates()).toEqual([]);
+    expect(run.output).toEqual([]);
+    expect(run.registry().tags["2.38.0"]).toBe(OTHER);
+    expect(run.stdout).toContain("Published maintenance version retained");
   });
 
   test("never overwrites another commit's release, and says when GHCR can't be read", () => {
