@@ -60,7 +60,7 @@ Do not commit credentials, `.env`, dumps, backups, generated output or local cod
 
 For local workflow validation, put ShellCheck on `PATH` before running the pinned actionlint. Check `command -v shellcheck` first: actionlint skips unavailable external linters, so a YAML-only pass is not CI parity. `actionlint -verbose` reports disabled integrations.
 
-CI's multi-platform image build runs unit/contract tests for both AMD64 and ARM64, with ARM64 under QEMU. Real Git/Bun CLI fixtures use explicit per-test subprocess budgets for emulation overhead; keep the ordinary test timeout unchanged and retain release-admission behavior coverage.
+CI builds AMD64 and ARM64 images on matching standard GitHub-hosted runners (`ubuntu-24.04` and `ubuntu-24.04-arm`), running the full Dockerfile build, type check and unit/contract suites on each native architecture. Per-architecture caches avoid concurrent overwrites, and `CI result` still requires both builds. Release publication retains its multi-platform QEMU build; real Git/Bun CLI fixtures therefore keep their explicit emulation budgets without raising the ordinary test timeout.
 
 Actions use full-SHA pins; checkouts do not persist credentials. `pages.yml` builds the separate site, `dependency-audit.yml` audits locked Bun dependencies, and CodeQL uses GitHub default setup. The owner maintains required checks and branch/environment protections.
 

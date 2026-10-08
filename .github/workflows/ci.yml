@@ -150,29 +150,36 @@ jobs:
         run: bun run ci:version
 
   images:
-    name: Container build
+    name: Container build (${{ matrix.arch }})
     # Publication builds its own multi-platform image after these reusable checks.
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: checks
-    runs-on: ubuntu-24.04
+    # Nested Git/Bun fixtures need native CPUs, not QEMU startup overhead.
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build without publishing
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: tarubot
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: false
           # Refresh Alpine packages on each build even when the upstream Bun tag is unchanged.
           no-cache-filters: base
-          cache-from: type=gha,scope=tarubot
-          cache-to: type=gha,mode=max,scope=tarubot
+          cache-from: type=gha,scope=tarubot-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=tarubot-${{ matrix.arch }}
 
   result:
     name: CI result
