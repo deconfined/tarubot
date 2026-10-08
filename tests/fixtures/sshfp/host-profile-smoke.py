@@ -94,7 +94,7 @@ def main():
             f"RUNNER_TEMP={runner_temp}", "TARGET=staging",
             "REPO_STAGING_DEPLOY_ENABLED=true", "REPO_PRODUCTION_DEPLOY_ENABLED=false",
             "VERSION=2.36.42", f"COMMIT={'a' * 40}", f"DIGEST=sha256:{'b' * 64}",
-            "GITHUB_RUN_ID=1234567", "DEPLOY_HOST=smoke.example.org",
+            "GITHUB_RUN_ID=1234567", "GITHUB_RUN_ATTEMPT=1", "DEPLOY_HOST=smoke.example.org",
             "DEPLOY_SSH_KEY=PRIVATE KEY fixture-invalid-key-not-a-credential",
             "bash", "-c", 'exec bash "$1"', "--", str(helper_path),
         ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

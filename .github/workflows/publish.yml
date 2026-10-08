@@ -12,10 +12,11 @@ concurrency:
   group: publish-${{ github.sha }}
   cancel-in-progress: false
 
-# Every job may be re-run after a failure, and re-running really retries: the version probe never
-# lets a release overwrite a different published tag, and a deployment re-validates, asks for the
-# owner's approval again and lets the host entry decide. Downstream jobs name the results they
-# need rather than relying on success(), which a deliberately skipped fallback would make false.
+# Every job may be re-run after a failure, and re-running really retries: publication resumes only
+# with this commit's own tagged index, never over another commit's release, and a deployment
+# re-validates, proceeds only on an approval given in its own attempt (deploy.yml) and lets the
+# host entry decide. Downstream jobs name the results they need rather than relying on success(),
+# which a deliberately skipped fallback would make false.
 jobs:
   gate:
     name: Release gate
@@ -97,6 +98,9 @@ jobs:
     needs: gate
     if: needs.gate.outputs.tested != 'true'
     uses: ./.github/workflows/ci.yml
+    # Everything the gate's proof requires, including the in-image suite on both platforms.
+    with:
+      platform-tests: true
 
   prepare:
     name: Check version publication
@@ -135,20 +139,52 @@ jobs:
               "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
             | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
           echo "::add-mask::$token"
-          status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-            | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
-              --head --output /dev/null --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-              "https://ghcr.io/v2/${repository}/manifests/${VERSION}")
+          accept='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          # A tag's HTTP status (404 absent, 200 present), and its index digest once present.
+          status_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --write-out '%{http_code}' --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1"
+          }
+          digest_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --dump-header - --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+          # This commit owns the published version when its own sha- tag names the same index.
+          # The publish job writes that tag first, so a version tag never exists without it.
+          own_release() {
+            local mine released
+            case "$(status_of "sha-$GITHUB_SHA")" in
+              200) ;;
+              404) return 1 ;;
+              *) return 2 ;;
+            esac
+            mine=$(digest_of "sha-$GITHUB_SHA") && released=$(digest_of "$VERSION") || return 2
+            [[ $mine =~ ^sha256:[0-9a-f]{64}$ && $released == "$mine" ]]
+          }
+          status=$(status_of "$VERSION")
           case "$status" in
             404) echo 'publish=true' >> "$GITHUB_OUTPUT" ;;
             200)
-              if [[ $RELEASE_REQUESTED == true ]]; then
-                echo '::error::This release version already exists. If this run published it, re-run only its failed jobs; otherwise release a new version.'
+              # Re-run all jobs finds this run's own release, including a maintenance commit that
+              # finished a release whose tag was never published: resume it, never skip it.
+              if own_release; then
+                echo 'publish=true' >> "$GITHUB_OUTPUT"
+                echo '::notice::This commit already published this version; resuming with its own index.'
+              elif (( $? == 2 )); then
+                echo '::error::Could not read the published tags; re-run once GHCR answers.'
                 exit 1
-              fi
-              echo 'publish=false' >> "$GITHUB_OUTPUT"
-              echo '::notice::Published maintenance version retained; no release image or deployment.' ;;
+              elif [[ $RELEASE_REQUESTED != true ]]; then
+                echo 'publish=false' >> "$GITHUB_OUTPUT"
+                echo '::notice::Published maintenance version retained; no release image or deployment.'
+              else
+                echo '::error::This release version was already published from another commit; release a new version.'
+                exit 1
+              fi ;;
             *) echo '::error::Could not establish release version absence.'; exit 1 ;;
           esac
 
@@ -212,6 +248,7 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
           AMD64: ${{ needs.amd64.outputs.digest }}
           ARM64: ${{ needs.arm64.outputs.digest }}
+          RELEASE_REQUESTED: ${{ needs.gate.outputs.release }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -219,36 +256,68 @@ jobs:
           [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
           [[ $AMD64 =~ ^sha256:[0-9a-f]{64}$ && $ARM64 =~ ^sha256:[0-9a-f]{64}$ && $AMD64 != "$ARM64" ]]
           repository="${GITHUB_REPOSITORY,,}"
-          image="ghcr.io/$repository"
-          index() {
-            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -er '.digest'
-          }
           token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
             | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
               "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
             | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
           echo "::add-mask::$token"
-          status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-            | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
-              --head --output /dev/null --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-              "https://ghcr.io/v2/${repository}/manifests/${VERSION}")
+          accept='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          # A tag's HTTP status (404 absent, 200 present), and its index digest once present.
+          status_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --write-out '%{http_code}' --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1"
+          }
+          digest_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --dump-header - --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+          # This commit owns the published version when its own sha- tag names the same index.
+          # The publish job writes that tag first, so a version tag never exists without it.
+          own_release() {
+            local mine released
+            case "$(status_of "sha-$GITHUB_SHA")" in
+              200) ;;
+              404) return 1 ;;
+              *) return 2 ;;
+            esac
+            mine=$(digest_of "sha-$GITHUB_SHA") && released=$(digest_of "$VERSION") || return 2
+            [[ $mine =~ ^sha256:[0-9a-f]{64}$ && $released == "$mine" ]]
+          }
+          image="ghcr.io/$repository"
+          status=$(status_of "$VERSION")
           case "$status" in
             404)
-              docker buildx imagetools create --tag "$image:$VERSION" --tag "$image:sha-$GITHUB_SHA" \
-                "$image@$AMD64" "$image@$ARM64" ;;
+              # This commit's tag first, then the version from that exact index: a single index
+              # source is re-tagged byte for byte, so both tags name one digest.
+              docker buildx imagetools create --tag "$image:sha-$GITHUB_SHA" "$image@$AMD64" "$image@$ARM64"
+              merged=$(digest_of "sha-$GITHUB_SHA")
+              [[ $merged =~ ^sha256:[0-9a-f]{64}$ ]]
+              docker buildx imagetools create --tag "$image:$VERSION" "$image@$merged" ;;
             200)
               # Only this commit's own earlier attempt may have tagged it: resume with that index.
-              mine=$(index "$image:sha-$GITHUB_SHA") || mine=
-              if [[ -z $mine || $(index "$image:$VERSION") != "$mine" ]]; then
+              if own_release; then
+                echo '::notice::This commit already tagged this version; resuming with that index.'
+              elif (( $? == 2 )); then
+                echo '::error::Could not read the published tags; re-run once GHCR answers.'
+                exit 1
+              elif [[ $RELEASE_REQUESTED != true ]]; then
+                # A maintenance commit merged while its release was still publishing: the release
+                # tagged first. No digest is written, so scan, signing and delivery skip.
+                echo '::notice::Published maintenance version retained; no release image or deployment.'
+                exit 0
+              else
                 echo '::error::This release version was already published from another commit; release a new version.'
                 exit 1
-              fi
-              echo '::notice::This commit already tagged this version; resuming with that index.' ;;
+              fi ;;
             *) echo '::error::Could not establish release version absence.'; exit 1 ;;
           esac
-          digest=$(index "$image:$VERSION")
-          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          digest=$(digest_of "$VERSION")
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ && $digest == "$(digest_of "sha-$GITHUB_SHA")" ]]
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
   scan:
@@ -352,6 +421,7 @@ jobs:
       contents: read
       actions: read
       attestations: read
+      deployments: read
     with:
       target: production
       version: ${{ needs.gate.outputs.version }}
