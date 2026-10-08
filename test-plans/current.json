@@ -1,20 +1,21 @@
 {
-  "title": "Session: 2.36.44 Linode staging-first delivery",
-  "objective": "Rehearse the signed 2.36.44 Compose release on owner-operated Linode staging with its managed database and declared test guild, effects initially paused, and one DevBot writer. Production stays unchanged until its own readiness and approval.",
+  "title": "Session: 2.37.0 admin dashboard acceptance",
+  "objective": "Verify the signed 2.37.0 release on owner-authorized staging, preserving one DevBot writer and testing optional HTTPS dashboard access and bot-only compatibility. Production requires its own readiness and GitHub approval.",
   "user": [
-    "Review the release and verify its published source/digest. Leave any production approval pending until production is separately ready.",
-    "Authorize the cutover window; fence the previous DevBot before moving its token or starting staging. Preserve its database and recovery boundary; bootstrap only managed staging.",
-    "Check exact image/version/schema, sustained readiness and sole writer lease, test-guild command inventory, and staging backup/restore evidence.",
-    "Keep effects paused initially. Authorize Discord mutation checks separately; enable staging delivery only after its healthy baseline and durable current state are accepted."
+    "Review the exact release source/digest, backups and reviewed stable deploy/backup entries before authorizing the existing staging target's upgrade.",
+    "Configure the optional HTTPS origin and Discord OAuth callback through bundled Caddy or an external proxy; leave web disabled for a bot-only rehearsal.",
+    "Sign in as an officer; compare configuration/health and background work with Discord. Confirm ordinary members and unauthorized guilds are denied; exercise current-session and all-session sign-out.",
+    "Accept readiness, sole writer lease, test-guild command inventory and backup/restore evidence. Approve production only after its separate baseline is ready."
   ],
   "assistant": [
-    "Prepare and verify the exact release with credential-free source, PostgreSQL, native DNSSEC/SSHFP and cancellation fixtures.",
-    "Use owner-reported results to diagnose scoped readiness, registration, backup and failure outcomes; record exercised checks and unverified cases.",
+    "Run credential-free release-metadata, startup-announcement, dashboard OAuth/authorization, native Caddy and host-transition checks.",
+    "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Acquire and reconcile rosters within staging's declared scope, reading character profiles only for /verify and characters the roster doesn't list, never production identities or global command registration.",
-    "Expose database, Discord and writer-lease readiness; report startup/version and effect state without pinging members."
+    "Serve dashboard pages from the same bot process only when web is enabled; require Discord sign-in and officer authority, and keep server reads scoped.",
+    "Keep acquisition and reconciliation in the declared test guild; dashboard pages change no settings and trigger no Discord retries or decisions.",
+    "Expose database, Discord and writer-lease readiness; report 2.37.0, startup time and effect state without pinging members."
   ]
 }

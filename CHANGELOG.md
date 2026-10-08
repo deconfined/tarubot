@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.36.44**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.37.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.37.0 — Read-only admin dashboard and optional HTTPS setup
+
+- Release the officer-only dashboard with server selection, grouped configuration and health checks, server-scoped background runs and jobs, and a responsive light/dark layout. Discord OAuth sign-in and session controls protect access; the dashboard changes no settings and offers no retries or guest decisions.
+- Add optional bundled Caddy HTTPS to stock Compose and managed staging/production. Share the canonical public origin with OAuth callbacks, keep the bot's web listener private, persist certificate state and retain bot-only operation by default. An existing external HTTPS proxy remains supported.
+- Validate optional web settings and bundled proxy configuration before stopping a managed writer. Preserve web and backup profiles, require backend/proxy readiness before acceptance and fence failed upgrades. Already-live requests remain observational, not settings reconciliation; operators must review and reinstall the updated stable deploy and backup entries.
+- Provide a credential-free HTTPS LAN preview and native Caddy regression coverage for Discord login and protected dashboard pages. This release adds no database migration.
 
 ## 2.36.44 — Read character profiles only to verify ownership
 
@@ -1211,7 +1218,7 @@ These numbers are assigned now to the completed work stages to establish a meani
 
 - **Major:** incompatible changes to supported commands, configuration, or persisted-data contracts.
 - **Minor:** backward-compatible functionality and supported operational capabilities.
-- **Patch:** backward-compatible corrections or maintenance, including documentation, tests, and tooling changes without a new feature contract.
-- Every coherent change set receives an appropriate version increment; related edits share that increment.
+- **Patch:** backward-compatible fixes to application functionality.
+- Any added or changed application functionality carries the appropriate increment in the same PR; related edits share that increment. Pure documentation, tests, CI and pipeline maintenance keep the application version unchanged.
 
 Future changes update `package.json`, the Bun-generated lockfile when affected, and this changelog together. Released versions identify the running build; the latest GitHub commits can include work newer than that build.
