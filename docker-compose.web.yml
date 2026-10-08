@@ -1,0 +1,52 @@
+# Shared optional ingress. The bot and its readiness port stay on the private network.
+services:
+  caddy:
+    image: docker.io/library/caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    profiles: [web]
+    environment:
+      WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
+      WEB_PORT: ${WEB_PORT:-8080}
+    # Caddy treats a URL's trailing slash as a path matcher. Canonicalize the
+    # optional slash accepted by webSettings for both serving and validation.
+    entrypoint: [sh, -ec, 'export WEB_PUBLIC_ORIGIN="$${WEB_PUBLIC_ORIGIN%/}"; exec "$$@"', --]
+    command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Shared read-only source also serves one-off validation on SELinux hosts.
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      tarubot:
+        condition: service_healthy
+    # The booleans-only web contract distinguishes its listener from the main
+    # health port, so a port collision cannot falsely mark the proxy ready.
+    # Public DNS and certificate issuance still need an external HTTPS check.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O /dev/null http://127.0.0.1:2019/config/ &&
+          wget -q -O - "http://tarubot:$$WEB_PORT/health/ready" | grep -qx '{"ready":true}'
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: ${TARUBOT_RESTART_POLICY:-unless-stopped}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # The official binary carries this file capability; dropping it also prevents exec.
+    cap_add: [NET_BIND_SERVICE]
+
+volumes:
+  # Keep these across container recreation, upgrades and temporary web disablement.
+  caddy_data:
+  caddy_config:

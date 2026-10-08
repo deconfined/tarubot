@@ -1,5 +1,8 @@
 # Standalone staging bot against its external managed database, never a local DB.
 # Use staging's separate owner-controlled Docker host with an approved digest.
+include:
+  - ./docker-compose.web.yml
+
 x-logging: &logging
   driver: json-file
   options:
@@ -14,6 +17,9 @@ services:
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN to the staging bot token}
       DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:?Set DISCORD_APPLICATION_ID to the staging application}
+      WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
+      WEB_PORT: ${WEB_PORT:-8080}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       TARUBOT_ENVIRONMENT: staging
       TEST_GUILD_ID: ${TEST_GUILD_ID:?Set TEST_GUILD_ID to the staging test guild}
       PUBLIC_TEST_RESPONSES: ${PUBLIC_TEST_RESPONSES:-false}

@@ -88,14 +88,23 @@ export function hostSandbox(
     chmodSync(join(bin, tool), 0o755);
   }
   const runtime = join(sim, "runtime");
-  mkdirSync(join(runtime, "dist/src/config"), { recursive: true });
   // Host scripts import their compiled guard paths; execute the real source guard
   // through a runtime adapter rather than faking identity-check success.
-  for (const module of ["deployment", "secrets"])
-    writeFileSync(
-      join(runtime, `dist/src/config/${module}.js`),
-      `export * from ${JSON.stringify(join(repository, `src/config/${module}.ts`))};\n`,
-    );
+  for (const containerRuntime of [runtime, join(sim, "live-runtime")]) {
+    mkdirSync(join(containerRuntime, "dist/src/config"), { recursive: true });
+    for (const module of ["deployment", "secrets"])
+      writeFileSync(
+        join(containerRuntime, `dist/src/config/${module}.js`),
+        `export * from ${JSON.stringify(join(repository, `src/config/${module}.ts`))};\n`,
+      );
+  }
+  mkdirSync(join(runtime, "dist/src/web"), { recursive: true });
+  writeFileSync(
+    join(runtime, "dist/src/web/settings.js"),
+    `export * from ${JSON.stringify(join(repository, "src/web/settings.ts"))};\n`,
+  );
+  // The published live image intentionally has no web modules: only candidates
+  // may use the genuine web validator when that feature is configured.
   const environment = {
     HOME: home,
     PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
@@ -137,6 +146,8 @@ export function hostSandbox(
         join(repository, `docker-compose.${target}.yml`),
         join(path, `docker-compose.${target}.yml`),
       );
+    cpSync(join(repository, "docker-compose.web.yml"), join(path, "docker-compose.web.yml"));
+    cpSync(join(repository, "ops/Caddyfile"), join(path, "ops/Caddyfile"));
     writeFileSync(join(path, "ops/age-recipients.txt"), "age1testrecipient\n");
   };
   if (releases) {

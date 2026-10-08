@@ -19,9 +19,13 @@ Production and staging require a non-empty resolved database CA. Connections ver
 
 Compose deployments use central host-only variables. Generic Docker secrets can instead supply supported `NAME_FILE` settings through read-only mounts; retain the resolver behavior above. Never log secrets or put them in argv.
 
+The optional dashboard's `DISCORD_CLIENT_SECRET` is a plain environment secret only, not one of the supported `*_FILE` settings. The existing `DISCORD_APPLICATION_ID` is its OAuth client ID. `WEB_PUBLIC_ORIGIN` is shared by the bot and Caddy and determines the exact `/auth/callback` redirect; `WEB_PORT` defaults to private `8080`. `COMPOSE_PROFILES=web` additionally selects bundled Caddy, while an empty profile supports bot-only operation or an external proxy. See the site's [web settings](../site/src/content/docs/deploy/configuration.md#optional-web-dashboard) and [installation](../site/src/content/docs/deploy/install.md#optional-https-dashboard), rather than creating a separate settings source.
+
 ## Managed host settings
 
 Production and staging settings remain in separate private host `.env` files; release worktrees reuse the appropriate central file. Their GitHub environments hold only their own SSH delivery credential and DNS hostname, not database or Discord credentials. Host identity is authenticated through matching DNSSEC-signed SSHFP in the owner's zone; there is no manual known_hosts fallback. Repository variables independently control activation: `DEPLOY_ENABLED` for production and `STAGING_DEPLOY_ENABLED` for staging. Use `production.env.example` or `staging.env.example` respectively, never a copied production secret file on staging. See [deployment](DEPLOYMENT.md#manual-linode-provisioning) for installation, backup and rotation.
+
+Managed web setting changes require owner-approved recreation against the recorded current worktree and exact digest, not a restart or an `already-live` dispatch. Routine version upgrades retain the central web settings. Stable deploy/backup entries require reviewed owner reinstallation for the optional proxy lifecycle; release source never installs itself. See [owner lifecycle](DEPLOYMENT.md#optional-dashboard-owner-lifecycle).
 
 Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; local DevBot uses its reports token for private previews. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 

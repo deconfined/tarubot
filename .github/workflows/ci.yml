@@ -106,25 +106,41 @@ jobs:
             "$USER" "$GITHUB_WORKSPACE/ops/deploy-ssh.sh" "$RUNNER_TEMP"
       - name: Build the credential-free DNSSEC SSHFP fixture
         run: docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
+      - name: Pull the credential-free Caddy fixture
+        run: |
+          set -Eeuo pipefail
+          image=$(docker compose --env-file .env.example --profile web config --format json | jq -r '.services.caddy.image')
+          docker pull "$image"
+          printf 'CADDY_FIXTURE_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Generate synthetic integration input
         run: bun run test:fixture
       - name: Run unit, contract, and PostgreSQL integration tests
         run: bun run test
       - name: Validate deployment and source-build Compose models
         run: |
-          docker compose --env-file .env.example config --quiet
-          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.build.yml config --quiet
-          # The production host's self-contained file, with placeholder values for its required settings.
-          TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-            DISCORD_APPLICATION_ID=123456789012345678 DATABASE_URL=postgresql://tarubot:x@db.example.org:27520/tarubot \
-            DATABASE_CA_CERT=x DISCORD_TOKEN=x \
-            docker compose --env-file /dev/null -f docker-compose.production.yml config --quiet
-          # Standalone staging model: invented credentials and IDs, no live connection or pull.
-          TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-            DISCORD_APPLICATION_ID=123456789012345678 TEST_GUILD_ID=123456789012345679 \
-            DATABASE_URL=postgresql://tarubot_staging:x@db.example.org:27520/tarubot_staging \
-            DATABASE_CA_CERT=x DISCORD_TOKEN=x \
-            docker compose --env-file /dev/null -f docker-compose.staging.yml config --quiet
+          set -Eeuo pipefail
+          # Check both bot-only and optional-web models with invented settings.
+          for profiles in '' web; do
+            export COMPOSE_PROFILES="$profiles"
+            export WEB_PUBLIC_ORIGIN= DISCORD_CLIENT_SECRET=
+            if [[ $profiles == web ]]; then
+              export WEB_PUBLIC_ORIGIN=https://tarubot.example.org DISCORD_CLIENT_SECRET=fixture-only
+            fi
+            docker compose --env-file .env.example config --quiet
+            docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.build.yml config --quiet
+            TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+              DISCORD_APPLICATION_ID=123456789012345678 DATABASE_URL=postgresql://tarubot:x@db.example.org:27520/tarubot \
+              DATABASE_CA_CERT=x DISCORD_TOKEN=x \
+              docker compose --env-file /dev/null -f docker-compose.production.yml config --quiet
+            TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+              DISCORD_APPLICATION_ID=123456789012345678 TEST_GUILD_ID=123456789012345679 \
+              DATABASE_URL=postgresql://tarubot_staging:x@db.example.org:27520/tarubot_staging \
+              DATABASE_CA_CERT=x DISCORD_TOKEN=x \
+              docker compose --env-file /dev/null -f docker-compose.staging.yml config --quiet
+          done
+          # Exercise the digest-pinned official binary under the service's hardening.
+          docker compose --env-file .env.example run --rm --no-deps caddy \
+            caddy validate --config /etc/caddy/Caddyfile
       # Maintenance passes all checks without a release bump. Only a known version increase
       # declares a release; manual verification has no predecessor and never infers one.
       - name: Validate version and release metadata

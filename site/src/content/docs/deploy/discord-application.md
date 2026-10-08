@@ -15,6 +15,12 @@ Every TaruBot deployment runs as its own Discord application. Create one in the 
 
 TaruBot checks at startup that the token belongs to `DISCORD_APPLICATION_ID`, and the maintenance tools check it before they touch Discord, so a token from another application is refused instead of used.
 
+## Optional dashboard OAuth
+
+Use this same application's **OAuth2** settings; its existing `DISCORD_APPLICATION_ID` is the OAuth client ID. Copy its **Client Secret** into private `.env` as `DISCORD_CLIENT_SECRET` (not `DISCORD_TOKEN`). This setting has no `*_FILE` form.
+
+Under **Redirects**, register the exact public origin plus `/auth/callback`. For `WEB_PUBLIC_ORIGIN=https://tarubot.example.org`, enter **`https://tarubot.example.org/auth/callback`** and save. Scheme, hostname, any explicit custom port and path must match; do not register the private container URL or the bot health port. If the origin changes, update this registration before recreating the deployment. Bot-only installations need neither the client secret nor this redirect.
+
 Next, [install the deployment](/tarubot/deploy/install/), then [add the bot to your server](/tarubot/admin/add-to-server/). Build the authorization URL yourself from your application ID, the `bot` and `applications.commands` scopes and [the permissions TaruBot needs](/tarubot/admin/add-to-server/#permissions).
 
 :::note

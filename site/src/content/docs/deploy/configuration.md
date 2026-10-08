@@ -30,6 +30,20 @@ Read by the running bot.
 | `GITHUB_REPORTS_REPO` | `deconfined/tarubot-reports` | The `owner/name` repository reports open issues in. The default is the upstream project's own private repository, so **set your own whenever you set the token**, or leave the token empty. It may never name TaruBot's public repository, `deconfined/tarubot`, in any letter case: the bot refuses to start, so private reports can't go public. |
 | `HEALTHCHECKS_PING_URL` | (empty) | The private ping URL of your [healthchecks.io](https://healthchecks.io) check, which the ready bot pings every five minutes. Empty turns the [heartbeat](/tarubot/deploy/monitoring/#heartbeat) off. Never publish the URL: anyone with it can ping your check. |
 
+## Optional web dashboard
+
+The stock, production and staging manifests pass these settings to the bot. [Installation](/tarubot/deploy/install/#optional-https-dashboard) explains the optional Caddy profile and external-proxy alternative.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `WEB_PUBLIC_ORIGIN` | (empty) | Enables web when set to the public HTTPS origin, for example `https://tarubot.example.org`. Shared with Caddy; also determines application URLs and the exact OAuth redirect `https://tarubot.example.org/auth/callback`. |
+| `WEB_PORT` | `8080` | Private web listener and Caddy upstream port. Not published on the host; distinct from `HEALTH_PORT`. |
+| `DISCORD_CLIENT_SECRET` | (empty) | The existing Discord application's OAuth client secret, required with web enabled. Plain environment only; no `DISCORD_CLIENT_SECRET_FILE` form. |
+
+`DISCORD_APPLICATION_ID` is also the OAuth client ID; do not create a second application for the dashboard. Keep secrets private in `.env`. Setting `WEB_PUBLIC_ORIGIN` enables the bot listener, not the bundled proxy: that additionally needs `COMPOSE_PROFILES=web`. The standard Caddy recipe publishes TCP 80/443; a custom public origin port needs a matching Caddy ports override.
+
+Apply environment changes by recreating containers, not `docker compose restart`, which retains their old environment. Follow [enable, change and disable](/tarubot/deploy/operations/#dashboard-enable-change-and-disable) without starting a second writer.
+
 ## Lodestone
 
 Read by the bot's Lodestone adapter, which fetches and parses Lodestone pages in the bot process. The defaults suit almost every deployment.
@@ -58,6 +72,7 @@ Read by `docker-compose.yml`, not by the bot.
 | `POSTGRES_PASSWORD` | (required) | The bundled database's password, set when its volume is first created. Use letters, digits, `-` and `_`, because Compose builds the bot's connection URL from it. Changing it later doesn't change the existing database's password. Secret. |
 | `TARUBOT_IMAGE_TAG` | `latest` | The image tag to run: a published version (recommended), `latest`, or `sha-<commit>`. |
 | `TARUBOT_IMAGE` | (empty) | A complete image reference that overrides `TARUBOT_IMAGE_TAG`, for example one pinned by `@sha256:` digest. |
+| `COMPOSE_PROFILES` | (empty) | Optional `web` starts bundled Caddy. Empty keeps the bot-only default or allows an external proxy. Shared included files are still required when the profile is off. |
 
 ## Maintenance tools only
 

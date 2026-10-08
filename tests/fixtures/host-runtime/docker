@@ -5,11 +5,17 @@ record() { printf '%s\n' "$*" >>"$SIM/events"; }
 fail() { [[ ! -e $SIM/fail-$1 ]]; }
 case $1 in
   ps)
-    if [[ $2 == -aq ]] || jq -e '.[0].State.Running' "$SIM/container.json" >/dev/null; then
-      jq -r '.[0].Id' "$SIM/container.json"
+    file=$SIM/container.json
+    if [[ $* == *'service=caddy'* ]]; then file=$SIM/proxy.json; fi
+    if [[ -f $file ]] && { [[ $2 == -aq ]] || jq -e '.[0].State.Running' "$file" >/dev/null; }; then
+      jq -r '.[0].Id' "$file"
     fi
     ;;
   inspect)
+    if [[ -f $SIM/proxy.json && $2 == $(jq -r '.[0].Id' "$SIM/proxy.json") ]]; then
+      cat "$SIM/proxy.json"
+      exit 0
+    fi
     if [[ -e $SIM/fail-inspect && -e $SIM/started ]]; then exit 1; fi
     if [[ -e $SIM/fail-restart && -e $SIM/observed ]]; then
       jq '.[0].RestartCount = 1' "$SIM/container.json"
@@ -27,14 +33,28 @@ case $1 in
     ;;
   pull) record "pull $2"; fail pull ;;
   update)
-    [[ $2 == --restart && $3 == unless-stopped && $4 == $(jq -r '.[0].Id' "$SIM/container.json") ]]
+    [[ $2 == --restart && $3 == unless-stopped ]]
     [[ -f $HOME/.local/state/tarubot-deploy/current ]]
-    record restart-policy
-    jq '.[0].HostConfig.RestartPolicy.Name = "unless-stopped"' "$SIM/container.json" >"$SIM/next.json"
-    mv "$SIM/next.json" "$SIM/container.json"
-    fail restart-policy
+    file=$SIM/container.json
+    action=restart-policy
+    if [[ -f $SIM/proxy.json && $4 == $(jq -r '.[0].Id' "$SIM/proxy.json") ]]; then
+      file=$SIM/proxy.json
+      action=proxy-restart-policy
+    else
+      [[ $4 == $(jq -r '.[0].Id' "$file") ]]
+    fi
+    record "$action"
+    jq '.[0].HostConfig.RestartPolicy.Name = "unless-stopped"' "$file" >"$SIM/next.json"
+    mv "$SIM/next.json" "$file"
+    fail "$action"
     ;;
   stop)
+    if [[ -f $SIM/proxy.json && ${*: -1} == $(jq -r '.[0].Id' "$SIM/proxy.json") ]]; then
+      record proxy-stop
+      jq '.[0].State.Running = false' "$SIM/proxy.json" >"$SIM/next.json"
+      mv "$SIM/next.json" "$SIM/proxy.json"
+      exit 0
+    fi
     record stop
     [[ -f $HOME/.local/state/tarubot-deploy/pending ]]
     fail stop
@@ -44,7 +64,7 @@ case $1 in
   exec)
     if [[ ${*: -1} == production || ${*: -1} == staging ]]; then
       record scope-live
-      "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/live-env.json" "$SIM/runtime" "$5" "$6"
+      "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/live-env.json" "$SIM/live-runtime" "$5" "$6"
     else
       record observe
       touch "$SIM/observed"
@@ -67,27 +87,40 @@ case $1 in
       esac
       shift 2
     done
-    if ((${#profiles[@]} == 0)) && [[ -n ${COMPOSE_PROFILES:-} ]]; then
-      IFS=, read -r -a profiles <<<"$COMPOSE_PROFILES"
-    fi
-    [[ $project == tarubot && $root == "$HOME/tarubot" && $env_file == "$HOME/tarubot/.env" ]]
+    [[ $project == tarubot && $env_file == "$HOME/tarubot/.env" ]]
+    # Published immutable backup uses the root; updated entries use the release.
+    [[ $root == "${manifest%/*}" || $root == "$HOME/tarubot" ]]
     [[ -f $manifest && ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
     case $1 in
       config)
         record config
         fail config
-        "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" "${profiles[@]}" >"$SIM/compose.json"
+        "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" "$root" "${profiles[@]}" >"$SIM/compose.json"
         if [[ -e $SIM/fail-restart-config ]]; then
           jq '.services.tarubot.restart = "unless-stopped"' "$SIM/compose.json"
         else cat "$SIM/compose.json"; fi
         ;;
+      pull)
+        [[ $2 == caddy ]]
+        jq -e '.services.caddy' "$SIM/compose.json" >/dev/null
+        record proxy-pull
+        fail proxy-pull
+        ;;
       run)
         case "$*" in
+          *'caddy caddy validate '*)
+            [[ $* == *'--pull never'* && $* == *'--config /etc/caddy/Caddyfile --adapter caddyfile'* ]]
+            mount=$(jq -er '.services.caddy.volumes[] | select(startswith("/") and contains(":/etc/caddy/Caddyfile:ro"))' "$SIM/compose.json")
+            [[ ${mount%%:*} == "${manifest%/*}/ops/Caddyfile" && -f ${mount%%:*} ]]
+            record proxy-validate
+            fail proxy-validate
+            ;;
           *'tarubot bun -e '*)
             [[ $* == *'--pull never'* ]]
-            record scope-candidate
+            code=${@: -2:1}
+            if [[ $code == *'webSettings'* ]]; then record web-candidate; else record scope-candidate; fi
             jq '.services.tarubot.environment' "$SIM/compose.json" >"$SIM/candidate-env.json"
-            "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/candidate-env.json" "$SIM/runtime" "${@: -2:1}" "${@: -1}"
+            "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/candidate-env.json" "$SIM/runtime" "$code" "${@: -1}"
             ;;
           *backup)
             record backup
@@ -118,6 +151,21 @@ case $1 in
         ;;
       up)
         [[ $* == *'--pull never'* && $* == *'--force-recreate'* && $* == *'--wait'* ]]
+        if [[ ${*: -1} == caddy ]]; then
+          jq -e '.[0].State.Running and .[0].State.Health.Status == "healthy"' "$SIM/container.json" >/dev/null
+          jq -e '.services.caddy' "$SIM/compose.json" >/dev/null
+          record proxy-start
+          jq -n --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" \
+            '[{Id:"cadd10000001",HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}}}]' >"$SIM/proxy.json"
+          fail proxy-start
+          if [[ -e $SIM/fail-proxy-ready ]]; then
+            jq '.[0].State.Health.Status = "unhealthy"' "$SIM/proxy.json" >"$SIM/next.json"
+            mv "$SIM/next.json" "$SIM/proxy.json"
+            exit 1
+          fi
+          record proxy-ready
+          exit 0
+        fi
         record start
         jq --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" '[.target | {Id:"c0ffee000002",Image:.id,RestartCount:0,HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}},Config:{Image:("ghcr.io/deconfined/tarubot@"+.digest),Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit,"com.docker.compose.project":"tarubot","com.docker.compose.oneoff":"False"}}}]' "$SIM/config.json" >"$SIM/container.json"
         touch "$SIM/started"

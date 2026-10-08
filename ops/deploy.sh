@@ -34,7 +34,7 @@ public_step() { step=$1; printf 'step %s\n' "$step" >&3; }
 refuse() { finished=true; printf '%s\n' 'result refused' >&3; exit 1; }
 compose() {
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_RESTART_POLICY=no timeout --kill-after=10 300 docker compose \
-    --project-name tarubot --project-directory "$ROOT" --env-file "$ROOT/.env" \
+    --project-name tarubot --project-directory "$WORKTREE" --env-file "$ROOT/.env" \
     -f "$WORKTREE/docker-compose.$DEPLOY_TARGET.yml" "$@"
 }
 bot_ids() {
@@ -171,8 +171,16 @@ jq -e --arg ref "$REF" --arg version "$VERSION" --arg commit "$COMMIT" \
   'length == 1 and (.[0].RepoDigests | index($ref) != null) and .[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $commit' <<<"$TARGET"
 TARGET_ID=$(jq -er '.[0].Id' <<<"$TARGET")
 [[ $TARGET_ID =~ ^sha256:[0-9a-f]{64}$ ]]
-# Compose omits inactive profiles from config; inspect the client without starting it.
-CONFIG=$(compose --profile backup config --format json)
+# Resolve the owner's selected profiles before adding backup: an explicit profile
+# replaces COMPOSE_PROFILES, including a value read from the central dotenv.
+SELECTED_CONFIG=$(compose config --format json)
+WEB_PROFILE=false
+BACKUP_PROFILES=(--profile backup)
+if jq -e '.services | has("caddy")' <<<"$SELECTED_CONFIG" >/dev/null; then
+  WEB_PROFILE=true
+  BACKUP_PROFILES+=(--profile web)
+fi
+CONFIG=$(compose "${BACKUP_PROFILES[@]}" config --format json)
 jq -e --arg wanted "$VERSION" --arg live "$LIVE_VERSION" --arg ref "$REF" --arg target "$DEPLOY_TARGET" \
   '.services.tarubot as $bot | .services.backup as $backup |
    $bot.image == $ref and $bot.environment.TARUBOT_ENVIRONMENT == $target and
@@ -202,6 +210,10 @@ observe() {
     const s = await r.json();
     if (!r.ok || !s.live || !s.ready || !s.database || !s.writerLease || !s.discord) throw Error("not ready");
   ' "$VERSION" "$SCHEMA"
+  if [[ -n ${PROXY_CID:-} ]]; then
+    snapshot=$(timeout --kill-after=5 30 docker inspect "$PROXY_CID")
+    jq -e 'length == 1 and .[0].State.Running == true and .[0].State.Health.Status == "healthy" and .[0].HostConfig.RestartPolicy.Name == "no"' <<<"$snapshot"
+  fi
 }
 if [[ $VERSION == "$LIVE_VERSION" ]]; then
   [[ $TARGET_ID == "$LIVE_ID" ]]
@@ -219,6 +231,29 @@ if [[ $VERSION == "$LIVE_VERSION" ]]; then
   printf '%s\n' 'result already-live' >&3
   exit 0
 fi
+# Only the candidate reads web modules; published running images may predate web.
+# Default bot-only upgrades also remain compatible with those published images.
+compose run --rm --no-deps --pull never -T tarubot bun -e '
+  const proxy = process.argv.at(-1) === "true";
+  if (process.env.WEB_PUBLIC_ORIGIN || proxy) {
+    const {webSettings} = await import("./dist/src/web/settings.js");
+    const web = webSettings(process.env);
+    if (web.status === "invalid") throw Error(web.problems.join("; "));
+    if (web.status === "on" &&
+        web.settings.port === Number(process.env.HEALTH_PORT ?? 3000)) {
+      throw Error("WEB_PORT must differ from HEALTH_PORT");
+    }
+    if (proxy && web.status !== "on") throw Error("Caddy requires WEB_PUBLIC_ORIGIN");
+    if (proxy && web.status === "on" &&
+        (!web.settings.secure || new URL(web.settings.origin).port)) {
+      throw Error("Stock Caddy requires an HTTPS origin on public port 443");
+    }
+  }
+' "$WEB_PROFILE"
+if [[ $WEB_PROFILE == true ]]; then
+  compose pull caddy
+  compose run --rm --no-deps --pull never -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+fi
 # Set the trap boundary BEFORE writing pending: an uncertain fsync/write is never
 # permission to continue an old writer. This marker is cleared only after success.
 boundary=true
@@ -227,7 +262,9 @@ public_step stop
 stop_writers
 public_step backup
 # The caller selects the dump client even when a pinned payload inspects default config.
-COMPOSE_PROFILES=backup TARUBOT_ROOT=$ROOT \
+BACKUP_PROFILE_SELECTION=backup
+if [[ $WEB_PROFILE == true ]]; then BACKUP_PROFILE_SELECTION+=,web; fi
+COMPOSE_PROFILES=$BACKUP_PROFILE_SELECTION TARUBOT_ROOT=$ROOT \
   TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_HOST_LOCK_HELD=true \
   timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh" "$DEPLOY_TARGET"
@@ -247,6 +284,25 @@ CID=$(bot_ids)
 SNAPSHOT=$(timeout --kill-after=5 30 docker inspect "$CID")
 RESTARTS=$(jq -er '.[0].RestartCount' <<<"$SNAPSHOT")
 jq -e '.[0].HostConfig.RestartPolicy.Name == "no"' <<<"$SNAPSHOT"
+if [[ $WEB_PROFILE == true ]]; then
+  # Compose health includes both Caddy's private admin and bot web readiness.
+  # A failed startup/readiness check crosses the same pending/writer fence.
+  compose up --detach --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 caddy
+  PROXY_CID=$(timeout --kill-after=5 30 docker ps -q \
+    --filter label=com.docker.compose.project=tarubot \
+    --filter label=com.docker.compose.service=caddy)
+  [[ $PROXY_CID =~ ^[0-9a-f]{12,64}$ ]]
+else
+  # Disabling the selected profile must not leave a previous proxy serving.
+  # Stop by service label because a disabled/older model may not contain Caddy.
+  PROXY_IDS=$(timeout --kill-after=5 30 docker ps -q \
+    --filter label=com.docker.compose.project=tarubot \
+    --filter label=com.docker.compose.service=caddy)
+  if [[ -n $PROXY_IDS ]]; then
+    mapfile -t proxies <<<"$PROXY_IDS"
+    timeout --kill-after=5 90 docker stop --time 40 "${proxies[@]}"
+  fi
+fi
 public_step observe
 observe
 # Require sustained readiness, rather than a momentary successful health check.
@@ -255,6 +311,9 @@ public_step record
 durable_record "$STATE/current"
 # Only a durably observed/accepted image may automatically resume after host loss.
 # Keep pending until this update succeeds; failure still fences the writer.
+if [[ -n ${PROXY_CID:-} ]]; then
+  timeout --kill-after=5 30 docker update --restart unless-stopped "$PROXY_CID"
+fi
 timeout --kill-after=5 30 docker update --restart unless-stopped "$CID"
 rm "$STATE/pending"
 sync -f "$STATE"

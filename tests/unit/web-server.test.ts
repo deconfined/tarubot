@@ -6,6 +6,10 @@
  * loopback, no database.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Hono } from "hono";
 import { pino } from "pino";
 import { z } from "zod";
@@ -35,12 +39,7 @@ import { SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
 import { type WebSettings, webSettings } from "../../src/web/settings.js";
 import { type DiscordAccount, discordOAuthError, FakeDiscord } from "../fixtures/discord-oauth.js";
 import { THROWN } from "../fixtures/web-pages/throws/boom.page.js";
-import {
-  HARNESS_ACCOUNTS,
-  HARNESS_GUILDS,
-  harnessGateway,
-  startHarness,
-} from "../fixtures/web-dev.js";
+import { HARNESS_GUILDS, harnessGateway, startHarness } from "../fixtures/web-dev.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
 import { configGuild, configReport } from "../fixtures/replies/configuration.js";
 
@@ -1435,12 +1434,17 @@ describe("startWeb", () => {
 
 describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopback", () => {
   /** A cookie-jar fetch that leaves redirects to the test. */
-  function client() {
+  function client(tls?: { ca: string }) {
     const jar = new Map<string, string>();
     return async (url: string | URL, init: RequestInit = {}) => {
       const headers = new Headers(init.headers);
       headers.set("cookie", [...jar].map(([name, value]) => `${name}=${value}`).join("; "));
-      const response = await fetch(url, { ...init, headers, redirect: "manual" });
+      const response = await fetch(url, {
+        ...init,
+        ...(tls && { tls }),
+        headers,
+        redirect: "manual",
+      });
       for (const cookie of response.headers.getSetCookie()) {
         const [pair = ""] = cookie.split(";");
         const [name = "", value = ""] = pair.split("=");
@@ -1509,7 +1513,6 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
         expect({ account, status: response.status }).toEqual({ account, status: 403 });
         expect(response.headers.getSetCookie().some((c) => c.startsWith("tarubot="))).toBe(false);
       }
-      expect(Object.keys(HARNESS_ACCOUNTS)).toEqual(["officer", "member", "outsider", "bot"]);
       const foreign = new URL(harness.authorizeUrl);
       foreign.searchParams.set("redirect_uri", "https://evil.example/auth/callback");
       foreign.searchParams.set("state", "<script>alert(1)</script>");
@@ -1522,4 +1525,149 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
       await harness.stop();
     }
   });
+  test.skipIf(!process.env.CADDY_FIXTURE_IMAGE)(
+    "an accepted trailing-slash origin serves protected routes and OAuth through native Caddy",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "tarubot-caddy-"));
+      const project = `tarubot-caddy-${crypto.randomUUID()}`;
+      const repository = fileURLToPath(new URL("../..", import.meta.url));
+      const freePort = async () => {
+        const probe = Bun.serve({ hostname: "::", port: 0, fetch: () => new Response(null) });
+        const port = probe.port;
+        await probe.stop(true);
+        if (port === undefined) throw new Error("TCP probe did not expose a port");
+        return port;
+      };
+      const publicPort = await freePort();
+      let privatePort = await freePort();
+      while (privatePort === publicPort) privatePort = await freePort();
+      const origin = `https://localhost:${publicPort}/`;
+      const harness = await startHarness({
+        hostname: "::1",
+        port: privatePort,
+        publicOrigin: origin,
+      });
+      const environment = {
+        PATH: process.env.PATH ?? "",
+        HOME: directory,
+        WEB_PUBLIC_ORIGIN: origin,
+        WEB_PORT: String(privatePort),
+      };
+      const compose = async (...args: string[]) => {
+        const result = Bun.spawn(
+          [
+            "docker",
+            "compose",
+            "--project-name",
+            project,
+            "--env-file",
+            "/dev/null",
+            "-f",
+            join(directory, "compose.yml"),
+            ...args,
+          ],
+          { env: environment, stdout: "pipe", stderr: "pipe" },
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          result.exited,
+          new Response(result.stdout).text(),
+          new Response(result.stderr).text(),
+        ]);
+        if (code !== 0) throw new Error(stderr);
+        return stdout.trim();
+      };
+      try {
+        // Host networking reaches only the loopback fixture. No fixed host ports,
+        // public ACME, bot/database credentials, or real Discord are involved.
+        await writeFile(
+          join(directory, "Caddyfile"),
+          `{
+          admin off
+          auto_https disable_redirects
+          skip_install_trust
+          default_bind 127.0.0.1 [::1]
+          servers {
+            protocols h1 h2
+          }
+        }
+        import /etc/caddy/TaruBot.Caddyfile
+        `,
+        );
+        await writeFile(
+          join(directory, "override.yml"),
+          `
+services:
+  caddy:
+    image: ${JSON.stringify(process.env.CADDY_FIXTURE_IMAGE)}
+    network_mode: host
+    extra_hosts: {tarubot: "::1"}
+    ports: !override []
+    # Native health waits for trusted TLS and the actual root response, not a delay.
+    healthcheck:
+      test: [CMD-SHELL, "SSL_CERT_FILE=/data/caddy/pki/authorities/local/root.crt wget -q -O /dev/null https://localhost:${publicPort}/"]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 0s
+    volumes: !override
+      - ${JSON.stringify(`${repository}/ops/Caddyfile:/etc/caddy/TaruBot.Caddyfile:ro,z`)}
+      - ${JSON.stringify(`${directory}/Caddyfile:/etc/caddy/Caddyfile:ro,z`)}
+      - caddy_data:/data
+      - caddy_config:/config
+`,
+        );
+        await writeFile(
+          join(directory, "compose.yml"),
+          `
+include:
+  - path:
+      - ${JSON.stringify(join(repository, "docker-compose.web.yml"))}
+      - ${JSON.stringify(join(directory, "override.yml"))}
+services:
+  tarubot:
+    image: ${JSON.stringify(process.env.CADDY_FIXTURE_IMAGE)}
+`,
+        );
+        await compose(
+          "up",
+          "--detach",
+          "--no-deps",
+          "--pull",
+          "never",
+          "--wait",
+          "--wait-timeout",
+          "15",
+          "caddy",
+        );
+        const ca = await compose(
+          "exec",
+          "-T",
+          "caddy",
+          "cat",
+          "/data/caddy/pki/authorities/local/root.crt",
+        );
+        const browse = client({ ca });
+        const done = await signIn(browse, harness.url, "officer");
+        expect(done.status).toBe(303);
+        expect(
+          done.headers
+            .getSetCookie()
+            .some((cookie) => cookie.startsWith("__Host-") && /; Secure(?:;|$)/u.test(cookie)),
+        ).toBe(true);
+        const page = await browse(
+          new URL(`/g/${HARNESS_GUILDS.example.id}/configuration`, harness.url),
+        );
+        expect(page.status).toBe(200);
+        expect(await page.text()).toContain("Example FC");
+      } finally {
+        await harness.stop();
+        try {
+          await compose("--profile", "web", "down", "--volumes", "--remove-orphans");
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
+    },
+    30_000,
+  );
 });

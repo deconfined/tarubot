@@ -8,6 +8,8 @@
  * Discord", and pick an invented account on the fake authorize page.
  * IPv6 loopback is the default; --host selects an explicit interface. LAN previews require
  * --cert and --key to serve both listeners over HTTPS without weakening the web's origin policy.
+ * For an isolated reverse-proxy lab, --origin supplies the public URL and --port the private
+ * HTTP listener; the fake Discord stays on its own local HTTP port.
  *
  * The fake authorize page runs on its own port on the same interface and protocol as the web. It
  * redirects only to the redirect URI the harness configured, and echoes no request data: its page
@@ -303,20 +305,22 @@ async function freeOrigin(hostname: string, tls: WebOptions["tls"]): Promise<str
   return origin;
 }
 
-/** Start both listeners on the same interface and protocol; loopback HTTP remains the default. */
+/** Default loopback harness; a public origin and private port also exercise real reverse proxies. */
 export async function startHarness(
-  options: Pick<WebOptions, "hostname" | "tls"> = {},
+  options: Pick<WebOptions, "hostname" | "tls" | "port"> & { publicOrigin?: string } = {},
   log: Logger = pino({ level: "silent" }),
 ): Promise<Harness> {
   const discord = new FakeDiscord(HARNESS_CLIENT_ID, HARNESS_CLIENT_SECRET);
   const hostname = options.hostname ?? "::1";
-  const origin = await freeOrigin(hostname, options.tls);
+  const listenerOrigin = await freeOrigin(hostname, options.tls);
+  const origin = options.publicOrigin ?? listenerOrigin;
+  const port = options.port ?? Number(new URL(listenerOrigin).port);
   const authorize = Bun.serve({
     hostname,
     ...(options.tls && { tls: options.tls }),
     port: 0,
     development: false,
-    fetch: authorizePage(discord, `${origin}/auth/callback`),
+    fetch: authorizePage(discord, `${new URL(origin).origin}/auth/callback`),
   });
   const reporter = createReporter(log);
   let web: WebServer | null = null;
@@ -324,7 +328,7 @@ export async function startHarness(
     web = await startWeb(
       {
         WEB_PUBLIC_ORIGIN: origin,
-        WEB_PORT: new URL(origin).port,
+        WEB_PORT: String(port),
         DISCORD_CLIENT_SECRET: HARNESS_CLIENT_SECRET,
         DISCORD_APPLICATION_ID: HARNESS_CLIENT_ID,
       },
@@ -342,6 +346,7 @@ export async function startHarness(
         fetch: discord.fetch,
         authorizeUrl: new URL("/oauth2/authorize", authorize.url).href,
         hostname,
+        port,
         ...(options.tls && { tls: options.tls }),
       },
     );
@@ -366,6 +371,8 @@ if (import.meta.main) {
       host: { type: "string", default: "::1" },
       cert: { type: "string" },
       key: { type: "string" },
+      origin: { type: "string" },
+      port: { type: "string" },
     },
     allowPositionals: false,
   });
@@ -376,7 +383,15 @@ if (import.meta.main) {
       ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
       : undefined;
   const log = pino({ level: "debug" });
-  const harness = await startHarness({ hostname: values.host, ...(tls && { tls }) }, log);
+  const harness = await startHarness(
+    {
+      hostname: values.host,
+      ...(values.origin && { publicOrigin: values.origin }),
+      ...(values.port && { port: Number(values.port) }),
+      ...(tls && { tls }),
+    },
+    log,
+  );
   console.log(
     `TaruBot web harness: open ${harness.url.href} (fake Discord: ${harness.authorizeUrl.origin})`,
   );

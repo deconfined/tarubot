@@ -20,6 +20,16 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
+The native Caddy regression exercises an accepted trailing-slash origin through trusted local HTTPS, fake Discord login and protected dashboard routes:
+
+```sh
+image=$(POSTGRES_PASSWORD=fixture-only docker compose --env-file /dev/null --profile web config --format json | jq -r '.services.caddy.image')
+docker pull "$image"
+CADDY_FIXTURE_IMAGE="$image" bun test tests/unit/web-server.test.ts
+```
+
+It requires Linux, IPv6 loopback and Compose 2.24.4 or newer for its isolated overrides. The fixture uses host networking with ephemeral loopback-only listeners, Caddy's local CA and invented accounts; it removes its own containers, volumes and temporary files. CI enables it with the shared manifest's pinned image. Ordinary unit checks skip this native case unless `CADDY_FIXTURE_IMAGE` is set; no image is built or downloaded by the test.
+
 The native DNSSEC/SSHFP transport fixture uses invented DNS zones and disposable server identities, with no client authentication key or live network access:
 
 ```sh

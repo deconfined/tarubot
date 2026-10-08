@@ -44,13 +44,19 @@ if [[ -z $COMPOSE_FILE ]]; then
 fi
 [[ ${COMPOSE_FILE##*/} == "docker-compose.$BACKUP_TARGET.yml" && -f $COMPOSE_FILE && -s $RECIPIENTS ]]
 compose() {
-  docker compose --project-name tarubot --project-directory "$ROOT" \
+  docker compose --project-name tarubot --project-directory "${COMPOSE_FILE%/*}" \
     --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 # Validate both the bot's resolved identity and the dump client's exact connection
 # before dumping or sending a heartbeat. This Bun check performs no network I/O.
-# Compose omits inactive profiles from config; inspect the client without starting it.
-CONFIG=$(compose --profile backup config --format json)
+# Preserve the selected web profile when explicitly enabling the dump client;
+# native Compose's --profile replaces COMPOSE_PROFILES from the dotenv.
+SELECTED_CONFIG=$(compose config --format json)
+BACKUP_PROFILES=(--profile backup)
+if jq -e '.services | has("caddy")' <<<"$SELECTED_CONFIG" >/dev/null; then
+  BACKUP_PROFILES+=(--profile web)
+fi
+CONFIG=$(compose "${BACKUP_PROFILES[@]}" config --format json)
 jq -e --arg target "$BACKUP_TARGET" --arg digest "${TARUBOT_IMAGE_DIGEST:-}" \
   '.services.tarubot as $bot | .services.backup as $backup |
    ($digest | test("^sha256:[0-9a-f]{64}$")) and
