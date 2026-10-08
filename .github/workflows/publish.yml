@@ -12,35 +12,114 @@ concurrency:
   group: publish-${{ github.sha }}
   cancel-in-progress: false
 
+# Every job may be re-run after a failure, and re-running really retries: the version probe never
+# lets a release overwrite a different published tag, and a deployment re-validates, asks for the
+# owner's approval again and lets the host entry decide. Downstream jobs name the results they
+# need rather than relying on success(), which a deliberately skipped fallback would make false.
 jobs:
-  verify:
-    name: Verify release
-    uses: ./.github/workflows/ci.yml
-
-  publish:
-    name: Publish image
-    needs: verify
-    # Dispatches and reruns verify only; maintenance never overwrites an existing version.
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
+  gate:
+    name: Release gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    concurrency:
-      group: publish-version-${{ needs.verify.outputs.version }}
-      cancel-in-progress: false
+    timeout-minutes: 10
     permissions:
       contents: read
-      packages: write
+      actions: read
+      pull-requests: read
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+      tested: ${{ steps.proof.outputs.tested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Validate version and release metadata
+        id: version
+        env:
+          CI_BASE_SHA: ${{ github.event.before || '' }}
+        run: bun run ci:version
+      # The ruleset requires "CI result" on a branch that is up to date with main, and merges by
+      # merge commit. So a merge commit whose tree equals its pull request's head carries exactly
+      # the tree that pull-request CI tested: every check, and the in-image suite on native AMD64
+      # and ARM64. Anything else (a direct push, a dispatch, a different tree) runs full CI.
+      - name: Prove this exact tree passed pull-request CI
+        id: proof
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          tested=false
+          trap 'printf "tested=%s\n" "$tested" >> "$GITHUB_OUTPUT"' EXIT
+          fallback() {
+            echo "::notice::$1; running the full CI suite instead."
+            exit 0
+          }
+          [[ $GITHUB_EVENT_NAME == push && $GITHUB_REF == refs/heads/main ]] ||
+            fallback 'This run is not a push to main'
+          pulls=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls") ||
+            fallback 'The merged pull request could not be read'
+          merged=$(jq -er --arg sha "$GITHUB_SHA" '
+            [.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)]
+            | if length == 1 then "\(.[0].number) \(.[0].head.sha)" else empty end' <<<"$pulls") ||
+            fallback 'No single pull request was merged as this commit'
+          number=${merged%% *}
+          head=${merged#* }
+          [[ $number =~ ^[1-9][0-9]{0,9}$ && $head =~ ^[0-9a-f]{40}$ ]] ||
+            fallback 'The merged pull request has an unexpected number or head'
+          [[ $(git rev-parse --verify --quiet "$GITHUB_SHA^2") == "$head" ]] ||
+            fallback "This commit's second parent is not PR #$number's head"
+          [[ $(git rev-parse "$GITHUB_SHA^{tree}") == "$(git rev-parse "$head^{tree}")" ]] ||
+            fallback "The merged tree differs from PR #$number's tested head"
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$head&status=success&per_page=20") ||
+            fallback 'Pull-request CI runs could not be read'
+          run=$(jq -er --arg head "$head" '
+            [.workflow_runs[] | select(.head_sha == $head and .event == "pull_request" and .conclusion == "success")]
+            | max_by(.run_number) | .id // empty' <<<"$runs") ||
+            fallback "PR #$number's head has no successful pull-request CI run"
+          [[ $run =~ ^[1-9][0-9]{0,19}$ ]] || fallback 'The CI run ID is unexpected'
+          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=50") ||
+            fallback "CI run $run's jobs could not be read"
+          jq -e '[.jobs[] | select(.conclusion == "success") | .name] as $passed
+            | ["Checks", "Container build (amd64)", "Container build (arm64)", "CI result"]
+            | all(. as $name | $passed | index($name) != null)' <<<"$jobs" > /dev/null ||
+            fallback "CI run $run lacks a passing check, platform test or result"
+          tested=true
+          echo "::notice::This tree is PR #$number's head, which CI run $run tested; publication does not run CI again."
+
+  verify:
+    name: Verify release
+    needs: gate
+    if: needs.gate.outputs.tested != 'true'
+    uses: ./.github/workflows/ci.yml
+
+  prepare:
+    name: Check version publication
+    needs: [gate, verify]
+    # The gate's proof or the full fallback suite must have passed; a skipped fallback alone proves
+    # nothing. Dispatches verify only.
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      needs.gate.result == 'success' &&
+      (needs.gate.outputs.tested == 'true' || needs.verify.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      publish: ${{ steps.publication.outputs.publish }}
+    steps:
       - name: Check version publication
         id: publication
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
-          RELEASE_REQUESTED: ${{ needs.verify.outputs.release }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RELEASE_REQUESTED: ${{ needs.gate.outputs.release }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -65,59 +144,117 @@ jobs:
             404) echo 'publish=true' >> "$GITHUB_OUTPUT" ;;
             200)
               if [[ $RELEASE_REQUESTED == true ]]; then
-                echo '::error::This release version already exists; use a new version.'
+                echo '::error::This release version already exists. If this run published it, re-run only its failed jobs; otherwise release a new version.'
                 exit 1
               fi
               echo 'publish=false' >> "$GITHUB_OUTPUT"
               echo '::notice::Published maintenance version retained; no release image or deployment.' ;;
             *) echo '::error::Could not establish release version absence.'; exit 1 ;;
           esac
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        if: steps.publication.outputs.publish == 'true'
+
+  amd64:
+    name: Platform amd64
+    needs: [gate, prepare]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/publish-platform.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      arch: amd64
+      runner: ubuntu-24.04
+      version: ${{ needs.gate.outputs.version }}
+
+  arm64:
+    name: Platform arm64
+    needs: [gate, prepare]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/publish-platform.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      arch: arm64
+      runner: ubuntu-24.04-arm
+      version: ${{ needs.gate.outputs.version }}
+
+  publish:
+    name: Publish image
+    needs: [gate, amd64, arm64]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' &&
+      needs.amd64.result == 'success' && needs.arm64.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Serializes the final absence check and tagging per version; never overwrites a release.
+    concurrency:
+      group: publish-version-${{ needs.gate.outputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.merge.outputs.digest }}
+    steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.publication.outputs.publish == 'true'
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: steps.publication.outputs.publish == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        if: steps.publication.outputs.publish == 'true'
-        id: metadata
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=${{ needs.verify.outputs.version }}
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.title=tarubot
-            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
-            org.opencontainers.image.licenses=AGPL-3.0-only
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-      - name: Build and publish both platforms
-        id: build
-        if: steps.publication.outputs.publish == 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          target: tarubot
-          platforms: linux/amd64,linux/arm64
-          push: true
-          no-cache-filters: base
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=tarubot
-          cache-to: type=gha,mode=max,scope=tarubot
+      - name: Tag one index of both platforms while the version is absent
+        id: merge
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          AMD64: ${{ needs.amd64.outputs.digest }}
+          ARM64: ${{ needs.arm64.outputs.digest }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
+          [[ $AMD64 =~ ^sha256:[0-9a-f]{64}$ && $ARM64 =~ ^sha256:[0-9a-f]{64}$ && $AMD64 != "$ARM64" ]]
+          repository="${GITHUB_REPOSITORY,,}"
+          image="ghcr.io/$repository"
+          index() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -er '.digest'
+          }
+          token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+            | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
+            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
+          echo "::add-mask::$token"
+          status=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+              --head --output /dev/null --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository}/manifests/${VERSION}")
+          case "$status" in
+            404)
+              docker buildx imagetools create --tag "$image:$VERSION" --tag "$image:sha-$GITHUB_SHA" \
+                "$image@$AMD64" "$image@$ARM64" ;;
+            200)
+              # Only this commit's own earlier attempt may have tagged it: resume with that index.
+              mine=$(index "$image:sha-$GITHUB_SHA") || mine=
+              if [[ -z $mine || $(index "$image:$VERSION") != "$mine" ]]; then
+                echo '::error::This release version was already published from another commit; release a new version.'
+                exit 1
+              fi
+              echo '::notice::This commit already tagged this version; resuming with that index.' ;;
+            *) echo '::error::Could not establish release version absence.'; exit 1 ;;
+          esac
+          digest=$(index "$image:$VERSION")
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
   scan:
     name: Scan built platforms
     needs: publish
-    if: needs.publish.outputs.digest != '' && github.run_attempt == '1'
+    if: "!cancelled() && needs.publish.result == 'success' && needs.publish.outputs.digest != ''"
     uses: ./.github/workflows/scan.yml
     with:
       digest: ${{ needs.publish.outputs.digest }}
@@ -127,7 +264,9 @@ jobs:
   attest:
     name: Sign build provenance
     needs: [publish, scan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      needs.publish.result == 'success' && needs.scan.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The signing job neither installs dependencies nor holds registry write credentials.
@@ -157,7 +296,9 @@ jobs:
   latest:
     name: Promote latest
     needs: [publish, attest]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1'
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      needs.publish.result == 'success' && needs.attest.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -197,8 +338,12 @@ jobs:
 
   deploy:
     name: Production release
-    needs: [verify, publish, attest, latest]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.run_attempt == '1' && vars.DEPLOY_ENABLED == 'true'
+    needs: [gate, publish, attest, latest]
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      vars.DEPLOY_ENABLED == 'true' && needs.gate.result == 'success' &&
+      needs.publish.result == 'success' && needs.attest.result == 'success' &&
+      needs.latest.result == 'success'
     uses: ./.github/workflows/deploy.yml
     # Bind only the delivery secret; its value comes from the approved environment.
     secrets:
@@ -209,6 +354,6 @@ jobs:
       attestations: read
     with:
       target: production
-      version: ${{ needs.verify.outputs.version }}
+      version: ${{ needs.gate.outputs.version }}
       commit: ${{ github.sha }}
       digest: ${{ needs.publish.outputs.digest }}
