@@ -66,6 +66,8 @@ Members see only their own requests and work, in plain words.
 
 ## Read-only dashboard
 
+The dashboard requires a **2.37.0 or newer** release.
+
 When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same officer authority as the bot. Ordinary members and guests cannot open these pages.
 
 - **Server configuration** groups the FC and roster, access roles, channels, officer access, onboarding and Discord automation into cards, including guest-application availability and configuration revision. The health snapshot links to the full checklist, using the same checks as `/config validate`. The check's time is shown in UTC; successful checks are reused for up to 30 seconds, so reloading within that window does not run a new check.
