@@ -6,6 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      platform-tests:
+        description: "Also run the in-image suite on native AMD64 and ARM64 (publication's fallback)"
+        type: boolean
+        default: false
     outputs:
       version:
         description: Validated application SemVer
@@ -152,7 +157,11 @@ jobs:
   images:
     name: Container build (${{ matrix.arch }})
     # Publication builds its own images after merge; it never re-runs this suite (see publish.yml).
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    # A called workflow sees its caller's event (a push), so publication's fallback asks for these
+    # explicitly: it must test the same platforms the gate's proof requires.
+    if: >-
+      github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' ||
+      inputs.platform-tests == true
     needs: checks
     # Nested Git/Bun fixtures need native CPUs, not QEMU startup overhead.
     strategy:
@@ -199,12 +208,14 @@ jobs:
     steps:
       - name: Require all applicable validation jobs
         env:
-          EVENT: ${{ github.event_name }}
+          IMAGES_REQUIRED: >-
+            ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' ||
+            inputs.platform-tests == true }}
           CHECKS: ${{ needs.checks.result }}
           IMAGES: ${{ needs.images.result }}
         run: |
           test "$CHECKS" = success
-          if [[ $EVENT == pull_request || $EVENT == workflow_dispatch ]]; then
+          if [[ $IMAGES_REQUIRED == true ]]; then
             test "$IMAGES" = success
           else
             test "$IMAGES" = skipped

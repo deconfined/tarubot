@@ -44,28 +44,35 @@ phase=runner
 host_lines=0
 result=''
 failure_message() {
-  local errors=$dir/ssh-errors
+  local errors=$dir/ssh-errors status=${rc:-0}
   case "$phase" in
     runner) echo 'Delivery stopped on the runner before contacting the host; the host was not changed.' ;;
     resolver) echo "The runner's DNSSEC-validating resolver did not start; the host was not contacted." ;;
     *)
       if (( host_lines == 0 )); then
-        if grep -q 'Host key verification failed' "$errors" 2> /dev/null; then
-          echo "The host's SSH key was not authenticated by DNSSEC-signed SSHFP records; the host was not contacted."
-        elif grep -qiE 'Could not resolve hostname|Name or service not known|Temporary failure in name resolution' "$errors" 2> /dev/null; then
+        # OpenSSH itself fails with 255; any other status came from the host's forced command.
+        if (( status != 0 && status != 255 )); then
+          echo "SSH authenticated, but the host's forced command did not start the deploy entry; the host was not changed."
+        elif grep -q 'Host key verification failed' "$errors" 2> /dev/null; then
+          echo "The host's SSH key was not authenticated by DNSSEC-signed SSHFP records; SSH stopped before offering the delivery key, so the deploy entry did not run."
+        elif grep -qE '^ssh: Could not resolve hostname' "$errors" 2> /dev/null; then
           echo 'The deploy host name did not resolve under DNSSEC validation; the host was not contacted.'
-        elif grep -q 'Permission denied' "$errors" 2> /dev/null; then
+        elif grep -q 'Permission denied (publickey' "$errors" 2> /dev/null; then
           echo 'The host refused the delivery key; its deploy entry did not run.'
-        elif grep -qiE 'timed out|Connection refused|No route to host|Network is unreachable' "$errors" 2> /dev/null; then
+        elif grep -qE '^ssh: connect to host .*: (Connection timed out|Connection refused|No route to host|Network is unreachable)' "$errors" 2> /dev/null; then
           echo 'The host did not accept an SSH connection; its deploy entry did not run.'
         else
           echo 'SSH ended before the host entry answered; check the host is reachable over SSH, then re-run.'
         fi
+      elif (( ${results:-0} > 1 )); then
+        echo 'The host entry returned more than one result; reconcile on the host before any new delivery.'
       else
         case "$result" in
-          'result refused') echo 'The host refused this delivery before stopping the writer, so nothing changed; its private host log says why. Fix the cause, then re-run or dispatch again.' ;;
+          'result deployed'|'result already-live')
+            echo "The host reported '${result#result }', but the SSH session ended abnormally; check the running release and pending marker on the host before any new delivery." ;;
+          'result refused') echo 'The host refused this delivery before stopping the writer, so nothing changed; its private host log, if this run wrote one, says why. Fix the cause, then re-run or dispatch again.' ;;
           'result needs-owner') echo 'The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery.' ;;
-          *) echo 'The host entry stopped without a single result; inspect the private host log and reconcile before a new delivery.' ;;
+          *) echo 'The host entry stopped without a result; inspect the private host log and reconcile before a new delivery.' ;;
         esac
       fi ;;
   esac
@@ -74,21 +81,28 @@ trap 'echo "::error::$(failure_message)"' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 exec 2> "$dir/errors"
-case "${TARGET:?}" in
+# From here every check fails as a command, so the ERR trap always names where delivery stopped.
+case "${TARGET:-}" in
   production) [[ ${REPO_PRODUCTION_DEPLOY_ENABLED:-} == true ]] ;;
   staging) [[ ${REPO_STAGING_DEPLOY_ENABLED:-} == true ]] ;;
-  *) exit 1 ;;
+  *) false ;;
 esac
-command="deploy $TARGET ${VERSION:?} ${COMMIT:?} ${DIGEST:?} ${GITHUB_RUN_ID:?}"
+# A re-run keeps GITHUB_RUN_ID, and the host entry names its release worktree after the request
+# ID, so a re-run after a refusal at or past 'step fetch' would always be refused. Each attempt
+# therefore sends its own ID: the run ID followed by the three-digit attempt (FORM allows 20 digits).
+attempt=${GITHUB_RUN_ATTEMPT:-}
+[[ $attempt =~ ^[1-9][0-9]{0,2}$ ]]
+request_id="${GITHUB_RUN_ID:-}$(printf '%03d' "$attempt")"
+command="deploy $TARGET ${VERSION:-} ${COMMIT:-} ${DIGEST:-} $request_id"
 form='^deploy (production|staging) (0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) [0-9a-f]{40} sha256:[0-9a-f]{64} [1-9][0-9]{0,19}$'
 [[ $command =~ $form ]]
 host_form='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 # OpenSSH intentionally skips SSHFP for numeric addresses; there is no pin fallback.
-[[ ${DEPLOY_HOST:?} =~ $host_form && ! $DEPLOY_HOST =~ ^[0-9.]+$ ]]
+[[ ${DEPLOY_HOST:-} =~ $host_form && ! $DEPLOY_HOST =~ ^[0-9.]+$ ]]
 # Ubuntu 24.04's security backport fixes VerifyHostKeyDNS MITM CVE-2025-26465.
 client_version=$(dpkg-query -W -f='${Version}' openssh-client)
 dpkg --compare-versions "$client_version" ge '1:9.6p1-3ubuntu13.8'
-[[ ${DEPLOY_SSH_KEY:?} == *'PRIVATE KEY'* ]]
+[[ ${DEPLOY_SSH_KEY:-} == *'PRIVATE KEY'* ]]
 printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
 unset DEPLOY_SSH_KEY
 

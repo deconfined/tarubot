@@ -296,7 +296,8 @@ def exercise(target, phase, identity, tampered, index):
     host = target + ".example.org"
     (ROOT / "deployment-host").write_text(host + "\n")
     run_id = str(1234 + index)
-    request = f"deploy {target} 2.36.42 {'a' * 40} sha256:{'b' * 64} {run_id}"
+    # The transport sends a per-attempt request ID: the run ID, then the three-digit attempt.
+    request = f"deploy {target} 2.36.42 {'a' * 40} sha256:{'b' * 64} {run_id}001"
     (ROOT / "expected-request").write_text(request + "\n")
     runner = pwd.getpwnam("runner")
     known_hosts = pathlib.Path("/home/runner/.ssh/known_hosts")
@@ -370,7 +371,7 @@ def exercise(target, phase, identity, tampered, index):
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME=/home/runner", "USER=runner", "LOGNAME=runner",
         f"TARGET={target}", "VERSION=2.36.42", "COMMIT=" + "a" * 40,
-        "DIGEST=sha256:" + "b" * 64, f"GITHUB_RUN_ID={run_id}",
+        "DIGEST=sha256:" + "b" * 64, f"GITHUB_RUN_ID={run_id}", "GITHUB_RUN_ATTEMPT=1",
         f"DEPLOY_HOST={host}", f"DEPLOY_SSH_KEY={SENTINEL}",
         f"RUNNER_TEMP={RUNNER_TEMP}",
         f"REPO_PRODUCTION_DEPLOY_ENABLED={'true' if target == 'production' else 'false'}",

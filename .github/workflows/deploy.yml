@@ -45,6 +45,7 @@ permissions:
   contents: read
   actions: read
   attestations: read
+  deployments: read
 
 defaults:
   run:
@@ -62,8 +63,9 @@ env:
 jobs:
   validate:
     name: Validate signed release
-    # A re-run validates and asks for approval again; the host entry then decides (already-live,
-    # refused while another delivery or a pending marker holds the host, or a deployment).
+    # A re-run validates again, and delivery proceeds only on an approval given in its own attempt;
+    # the host entry then decides (already-live, refused while another delivery or a pending marker
+    # holds the host, or a deployment). Each attempt sends its own request ID (ops/deploy-ssh.sh).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -169,7 +171,34 @@ jobs:
             --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
             --format json > "$private/attestation"
           jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
-          echo 'Signed release and selected environment policy revalidated.'
+          # The owner's approval must belong to this attempt (@deconfined, 2026-10-08). GitHub gives
+          # each environment job its own deployment, whose first status is "waiting" only while the
+          # job is held for the required reviewer; every status links to the run and the job ID,
+          # and a re-run gets a new job ID. So this job finds its own deployment and requires that
+          # it began "waiting": a re-run let through on an earlier approval is refused here, before
+          # any host contact. Re-run all jobs and a fresh dispatch both ask for approval again.
+          trap 'echo "::error::This delivery was not held for the production approval in this attempt, so it will not use an earlier approval. Re-run all jobs or dispatch Deploy again to be asked; no host connection was made."' ERR
+          [[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]{0,19}$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]{0,2}$ ]]
+          [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$private/jobs"
+          job=$(jq -er --arg name "Deploy $TARGET" '
+            [.jobs[] | select(.status == "in_progress" and (.name == $name or (.name | endswith(" / " + $name)))) | .id]
+            | if length == 1 then .[0] else empty end' "$private/jobs")
+          [[ $job =~ ^[1-9][0-9]{0,19}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/deployments?environment=$TARGET&sha=$GITHUB_SHA&per_page=30" > "$private/deployments"
+          held=false
+          for deployment in $(jq -r '.[] | .id | select(type == "number")' "$private/deployments"); do
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses?per_page=100" > "$private/statuses"
+            # Statuses arrive newest first, so the last of this job's statuses is its first.
+            if jq -e --arg job "/actions/runs/$GITHUB_RUN_ID/job/$job" '
+                [.[] | select((.target_url // "") | endswith($job))] as $mine
+                | ($mine | length) > 0 and ($mine | last | .state) == "waiting"' "$private/statuses" > /dev/null; then
+              held=true
+              break
+            fi
+          done
+          [[ $held == true ]]
+          echo 'Signed release, selected environment policy and this attempt'"'"'s approval revalidated.'
       - name: Check out the reviewed workflow transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

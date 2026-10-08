@@ -322,6 +322,19 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
     for (const file of ["publish.yml", "publish-platform.yml", "deploy.yml"])
       expect(
         readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8"),
-      ).not.toContain("run_attempt");
+      ).not.toContain("github.run_attempt");
+  });
+
+  test("the full-CI fallback also runs the in-image suite on both platforms", () => {
+    const verify = workflow.jobs.verify as Job & { with?: Record<string, unknown> };
+    expect(verify.with).toEqual({ "platform-tests": true });
+    const ci = Bun.YAML.parse(
+      readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+    ) as {
+      jobs: Record<string, { if?: string; steps?: { env?: Record<string, string> }[] }>;
+    };
+    expect(ci.jobs.images?.if).toContain("inputs.platform-tests == true");
+    const required = ci.jobs.result?.steps?.find((candidate) => candidate.env?.IMAGES_REQUIRED);
+    expect(required?.env?.IMAGES_REQUIRED).toContain("inputs.platform-tests == true");
   });
 });
