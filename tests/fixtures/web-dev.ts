@@ -1,21 +1,33 @@
 /**
  * A credential-free development harness for the web pages (#43, ADR E13): the real web server
- * (startWeb) on the IPv6 loopback, with a fake Discord, prototype-backed service fakes, in-memory
- * sessions and invented data. Nothing leaves the machine and no setting or secret is read.
+ * (startWeb), with a fake Discord, prototype-backed service fakes, in-memory sessions and invented
+ * data. No application environment, real Discord connection or database is used.
  *
  * Run it as `bun --no-env-file tests/fixtures/web-dev.ts`, never through a root `bun run` alias,
  * which would load the checkout's .env (CLAUDE.md). Open the printed address, choose "Sign in with
  * Discord", and pick an invented account on the fake authorize page.
+ * IPv6 loopback is the default; --host selects an explicit interface. LAN previews require
+ * --cert and --key to serve both listeners over HTTPS without weakening the web's origin policy.
+ * For an isolated reverse-proxy lab, --origin supplies the public URL and --port the private
+ * HTTP listener; the fake Discord stays on its own local HTTP port.
  *
- * The fake authorize page runs on its own [::1] port. It redirects only to the redirect URI the
- * harness configured, and echoes no request data: its page holds fixed wording and an ID it made
- * itself. The token and /users/@me requests keep their https://discord.com URLs and are answered
- * by FakeDiscord through the injected fetch, so oauth4webapi's allowInsecureRequests is never used.
+ * The fake authorize page runs on its own port on the same interface and protocol as the web. It
+ * redirects only to the redirect URI the harness configured, and echoes no request data: its page
+ * holds fixed wording and an ID it made itself. The token and /users/@me requests keep their
+ * https://discord.com URLs and are answered by FakeDiscord through the injected fetch, so
+ * oauth4webapi's allowInsecureRequests is never used.
  * tests/unit/web-server.test.ts drives the same harness end to end.
  */
 import { randomUUID } from "node:crypto";
+import { parseArgs } from "node:util";
+import {
+  ChannelFlagsBitField,
+  Collection,
+  PermissionFlagsBits,
+  PermissionsBitField,
+} from "discord.js";
 import { type Logger, pino } from "pino";
-import { applicationKey, lifecycleKey } from "../../src/application/keys.js";
+import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import { createReporter } from "../../src/application/reporting.js";
 import type { SyncStatusView } from "../../src/application/results.js";
@@ -23,10 +35,12 @@ import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { WebGuild } from "../../src/web/access.js";
-import { startWeb, type WebServer } from "../../src/web/server.js";
+import { startWeb, type WebOptions, type WebServer } from "../../src/web/server.js";
 import { type DiscordAccount, FakeDiscord } from "./discord-oauth.js";
 import { MemorySessions } from "./web-sessions.js";
+import { CHANNEL, configGuild, configReport, fcRow, ROLE } from "./replies/configuration.js";
 
 /** The invented application: its ID doubles as the OAuth client ID, as in production. */
 export const HARNESS_CLIENT_ID = "300000000000000001";
@@ -90,7 +104,7 @@ async function resolveActor(guildId: string, userId: string): Promise<Actor> {
   return actor;
 }
 
-/** Status's invented data: a failed roster run, and work in several states. */
+/** Background work's invented data: a completed roster run, and work in several states. */
 function syncView(): SyncStatusView {
   const at = new Date(Date.now() - 12 * 60_000);
   const job = (kind: string, status: string, last_error: string | null = null) => ({
@@ -114,7 +128,7 @@ function syncView(): SyncStatusView {
         enumeration_completed_at: at,
         requester_id: HARNESS_ACCOUNTS.officer.id,
         acquisition_kind: "roster",
-        acquisition_status: "completed",
+        acquisition_status: "succeeded",
         last_error: null,
         result: null,
         status: "completed",
@@ -133,12 +147,76 @@ function syncView(): SyncStatusView {
     ],
   };
 }
+/** SDK-shaped invented caches: no gateway connection, fetched names or member data. */
+export function harnessGateway(): DiscordGateway {
+  const gateway: unknown = Object.create(DiscordGateway.prototype);
+  if (!(gateway instanceof DiscordGateway)) throw new Error("Invalid gateway fake");
+  const roles = new Collection(
+    Object.entries(ROLE).map(([label, id]) => [
+      id,
+      { id, name: label === "bot" ? "TaruBot" : `${label[0]?.toUpperCase()}${label.slice(1)}` },
+    ]),
+  );
+  const channels = new Collection(
+    Object.entries(CHANNEL).map(([label, id]) => [
+      id,
+      {
+        id,
+        name:
+          {
+            ledger: "fc-ledger",
+            notices: "officer-notices",
+            reviews: "guest-review",
+            lobby: "lobby",
+            officers: "officers",
+            changelog: "tarubot-updates",
+          }[label] ?? label,
+        flags: new ChannelFlagsBitField(),
+        isThread: () => false,
+        permissionsFor: () => new PermissionsBitField(PermissionFlagsBits.ViewChannel),
+      },
+    ]),
+  );
+  const guild = {
+    roles: { cache: roles },
+    channels: { cache: channels },
+    members: {
+      me: {},
+      cache: new Collection(
+        Object.values(HARNESS_ACCOUNTS).map((account) => [
+          account.id,
+          {
+            id: account.id,
+            displayName: account.label,
+          },
+        ]),
+      ),
+    },
+  };
+  Object.defineProperty(gateway, "client", {
+    value: { guilds: { cache: new Map([[HARNESS_GUILDS.example.id, guild]]) } },
+  });
+  return gateway;
+}
 
-/** The services the Status page requires, as prototype-backed fakes (tests/unit/commands.test.ts). */
+/** Read-only dashboard services, answered with the existing invented configuration fixtures. */
 function harnessServices(): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
   app.syncStatus = async () => syncView();
+  app.validate = async () =>
+    configReport({
+      guild: configGuild({
+        id: HARNESS_GUILDS.example.id,
+        access_policy_enabled: false,
+        lobby_channel_id: null,
+        officer_channel_id: null,
+      }),
+      fc: fcRow({
+        last_successful_roster_at: new Date(Date.now() - 12 * 60_000),
+        last_attempt_at: new Date(Date.now() - 12 * 60_000),
+      }),
+    });
   const lifecycle: unknown = Object.create(ApplicationLifecycle.prototype);
   if (!(lifecycle instanceof ApplicationLifecycle)) throw new Error("Invalid lifecycle fake");
   lifecycle.status = () => ({
@@ -166,7 +244,10 @@ function harnessServices(): Services {
     },
     visibility: { missing: null, onboardingPending: null, checked: null, checkedAt: null },
   });
-  return new Services().provide(applicationKey, app).provide(lifecycleKey, lifecycle);
+  return new Services()
+    .provide(applicationKey, app)
+    .provide(lifecycleKey, lifecycle)
+    .provide(gatewayKey, harnessGateway());
 }
 
 /**
@@ -211,24 +292,35 @@ function authorizePage(discord: FakeDiscord, redirectUri: string) {
   };
 }
 
-/** A free port on the IPv6 loopback, so the web's origin can name it before the web binds it. */
-async function freePort(): Promise<number> {
-  const probe = Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response(null) });
-  const { port } = probe;
+/** Choose a free origin on the selected interface before startWeb uses it for redirects. */
+async function freeOrigin(hostname: string, tls: WebOptions["tls"]): Promise<string> {
+  const probe = Bun.serve({
+    hostname,
+    ...(tls && { tls }),
+    port: 0,
+    fetch: () => new Response(null),
+  });
+  const origin = probe.url.origin;
   await probe.stop(true);
-  if (port === undefined) throw new Error("No free loopback port");
-  return port;
+  return origin;
 }
 
-/** Start the fake authorize page and the real web server on [::1]. */
-export async function startHarness(log: Logger = pino({ level: "silent" })): Promise<Harness> {
+/** Default loopback harness; a public origin and private port also exercise real reverse proxies. */
+export async function startHarness(
+  options: Pick<WebOptions, "hostname" | "tls" | "port"> & { publicOrigin?: string } = {},
+  log: Logger = pino({ level: "silent" }),
+): Promise<Harness> {
   const discord = new FakeDiscord(HARNESS_CLIENT_ID, HARNESS_CLIENT_SECRET);
-  const origin = `http://[::1]:${await freePort()}`;
+  const hostname = options.hostname ?? "::1";
+  const listenerOrigin = await freeOrigin(hostname, options.tls);
+  const origin = options.publicOrigin ?? listenerOrigin;
+  const port = options.port ?? Number(new URL(listenerOrigin).port);
   const authorize = Bun.serve({
-    hostname: "::1",
+    hostname,
+    ...(options.tls && { tls: options.tls }),
     port: 0,
     development: false,
-    fetch: authorizePage(discord, `${origin}/auth/callback`),
+    fetch: authorizePage(discord, `${new URL(origin).origin}/auth/callback`),
   });
   const reporter = createReporter(log);
   let web: WebServer | null = null;
@@ -236,7 +328,7 @@ export async function startHarness(log: Logger = pino({ level: "silent" })): Pro
     web = await startWeb(
       {
         WEB_PUBLIC_ORIGIN: origin,
-        WEB_PORT: new URL(origin).port,
+        WEB_PORT: String(port),
         DISCORD_CLIENT_SECRET: HARNESS_CLIENT_SECRET,
         DISCORD_APPLICATION_ID: HARNESS_CLIENT_ID,
       },
@@ -253,7 +345,9 @@ export async function startHarness(log: Logger = pino({ level: "silent" })): Pro
         sessions: new MemorySessions(),
         fetch: discord.fetch,
         authorizeUrl: new URL("/oauth2/authorize", authorize.url).href,
-        hostname: "::1",
+        hostname,
+        port,
+        ...(options.tls && { tls: options.tls }),
       },
     );
   } finally {
@@ -272,8 +366,32 @@ export async function startHarness(log: Logger = pino({ level: "silent" })): Pro
 }
 
 if (import.meta.main) {
+  const { values } = parseArgs({
+    options: {
+      host: { type: "string", default: "::1" },
+      cert: { type: "string" },
+      key: { type: "string" },
+      origin: { type: "string" },
+      port: { type: "string" },
+    },
+    allowPositionals: false,
+  });
+  if (Boolean(values.cert) !== Boolean(values.key))
+    throw new Error("Pass --cert and --key together.");
+  const tls =
+    values.cert && values.key
+      ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
+      : undefined;
   const log = pino({ level: "debug" });
-  const harness = await startHarness(log);
+  const harness = await startHarness(
+    {
+      hostname: values.host,
+      ...(values.origin && { publicOrigin: values.origin }),
+      ...(values.port && { port: Number(values.port) }),
+      ...(tls && { tls }),
+    },
+    log,
+  );
   console.log(
     `TaruBot web harness: open ${harness.url.href} (fake Discord: ${harness.authorizeUrl.origin})`,
   );

@@ -64,6 +64,17 @@ What to do with each [status marker](/tarubot/reference/replies/#status-markers)
 
 Members see only their own requests and work, in plain words.
 
+## Read-only dashboard
+
+When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same officer authority as the bot. Ordinary members and guests cannot open these pages.
+
+- **Server configuration** groups the FC and roster, access roles, channels, officer access, onboarding and Discord automation into cards, including guest-application availability and configuration revision. The health snapshot links to the full checklist, using the same checks as `/config validate`. The check's time is shown in UTC; successful checks are reused for up to 30 seconds, so reloading within that window does not run a new check.
+- **Background work** shows process health, up to 10 recent refresh runs and up to 25 outstanding jobs for this server. Counts describe only those displayed jobs, not the whole server or deployment. Open a job's or run's details to read its full ID and diagnostic. A failed decision DM does not undo the guest decision.
+
+The dashboard changes no settings and offers no retries or guest decisions. Use the Discord commands for those actions. Names come from TaruBot's cache; an uncached name shows an ID, and a hidden channel shows that TaruBot cannot see it. Times are UTC throughout. The layout works on phones, wide tables scroll within their own area, and the light or dark palette follows your device.
+
+The **Account** menu offers **Sign out** for this browser and **Sign out everywhere** for all your sessions. See [dashboard sessions and font requests](/tarubot/architecture/data-and-privacy/#dashboard-sessions-and-fonts).
+
 ## Repeats and unsetting
 
 A request that matches what's already saved changes nothing and replies with `= NO CHANGE`: naming the saved officer rank, a `/config guest_applications` request that matches the settings, `/main` naming the current main, `/nickname` repeating its setting, and `/officer reset` or `/guest reset` with nothing to remove. Nothing is saved, audited or queued.

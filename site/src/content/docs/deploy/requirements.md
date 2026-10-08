@@ -9,7 +9,7 @@ These pages are for people who run TaruBot themselves. A deployment is one bot p
 
 ## A host
 
-- **Docker Engine with Compose v2** on a Linux host, `amd64` or `arm64`. TaruBot ships as one published container image, `ghcr.io/deconfined/tarubot`, built for both. You don't need Bun, Node or a source checkout on the host.
+- **Docker Engine with Compose 2.20.0 or newer** on a Linux host, `amd64` or `arm64`. The shared ingress file uses Compose `include`. TaruBot ships as one published container image, `ghcr.io/deconfined/tarubot`, built for both. You don't need Bun, Node or a source checkout on the host.
 
   The bot image uses Bun on Alpine Linux. Alpine is inside the container; your host can use another Linux distribution.
 - **An address the Lodestone accepts.** TaruBot reads character profiles, FC rosters and searches from the Lodestone itself, from the host's own address. Some cloud providers' addresses are refused: the Lodestone answers DigitalOcean's with HTTP 403, for example, so profile checks, claims and rosters all fail there. Test from the host before you commit to it:
@@ -20,7 +20,15 @@ These pages are for people who run TaruBot themselves. A deployment is one bot p
 
   `200` is what you want; `403` means the Lodestone refuses that address.
 - **A small machine is enough** for a Free Company's server: the bot does its heavy lifting (reading Lodestone pages) a page at a time, with a small, bounded amount of parallel work.
-- **Outbound HTTPS** to Discord, the Lodestone (`<region>.finalfantasyxiv.com`), GitHub (`api.github.com` and `raw.githubusercontent.com`, for `/version`, the live Lodestone selectors, and issue reports if you turn them on), and `hc-ping.com` if you use the optional heartbeat. **No inbound ports**: the bot's health endpoint stays inside the container network.
+- **Outbound HTTPS** to Discord, the Lodestone (`<region>.finalfantasyxiv.com`), GitHub (`api.github.com` and `raw.githubusercontent.com`, for `/version`, the live Lodestone selectors, and issue reports if you turn them on), and `hc-ping.com` if you use the optional heartbeat. **No inbound ports for bot-only operation**: the bot's health endpoint stays inside the container network.
+
+### Optional public dashboard
+
+For the bundled HTTPS proxy, use a hostname you control, for example `tarubot.example.org`. Its DNS **A** record must point to this host's public IPv4 address; if you publish an **AAAA** record, IPv6 must reach the same proxy too. Remove stale/unreachable records rather than leaving certificate issuance or visitors to hit another host.
+
+Allow inbound **TCP 80 and 443** through host and provider firewalls, and make sure no other service owns those ports. Caddy needs outbound access to certificate authorities for automatic issuance and renewal. Its certificate state persists in Docker volumes. Only Caddy publishes ports: bot web (`8080` by default), bot health (`3000` by default) and PostgreSQL remain private.
+
+The standard recipe uses public HTTPS port 443. A custom public origin port requires a matching Caddy ports override and firewall allowance; changing `WEB_PORT` only changes the private backend. An existing external HTTPS proxy can replace bundled Caddy, provided it reaches that backend privately. See [installation](/tarubot/deploy/install/#optional-https-dashboard).
 
 ## A database
 

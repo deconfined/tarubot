@@ -15,14 +15,19 @@ Read the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.m
 
 Signed published releases pass vulnerability scans for both AMD64 and ARM64 before signing and promotion. Fixable high/critical findings block the release unless covered by an exact, reviewed exception with a documented reason and an expiry within 30 days. The default policy allows no exceptions. Scanner errors and expired exceptions block signing and promotion; repository ignore files cannot bypass the checks. A failed scan can leave candidate version tags in the registry without a signed release; do not treat an available tag as verification. Use the signed digest and provenance checks in [installation](/tarubot/deploy/install/), not just `latest` or a successful pull.
 
-1. Fetch the new release's Compose file and settings template. A release can add, rename or remove settings and services in `docker-compose.yml`, and Compose passes the bot only the settings that file lists, so take both from the commit that built the new image. Nothing restarts yet.
+1. Fetch the new release's Compose files, Caddy configuration and settings template from the exact commit that built the new image. A release can change settings and services, so keep this whole source set matched even with the web profile off. Nothing restarts yet.
 
    ```sh
    docker pull ghcr.io/deconfined/tarubot:X.Y.Z
    commit=$(docker image inspect ghcr.io/deconfined/tarubot:X.Y.Z \
      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
    cp docker-compose.yml docker-compose.yml.previous
+   test ! -f docker-compose.web.yml || cp docker-compose.web.yml docker-compose.web.yml.previous
+   test ! -f ops/Caddyfile || cp ops/Caddyfile ops/Caddyfile.previous
    curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker-compose.yml"
+   curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker-compose.web.yml"
+   mkdir -p ops
+   curl -fsSL -o ops/Caddyfile "https://raw.githubusercontent.com/deconfined/tarubot/$commit/ops/Caddyfile"
    curl -fsSL -o .env.example "https://raw.githubusercontent.com/deconfined/tarubot/$commit/.env.example"
    comm -13 <(grep -oE '^[A-Z][A-Z0-9_]*=' .env | sort) <(grep -oE '^[A-Z][A-Z0-9_]*=' .env.example | sort)
    ```
@@ -54,9 +59,35 @@ A new image never touches your database or restarts your bot by itself: updates 
 
 From 2.35.0, a server whose channels TaruBot could see only through Administrator gets [one officer alert](/tarubot/admin/notices-and-updates/#missing-channel-overrides) about missing channel overrides about six minutes after the update, even while TaruBot still holds Administrator. Its officers follow [the setup window](/tarubot/admin/add-to-server/#the-setup-window); readiness counts the channels in `visibility.missing`. Rolling back to an earlier release leaves TaruBot's channel entries in place, which is harmless. An alert still waiting at the rollback posts anyway, naming `/setup overrides`, which the earlier release doesn't have, and its recovery line follows only after you update again. Before 2.35.0, `/setup` has no dry run: it turns lobby onboarding on at once.
 
+Keep optional web settings in `.env` during routine upgrades; do not overwrite it with the new template. With `COMPOSE_PROFILES=web`, the normal pull/up sequence also updates Caddy from the new exact source, retaining its certificate volumes. Recheck [public HTTPS and OAuth](/tarubot/deploy/install/#5-start-the-bot), not only private container health.
+
+## Dashboard enable, change and disable
+
+For a running stock installation, first download the matching shared files as in [Install](/tarubot/deploy/install/#1-get-the-compose-file-and-settings-template), prepare DNS/firewalls and register the exact OAuth callback. Set the [web settings](/tarubot/deploy/configuration/#optional-web-dashboard) and `COMPOSE_PROFILES=web` in private `.env`, then recreate the existing bot and proxy:
+
+```sh
+docker compose pull
+docker compose up -d --wait --force-recreate tarubot caddy
+```
+
+Use the same command after changing origin, private port or client secret; update the Discord redirect first when the origin changes. `docker compose restart` does not reload environment settings. This is a brief outage of the existing bot, not a second bot instance. No migration or command re-registration is needed merely to change web settings; release changes still follow the update procedure above. Verify private readiness and then public DNS/TLS, redirects and authorized OAuth login as described in Install.
+
+To disable the bundled proxy, explicitly stop and remove its container even after clearing `COMPOSE_PROFILES`:
+
+```sh
+docker compose --profile web stop caddy
+docker compose --profile web rm -f caddy
+```
+
+These commands preserve `caddy_data` and `caddy_config`; never use `down -v` to disable web. To disable the bot's dashboard too, clear `WEB_PUBLIC_ORIGIN` and `DISCORD_CLIENT_SECRET` and run `docker compose up -d --wait --force-recreate tarubot`. For an external proxy, leave the web settings populated, clear the bundled profile and configure that proxy's private upstream instead. Changing a profile alone is not proof an old proxy stopped.
+
+Managed production/staging targets require owner-reviewed stable deploy and backup entry reinstallation before using this source's web lifecycle. Source releases never self-update those entries. Settings enable/bootstrap/change is a separate owner-approved recreation of the current exact digest in its recorded worktree; `already-live` is observation, not settings reconciliation. See [owner operations](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#optional-dashboard-owner-lifecycle), not this stock database recipe.
+
 ## Rollback
 
-To go back, pin the previous `TARUBOT_IMAGE_TAG`, put back the Compose file that went with it (`mv docker-compose.yml.previous docker-compose.yml`, or fetch the older release's file as in step 1 of the update), and run `docker compose up -d --wait --remove-orphans` again. Going back past a release that changed the Compose file needs that older file: the newer one may lack a service or setting the older release expects.
+To go back, pin the previous `TARUBOT_IMAGE_TAG`, restore the matching main manifest, shared `docker-compose.web.yml` and `ops/Caddyfile` (from the `.previous` copies or the older image's exact source), and run `docker compose up -d --wait --remove-orphans` again. Going back past a Compose change needs that older source set: newer files may lack services or settings the older release expects.
+
+If the previous release predates the shared web setup, use its original manifest and disable/remove Caddy explicitly as above; that older bot has no dashboard. Retain certificate volumes for a later re-enable instead of grafting new proxy files onto the older source.
 
 That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
 
@@ -203,3 +234,5 @@ Discord work the restored database still owes resumes from its durable jobs. A r
 ## Volumes
 
 The database lives in the `postgres_data` volume, mounted at `/var/lib/postgresql` as PostgreSQL 18 images expect. Recreating or updating containers keeps it. `docker compose down -v` deletes it, and with it every record: never use `-v` unless you mean to start over.
+
+Optional Caddy keeps certificates and proxy state in `caddy_data` and `caddy_config`. Keep both across recreation, upgrades and proxy disable/re-enable; deleting them discards certificate state and may require issuance again. They do not replace database/settings backups.

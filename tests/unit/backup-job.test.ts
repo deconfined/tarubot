@@ -54,6 +54,7 @@ describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => 
     expect(result.stdout).toBe("backup ok: tarubot-20261003T120000Z\n");
     expect(events(box)).toEqual([
       "config",
+      "config",
       "scope-candidate",
       "backup",
       "age-database",
@@ -85,6 +86,25 @@ describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => 
     expect(readFileSync(join(box.sim, "pings"), "utf8")).toContain("/private-check/start");
     expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
   });
+
+  for (const target of ["production", "staging"] as const) {
+    test(`${target} dotenv-selected web stays selected when the dump profile is added, without starting a proxy`, () => {
+      const box = sandbox(target);
+      const file = join(box.root, ".env");
+      writeFileSync(
+        file,
+        `${readFileSync(file, "utf8")}COMPOSE_PROFILES=web\nWEB_PUBLIC_ORIGIN=https://dashboard.example.org\n`,
+      );
+      expect(backup(box).code).toBe(0);
+      const model = JSON.parse(readFileSync(join(box.sim, "compose.json"), "utf8"));
+      expect(model.services.backup).toBeDefined();
+      expect(model.services.caddy).toBeDefined();
+      expect(events(box)).toContain("backup");
+      expect(events(box)).not.toContain("proxy-start");
+      expect(events(box)).not.toContain("proxy-pull");
+      expect(existsSync(join(box.sim, "proxy.json"))).toBe(false);
+    });
+  }
 
   test("the first day of the month also uploads the encrypted dump to monthly", () => {
     const box = sandbox();
@@ -119,6 +139,9 @@ describe.skipIf(!hostToolsAvailable)("isolated encrypted offsite backup", () => 
       const manifest = `docker-compose.${target}.yml`;
       mkdirSync(worktree, { recursive: true });
       cpSync(join(box.root, manifest), join(worktree, manifest));
+      cpSync(join(box.root, "docker-compose.web.yml"), join(worktree, "docker-compose.web.yml"));
+      mkdirSync(join(worktree, "ops"));
+      cpSync(join(box.root, "ops/Caddyfile"), join(worktree, "ops/Caddyfile"));
       const config = Bun.YAML.parse(readFileSync(join(box.root, manifest), "utf8")) as {
         services: { backup: { environment: Record<string, string> } };
       };

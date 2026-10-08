@@ -104,7 +104,7 @@ After staging acceptance, production still needs its own host setup and approval
 
 ## Everyday observation and outcomes
 
-Use the target, worktree and exact image named by private `current` state, the central `.env`, and `TARUBOT_IMAGE_DIGEST=<current.digest> docker compose --project-name tarubot --env-file "$HOME/tarubot/.env" -f <current-worktree>/docker-compose.<current.target>.yml` for owner-run inspection/tools. The manifest requires this exact digest; there is no default tag. Check `ps`, private logs, `/health/ready`, command inventory, `/sync status` and `/config validate`.
+Use the target, worktree and exact image named by private `current` state, the central `.env`, and `TARUBOT_IMAGE_DIGEST=<current.digest> docker compose --project-name tarubot --project-directory <current-worktree> --env-file "$HOME/tarubot/.env" -f <current-worktree>/docker-compose.<current.target>.yml` for owner-run inspection/tools. The manifest requires this exact digest; there is no default tag. The project directory must be the release worktree so the shared web include resolves there, not beside the central `.env`. Check `ps`, private logs, `/health/ready`, command inventory, `/sync status` and `/config validate`.
 
 Readiness requires database, writer lease and Discord. Effects may remain paused on staging; `effects` reports that setting separately. Lodestone and visibility diagnostics are informational; an incomplete upstream roster is never an empty roster.
 
@@ -113,12 +113,28 @@ Remote output is limited to fixed `step` tokens (`preflight`, `fetch`, `pull`, `
 | Result | Meaning / owner action |
 | --- | --- |
 | `deployed` | Host observation completed; still perform appropriate live behavior acceptance |
-| `already-live` | Exact digest-named runtime passed sustained observation; no migration/registration replay |
+| `already-live` | Exact digest-named runtime passed sustained observation; no migration/registration replay, bootstrap or settings reconciliation |
 | `refused` | Inspect the private precondition failure before a fresh authorized request |
 | `needs-owner` | Preserve pending/logs and reconcile; never blindly retry |
 | Connection failure / missing result | Outcome is unknown; the remote operation may continue or have completed |
 
 Private state lives in `$HOME/.local/state/tarubot-deploy`: `host.lock` serializes delivery and scheduled backup, target-bound `pending` retains unresolved intent, `current` records the target and successful identity/worktree, and private logs retain diagnostics. Never remove run state to bypass a refusal.
+
+## Optional dashboard: owner lifecycle
+
+The [site installation guide](../site/src/content/docs/deploy/install.md#optional-https-dashboard) owns the DNS, OAuth, port and public verification recipe. Production/staging use the same shared `docker-compose.web.yml` and `ops/Caddyfile` from the exact requested image source; the include is parsed even with `web` off. Use private central settings with optional `COMPOSE_PROFILES=web`, shared `WEB_PUBLIC_ORIGIN`, private `WEB_PORT` (default `8080`) and plain `DISCORD_CLIENT_SECRET`, together with the existing application ID. No bot web, main health or database port is published. Preserve target identities and distinct hosts/settings; this is not authorization to operate either live target.
+
+The stock managed deploy entry's bundled profile requires HTTPS on the default public port **443**. The site's custom-port Caddy override applies to owner-managed stock installations, not this native entry: a nonstandard public port on a managed target needs an externally managed HTTPS proxy instead, with the bundled profile off.
+
+Before admitting releases with this optional proxy lifecycle, the owner must review and reinstall **both** stable `tarubot-deploy` and `tarubot-backup` entries as in [first-host setup](#first-host-setup-owner-checklist). A source checkout, release or workflow does not update owner-installed entries. Confirm no in-flight or unresolved delivery and retain the writer/backup/migration fences.
+
+For routine actual version upgrades, native delivery reuses opted-in central settings and manages Caddy from the requested exact release source alongside the sole bot writer. When the bundled profile is disabled, an actual upgrade stops the existing project-labelled Caddy container without deleting its certificate volumes. An exact already-live request performs neither web configuration validation nor settings reconciliation.
+
+Enable/bootstrap or change of origin, client secret or private port at the **current** release is a separate owner-approved maintenance operation. Fence competing delivery/backup/manual operators, inspect `current` and pending state, and use the exact current digest, target manifest and release project directory shown above. If the current release lacks the web feature, first admit a reviewed feature-bearing version through the normal release flow; never graft moving source onto an older image. Prepare DNS/firewalls and the exact Discord redirect, update central settings privately, then run that same Compose command with `up -d --wait --force-recreate tarubot caddy` for bundled web. An external proxy instead recreates only `tarubot` and privately routes to its web port. Never start a second bot, replay migrations/registration solely for web settings, or use `restart` to reload environment.
+
+For explicit bundled-proxy disable, clear the central profile and append `--profile web stop caddy`, then `--profile web rm -f caddy`, to the current exact Compose command. Preserve `caddy_data` and `caddy_config`; do not use `down -v`. To disable the bot dashboard as well, clear its origin/client secret and recreate only `tarubot`; retain them when switching to an external proxy. A profile edit by itself does not prove an existing proxy stopped.
+
+Recreation must retain the recorded exact image/schema identity and one writer, and prove sustained private readiness before routine delivery resumes. Caddy health checks its loopback admin process and the private bot web response, with startup depending on the bot's main readiness; it does not prove public DNS, certificate issuance, HTTPS redirects or OAuth acceptance. Separately verify the public origin with trusted TLS and authorized Discord login, following the site's recipe. Preserve pending evidence and follow owner recovery if any operation leaves state uncertain; `already-live` does not repair or bootstrap that state.
 
 ## Backups and restore
 

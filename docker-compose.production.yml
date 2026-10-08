@@ -2,6 +2,9 @@
 # the private host .env supplies settings, not release identity. ops/deploy.sh passes
 # --project-name tarubot, the central --env-file and the release worktree manifest.
 # Exactly one writer holds the database lease; migrations run only while it is stopped.
+include:
+  - ./docker-compose.web.yml
+
 x-logging: &logging
   # Bounded local logs so a busy day can't fill the disk.
   driver: json-file
@@ -18,6 +21,9 @@ services:
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN}
       DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:?Set DISCORD_APPLICATION_ID to the production application}
+      WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
+      WEB_PORT: ${WEB_PORT:-8080}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       # Tools run inside this container (docker compose run) resolve the production profile.
       TARUBOT_ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-info}

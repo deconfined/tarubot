@@ -1,0 +1,5 @@
+# The same canonical origin drives OAuth callbacks and the TLS virtual host.
+# No access log: callback query strings contain short-lived authorization codes.
+{$WEB_PUBLIC_ORIGIN} {
+	reverse_proxy tarubot:{$WEB_PORT:8080}
+}

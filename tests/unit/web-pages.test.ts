@@ -3,11 +3,11 @@
  * rendered markup of the shell, the / page, the "no access" page, error pages and Status, with
  * invented data parsed by linkedom. The markup rules: lang="en", one <h1>, no style attribute or
  * script (the CSP allows neither), a text label on every control, hostile names escaped inside
- * dir="auto" elements, and no diagnostics or global metrics on Status.
+ * dir="auto" elements, and no global process metrics or diagnostics on Status.
  */
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
-import { applicationKey, lifecycleKey } from "../../src/application/keys.js";
+import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import type { JobView, SyncRunRow, SyncStatusView } from "../../src/application/results.js";
 import { Service } from "../../src/application/service.js";
@@ -15,6 +15,7 @@ import { ServiceKey, Services } from "../../src/bot/services.js";
 import { project } from "../../src/config/project.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { DiscordGateway } from "../../src/discord/gateway.js";
 import { PAGE_ACCESS } from "../../src/web/access.js";
 import { FAVICON, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
@@ -22,8 +23,10 @@ import { problemOf } from "../../src/web/http.js";
 import { errorPage, layout, navLinks } from "../../src/web/layout.js";
 import { definePage, PAGE_PATH, Page, type PageContext } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
+import type { WebNames } from "../../src/web/mentions.js";
 import type { Session } from "../../src/web/sessions.js";
 import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
+import { renderStatus } from "../../src/web/views/status.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
@@ -31,7 +34,7 @@ const REF = "00000000-0000-4000-8000-000000000000";
 const fixtures = new URL("../fixtures/web-pages/", import.meta.url);
 
 /** Names a hostile server owner or member could choose. */
-const HOSTILE = [
+const HOSTILE: [string, string, string, string] = [
   "<img src=x onerror=alert(1)>",
   '"><script>alert(1)</script>',
   "‮txt.exe‬ Officers",
@@ -193,10 +196,6 @@ describe("loadPages", () => {
       for (const flag of page.access) expect(PAGE_ACCESS).toContain(flag);
       expect(page.requires.every((key) => key instanceof ServiceKey)).toBe(true);
     }
-    // Status is for officers and reads the application and the lifecycle.
-    const status = pages.get("/g/:guild/status");
-    expect(status?.access).toEqual(["officer"]);
-    expect(status?.requires).toEqual([applicationKey, lifecycleKey]);
   });
 
   test("discovers nested pages in file-name order and ignores helpers", async () => {
@@ -246,7 +245,7 @@ describe("the shell and /", () => {
       ["/logout/all", "Sign out everywhere"],
     ]);
     // Hostile names are text inside dir="auto" elements, never markup.
-    expect(document.querySelectorAll("img")).toHaveLength(0);
+    expect(document.querySelectorAll("main img")).toHaveLength(0);
     expect(isolated(document)).toEqual(HOSTILE);
     expect(document.querySelectorAll('.servers a[href$="/status"]')).toHaveLength(HOSTILE.length);
   });
@@ -279,7 +278,6 @@ describe("the shell and /", () => {
     expect(isolated(document)).toEqual([name]);
     const current = document.querySelector('nav a[aria-current="page"]');
     expect(current?.getAttribute("href")).toBe(`/g/${GUILD}/status`);
-    expect(current?.textContent).toBe("Status");
     expect(document.querySelector("nav")?.getAttribute("aria-label")).toBe("Server pages");
   });
 
@@ -396,15 +394,14 @@ describe("Status", () => {
     ],
   };
 
-  /** The Status page from discovery, with prototype-backed fakes and recorded calls. */
+  /** The discovered page reads prototype-backed services without writing or fetching Discord. */
   async function statusPage(sync: SyncStatusView) {
-    const calls: unknown[][] = [];
     const app: unknown = Object.create(Service.prototype);
     if (!(app instanceof Service)) throw new Error("Invalid application fixture");
-    app.syncStatus = async (...args) => {
-      calls.push(args);
-      return sync;
-    };
+    app.syncStatus = async () => sync;
+    const gateway: unknown = Object.create(DiscordGateway.prototype);
+    if (!(gateway instanceof DiscordGateway)) throw new Error("Invalid gateway fixture");
+    Object.defineProperty(gateway, "client", { value: { guilds: { cache: new Map() } } });
     const lifecycle: unknown = Object.create(ApplicationLifecycle.prototype);
     if (!(lifecycle instanceof ApplicationLifecycle)) throw new Error("Invalid lifecycle fixture");
     // Every global or diagnostic figure is a recognisable number, so the page can be searched.
@@ -454,7 +451,10 @@ describe("Status", () => {
       session,
       actor,
       guildId: GUILD,
-      services: new Services().provide(applicationKey, app).provide(lifecycleKey, lifecycle),
+      services: new Services()
+        .provide(applicationKey, app)
+        .provide(lifecycleKey, lifecycle)
+        .provide(gatewayKey, gateway),
       report: () => {},
       ref: REF,
     };
@@ -471,66 +471,84 @@ describe("Status", () => {
         body,
       ),
     );
-    return { main, markup, calls, actor };
+    return { main, markup };
   }
 
-  test("reads syncStatus for the actor, with no run filter", async () => {
-    const { calls, actor } = await statusPage(view);
-    expect(calls).toEqual([[actor, null]]);
-  });
-
-  test("shows process health and Discord changes as house words", async () => {
-    const { markup } = await statusPage(view);
-    const document = inspect(markup);
-    const health = [...document.querySelectorAll("main > ul:first-of-type > li")].map((item) =>
-      (item.textContent ?? "").trim(),
+  /** Pure rendering also supports callers without a cached-name snapshot. */
+  async function statusBody(sync: SyncStatusView, names?: WebNames) {
+    const markup = await render(
+      renderStatus({
+        process: { ready: false, discord: true, database: false, lodestone: "available" },
+        sync,
+        ...(names === undefined ? {} : { names }),
+      }),
     );
-    expect(health).toEqual([
-      "[OK] Ready",
-      "[FAIL] Not connected to Discord",
-      "[OK] Database reachable",
-      "[WAIT] Lodestone cooling down after too many requests",
-      "[OK] Discord changes are live",
-    ]);
-    expect([...document.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
-      "Health",
-      "Sync runs",
-      "Outstanding work",
-    ]);
+    return parseHTML(`<html><body>${markup}</body></html>`).document;
+  }
+
+  test("keeps health words and failure states in one featured read-only panel", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    const health = document.querySelector(".featured");
+    expect(document.querySelectorAll(".featured")).toHaveLength(1);
+    expect(health?.querySelectorAll(".check")).toHaveLength(5);
+    expect(health?.querySelectorAll(".check-ok")).toHaveLength(3);
+    expect(health?.querySelectorAll(".check-fail")).toHaveLength(1);
+    expect(health?.querySelectorAll(".check-wait")).toHaveLength(1);
+    expect(health?.textContent).toContain("Discord");
+    expect(health?.textContent).toContain("Database");
+    expect(health?.textContent).toContain("Lodestone");
+    const failed = await statusBody({ effectsMode: "live", runs: [], work: [] });
+    expect(failed.querySelector(".featured")?.querySelectorAll(".check-fail")).toHaveLength(2);
+    expect(document.querySelector("main")?.querySelectorAll("form, button, input")).toHaveLength(0);
   });
 
-  test("shows each job's marker, label and code, never its diagnostic", async () => {
-    const { main, markup } = await statusPage(view);
-    const document = inspect(markup);
-    const lines = [...document.querySelectorAll("main ul:last-of-type > li")].map((item) =>
-      (item.textContent ?? "").replace(/\s+/gu, " ").trim(),
+  test("shows actual sampled markers, raw kinds and safely disclosed diagnostics", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    const table = document.querySelector('table[aria-describedby="work-sample"]');
+    expect(table?.querySelectorAll("tbody tr")).toHaveLength(view.work.length);
+    for (const marker of ["blocked", "failed", "waiting", "queued", "running", "paused"])
+      expect(table?.querySelectorAll(`.marker-${marker}`)).toHaveLength(1);
+    expect(table?.textContent).toContain("reconcile.user");
+    expect(table?.textContent).toContain("Role update");
+    expect(table?.textContent).toContain("secret-job-diagnostic");
+    expect(table?.textContent).toContain("secret-dm-diagnostic");
+    expect(table?.textContent).toContain("the decision still stands");
+    expect(table?.textContent).toContain("1a2b3c4d-0000-4000-8000-000000000001");
+    expect(table?.textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(document.querySelectorAll("main img")).toHaveLength(0);
+    for (const details of table?.querySelectorAll("details") ?? [])
+      expect((details.querySelector("summary")?.textContent ?? "").trim()).not.toBe("");
+    for (const data of document.querySelectorAll("table")) {
+      expect((data.querySelector("caption")?.textContent ?? "").trim()).not.toBe("");
+      for (const heading of data.querySelectorAll("thead th"))
+        expect(heading.getAttribute("scope")).toBe("col");
+      for (const row of data.querySelectorAll("tbody tr"))
+        expect(row.querySelector("th")?.getAttribute("scope")).toBe("row");
+    }
+  });
+
+  test("counts displayed work only and separates waiting from queued", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    expect(document.querySelector("#work-sample")?.textContent).toContain("Limited sample");
+    expect(document.querySelector("#work-sample")?.textContent).toContain("up to 25");
+    const metrics = [...document.querySelectorAll(".metrics dd")].map((dd) =>
+      Number(dd.textContent),
     );
-    expect(lines).toEqual([
-      "! BLOCKED Role update 1a2b3c4d · added 2026-10-04 21:37 UTC · Code blocked",
-      "✗ FAILED Decision DM 1a2b3c4d · attempt 1 · Code dm_blocked · the recipient's DMs are closed",
-      "↻ WAITING FC roster check 1a2b3c4d · attempt 2 · next 2026-10-04 21:37 UTC · Code cooldown",
-      "… QUEUED <img src=x onerror=alert(1)> 1a2b3c4d · next 2026-10-04 21:37 UTC",
-      "… IN PROGRESS Role layout 1a2b3c4d · attempt 1",
-      "‖ PAUSED Officer notice 1a2b3c4d · added 2026-10-04 21:37 UTC",
-    ]);
-    // The run line: progress and the acquisition's code only.
-    expect(main).toContain("Lodestone fetch · Did not finish · 38/40 done · 2 failed");
-    expect(main).toContain("Code <code>invalid_response</code>");
-    for (const hidden of [
-      "secret-run-diagnostic",
-      "secret-job-diagnostic",
-      "Missing Permissions",
-      "123456789012345678",
-      "&lt;@",
-      "<@",
-      "secret-dm-diagnostic",
-    ])
-      expect({ hidden, shown: markup.includes(hidden) }).toEqual({ hidden, shown: false });
-    // A stored kind is text, never markup.
-    expect(document.querySelectorAll("img")).toHaveLength(0);
+    expect(metrics).toHaveLength(6);
+    expect(metrics.reduce((sum, count) => sum + count, 0)).toBe(view.work.length);
+    expect(
+      document.querySelector(".metrics .marker-queued")?.closest("div")?.querySelector("dd")
+        ?.textContent,
+    ).toBe("1");
+    expect(
+      document.querySelector(".metrics .marker-waiting")?.closest("div")?.querySelector("dd")
+        ?.textContent,
+    ).toBe("1");
+    expect(document.querySelector(".metrics .marker-done")).toBeNull();
+    expect(document.querySelector('table[aria-describedby="work-sample"] .marker-done')).toBeNull();
   });
 
-  test("renders every time as a <time> with its ISO instant and UTC text", async () => {
+  test("renders UTC timestamps without inventing a running-job start time", async () => {
     const document = inspect((await statusPage(view)).markup);
     const times = [...document.querySelectorAll("time")];
     expect(times.length).toBeGreaterThan(0);
@@ -538,31 +556,132 @@ describe("Status", () => {
       expect(element.getAttribute("datetime")).toBe("2026-10-04T21:37:42.000Z");
       expect(element.textContent).toBe("2026-10-04 21:37 UTC");
     }
+    const running = document
+      .querySelector('table[aria-describedby="work-sample"] .marker-running')
+      ?.closest("tr");
+    expect(running?.textContent).toContain("Added");
+    expect(running?.textContent).not.toContain("Started");
   });
 
-  test("never shows a global metric or diagnostic from the process status", async () => {
+  test("keeps process-wide figures and diagnostics out of server views", async () => {
     const { markup } = await statusPage(view);
     for (const figure of ["7770", "7771", "7772", "7773", "7774", "7775", "7776", "7777", "7778"])
       expect({ figure, shown: markup.includes(figure) }).toEqual({ figure, shown: false });
     expect(markup).not.toContain("lodestone-css-selectors");
   });
 
-  test("says when there is nothing to show, and words paused runs and work", async () => {
-    const empty = await statusPage({ effectsMode: "awaiting_activation", runs: [], work: [] });
-    const document = inspect(empty.markup);
-    expect(document.querySelector("main")?.textContent).toContain("No sync runs yet.");
-    expect(document.querySelector("main")?.textContent).toContain(
-      "Nothing is queued, running, blocked, paused or failed.",
+  test("resolves officer diagnostic mentions without exposing hidden names or unsafe markup", async () => {
+    const hidden = "123456789012345678";
+    const role = "300000000000000003";
+    const names: WebNames = {
+      users: new Map([[USER, HOSTILE[0]]]),
+      roles: new Map([[role, HOSTILE[1]]]),
+      channels: new Map([[hidden, null]]),
+    };
+    const document = await statusBody(
+      {
+        effectsMode: "live",
+        runs: [],
+        work: [
+          job({
+            last_error: `blocked: <@${USER}> <@&${role}> <#${hidden}> <t:1700000000:F> <script>unsafe()</script>`,
+            result: { secret: "unrelated-payload-secret" },
+          }),
+        ],
+      },
+      names,
     );
-    expect(empty.main).toContain(
-      "[WAIT]</span> Discord changes are paused until this server is activated",
+    expect(document.querySelectorAll("script, img")).toHaveLength(0);
+    expect(document.body.textContent).toContain(HOSTILE[0]);
+    expect(document.body.textContent).toContain(HOSTILE[1]);
+    expect(document.body.textContent).toContain("<script>unsafe()</script>");
+    expect(document.body.textContent).toMatch(/channel.*TaruBot|TaruBot.*channel/iu);
+    expect(document.body.textContent).not.toContain(`<#${hidden}>`);
+    expect(document.body.textContent).not.toContain("unrelated-payload-secret");
+    expect(isolated(document)).toContain(HOSTILE[0]);
+    expect(document.querySelector(".diagnostic .mention [dir=auto]")?.textContent).toContain(
+      HOSTILE[1],
     );
-    const paused = await statusPage({
-      effectsMode: "deployment_disabled",
-      runs: [{ ...run, status: "blocked", work_failed: 0, work_blocked: 2, last_error: null }],
+    expect(document.querySelector(".diagnostic time")?.getAttribute("datetime")).toBe(
+      new Date(1700000000 * 1000).toISOString(),
+    );
+    expect(document.querySelector(".diagnostic time")?.textContent).toContain("UTC");
+  });
+
+  test("distinguishes a scheduled wait from a retry without implying either already ran", async () => {
+    const document = await statusBody({
+      effectsMode: "live",
+      runs: [],
+      work: [
+        job({ last_error: "cooldown: Lodestone cooldown", attempts: 0 }),
+        job({ last_error: "network: unreachable", attempts: 3 }),
+      ],
+    });
+    const rows = [...document.querySelectorAll("tbody tr")];
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.querySelectorAll(".marker-waiting")).toHaveLength(1);
+      expect(row.textContent).not.toContain("Completed");
+    }
+    expect(rows[0]?.textContent).toContain("Next");
+    expect(rows[1]?.textContent).toContain("Retry");
+  });
+
+  test("preserves run progress and failed acquisition even when child totals say completed", async () => {
+    const document = await statusBody({
+      effectsMode: "live",
+      runs: [{ ...run, status: "completed" }],
       work: [],
     });
-    expect(paused.main).toContain("Lodestone fetch · Paused · 38/40 done · 2 held</li>");
-    expect(paused.main).toContain("[OFF]</span> Discord changes are off for this deployment");
+    const row = document.querySelector("tbody tr");
+    expect(row?.textContent).toContain("Completed");
+    expect(row?.textContent).toContain("38/40 done");
+    expect(row?.textContent).toContain("2 failed");
+    expect(row?.querySelectorAll(".marker-failed")).toHaveLength(1);
+    expect(row?.textContent).toContain("secret-run-diagnostic");
+    expect(row?.textContent).toContain(run.id);
+    expect(row?.textContent).toContain("invalid_response");
+  });
+
+  test("preserves paused, waiting and skipped acquisition states and DM decision semantics", async () => {
+    for (const [status, last_error, result, marker] of [
+      ["disabled", null, null, "paused"],
+      ["queued", "cooldown: wait", null, "waiting"],
+      ["succeeded", null, { skipped: "Nothing changed <@200000000000000002>" }, "skipped"],
+      ["failed", "dm_blocked: refused", null, "failed"],
+    ] as const) {
+      const document = await statusBody({
+        effectsMode: "deployment_disabled",
+        runs: [
+          {
+            ...run,
+            status: "blocked",
+            acquisition_status: status,
+            last_error,
+            result,
+            work_failed: 0,
+            work_blocked: 2,
+          },
+        ],
+        work: [],
+      });
+      const row = document.querySelector("tbody tr");
+      expect(row?.textContent).toContain("Paused");
+      expect(row?.textContent).toContain("38/40 done");
+      expect(row?.textContent).toContain("2 held");
+      expect(row?.querySelectorAll(`.marker-${marker}`)).toHaveLength(1);
+      if (marker === "skipped") expect(row?.textContent).toContain("Nothing changed");
+      if (last_error?.startsWith("dm_blocked"))
+        expect(row?.textContent).toContain("the decision still stands");
+    }
+  });
+
+  test("distinguishes pending activation from deployment-disabled effects", async () => {
+    const waiting = inspect(
+      (await statusPage({ effectsMode: "awaiting_activation", runs: [], work: [] })).markup,
+    );
+    expect(waiting.querySelector(".featured")?.querySelectorAll(".check-wait")).toHaveLength(2);
+    const off = await statusBody({ effectsMode: "deployment_disabled", runs: [], work: [] });
+    expect(off.querySelector(".featured")?.querySelectorAll(".check-off")).toHaveLength(1);
   });
 });

@@ -20,6 +20,7 @@ Everything TaruBot knows lives in one PostgreSQL database per deployment, run by
 | Work | `jobs`, `delivery_attempts`, `sync_runs`, `sync_run_jobs` | The durable queue of Discord effects, their attempts and outcomes, and `/refresh` runs. |
 | Server structure | `retired_roles`, `channel_access_policies` | Roles being cleaned up after a change, and each managed channel's original permissions under onboarding. |
 | Records | `audit`, `imports`, `issue_reports` | The audit trail, imports from a previous bot, and saved issue reports. |
+| Web sessions | `web_sessions` | Hashed session tokens, Discord user IDs, authentication and activity times, and expiry; never the raw browser token or Discord's OAuth token. |
 | Schema | `schema_migrations` | Which migrations were applied, with their checksums. |
 
 The numbered files in [`migrations/`](https://github.com/deconfined/tarubot/tree/main/migrations) define every table, with comments, and are the authority for the schema. The bot refuses to start on a schema it doesn't expect, and an applied migration is never edited: every change is a new file.
@@ -43,6 +44,14 @@ Expired claim challenges are deleted a week after they expire. Links, grants, ro
 For each member, a server's database holds their Discord user ID, whether they're in the server and when they joined; their linked characters and each link's history; their main character and nickname state, including the nickname TaruBot replaced; guest applications with their answers, grants, revocations and officer overrides; ledger entries they recorded; audit records of changes they made or that were made to them; and their queued Discord work.
 
 It doesn't store Discord messages or online status: Discord sends it no message events and no online status, because TaruBot asks for neither the message intents nor Presence. It doesn't store Discord usernames outside a saved `/issue` report. It never sees Lodestone passwords, and it keeps a claim token only as a hash; the reply that shows the token is private.
+
+## Dashboard sessions and fonts
+
+When the dashboard is enabled, Discord sign-in asks only for `identify`. TaruBot uses Discord's token once to learn the user ID, then drops it. An admitted officer receives an opaque browser session; the database stores its hash, user ID and timestamps. Sessions expire after 30 days absolutely or 7 days without activity. **Sign out** ends the current browser's session; **Sign out everywhere** ends all sessions for that user.
+
+The read-only pages show the admitted server's configuration and work. Member, role and channel names come from that server's gateway cache at render time, not a new stored directory. Application request logs use route patterns and reference IDs, not queries, cookies, form values or client addresses.
+
+The dashboard loads Chakra Petch and Martian Mono from Google Fonts. Google receives the browser's normal requests for the font stylesheet and files; TaruBot does not put server or member records into those URLs. No client scripts are loaded. If fonts cannot load, local system fonts remain usable.
 
 ## Issue reports
 

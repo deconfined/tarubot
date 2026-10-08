@@ -37,6 +37,22 @@ const sandbox = (releases = true, target: HostTarget = "production") => {
   boxes.push(box);
   return box;
 };
+const configureWeb = (box: HostSandbox, overrides: Record<string, string> = {}) => {
+  const settings = {
+    COMPOSE_PROFILES: "web",
+    WEB_PUBLIC_ORIGIN: "https://dashboard.example.org",
+    WEB_PORT: "8080",
+    DISCORD_CLIENT_SECRET: "private-oauth-secret",
+    ...overrides,
+  };
+  const file = join(box.root, ".env");
+  let contents = readFileSync(file, "utf8");
+  for (const [key, value] of Object.entries(settings)) {
+    contents = contents.replace(new RegExp(`^${key}=.*\\n?`, "mu"), "");
+    contents += `${key}=${value}\n`;
+  }
+  writeFileSync(file, contents);
+};
 
 for (const request of [
   "",
@@ -555,5 +571,155 @@ describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", ()
     expect(events(box)).not.toContain("stop");
     expect(events(box)).not.toContain("backup");
     expect(existsSync(join(box.state, "pending"))).toBe(false);
+  });
+});
+
+describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
+  test("bot-only upgrades remain compatible with candidate images that predate web modules", () => {
+    const box = sandbox();
+    rmSync(join(box.sim, "runtime/dist/src/web"), { recursive: true });
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(events(box)).not.toContain("proxy-start");
+  });
+
+  for (const target of ["production", "staging"] as const) {
+    test(`${target} upgrades opted-in web from the release, preserving backup and proxy profiles`, () => {
+      const box = sandbox(true, target);
+      configureWeb(box);
+      const before = readFileSync(join(box.root, ".env"), "utf8");
+      // Central settings stay put, but shared includes and mounts must not use
+      // a drifting owner checkout instead of the immutable requested release.
+      writeFileSync(join(box.root, "docker-compose.web.yml"), "services: {}\n");
+      writeFileSync(join(box.root, "ops/Caddyfile"), "invalid owner checkout\n");
+      expect(deploy(box).stdout).toEndWith("result deployed\n");
+      const actions = events(box);
+      for (const action of ["web-candidate", "proxy-pull", "proxy-validate"])
+        expect(actions.indexOf(action)).toBeLessThan(actions.indexOf("stop"));
+      expect(actions.indexOf("start")).toBeLessThan(actions.indexOf("proxy-start"));
+      expect(actions.indexOf("proxy-ready")).toBeLessThan(actions.indexOf("restart-policy"));
+      const model = JSON.parse(readFileSync(join(box.sim, "compose.json"), "utf8"));
+      expect(model.services.backup).toBeDefined();
+      expect(model.services.caddy).toBeDefined();
+      expect(model.services.tarubot.environment.WEB_PUBLIC_ORIGIN).toBe(
+        "https://dashboard.example.org",
+      );
+      expect(model.services.caddy.environment.WEB_PORT).toBe("8080");
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "proxy.json"), "utf8"))[0].HostConfig.RestartPolicy
+          .Name,
+      ).toBe("unless-stopped");
+      expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(before);
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+    });
+  }
+
+  for (const [name, settings] of Object.entries({
+    "missing OAuth secret": { DISCORD_CLIENT_SECRET: "" },
+    "invalid external-proxy origin": {
+      COMPOSE_PROFILES: "",
+      WEB_PUBLIC_ORIGIN: "https://dashboard.example.org/path",
+    },
+    "invalid external-proxy port": { COMPOSE_PROFILES: "", WEB_PORT: "65536" },
+    "external-proxy health port collision": { COMPOSE_PROFILES: "", WEB_PORT: "3000" },
+    "disabled backend with bundled proxy": { WEB_PUBLIC_ORIGIN: "" },
+    "unsupported bundled public port": { WEB_PUBLIC_ORIGIN: "https://dashboard.example.org:8443" },
+  })) {
+    test(`${name} refuses before stopping the writer`, () => {
+      const box = sandbox();
+      configureWeb(box, settings);
+      expect(deploy(box).stdout).toEndWith("result refused\n");
+      expect(events(box)).toContain("web-candidate");
+      expect(events(box)).not.toContain("stop");
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+      ).toBe(true);
+    });
+  }
+
+  for (const failure of ["proxy-pull", "proxy-validate"]) {
+    test(`${failure} refuses before the writer boundary`, () => {
+      const box = sandbox();
+      configureWeb(box);
+      knob(box, failure);
+      expect(deploy(box).stdout).toEndWith("result refused\n");
+      expect(events(box)).not.toContain("stop");
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+    });
+  }
+
+  for (const failure of ["proxy-start", "proxy-ready", "proxy-restart-policy"]) {
+    test(`${failure} preserves pending and fences the writer instead of accepting`, () => {
+      const box = sandbox();
+      configureWeb(box);
+      knob(box, failure);
+      const result = deploy(box);
+      expect(result.stdout).toEndWith("result needs-owner\n");
+      expect(result.stdout).not.toContain("result deployed");
+      expect(existsSync(join(box.state, "pending"))).toBe(true);
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+      ).toBe(false);
+      expect(events(box)).not.toContain("restart-policy");
+      expect(deploy(box).stdout).toEndWith("result refused\n");
+    });
+  }
+
+  test("external-proxy web is validated without starting bundled Caddy", () => {
+    const box = sandbox();
+    configureWeb(box, { COMPOSE_PROFILES: "" });
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(events(box)).toContain("web-candidate");
+    expect(events(box)).not.toContain("proxy-pull");
+    expect(events(box)).not.toContain("proxy-start");
+  });
+
+  test("a real upgrade recreates changed proxy settings and stops a disabled proxy", () => {
+    const box = sandbox();
+    writeFileSync(
+      join(box.sim, "proxy.json"),
+      JSON.stringify([{ Id: "cadd10000000", State: { Running: true } }]),
+    );
+    configureWeb(box, { WEB_PUBLIC_ORIGIN: "https://new-dashboard.example.org", WEB_PORT: "8081" });
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(events(box)).toContain("proxy-start");
+    expect(
+      JSON.parse(readFileSync(join(box.sim, "compose.json"), "utf8")).services.caddy.environment,
+    ).toEqual({ WEB_PUBLIC_ORIGIN: "https://new-dashboard.example.org", WEB_PORT: "8081" });
+
+    const disabled = sandbox();
+    writeFileSync(
+      join(disabled.sim, "proxy.json"),
+      JSON.stringify([{ Id: "cadd10000000", State: { Running: true } }]),
+    );
+    expect(deploy(disabled).stdout).toEndWith("result deployed\n");
+    expect(events(disabled)).toContain("proxy-stop");
+    expect(events(disabled)).not.toContain("proxy-start");
+    expect(
+      JSON.parse(readFileSync(join(disabled.sim, "proxy.json"), "utf8"))[0].State.Running,
+    ).toBe(false);
+  });
+
+  test("already-live never becomes web settings reconciliation or proxy bootstrap", () => {
+    const box = sandbox();
+    expect(deploy(box).code).toBe(0);
+    configureWeb(box, { WEB_PUBLIC_ORIGIN: "invalid-origin", DISCORD_CLIENT_SECRET: "" });
+    writeFileSync(join(box.sim, "events"), "");
+    const result = deploy(
+      box,
+      `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+    );
+    expect(result.stdout).toEndWith("result already-live\n");
+    for (const action of [
+      "web-candidate",
+      "proxy-pull",
+      "proxy-validate",
+      "proxy-start",
+      "proxy-stop",
+      "stop",
+      "start",
+    ])
+      expect(events(box)).not.toContain(action);
+    expect(existsSync(join(box.sim, "proxy.json"))).toBe(false);
   });
 });

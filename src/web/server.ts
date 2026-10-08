@@ -5,7 +5,7 @@
  * sign-out, health and assets) and the discovered pages under /g/:guild/. Web faults never stop
  * the bot: bad settings, a broken page module or a failed bind are reported and leave the web off.
  */
-import type { Server } from "bun";
+import type { Server, TLSOptions } from "bun";
 import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
@@ -80,8 +80,10 @@ export interface WebOptions {
   readonly authorizeUrl?: string;
   /** Defaults to pages.ts's pagesDirectory. */
   readonly pagesDirectory?: URL;
-  /** Defaults to "::", the explicit dual-stack bind; the harness binds "::1" only. */
+  /** Defaults to "::", the explicit dual-stack bind; the harness selects its preview interface. */
   readonly hostname?: string;
+  /** Optional listener TLS for the development harness; production passes none. */
+  readonly tls?: TLSOptions;
   /** Overrides WEB_PORT; tests pass 0 for any free port. */
   readonly port?: number;
   /** Defaults to WEB_STOP_MS; tests shorten the grace period. */
@@ -264,7 +266,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     }
     return page(
       c,
-      layout({ title: BRAND, signedIn: true }, renderHome({ signedIn: true, servers })),
+      layout({ title: "Your servers", signedIn: true }, renderHome({ signedIn: true, servers })),
     );
   });
   allow(PATHS.home, GET_ONLY);
@@ -470,6 +472,7 @@ export async function startWeb(
       server = Bun.serve({
         hostname: options.hostname ?? "::",
         port: options.port ?? settings.port,
+        ...(options.tls && { tls: options.tls }),
         development: false,
         maxRequestBodySize: WEB_BODY_LIMIT,
         idleTimeout: WEB_IDLE_TIMEOUT_SECONDS,
