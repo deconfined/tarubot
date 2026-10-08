@@ -38,7 +38,39 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
-trap 'echo "::error::Deployment did not complete; inspect the private host log and reconcile before a fresh dispatch."' ERR
+# Say where delivery stopped in fixed sentences only: diagnostics stay in private files, and only
+# the host entry's own step/result lines are relayed. The phase moves runner -> resolver -> ssh.
+phase=runner
+host_lines=0
+result=''
+failure_message() {
+  local errors=$dir/ssh-errors
+  case "$phase" in
+    runner) echo 'Delivery stopped on the runner before contacting the host; the host was not changed.' ;;
+    resolver) echo "The runner's DNSSEC-validating resolver did not start; the host was not contacted." ;;
+    *)
+      if (( host_lines == 0 )); then
+        if grep -q 'Host key verification failed' "$errors" 2> /dev/null; then
+          echo "The host's SSH key was not authenticated by DNSSEC-signed SSHFP records; the host was not contacted."
+        elif grep -qiE 'Could not resolve hostname|Name or service not known|Temporary failure in name resolution' "$errors" 2> /dev/null; then
+          echo 'The deploy host name did not resolve under DNSSEC validation; the host was not contacted.'
+        elif grep -q 'Permission denied' "$errors" 2> /dev/null; then
+          echo 'The host refused the delivery key; its deploy entry did not run.'
+        elif grep -qiE 'timed out|Connection refused|No route to host|Network is unreachable' "$errors" 2> /dev/null; then
+          echo 'The host did not accept an SSH connection; its deploy entry did not run.'
+        else
+          echo 'SSH ended before the host entry answered; check the host is reachable over SSH, then re-run.'
+        fi
+      else
+        case "$result" in
+          'result refused') echo 'The host refused this delivery before stopping the writer, so nothing changed; its private host log says why. Fix the cause, then re-run or dispatch again.' ;;
+          'result needs-owner') echo 'The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery.' ;;
+          *) echo 'The host entry stopped without a single result; inspect the private host log and reconcile before a new delivery.' ;;
+        esac
+      fi ;;
+  esac
+}
+trap 'echo "::error::$(failure_message)"' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 exec 2> "$dir/errors"
@@ -60,6 +92,7 @@ dpkg --compare-versions "$client_version" ge '1:9.6p1-3ubuntu13.8'
 printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
 unset DEPLOY_SSH_KEY
 
+phase=resolver
 # Trust only the OS-maintained root anchor, not an AD bit received over an
 # untrusted network. Ubuntu confines /usr/sbin/unbound with its packaged
 # AppArmor profile: daemon files must be root-owned under /var/lib/unbound.
@@ -112,6 +145,7 @@ cp -L /etc/resolv.conf "$dir/resolv.conf.previous"
 printf 'nameserver 127.0.0.1\noptions edns0 trust-ad\n' |
   sudo -n tee /etc/resolv.conf > /dev/null
 
+phase=ssh
 rc=0
 # wait is interruptible; a foreground ssh would defer INT/TERM traps.
 ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none \
@@ -124,15 +158,16 @@ ssh -F /dev/null -T -4 -i "$dir/key" -o IdentitiesOnly=yes -o IdentityAgent=none
 ssh_job=$!
 wait "$ssh_job" || rc=$?
 unset ssh_job
-result=''
 results=0
 while IFS= read -r line; do
   case "$line" in
     'step preflight'|'step fetch'|'step pull'|'step stop'|'step backup'|'step migrate'|'step register'|'step start'|'step observe'|'step record')
+      host_lines=$((host_lines + 1))
       printf '%s\n' "$line" ;;
     'result deployed'|'result already-live'|'result refused'|'result needs-owner')
       result=$line
       results=$((results + 1))
+      host_lines=$((host_lines + 1))
       printf '%s\n' "$line" ;;
   esac
 done < "$dir/output"

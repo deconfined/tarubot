@@ -3,16 +3,14 @@
 FROM oven/bun:1.4.2-alpine AS base
 RUN apk upgrade --no-cache
 
-# Compile and verify all first-party code plus discoverable modules using pinned Bun.
+# Compile all first-party code plus discoverable modules using pinned Bun. The runtime image
+# depends on this compilation only, so publishing never re-runs the test suite.
 FROM base AS build
-# Host delivery tests use Bash, GNU date, Git, jq and util-linux's flock/setsid options.
-# These tools belong only in the build/test stage; the runtime retains the minimal base.
-RUN apk add --no-cache bash coreutils git jq flock util-linux-misc
 WORKDIR /app
 COPY package.json bun.lock bunfig.toml ./
 RUN bun install --frozen-lockfile
 COPY . .
-RUN bun run build && bun run typecheck && bun run test:unit && bun run test:contract
+RUN bun run build
 
 # Keep source/build dependencies separate from the final runtime dependency tree.
 FROM base AS dependencies
@@ -31,8 +29,14 @@ LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 USER bun
 STOPSIGNAL SIGTERM
 
+# Verify the compiled tree on this platform's base: pull-request CI builds this stage on native
+# AMD64 and ARM64 before merge, and publication then reuses that proof for the identical tree.
+# Host delivery tests use Bash, GNU date, Git, jq and util-linux's flock/setsid options; these
+# tools belong only in this stage, so the runtime retains the minimal base.
 # The test harness injects the SQL fixture separately into an ephemeral container.
 FROM build AS test
+RUN apk add --no-cache bash coreutils git jq flock util-linux-misc
+RUN bun run typecheck && bun run test:unit && bun run test:contract
 CMD ["bun", "test", "tests"]
 
 # Preserve directory layout: discovery resolves compiled modules relative to import.meta.url.

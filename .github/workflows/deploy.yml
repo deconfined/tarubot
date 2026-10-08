@@ -62,7 +62,9 @@ env:
 jobs:
   validate:
     name: Validate signed release
-    if: github.ref == 'refs/heads/main' && github.run_attempt == '1'
+    # A re-run validates and asks for approval again; the host entry then decides (already-live,
+    # refused while another delivery or a pending marker holds the host, or a deployment).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -115,7 +117,7 @@ jobs:
     name: Deploy ${{ needs.validate.outputs.target }}
     needs: validate
     if: >-
-      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      github.ref == 'refs/heads/main' &&
       ((needs.validate.outputs.target == 'production' && vars.DEPLOY_ENABLED == 'true') ||
        (needs.validate.outputs.target == 'staging' && vars.STAGING_DEPLOY_ENABLED == 'true'))
     runs-on: ubuntu-24.04
@@ -174,8 +176,10 @@ jobs:
           persist-credentials: false
       - name: Install the DNSSEC SSH transport
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends openssh-client unbound dns-root-data
+          # A mirror hiccup here would fail delivery before any host contact; retry it.
+          sudo apt-get -o Acquire::Retries=5 update -q
+          sudo apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends \
+            openssh-client unbound dns-root-data
           # The transport starts and cleans up its own validating resolver.
           sudo systemctl stop unbound
       - name: Send the exact release to the DNSSEC-authenticated host entry
