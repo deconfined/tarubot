@@ -1,14 +1,14 @@
 {
-  "title": "Session: 2.37.0 admin dashboard acceptance",
-  "objective": "Verify the signed 2.37.0 release on owner-authorized staging, preserving one DevBot writer and testing optional HTTPS dashboard access and bot-only compatibility. Production requires its own readiness and GitHub approval.",
+  "title": "Session: 2.37.1 Caddy worktree acceptance",
+  "objective": "Verify the signed 2.37.1 release on owner-authorized staging: Caddy must validate its public template from a private worktree without broader container privileges or exposed settings. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest, backups and reviewed stable deploy/backup entries before authorizing the existing staging target's upgrade.",
-    "Configure the optional HTTPS origin and Discord OAuth callback through bundled Caddy or an external proxy; leave web disabled for a bot-only rehearsal.",
-    "Sign in as an officer; compare configuration/health and background work with Discord. Confirm ordinary members and unauthorized guilds are denied; exercise current-session and all-session sign-out.",
-    "Accept readiness, sole writer lease, test-guild command inventory and backup/restore evidence. Approve production only after its separate baseline is ready."
+    "Review the exact release source/digest, backups and updated stable deploy entry before authorizing the existing staging target's upgrade; preserve entry ownership, mode and SELinux label.",
+    "Configure the reviewed HTTPS origin and OAuth callback. Confirm bundled Caddy validates the public template in its private release worktree; keep central settings private.",
+    "Accept backend/proxy readiness, sole writer lease, scoped command inventory and backup/restore evidence. Check officer login and ordinary-member denial.",
+    "Use a bot-only rehearsal to check compatibility. Approve production only after its own healthy baseline and acceptance prerequisites are ready."
   ],
   "assistant": [
-    "Run credential-free release-metadata, startup-announcement, dashboard OAuth/authorization, native Caddy and host-transition checks.",
+    "Reproduce Caddy denial with a 0600 template in a umask-077 Git worktree, then run the corrected entry against real Caddy without read-override capabilities; check release/startup metadata and host transitions.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
@@ -16,6 +16,6 @@
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
     "Serve dashboard pages from the same bot process only when web is enabled; require Discord sign-in and officer authority, and keep server reads scoped.",
     "Keep acquisition and reconciliation in the declared test guild; dashboard pages change no settings and trigger no Discord retries or decisions.",
-    "Expose database, Discord and writer-lease readiness; report 2.37.0, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.37.1, startup time and effect state without pinging members."
   ]
 }

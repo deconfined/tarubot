@@ -28,6 +28,7 @@ Signed published releases pass vulnerability scans for both AMD64 and ARM64 befo
    curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker-compose.web.yml"
    mkdir -p ops
    curl -fsSL -o ops/Caddyfile "https://raw.githubusercontent.com/deconfined/tarubot/$commit/ops/Caddyfile"
+   chmod 644 ops/Caddyfile
    curl -fsSL -o .env.example "https://raw.githubusercontent.com/deconfined/tarubot/$commit/.env.example"
    comm -13 <(grep -oE '^[A-Z][A-Z0-9_]*=' .env | sort) <(grep -oE '^[A-Z][A-Z0-9_]*=' .env.example | sort)
    ```
@@ -82,6 +83,8 @@ docker compose --profile web rm -f caddy
 These commands preserve `caddy_data` and `caddy_config`; never use `down -v` to disable web. To disable the bot's dashboard too, clear `WEB_PUBLIC_ORIGIN` and `DISCORD_CLIENT_SECRET` and run `docker compose up -d --wait --force-recreate tarubot`. For an external proxy, leave the web settings populated, clear the bundled profile and configure that proxy's private upstream instead. Changing a profile alone is not proof an old proxy stopped.
 
 Managed production/staging targets require owner-reviewed stable deploy and backup entry reinstallation before using this source's web lifecycle. Source releases never self-update those entries. Settings enable/bootstrap/change is a separate owner-approved recreation of the current exact digest in its recorded worktree; `already-live` is observation, not settings reconciliation. See [owner operations](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#optional-dashboard-owner-lifecycle), not this stock database recipe.
+
+For bundled Caddy on managed targets, install the reviewed **2.37.1 or newer deploy entry** before approving delivery. It makes only the public `ops/Caddyfile` readable (`0644`) before validation while central `.env` stays private (`0600`). Older entries can refuse with `/etc/caddy/Caddyfile: permission denied` after a successful image pull; rebuilding the image alone does not update the installed entry.
 
 ## Rollback
 

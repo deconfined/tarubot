@@ -114,6 +114,11 @@ case $1 in
             [[ ${mount%%:*} == "${manifest%/*}/ops/Caddyfile" && -f ${mount%%:*} ]]
             record proxy-validate
             fail proxy-validate
+            if [[ -n ${CADDY_NATIVE_DOCKER:-} ]]; then
+              "$CADDY_NATIVE_DOCKER" compose --project-name "$CADDY_NATIVE_PROJECT" \
+                --project-directory "$root" --env-file "$env_file" \
+                -f "$manifest" -f "$SIM/native-caddy.yml" "$@"
+            fi
             ;;
           *'tarubot bun -e '*)
             [[ $* == *'--pull never'* ]]

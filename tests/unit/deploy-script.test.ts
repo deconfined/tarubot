@@ -8,6 +8,7 @@ import {
   watch,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   deployments,
@@ -581,6 +582,64 @@ describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
     expect(deploy(box).stdout).toEndWith("result deployed\n");
     expect(events(box)).not.toContain("proxy-start");
   });
+
+  test.skipIf(!process.env.CADDY_FIXTURE_IMAGE)(
+    "validates Caddy from a private managed worktree without read-override capabilities",
+    () => {
+      const docker = Bun.which("docker");
+      if (!docker) throw new Error("CADDY_FIXTURE_IMAGE requires Docker");
+      const box = sandbox();
+      configureWeb(box);
+      box.environment.CADDY_NATIVE_DOCKER = docker;
+      box.environment.CADDY_NATIVE_PROJECT = `tarubot-private-caddy-${crypto.randomUUID()}`;
+      box.environment.DOCKER_CONFIG = process.env.DOCKER_CONFIG ?? join(homedir(), ".docker");
+      for (const name of [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+      ]) {
+        const value = process.env[name];
+        if (value) box.environment[name] = value;
+      }
+      writeFileSync(
+        join(box.sim, "native-caddy.yml"),
+        `services:\n  caddy:\n    image: ${JSON.stringify(process.env.CADDY_FIXTURE_IMAGE)}\n`,
+      );
+      const worktree = join(box.state, "releases", `1234-${box.target.commit}`);
+      try {
+        expect(deploy(box).stdout).toEndWith("result deployed\n");
+        expect(JSON.parse(readFileSync(join(box.state, "current"), "utf8")).version).toBe(
+          box.target.version,
+        );
+        expect(statSync(join(box.root, ".env")).mode & 0o777).toBe(0o600);
+      } finally {
+        if (existsSync(worktree)) {
+          const cleanup = subprocess(
+            [
+              docker,
+              "compose",
+              "--project-name",
+              box.environment.CADDY_NATIVE_PROJECT,
+              "--project-directory",
+              worktree,
+              "--env-file",
+              join(box.root, ".env"),
+              "-f",
+              join(worktree, "docker-compose.production.yml"),
+              "-f",
+              join(box.sim, "native-caddy.yml"),
+              "down",
+              "--volumes",
+              "--remove-orphans",
+            ],
+            { ...box.environment, TARUBOT_IMAGE_DIGEST: box.target.digest },
+          );
+          expect(cleanup.code).toBe(0);
+        }
+      }
+    },
+  );
 
   for (const target of ["production", "staging"] as const) {
     test(`${target} upgrades opted-in web from the release, preserving backup and proxy profiles`, () => {
