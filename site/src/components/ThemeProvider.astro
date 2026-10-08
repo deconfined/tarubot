@@ -1,0 +1,8 @@
+---
+/*
+ * Dark only. Starlight's ThemeProvider inlines a script that switches html[data-theme] to a stored
+ * or device preference; this site has a single dark palette, so it renders nothing and the
+ * data-theme="dark" Starlight puts on <html> at build time stays. ThemeSelect.astro is emptied with
+ * it: the stock picker's inline script calls this component's global and would throw without it.
+ */
+---

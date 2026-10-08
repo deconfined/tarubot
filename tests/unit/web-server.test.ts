@@ -25,6 +25,7 @@ import { AccessResolver, type WebGuild } from "../../src/web/access.js";
 import { ASSET_CACHE_CONTROL, ASSETS, STYLESHEET } from "../../src/web/assets.js";
 import { html } from "../../src/web/html.js";
 import { securityHeaderRecord, type WebEnv } from "../../src/web/http.js";
+import { icon } from "../../src/web/icons.js";
 import { DiscordSignIn } from "../../src/web/oauth.js";
 import { definePage, type Page } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
@@ -655,7 +656,11 @@ describe("server pages (D12)", () => {
     expect(text).not.toContain("Unserved FC");
     expect(text).toContain("Sign out everywhere");
     const visitor = await (await new Browser(w).get("/")).text();
-    expect(visitor).toContain('<a class="button" href="/login">Sign in with Discord</a>');
+    // The page's one primary button, a link with its decorative icon (form-action would block a
+    // form's redirect to Discord).
+    expect(visitor).toContain(
+      `<a class="orr-btn orr-btn--primary orr-btn--lg orr-btn--block" href="/login">${String(icon("log-in"))}Sign in with Discord</a>`,
+    );
     expect(visitor).not.toContain("Sign out");
   });
 
@@ -1042,14 +1047,34 @@ describe("readiness and assets", () => {
   test("assets are served at their hashed paths as immutable, and nothing else is", async () => {
     const w = await world();
     const visitor = new Browser(w);
+    // Text and binary alike: the stylesheet, favicon, notices and the four fonts.
+    expect(new Set(ASSETS.map((asset) => asset.contentType))).toEqual(
+      new Set([
+        "text/css; charset=utf-8",
+        "image/svg+xml",
+        "text/plain; charset=utf-8",
+        "font/woff2",
+      ]),
+    );
     for (const asset of ASSETS) {
       const response = await visitor.get(asset.path);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe(asset.contentType);
       expect(response.headers.get("cache-control")).toBe(ASSET_CACHE_CONTROL);
-      expect(await response.text()).toBe(asset.body);
+      // Bytes, not text: a font read as UTF-8 would lose its invalid sequences to replacement.
+      const expected =
+        typeof asset.body === "string" ? new TextEncoder().encode(asset.body) : asset.body;
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(expected);
     }
-    for (const path of ["/assets/site.css", "/assets/../package.json", "/assets/", "/favicon.ico"])
+    for (const path of [
+      "/assets/site.css",
+      "/assets/../package.json",
+      "/assets/",
+      "/favicon.ico",
+      // Only the hashed names exist: never a font or the notices by their plain names.
+      "/assets/licenses.txt",
+      "/assets/manrope-latin-wght-normal.woff2",
+    ])
       expect({ path, status: (await visitor.get(path)).status }).toEqual({ path, status: 404 });
   });
 });

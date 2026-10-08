@@ -1,18 +1,30 @@
 /**
- * The page shell (#43, ADR E12): `lang="en"`, the viewport, the hashed stylesheet and favicon, one
- * `<h1>`, the server navigation, the sign-out forms and a footer with the version and the source
- * and license links (AGPL-3.0 §13). Pure: it renders what it is given and reads no state.
+ * The page shell (#43, ADR E12): `lang="en"`, the viewport, the dark color scheme, the hashed
+ * stylesheet and favicon, one `<h1>`, the server navigation, the sign-out forms and a footer with
+ * the version, the source and license links (AGPL-3.0 §13) and the third-party licenses (the
+ * fonts' and icons' notices). Pure: it renders what it is given and reads no state.
+ *
+ * Two frames, styled by styles/shell.ts and styles/entry.ts:
+ * - a server page is a console: a sidebar with the wordmark, the server switcher (a link back to
+ *   the server list, and the only place the server's name appears), the page navigation and the
+ *   account menu, beside a top bar and the page. From 64rem the sidebar is a fixed column; below,
+ *   it is a sticky bar with the navigation as a strip under it.
+ * - every other page (sign-in, the server list, "no access", errors) is an entry page on the
+ *   starfield, under a plain bar with the wordmark and, when signed in, the account menu. The
+ *   sign-in page has no bar: its heading is the wordmark.
  *
  * Markup rules every page inherits (tests/unit/web-pages.test.ts checks the rendered output): no
  * `style=` attribute and no script (the CSP allows neither), exactly one `<h1>` (the title), a
- * visible text label on every control, and untrusted text only through untrusted().
+ * visible text label on every control, and untrusted text only through untrusted(). Icons are
+ * decorative and never change a label's text (icons.ts).
  */
 import { project } from "../config/project.js";
 import type { Actor } from "../domain/policy.js";
 import { admits } from "./access.js";
-import { FAVICON, STYLESHEET } from "./assets.js";
+import { FAVICON, NOTICES, STYLESHEET } from "./assets.js";
 import { href, html, type SafeHtml, untrusted } from "./html.js";
 import { PATHS, type Problem } from "./http.js";
+import { type IconName, icon } from "./icons.js";
 import type { Page } from "./page.js";
 
 /** One navigation link; `href` is a page href or a PATHS value. */
@@ -22,6 +34,16 @@ export interface NavLink {
   readonly label: string;
   /** Marked aria-current="page". */
   readonly current: boolean;
+  /** The page's decorative icon (Page.icon), when it declares one. */
+  readonly icon?: IconName;
+}
+
+/** A Discord server as the shell shows it. */
+export interface ServerIdentity {
+  /** The snowflake; picks the initials' color, so a renamed server keeps its color. */
+  readonly id: string;
+  /** Untrusted text (the Discord server name), always escaped and isolated. */
+  readonly name: string;
 }
 
 /** What the shell shows around a page's main content. */
@@ -29,12 +51,12 @@ export interface LayoutModel {
   /** The `<title>` (with " · TaruBot") and the one `<h1>`. */
   readonly title: string;
   /**
-   * Signed in: the header shows "Sign out" (POST /logout) and "Sign out everywhere" (POST
+   * Signed in: the account menu offers "Sign out" (POST /logout) and "Sign out everywhere" (POST
    * /logout/all), as forms.
    */
   readonly signedIn: boolean;
-  /** The current server: its name (untrusted text) and the pages in it that admit the viewer. */
-  readonly guild?: { readonly name: string; readonly nav: readonly NavLink[] };
+  /** The current server and the pages in it that admit the viewer: a console page. */
+  readonly guild?: ServerIdentity & { readonly nav: readonly NavLink[] };
 }
 
 /** The product name, in every `<title>` and the header, and the / page's whole title. */
@@ -53,77 +75,156 @@ export function navLinks(pages: Iterable<Page>, actor: Actor, currentPath?: stri
       href: page.href(actor.guildId),
       label: page.nav ?? page.title,
       current: page.path === currentPath,
+      ...(page.icon === undefined ? {} : { icon: page.icon }),
     }));
 }
 
-/** One navigation item; the label is constant wording and the target passes href(). */
-const navItem = (link: NavLink): SafeHtml =>
-  link.current
-    ? html`<li><a href="${href(link.href)}" aria-current="page">${link.label}</a></li>`
-    : html`<li><a href="${href(link.href)}">${link.label}</a></li>`;
+/** Anything but letters, digits and spaces: punctuation, symbols, marks and bidi controls. */
+const NOT_INITIAL = /[^\p{L}\p{N}\s]/gu;
+
+/** One of the eight avatar hues: an FNV-1a hash of the ID, the same on every page and restart. */
+function hue(id: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < id.length; index += 1)
+    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193);
+  return (hash >>> 0) % 8;
+}
 
 /**
- * Sign-out is a POST (E1), so it is a form; the empty form still sends the urlencoded type that
- * formOnly() requires. Sign-in, by contrast, is a link (servers.ts).
+ * A server's initials avatar (D24): the first letter or digit of each of the name's first two
+ * words, on a hue picked by the ID. It is decorative and aria-hidden, since the name sits beside
+ * it. The initials are deliberately not isolated: they hold letters and digits only, so no bidi
+ * control, and each page must still isolate a server's name exactly once (web-pages.test.ts).
+ * A name with neither shows the server icon instead.
+ */
+export function serverAvatar(server: ServerIdentity): SafeHtml {
+  const initials = server.name
+    .replace(NOT_INITIAL, "")
+    .split(/\s+/u)
+    .filter((word) => word !== "")
+    .slice(0, 2)
+    .map((word) => [...word][0]?.toUpperCase() ?? "")
+    .join("");
+  return html`<span class="orr-avatar orr-avatar--square orr-avatar--hue-${hue(server.id)}" aria-hidden="true">${initials === "" ? icon("server") : initials}</span>`;
+}
+
+/** The type-only wordmark (D13), a link to the start page. */
+const WORDMARK = html`<a class="wordmark" href="${PATHS.home}">${BRAND}</a>`;
+
+/** One navigation item; the label is constant wording and the target passes href(). */
+const navItem = (link: NavLink): SafeHtml => {
+  const label = html`${link.icon ? icon(link.icon) : ""}${link.label}`;
+  return link.current
+    ? html`<li><a class="nav-item" href="${href(link.href)}" aria-current="page">${label}</a></li>`
+    : html`<li><a class="nav-item" href="${href(link.href)}">${label}</a></li>`;
+};
+
+/**
+ * The server switcher (D22): a link to the server list, styled as the design's switcher. It is the
+ * one place a server page shows the server's name; the shell knows no member count or other
+ * server data, so it shows none.
+ */
+const switcher = (guild: ServerIdentity): SafeHtml =>
+  html`<a class="server-switch" href="${PATHS.home}">${serverAvatar(guild)}<span class="server-switch__text"><span class="server-switch__name">${untrusted(guild.name)}</span> <span class="server-switch__hint">Switch server</span></span>${icon("chevron-right")}</a>`;
+
+/**
+ * The account menu: a disclosure, so it opens without script. Sign-out is a POST (E1), so each
+ * action is a form; the empty form still sends the urlencoded type that formOnly() requires.
+ * Sign-in, by contrast, is a link (views/servers.ts).
  */
 const ACCOUNT = html`<details class="account">
-  <summary>Account</summary>
-  <div class="account-menu">
-    <p class="menu-caption">Signed-in session</p>
-    <form method="post" action="${PATHS.logout}">
-      <button type="submit" class="secondary">Sign out</button>
-    </form>
-    <form method="post" action="${PATHS.logoutAll}">
-      <button type="submit" class="secondary">Sign out everywhere</button>
-    </form>
-  </div>
+<summary class="account__summary">Account${icon("chevron-down")}</summary>
+<div class="account__menu">
+<p class="orr-label account__caption">Signed-in session</p>
+<form method="post" action="${PATHS.logout}">
+<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out</button>
+</form>
+<form method="post" action="${PATHS.logoutAll}">
+<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out everywhere</button>
+</form>
+</div>
 </details>`;
+
+/**
+ * The entry pages' backdrop: the starfield and the orbit rings, fixed behind the page so they take
+ * no space (nothing moves on a phone), and hidden from assistive technology as pure decoration.
+ */
+const BACKDROP = html`<div class="orr-starfield entry-backdrop" aria-hidden="true"><div class="orr-orbit entry-orbit"><div class="orr-orbit__ring"><span class="orr-orbit__planet orr-orbit__planet--violet"></span></div><div class="orr-orbit__ring orr-orbit__ring--dashed orr-orbit__ring--middle"></div><div class="orr-orbit__ring orr-orbit__ring--inner"><span class="orr-orbit__planet"></span></div></div></div>`;
+
+const FOOTER = html`<footer class="site-footer">
+<p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a> · <a href="${NOTICES.path}">Third-party licenses</a></p>
+</footer>`;
+
+/**
+ * The page header: the one `<h1>`, after an eyebrow on server pages and the sign-in page. Error
+ * pages never get the eyebrow, because their message must be main's first paragraph.
+ */
+const pageHeader = (title: string, eyebrow: boolean): SafeHtml =>
+  html`<header class="page-header">
+${eyebrow ? html`<p class="orr-label page-header__eyebrow">Free Company workspace</p>` : ""}
+<h1 class="page-header__title">${title}</h1>
+</header>`;
+
+/** A server page: the sidebar, the top bar with the page's label, then the page. */
+function consolePage(
+  model: LayoutModel,
+  guild: NonNullable<LayoutModel["guild"]>,
+  main: SafeHtml,
+): SafeHtml {
+  return html`<body class="console-page">
+<a class="skip" href="#main">Skip to content</a>
+<div class="app">
+<header class="sidebar">
+${WORDMARK}
+${switcher(guild)}
+<nav class="side-nav" aria-label="Server pages">
+<p class="orr-label side-nav__caption">Workspace</p>
+<ul class="side-nav__list">${guild.nav.map(navItem)}</ul>
+<div class="side-nav__context"><p>Settings and background work</p><p>Changes are managed in Discord.</p></div>
+</nav>
+${model.signedIn ? ACCOUNT : ""}
+</header>
+<div class="frame">
+<div class="topbar" aria-hidden="true"><p class="orr-label">Workspace<span class="topbar__separator">/</span><span class="topbar__page">${model.title}</span></p></div>
+<main id="main" class="main orr-enter">
+${pageHeader(model.title, true)}
+${main}
+</main>
+${FOOTER}
+</div>
+</div>
+</body>`;
+}
+
+/** Any other page, on the starfield; the sign-in page (titled with the brand) is the welcome. */
+function entryPage(model: LayoutModel, main: SafeHtml): SafeHtml {
+  const welcome = model.title === BRAND;
+  return html`<body class="entry-page">
+<a class="skip" href="#main">Skip to content</a>
+${BACKDROP}
+${welcome ? "" : html`<header class="entry-bar">${WORDMARK}${model.signedIn ? ACCOUNT : ""}</header>`}
+<main id="main" class="${welcome ? "entry entry--welcome" : "entry"} orr-enter">
+${pageHeader(model.title, welcome)}
+${main}
+</main>
+${FOOTER}
+</body>`;
+}
 
 /** The whole document around `main`. Views never render `<h1>`, `<html>` or the sign-out forms. */
 export function layout(model: LayoutModel, main: SafeHtml): SafeHtml {
   const title = model.title === BRAND ? BRAND : `${model.title} · ${BRAND}`;
-  const guild = model.guild;
   return html`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>${title}</title>
 <link rel="icon" href="${FAVICON.path}" type="${FAVICON.contentType}">
 <link rel="stylesheet" href="${STYLESHEET.path}">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600&amp;family=Martian+Mono:wght@400;500&amp;display=swap">
 </head>
-<body class="${guild ? "console-page" : "entry-page"}">
-<a class="skip" href="#main">Skip to content</a>
-<header class="masthead">
-<div class="bar">
-<a class="brand" href="${PATHS.home}"><img src="${FAVICON.path}" alt="" width="28" height="28">${BRAND}</a>
-${guild ? html`<a class="server-switch" href="${PATHS.home}"><span class="switch-name">${untrusted(guild.name)}</span><span class="switch-label">Switch server</span></a>` : ""}
-${model.signedIn ? ACCOUNT : ""}
-</div>
-</header>
-<div class="${guild ? "workspace console" : "workspace landing"}">
-${
-  guild
-    ? html`<nav class="server-nav" aria-label="Server pages">
-<p class="nav-caption">Workspace</p>
-<ul class="links">${guild.nav.map(navItem)}</ul>
-<div class="nav-context"><p>Settings and background work</p><span>Changes are managed in Discord.</span></div>
-</nav>`
-    : ""
-}
-<main id="main">
-<header class="page-heading${model.title === BRAND ? " welcome-heading" : ""}">
-${guild || model.title === BRAND ? html`<p class="eyebrow">Free Company workspace</p>` : ""}
-<h1>${model.title}</h1>
-</header>
-${main}
-</main>
-</div>
-<footer class="site-footer">
-<p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a></p>
-</footer>
-</body>
+${model.guild ? consolePage(model, model.guild, main) : entryPage(model, main)}
 </html>
 `;
 }
@@ -174,9 +275,10 @@ const GENERIC_WORDING: ErrorWording = {
 };
 
 /**
- * An error document: a heading by status, the approved message as escaped text when there is one
- * (a fixed sentence per status otherwise), and `Code <code> · Ref <ref>`. Never the error's own
- * text: Problem.message is already null for anything that isn't an approved Failure.
+ * An error document: a heading by status, then a card with the approved message as escaped text
+ * when there is one (a fixed sentence per status otherwise), `Code <code> · Ref <ref>` and a way
+ * home. Never the error's own text: Problem.message is already null for anything that isn't an
+ * approved Failure. The message stays main's first paragraph, which tests read as the message.
  */
 export function errorPage(details: Problem, signedIn: boolean): SafeHtml {
   const wording = ERROR_WORDING[details.status] ?? GENERIC_WORDING;
@@ -186,9 +288,11 @@ export function errorPage(details: Problem, signedIn: boolean): SafeHtml {
       : "";
   return layout(
     { title: wording.heading, signedIn },
-    html`<p>${details.message ?? wording.sentence}</p>
+    html`<div class="orr-card entry-panel">
+<p class="entry-panel__lead">${details.message ?? wording.sentence}</p>
 ${wait}
 <p class="ref">Code <code>${details.code}</code> · Ref <code>${details.ref}</code></p>
-<p><a href="${PATHS.home}">Go to the ${BRAND} start page</a></p>`,
+<p class="entry-panel__actions"><a class="orr-btn orr-btn--secondary" href="${PATHS.home}">Go to the ${BRAND} start page</a></p>
+</div>`,
   );
 }

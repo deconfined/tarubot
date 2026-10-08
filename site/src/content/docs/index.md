@@ -3,6 +3,15 @@ title: TaruBot
 description: A Discord bot for Final Fantasy XIV Free Companies. Documentation for members, server officers, self-hosters and contributors.
 template: splash
 hero:
+  title: '<em class="orr-holo-text">TaruBot</em>'
+  image:
+    html: >-
+      <div class="orr-orbit" aria-hidden="true">
+      <div class="orr-orbit__ring"><span class="orr-orbit__planet orr-orbit__planet--violet"></span></div>
+      <div class="orr-orbit__ring orr-orbit__ring--dashed orr-orbit__ring--middle"></div>
+      <div class="orr-orbit__ring orr-orbit__ring--inner"><span class="orr-orbit__planet"></span></div>
+      <div class="orr-orbit__sun"></div>
+      </div>
   tagline: A Discord bot for Final Fantasy XIV Free Companies. It verifies who owns which character through the Lodestone, keeps Discord roles in step with your FC's roster, handles guest access and nicknames, and keeps an exact gil ledger.
   actions:
     - text: Use TaruBot

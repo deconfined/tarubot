@@ -63,6 +63,7 @@ export default definePage({
   access: ["officer"],
   requires: [applicationKey, gatewayKey],
   nav: "Server configuration",
+  icon: "settings",
   async get({ actor, guildId, services, report, ref }) {
     const checked = await validateConfiguration(services.get(applicationKey), actor, (error) =>
       report(error, ref, { scope: "web:/g/:guild/configuration" }),

@@ -55,7 +55,10 @@ test("current guides link to existing files and Markdown headings", () => {
       let destination: string;
       if (path.startsWith("/tarubot/")) {
         const slug = path.slice("/tarubot/".length).replace(/\/$/u, "") || "index";
-        destination = resolve(root, "site/src/content/docs", `${decodeURI(slug)}.md`);
+        // A name with an extension is a file the site publishes from site/public, not a page.
+        destination = /\.[a-z0-9]+$/iu.test(slug)
+          ? resolve(root, "site/public", decodeURI(slug))
+          : resolve(root, "site/src/content/docs", `${decodeURI(slug)}.md`);
       } else {
         destination = path
           ? resolve(root, repositoryLink ? "." : dirname(file), decodeURI(path))

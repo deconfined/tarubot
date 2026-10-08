@@ -9,6 +9,7 @@ import { ServiceKey, type Services } from "../bot/services.js";
 import type { Actor } from "../domain/policy.js";
 import { PAGE_ACCESS, type PageAccess } from "./access.js";
 import type { SafeHtml } from "./html.js";
+import { ICON_NAMES, type IconName } from "./icons.js";
 import type { Session } from "./sessions.js";
 
 /** Every page is a server page: `/g/:guild/` and lowercase segments, with no other parameter. */
@@ -57,6 +58,11 @@ export interface PageOptions {
   readonly post?: (context: PageContext, form: FormData) => Promise<PostOutcome>;
   /** The page's label in the server navigation; omitted pages aren't listed there. */
   readonly nav?: string;
+  /**
+   * The decorative icon beside the page's navigation label and its link on the server list (D11),
+   * by icons.ts name; omitted, the label stands alone.
+   */
+  readonly icon?: IconName;
 }
 
 /** Nominal page type, so discovery can validate an unknown import with instanceof. */
@@ -68,6 +74,7 @@ export class Page {
   readonly get: PageOptions["get"];
   readonly post: PageOptions["post"];
   readonly nav: string | undefined;
+  readonly icon: IconName | undefined;
 
   constructor(options: PageOptions) {
     // Discovered modules are untyped at runtime, so re-check what the options type promises.
@@ -91,6 +98,8 @@ export class Page {
       throw new Error("A page's post handler must be a function.");
     if (options.nav !== undefined && (typeof options.nav !== "string" || options.nav.trim() === ""))
       throw new Error("A page's navigation label must be text.");
+    if (options.icon !== undefined && !(ICON_NAMES as readonly unknown[]).includes(options.icon))
+      throw new Error("A page's icon must name one of the icons in icons.ts.");
     this.path = options.path;
     this.title = options.title;
     this.access = [...new Set(options.access)];
@@ -98,6 +107,7 @@ export class Page {
     this.get = options.get;
     this.post = options.post;
     this.nav = options.nav;
+    this.icon = options.icon;
   }
 
   /** This page's path in one server; `guildId` must already have passed idSchema. */

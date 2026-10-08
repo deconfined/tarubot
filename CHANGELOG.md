@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.37.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.38.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.38.0 — Rebuild the dashboard and documentation site on one dark design system
+
+- Rebuild the officer dashboard on TaruBot's new design system: a console with a sidebar on wide screens and a navigation strip on phones, one featured card per page, settings cards, a checklist that folds a long group only when every check in it passed, and Background work tables in their own scroll regions. Routes, data and access are unchanged, and the dashboard still changes no settings and offers no retries or guest decisions.
+- Restyle the documentation site with the same tokens and fonts on its existing Starlight setup. Both are dark only: the light palette and the site's theme picker are gone, and both respect reduced motion, reduced transparency, forced colors and print.
+- Serve the Instrument Serif, Manrope and JetBrains Mono fonts and the inline Lucide icons from TaruBot itself. The dashboard's content security policy now admits styles, fonts and images from its own origin only, so its pages make no Google Fonts or other third-party request. Every dashboard footer, and the documentation site's Thank you page, links the fonts' and icons' licenses.
+- This release adds no database migration and changes no setting.
 
 ## 2.37.1 — Read bundled Caddy configuration from private worktrees
 

@@ -230,7 +230,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   // to an unknown path or a GET-only route keeps its 404 or 405 (logged at debug), not a 403 at
   // info.
 
-  // The stylesheet and favicon, at hashed paths that never change content.
+  // The stylesheet, favicon, fonts and notices, at hashed paths that never change content. A text
+  // body goes out as UTF-8 and a font's bytes unchanged, each with its own Content-Type.
   for (const asset of ASSETS) {
     app.get(asset.path, (c) =>
       c.body(asset.body, 200, {
@@ -262,7 +263,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       false,
     )) {
       const links = navLinks(pages.values(), entry.actor);
-      if (links.length > 0) servers.push({ name: entry.guild.name, links });
+      if (links.length > 0) servers.push({ id: entry.guild.id, name: entry.guild.name, links });
     }
     return page(
       c,
@@ -375,7 +376,11 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       const model: LayoutModel = {
         title: definition.title,
         signedIn: true,
-        guild: { name: guild.name, nav: navLinks(pages.values(), actor, definition.path) },
+        guild: {
+          id: guildId,
+          name: guild.name,
+          nav: navLinks(pages.values(), actor, definition.path),
+        },
       };
       if (!post || !definition.post)
         return page(c, layout(model, await definition.get(pageContext)));
