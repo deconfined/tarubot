@@ -194,11 +194,14 @@ function assertRejected(run: Run, scenario: Scenario) {
   expect(run.releaseStateSha256).toBeNull();
   expect(run.stdout).not.toContain("result deployed");
   expect(run.stdout).not.toContain("result already-live");
-  // The entry never ran, so the runner says the host wasn't reached rather than pointing the owner
-  // at a private host log that holds nothing for this run.
-  expect(run.stdout).toMatch(
-    /^::error::.*(?:was not contacted|did not run|before the host entry answered)/mu,
-  );
+  // The entry never ran, so a rejection says the host wasn't reached rather than pointing the owner
+  // at a private host log that holds nothing for this run. A TERM cancellation exits through its
+  // signal trap with no sentence at all.
+  if (scenario === "term") expect(run.stdout).not.toContain("::error::");
+  else
+    expect(run.stdout).toMatch(
+      /^::error::.*(?:was not contacted|did not run|before the host entry answered)/mu,
+    );
   expect(run.stdout).not.toContain("private host log says why");
   // Native OpenSSH may finish rejection before the observer's extra query.
   // When captured, this is the actual job-local Unbound response, not a fake
