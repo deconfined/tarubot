@@ -24,6 +24,7 @@ curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker
 curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker-compose.web.yml"
 mkdir -p ops
 curl -fsSL -o ops/Caddyfile "https://raw.githubusercontent.com/deconfined/tarubot/$commit/ops/Caddyfile"
+chmod 644 ops/Caddyfile
 curl -fsSL -o .env "https://raw.githubusercontent.com/deconfined/tarubot/$commit/.env.example"
 chmod 600 .env
 ```

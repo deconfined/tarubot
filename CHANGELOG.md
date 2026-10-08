@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.37.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.37.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.37.1 — Read bundled Caddy configuration from private worktrees
+
+- Make only the public `ops/Caddyfile` readable before bundled Caddy validation in a managed release worktree. Worktrees still use private permissions, central settings remain private, and Caddy retains its read-only SELinux-labeled mount and restricted capabilities.
+- Exercise the managed entry against the real pinned Caddy image so private Git checkout permissions cannot silently pass proxy validation tests. Also make the stock installation's public template readable independently of the operator's umask.
+- Operators must install the reviewed updated stable deploy entry before approving delivery; releases do not self-update it. This fixes preflight configuration access without adding a migration or changing dashboard authorization.
 
 ## 2.37.0 — Read-only admin dashboard and optional HTTPS setup
 
