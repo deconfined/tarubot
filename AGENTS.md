@@ -30,7 +30,7 @@ Agents hold no host-access key, state, saved plan or state passphrase, and never
 - Production currently uses Compose and the owner-provisioned Linode managed database. Existing staging and infrastructure implementation details are in [DEPLOYMENT](docs/DEPLOYMENT.md), not requirements to reproduce in the replacement. No source change authorizes a live cutover, new cluster or cloud-resource change.
 - Until the pipeline-reset authorization below is approved and merged to `main`, preserve the byte-identical production files and jobs: `ops/deploy.sh`, `ops/backup.sh`, `docker-compose.production.yml`, `production.env.example`, `scripts/host-env-backup.ts` and deploy.yml's `deploy`/`notify` jobs. Keep Compose's `FLOOR` and leave unused legacy Quadlet modes untouched.
 - Keep “Modules loaded” (`src/main.ts`) and “Database writer lease acquired” (`src/application/lifecycle.ts`) at info, with their exact existing text. The live Compose deploy script relies on them to judge a new release.
-- Name no host, address, zone, account or cluster ID in new repository content or public workflow output. Values remain in environments; examples use `example.org` and documentation addresses. Historic evidence stays in Git, not copied into new examples.
+- Host names and their addresses are web-facing, not secret: they may appear in repository content and public workflow output (@deconfined, 2026-10-08). Name no account, zone or cluster ID there; those values remain in environments. Generic documentation and examples still use `example.org` and documentation addresses.
 
 ## Pipeline reset proposal
 
