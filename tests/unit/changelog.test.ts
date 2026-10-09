@@ -1,24 +1,43 @@
 /**
  * Update posts (2.25.0, issue #30): which releases a guild still has to hear about, what one
- * changelog.post job does with its guild's current row, and the member-note map itself, checked
- * against the repository: every key is a release CHANGELOG.md records, fits the column's CHECK and
- * is no newer than package.json; every note is one short line with no mention or link, and renders
- * without being cut.
+ * changelog.post job does with its guild's current row, and the release-note maps themselves,
+ * checked against the repository: every release from 2.25.0 to package.json's version has a note
+ * or a short NO_RELEASE_NOTE reason, never both (owner rule of 2026-10-09); every key is a
+ * CHANGELOG.md release that fits the column's CHECK and isn't ahead of package.json; every note is
+ * one short line with no mention or link, and the compiled notes render without being cut, even as
+ * one catch-up post from before update posts launched.
  */
 import { describe, expect, test } from "bun:test";
+import { embedLength } from "discord.js";
 import { project } from "../../src/config/project.js";
+import { changelogPost } from "../../src/discord/presenters/changelog.js";
 import { plain } from "../../src/discord/presenters/format.js";
-import { HOUSE_LIMITS } from "../../src/discord/presenters/style.js";
+import { DISCORD_LIMITS, HOUSE_LIMITS } from "../../src/discord/presenters/style.js";
 import {
   changelogDue,
   changelogStep,
   newerVersion,
   notesSince,
 } from "../../src/domain/changelog.js";
-import { RELEASE_NOTES } from "../../src/domain/release-notes.js";
+import { NO_RELEASE_NOTE, RELEASE_NOTES } from "../../src/domain/release-notes.js";
 
 /** Read a repository file as text. */
 const read = (path: string) => Bun.file(new URL(`../../${path}`, import.meta.url)).text();
+
+/** Update posts launched in 2.25.0 (migration 009), so no earlier release can appear in one. */
+const FIRST_POSTED = "2.25.0";
+/** A NO_RELEASE_NOTE reason is one short line; CHANGELOG.md holds the detail. */
+const REASON_LIMIT = 80;
+/** Whether a map has its own entry for a version. */
+const has = (map: Readonly<Record<string, string>>, version: string) => Object.hasOwn(map, version);
+/** Versions sorted newest first, so a failure lists them the way CHANGELOG.md does. */
+const newestFirst = (versions: Iterable<string>) =>
+  [...versions].sort((left, right) => Bun.semver.order(right, left));
+/** Every release CHANGELOG.md records, from its '## X.Y.Z — Title' headings. */
+const releases = async () =>
+  [...(await read("CHANGELOG.md")).matchAll(/^## (\d+\.\d+\.\d+\S*)(?: |$)/gmu)].map(
+    (match) => match[1] ?? "",
+  );
 
 /** A note map spanning a rollback, a prerelease and releases without notes (2.3.0 and 2.5.0). */
 const NOTES = {
@@ -113,10 +132,51 @@ describe("one changelog.post job", () => {
     // The running release carries its own note, so a guild one release behind gets one field.
     const step = changelogStep("1", "2.24.2", "2.25.0");
     expect(step).toMatchObject({ kind: "post", notes: [{ version: "2.25.0" }] });
+    // A range of exempt releases only (2.36.0 to 2.36.43) still advances without a post.
+    expect(changelogStep("1", "2.35.0", "2.36.43")).toEqual({ kind: "advance", from: "2.35.0" });
   });
 });
 
-describe("RELEASE_NOTES, checked against the repository", () => {
+describe("release notes, checked against the repository", () => {
+  test("every release since update posts launched has a note or a reason, never both", async () => {
+    // package.json's version counts even before its CHANGELOG heading exists, so a bump alone
+    // fails this until the release is given a note or a reason.
+    const recorded = new Set(await releases());
+    const due = new Set(
+      [...recorded, project.version].filter(
+        (version) => Bun.semver.order(version, FIRST_POSTED) >= 0,
+      ),
+    );
+    expect(
+      newestFirst([...due].filter((v) => !has(RELEASE_NOTES, v) && !has(NO_RELEASE_NOTE, v))),
+      "Each listed release needs one entry in src/domain/release-notes.ts: a RELEASE_NOTES sentence, in plain words, about what members, guests or officers will see or can now do (in Discord, on the dashboard or on the documentation site); or, only when nobody using TaruBot can notice it, a NO_RELEASE_NOTE entry with a short reason.",
+    ).toEqual([]);
+    expect(
+      newestFirst(Object.keys(RELEASE_NOTES).filter((v) => has(NO_RELEASE_NOTE, v))),
+      "A release has a RELEASE_NOTES sentence or a NO_RELEASE_NOTE reason, never both: remove one.",
+    ).toEqual([]);
+    // Both bounds and the heading are checked for each key, since `due` also holds package.json's
+    // version before its heading exists and any CHANGELOG heading ahead of package.json.
+    expect(
+      newestFirst([...Object.keys(RELEASE_NOTES), ...Object.keys(NO_RELEASE_NOTE)]).filter(
+        (v) => !due.has(v) || !recorded.has(v) || Bun.semver.order(v, project.version) > 0,
+      ),
+      `Keys must be CHANGELOG.md releases from ${FIRST_POSTED} up to package.json's version; move a renumbered release's entry to its new version.`,
+    ).toEqual([]);
+    for (const [version, reason] of Object.entries(NO_RELEASE_NOTE))
+      expect(
+        {
+          version,
+          short:
+            reason.length > 0 &&
+            reason.length <= REASON_LIMIT &&
+            reason.trim() === reason &&
+            !/[\r\n]/u.test(reason),
+        },
+        `Give ${version} a one-line NO_RELEASE_NOTE reason of at most ${REASON_LIMIT} characters saying why nobody using TaruBot can notice it.`,
+      ).toEqual({ version, short: true });
+  });
+
   test("every key is a CHANGELOG release that fits the column's CHECK and isn't ahead of package.json", async () => {
     const changelog = (await read("CHANGELOG.md")).split("\n");
     // The same pattern migration 009 enforces on guilds.changelog_version.
@@ -162,5 +222,33 @@ describe("RELEASE_NOTES, checked against the repository", () => {
       // Escaped as the post escapes it, the note still fits, so nothing is ever cut.
       expect(plain(note, HOUSE_LIMITS.userText)).toBe(plain(note, Number.MAX_SAFE_INTEGER));
     }
+  });
+
+  test("the compiled notes render as one whole catch-up post from before update posts launched", () => {
+    // The widest range a server can be owed: every noted release up to the running one. The ten
+    // newest are fields and the footer counts the rest; nothing is cut or dropped.
+    const notes = notesSince("2.24.2", project.version);
+    expect(notes.length).toBe(Object.keys(RELEASE_NOTES).length);
+    const presented = changelogPost({
+      version: project.version,
+      previous: "2.24.2",
+      notes,
+      url: "https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md",
+    });
+    expect(presented.truncated).toBe(false);
+    const embed = presented.options.embeds[0];
+    if (!embed) throw new Error("The update post lost its embed");
+    const shown = Math.min(notes.length, HOUSE_LIMITS.fields);
+    expect(embed.fields?.map((field) => field.name)).toEqual(
+      notes.slice(0, shown).map((row) => `v${row.version}`),
+    );
+    expect(embed.fields?.map((field) => field.value)).toEqual(
+      notes.slice(0, shown).map((row) => row.note),
+    );
+    expect(embed.footer?.text).toBe(
+      notes.length > shown ? `…and ${notes.length - shown} more in the full changelog` : undefined,
+    );
+    expect(embedLength(embed)).toBeLessThanOrEqual(DISCORD_LIMITS.embedTotal);
+    expect(embed.title?.length ?? 0).toBeLessThanOrEqual(HOUSE_LIMITS.title);
   });
 });

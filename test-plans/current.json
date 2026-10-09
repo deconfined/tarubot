@@ -1,8 +1,9 @@
 {
   "title": "Session: 2.38.0 dashboard and documentation redesign review",
-  "objective": "Review the 2.38.0 redesign in a browser on owner-authorized staging: the dashboard and documentation site are dark only, fonts and icons come from TaruBot itself with no third-party request, and routes, data, access and read-only behavior are unchanged. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "objective": "Review the 2.38.0 redesign in a browser on owner-authorized staging: the dashboard and documentation site are dark only, fonts and icons come from TaruBot itself with no third-party request, and routes, data, access and read-only behavior are unchanged. The changelog channel gets this release's update post. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
     "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; this release adds no migration and changes no setting.",
+    "Before the upgrade, make sure the test guild has a changelog channel (/config changelog); afterwards check it for one 'TaruBot updated to v2.38.0' post listing this release's note in full, or a paused changelog.post in /sync status while effects are off.",
     "Sign in as an officer and review the server list, Server configuration and Background work on a phone and a desktop: dark only, the server name once in the switcher, exact check tokens and UTC times.",
     "In the browser's network panel, confirm every request stays on the dashboard's origin (no Google Fonts, no script) and the footer's Third-party licenses link opens.",
     "Check ordinary-member denial and both sign-outs, then review the published documentation site, including Thank you and Data and privacy. Approve production only after its own healthy baseline."
@@ -16,6 +17,7 @@
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
     "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; require Discord sign-in and officer authority, and keep server reads scoped.",
     "Keep acquisition and reconciliation in the declared test guild; dashboard pages change no settings and trigger no Discord retries or decisions.",
+    "Queue one update post for each server whose changelog channel stored an older version, listing the notes since then; park it while effects are paused.",
     "Expose database, Discord and writer-lease readiness; report 2.38.0, startup time and effect state without pinging members."
   ]
 }

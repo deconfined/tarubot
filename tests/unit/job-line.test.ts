@@ -212,7 +212,7 @@ describe("job markers and lines", () => {
     expect(post({ status: "succeeded", completed_at: NOW })).toBe(
       "`✓ DONE` Update posted <t:1790169000:R>",
     );
-    // A range with no member notes moves the baseline without posting.
+    // A range with no release notes moves the baseline without posting.
     expect(
       post({ status: "succeeded", completed_at: NOW, result: { skipped: "nothing for members" } }),
     ).toBe("`– SKIPPED` Update post: nothing to do");

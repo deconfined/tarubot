@@ -305,7 +305,7 @@ Choose the channel for officer notices: Lodestone trouble and its recovery, and 
 
 ### /config changelog
 
-Choose the channel where TaruBot posts what's new for members after it starts on a newer version. Setting it posts nothing at once: the first post comes with the next update that has something for members. See [Update posts](/tarubot/admin/notices-and-updates/#update-posts).
+Choose the channel where TaruBot posts what's new after it starts on a newer version. Setting it posts nothing at once: the first post comes with the next update that has a note. See [Update posts](/tarubot/admin/notices-and-updates/#update-posts).
 
 **Who can use it:** officers.
 

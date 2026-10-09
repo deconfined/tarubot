@@ -1,9 +1,9 @@
 /**
  * The update post (2.25.0, issue #30), which the gateway renders for the changelog.post job: after
- * the bot starts on a newer version, one message in the guild's changelog channel lists the member
- * note of each release since the last post (owner decisions of 2026-09-25). Members read what
- * changed for them, not the technical side; the title links the full CHANGELOG, and /version lists
- * the commits. Pure.
+ * the bot starts on a newer version, one message in the guild's changelog channel lists the note of
+ * each release since the last post (owner decisions of 2026-09-25; every release people can notice
+ * has one since 2026-10-09). People read what changed for them, not the technical side; the title
+ * links the full CHANGELOG, and /version lists the commits. Pure.
  *
  * The post has no button, no timestamp and nothing per attempt, so every retry of the same job
  * renders byte-identical JSON and Discord's nonce check returns the first message. At most ten

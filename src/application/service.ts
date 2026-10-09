@@ -926,7 +926,7 @@ export class Service {
       }
       // A changelog channel set where none was sets the update-post baseline in the same UPDATE,
       // so the migration's changelog_baseline CHECK always holds; nothing is posted until a newer
-      // release with a member note starts.
+      // release with a release note starts.
       const baseline =
         column === "changelog_channel_id" && value && saved.changelog_channel_id === null
           ? newerVersion(saved.changelog_version, project.version)
@@ -1056,7 +1056,7 @@ export class Service {
   }
   /**
    * Move a guild's update-post baseline from `from` to `to` once a changelog.post job has posted
-   * (or found nothing for members), audited with the message it sent. A compare-and-set: when
+   * (or found no release note to post), audited with the message it sent. A compare-and-set: when
    * another worker already moved it, nothing changes and this returns false rather than throwing,
    * since a retry could only post the same releases again. It never bumps the revision and queues
    * nothing: the baseline isn't configuration.

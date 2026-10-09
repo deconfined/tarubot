@@ -1,15 +1,17 @@
 /**
  * Update posts (issue #30, owner decisions of 2026-09-25): which releases a guild still has to be
  * told about, and what one changelog.post job does about them. Each guild stores the newest version
- * it was told about (guilds.changelog_version); a post lists the member notes of every release
+ * it was told about (guilds.changelog_version); a post lists the release notes of every release
  * after that version up to the running one, newest first, and then moves the stored version
- * forward. Releases without a note are never shown, and a range with no notes moves the version
- * without posting (decision 2: silent when an update has nothing for members). Pure; versions are
- * compared with Bun.semver.order, and the database CHECK keeps stored versions comparable.
+ * forward. Releases without a note (recorded in NO_RELEASE_NOTE) are never shown, and a range with
+ * no notes moves the version without posting (decision 2: silent when an update has nothing anyone
+ * can notice). A note added for a release a guild has already moved past is never posted there.
+ * Pure; versions are compared with Bun.semver.order, and the database CHECK keeps stored versions
+ * comparable.
  */
 import { RELEASE_NOTES } from "./release-notes.js";
 
-/** One release's member note, as an update post lists it. */
+/** One release's note, as an update post lists it. */
 export interface ReleaseNote {
   readonly version: string;
   readonly note: string;
@@ -55,8 +57,8 @@ export type ChangelogSkip = "changelog unconfigured" | "already announced";
  * What one changelog.post job does, from the guild's current row:
  * - skip: no channel or no baseline (posts turned off while the job waited), or the stored version
  *   is already at or past the running one (announced by an earlier job, or left by a newer release);
- * - advance: the releases since the baseline have no member notes, so the version moves without a
- *   post;
+ * - advance: the releases since the baseline have no release notes, so the version moves without
+ *   a post;
  * - post: list `notes` in `channel`, then move the version from `from` to the running one.
  */
 export type ChangelogStep =

@@ -52,7 +52,7 @@ export const CORRECTION_POST: LedgerPostView = { entry: E43, correctionSequence:
 
 /**
  * The update post a guild last told about 2.24.2 sees when 2.25.0 starts: that release's own
- * member note, linking the CHANGELOG on main as the dispatcher does.
+ * release note, linking the CHANGELOG on main as the dispatcher does.
  */
 export const CHANGELOG_POST: ChangelogPostView = {
   version: "2.25.0",

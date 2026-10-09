@@ -148,7 +148,7 @@ Every click is authorized again for the person who clicked.
   - "Some channels are missing TaruBot's channel override, so without Administrator TaruBot can't see them or can't post where it should. /config validate lists them and what to do; /setup overrides adds missing overrides while TaruBot holds Administrator."
   - "TaruBot's channel overrides are complete again: /config validate shows every channel visible."
 - **Status notices** in the officer notifications channel read "Member status changes": members grouped by change and reason ("Member → Guest · no linked character is in the FC"), then "Left the FC" with each departed character and its owner's mention. The footer counts the members. See [Member status changes](/tarubot/admin/notices-and-updates/#member-status-changes).
-- **Update posts** in the changelog channel read "TaruBot updated to vX.Y.Z", linking the changelog, with "What's new since" the last version announced and one field per release with a member note, newest first. At most ten are listed; the footer counts the rest. See [Update posts](/tarubot/admin/notices-and-updates/#update-posts).
+- **Update posts** in the changelog channel read "TaruBot updated to vX.Y.Z", linking the changelog, with "What's new since" the last version announced and one field per release with a note, newest first. At most ten are listed; the footer counts the rest. See [Update posts](/tarubot/admin/notices-and-updates/#update-posts).
 
 Every message is sent with mentions turned off, so no reply or post pings anyone.
 
