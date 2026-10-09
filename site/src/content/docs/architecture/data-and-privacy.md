@@ -72,9 +72,9 @@ TaruBot serves the dashboard's stylesheet, fonts and icons itself, from the dash
 When an operator configures a reports repository, `/issue` and automatic reports open issues there. A report carries:
 
 - the deployment's version, readiness and Lodestone status;
-- active and recently failed jobs;
+- active and recently failed jobs, where a self-service role choice shows only by kind, never with its member;
 - the server's TaruBot settings and roster state;
-- for `/issue` and work about one member: the member's Discord username and ID (for `/issue`), links, main character, nickname state, guest and officer standing, recent work other than self-service role choices, and recent audit records (a report about a failed role choice doesn't name the member);
+- for `/issue` and work about one member: the member's Discord username and ID (for `/issue`), links, main character, nickname state, guest and officer standing, recent work other than self-service role choices (not even in the member's own `/issue`), and recent audit records (a report about a failed role choice doesn't name the member);
 - the newest log records.
 
 Before a report is saved, TaruBot removes known secret shapes (Discord and GitHub tokens, authorization headers, passwords in URLs, PEM blocks, heartbeat ping URLs), the deployment's own secret values, and the values a failed database query was given, since they can hold what someone submitted. A member's own description goes into the issue as a quoted block, so it can't mention anyone on GitHub. Reports go to the repository the operator chose; the operator should keep it private.

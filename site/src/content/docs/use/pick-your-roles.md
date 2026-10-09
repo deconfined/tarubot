@@ -89,6 +89,7 @@ You can't open My roles any more. Roles from the menu that open channels, such a
 - **Everyone in the server can see your roles**, on your profile and in the member list, as with any Discord role. Discord's audit log also shows each change to staff who can read it, with TaruBot's reason.
 - **TaruBot keeps no record of which roles you choose.** Discord holds your roles. While a change waits to be applied, TaruBot keeps the IDs of the roles involved, and clears them when the change is applied or ends, at most 7 days after your last save.
 - **A record that you changed your roles, and when** (never which roles) is deleted after 30 days. While a change waits, officers see it in Background work as "A member", never with your name, and your own [`/sync status`](/tarubot/reference/commands/#sync-status) lists it as **Role choices**.
+- **Problem reports leave your role changes out**, even one you send yourself with [`/issue`](/tarubot/use/progress-and-problems/#report-a-problem). A report can show only that some role change is waiting or failed, among TaruBot's other background work, never whose.
 
 [Data and privacy](/tarubot/architecture/data-and-privacy/#self-service-roles) has the details, including backups.
 

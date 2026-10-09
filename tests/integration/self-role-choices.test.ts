@@ -8,9 +8,10 @@
  * Synchronization.user's removal of channel-opening menu roles from someone left without Member
  * or Guest (owner decision Q3 B), the 7-day expiry and 30-day retention in schedule(), migration
  * 012's trigger clearing the payload on every terminal path, and privacy: no role ID in a result,
- * diagnostic, log event, issue report or officer view. The Discord port is a fake that records
- * every call: web operations only ever read the gateway cache. Confined to its own schema,
- * self_role_choices_it, with invented IDs.
+ * diagnostic, log event, issue report or officer view, and no role change at all in /guest status
+ * or an issue report's member section, the member's own /issue included. The Discord port is a
+ * fake that records every call: web operations only ever read the gateway cache. Confined to its
+ * own schema, self_role_choices_it, with invented IDs.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ChannelType, PermissionFlagsBits as P } from "discord.js";
@@ -1381,15 +1382,24 @@ describe.skipIf(!url)("members' role choices", () => {
         );
       }
       expect(await choiceRows()).toHaveLength(12);
-      // Any officer, delegated ones included, may open the member's record: it holds no roles.self
-      // row, so neither the card's deliveries, its health, nor its Full details (JSON) can give a
-      // timeline of when the member changed roles (owner decision Q4 A).
-      const officer = actor(USER.officer, { officer: true, member: false });
-      const record = await app.guestStatus(officer, USER.member);
-      expect(record.delivery.map((job) => [job.kind, job.id])).toEqual([
-        ["reconcile.user", reconcileJob],
-      ]);
-      roleFree(record);
+      // Any officer, delegated ones and server managers alike, may open the member's record: it
+      // holds no roles.self row, so neither the card's deliveries, its health, nor its Full details
+      // (JSON) can give a timeline of when the member changed roles (owner decision Q4 A).
+      for (const officer of [
+        actor(USER.officer, { officer: true, member: false }),
+        actor(USER.officer, {
+          officer: true,
+          member: false,
+          serverManager: true,
+          manageRoles: true,
+        }),
+      ]) {
+        const record = await app.guestStatus(officer, USER.member);
+        expect(record.delivery.map((job) => [job.kind, job.id])).toEqual([
+          ["reconcile.user", reconcileJob],
+        ]);
+        roleFree(record);
+      }
       // The member's own record still finds its reconcile.user behind a dozen newer saves.
       const own = await app.guestStatus(actor(USER.member), USER.member);
       expect(own.delivery.map((job) => job.kind)).toEqual(["reconcile.user"]);
@@ -1400,22 +1410,50 @@ describe.skipIf(!url)("members' role choices", () => {
       );
     });
 
-    test("issue reports and officers' job views show a change happened, never which roles", async () => {
+    test("issue reports and officers' job views show a change happened, never which roles, and a report never whose", async () => {
+      // The member's reconcile.user, then more applied saves than a report's member section lists
+      // (five rows), then a change TaruBot can't apply.
+      const reconcileJob = await enqueue(
+        db.pool,
+        "reconcile.user",
+        `user:${GUILD}:${USER.member}`,
+        {},
+        GUILD,
+        USER.member,
+      );
+      await db.query(
+        "UPDATE jobs SET status='succeeded', completed_at=now(), created_at=now()-interval '1 hour' WHERE id=$1",
+        [reconcileJob],
+      );
+      for (let save = 0; save < 6; save++) {
+        const id = await queueChoice(USER.member, choice([ROLE.game], [ROLE.game]));
+        await db.query("UPDATE jobs SET status='succeeded', completed_at=now() WHERE id=$1", [id]);
+      }
       await queueChoice(USER.member, choice([ROLE.game], [ROLE.game, ROLE.pronoun]));
       writeFailure = new Failure(
         "blocked",
         "TaruBot needs Manage Roles to change roles in this server. Check its role with /config validate.",
       );
       await runNext();
+      // The member's own /issue (owner decision Q4 A: nothing lasting says when they changed roles).
       const reports = new IssueReports(CONFIG, db, {} as Lodestone, new RecentLogs(), null);
       await reports.user(actor(USER.member), "a member", "REF1", "My roles didn't change at all.");
       const [report] = await db.orm
         .select({ body: t.issueReports.body })
         .from(t.issueReports)
         .where(and(eq(t.issueReports.source, "user"), eq(t.issueReports.user_id, USER.member)));
-      expect(report?.body).toContain("roles.self");
-      expect(report?.body).toContain("blocked");
-      roleFree(report?.body);
+      const body = report?.body ?? "";
+      /** The report's `### title` section, up to the next one. */
+      const section = (title: string) =>
+        body.split(/^### /m).find((part) => part.startsWith(`${title}\n`)) ?? "";
+      // The queue's table counts waiting work by kind and never names a member, so it alone shows
+      // that a role change waits.
+      expect(section("Queue")).toContain("| roles.self | blocked | 1 |");
+      expect(section("Queue")).not.toContain(USER.member);
+      // The member section lists the member's other work, never a role change, however many.
+      expect(section("Member")).toContain("| reconcile.user | succeeded |");
+      expect(section("Member")).not.toContain("roles.self");
+      roleFree(body);
       // An officer sees "a member" (no user) and nothing that names a role.
       const officer = await app.syncStatus(
         actor(USER.officer, { officer: true, member: false }),

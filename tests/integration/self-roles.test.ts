@@ -2,19 +2,20 @@
  * The Role menu's writes (2.39.0) over real PostgreSQL: SelfRoles.edit's locks, revision and audit
  * rows, the equal-state rule, conflicts and refusals, the shutdown rollback, two officers editing at
  * once; the invariant that a menu role is never an access role, in configure() and /setup
- * onboarding; the "Role menu" health check in validate(); officers' job views and the 30-day
- * retention of members' role choices (2.40.0 applies them: self-role-choices.test.ts). Any officer
- * may make every change, with no Discord
- * permission check (owner decision, 2026-10-09). The Discord port records every call: web edits
- * read Discord, never write to it. Confined to its own schema, self_roles_it, with invented IDs.
+ * onboarding; and the "Role menu" health check in validate(). Also the rules for members' role
+ * choices that 2.39.0 shipped ahead of them: officers' job views show "a member", and the schedule
+ * pass deletes finished ones after 30 days; and that the pass's statements about them, 2.40.0's
+ * 7-day expiry included, plan through migration 012's partial indexes. Role choices as 2.40.0
+ * queues and applies them, and the rest of their privacy, are in self-role-choices.test.ts. Any
+ * officer may make every change, with no Discord permission check (owner decision, 2026-10-09).
+ * The Discord port records every call: web edits read Discord, never write to it. Confined to its
+ * own schema, self_roles_it, with invented IDs.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ChannelType, PermissionFlagsBits as P } from "discord.js";
 import { asc, eq } from "drizzle-orm";
 import { GuildAccess } from "../../src/application/guild-access.js";
 import type { DiscordPort, MemberView } from "../../src/application/records.js";
-import { IssueReports } from "../../src/application/issue-reports.js";
-import { RecentLogs } from "../../src/application/recent-logs.js";
 import {
   RoleAdministration,
   type RoleProvisioner,
@@ -897,51 +898,6 @@ describe.skipIf(!url)("self-service role menu writes", () => {
     expect(left.map((row) => row.id).sort()).toEqual([recent, waiting, history].sort());
   });
 
-  test("/guest status and an issue report's member section never list a member's role choices, for anyone (Q4 A)", async () => {
-    // The member's reconcile.user, then a dozen newer role choices, finished as 2.40.0 leaves them.
-    const reconcile = await enqueue(
-      db.pool,
-      "reconcile.user",
-      `user:${GUILD}:${MEMBER.userId}`,
-      {},
-      GUILD,
-      MEMBER.userId,
-    );
-    await db.query(
-      "UPDATE jobs SET status='succeeded', completed_at=now(), created_at=now()-interval '1 hour' WHERE id=$1",
-      [reconcile],
-    );
-    for (let save = 0; save < 12; save++) {
-      const id = await enqueue(
-        db.pool,
-        "roles.self",
-        `self-roles:${GUILD}:${MEMBER.userId}`,
-        { chosen: [ROLE.pronoun], offered: [ROLE.pronoun], savedAt: "2026-10-09T12:00:00.000Z" },
-        GUILD,
-        MEMBER.userId,
-      );
-      await db.query("UPDATE jobs SET status='succeeded', completed_at=now() WHERE id=$1", [id]);
-    }
-    expect(await db.orm.$count(t.jobs, eq(t.jobs.kind, "roles.self"))).toBe(12);
-    // Any officer, delegated ones included, and the member: the record's deliveries, and with them
-    // its card, its health and its Full details (JSON), hold the reconcile.user behind them all.
-    for (const viewer of [DELEGATED, MANAGER, MEMBER])
-      expect(
-        (await app.guestStatus(viewer, MEMBER.userId)).delivery.map((job) => [job.kind, job.id]),
-      ).toEqual([["reconcile.user", reconcile]]);
-    // An issue report's member section lists the same work. Every role choice here has finished, so
-    // the report's queue and failure tables, which list waiting and failed jobs by kind and never by
-    // member, hold none either.
-    const reports = new IssueReports(CONFIG, db, {} as Lodestone, new RecentLogs(), null);
-    await reports.user(MEMBER, "a member", "1300000000000000001", "My roles didn't change at all.");
-    const [report] = await db.orm
-      .select({ body: t.issueReports.body })
-      .from(t.issueReports)
-      .where(eq(t.issueReports.fingerprint, "user:1300000000000000001"));
-    expect(report?.body).toContain("reconcile.user");
-    expect(report?.body).not.toContain("roles.self");
-  });
-
   test("the schedule pass reaches role choices through migration 012's partial indexes", async () => {
     // Plenty of other work and finished role choices, two waiting ones, and fresh statistics.
     await db.query(
@@ -974,9 +930,9 @@ describe.skipIf(!url)("self-service role menu writes", () => {
     } finally {
       pool.query = query;
     }
-    // The waiting rows' close, then the finished rows' retention.
-    const [close, retention, ...rest] = sent.filter(({ values }) => values.includes("roles.self"));
-    expect([close?.text.split(" ")[0], retention?.text.split(" ")[0], rest]).toEqual([
+    // The waiting rows' 7-day expiry, then the finished rows' retention.
+    const [expiry, retention, ...rest] = sent.filter(({ values }) => values.includes("roles.self"));
+    expect([expiry?.text.split(" ")[0], retention?.text.split(" ")[0], rest]).toEqual([
       "update",
       "delete",
       [],
@@ -999,7 +955,7 @@ describe.skipIf(!url)("self-service role menu writes", () => {
       // Whether each predicate proves its partial index is under test, not the plan this small
       // table would get, so sequential scans are off.
       await client.query("SET LOCAL enable_seqscan = off");
-      expect(await indexes(close)).toEqual(["self_role_waiting"]);
+      expect(await indexes(expiry)).toEqual(["self_role_waiting"]);
       expect(await indexes(retention)).toEqual(["self_role_jobs"]);
     } finally {
       await client.query("ROLLBACK");
