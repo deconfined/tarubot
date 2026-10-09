@@ -36,7 +36,7 @@ A server TaruBot isn't set up in shows only "Set TaruBot up first".
 
 1. **Add a category** at the bottom of the page: a name (up to 40 characters), an optional description (up to 200), and **How many can someone pick?**: Pick any number, Pick one, or Pick up to 2 to 25. New categories start as **drafts**, which only officers see.
 2. **Add roles** in the category's card. It lists every role that passes [the checks](#what-a-role-must-pass), in Discord's order, each with the channels it opens. Tick as many as the category has room for, then choose **Add selected roles**. **Roles you can't add** lists every other role, with the first reason it can't be added.
-3. **Edit roles** changes the whole category in one form. For each role, set its description (up to 100 characters, shown to people choosing it), its position, and **On the menu**: **Offered**, **Not offered** (nobody can add it, but people who have it can remove it), or **Remove from the menu**.
+3. **Edit roles** changes the whole category in one form. For each role, set its description (up to 100 characters, shown to people choosing it), its position, and **On the menu**: **Offered**, **Not offered** (nobody can add it, but people who have it can remove it), or **Remove from menu**.
 4. **Edit category** changes the name, description and limit. **Move up** and **Move down** change the order people see the categories in.
 5. When the menu is ready, **Publish** each category, or use **Publish N drafts** at the top to publish every draft at once.
 
@@ -57,7 +57,7 @@ None of these changes anyone's roles in Discord by itself: they change what memb
 | **Publish** | Everyone with Member or Guest | Add it or remove it. |
 | **Stop offering** (a category), or **Not offered** (one role) | Only people who have it, marked **No longer offered** | Remove it. Nobody can add it. |
 | **Move back to draft** | Officers only, as a disabled draft | Nothing, until you publish it again. |
-| **Remove from the menu** (one role), or **Delete category** | Nobody | Nothing: people keep the role in Discord, but can't change it on My roles. |
+| **Remove from menu** (one role), or **Delete category** | Nobody | Nothing: people keep the role in Discord, but can't change it on My roles. |
 
 To let people drop an identity role themselves, such as a pronoun, use **Stop offering** rather than deleting it. To take a role away from everyone, remove it from them in Discord, or delete the role.
 

@@ -227,7 +227,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 .check-group {
   display: grid;
   gap: var(--space-1);
-  padding: var(--space-4) 0 var(--space-2);
+  padding: var(--space-2) 0;
 }
 
 .check-group + .check-group {
@@ -282,9 +282,9 @@ export const CONFIGURATION_CSS = `/* Server configuration */
     align-items: start;
     padding-bottom: var(--space-1);
   }
-  /* Level with the first row's text (the rows' own 10px top padding). */
+  /* Level with the first row's text (the rows' own 6px top padding). */
   .check-group__title {
-    padding-top: 10px;
+    padding-top: 6px;
   }
 }
 

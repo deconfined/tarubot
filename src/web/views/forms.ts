@@ -38,9 +38,21 @@ function checkedId(id: string): string {
   return id;
 }
 
-/** The ids of a control's hint and error, in that order, for aria-describedby; "" when neither. */
-function describedBy(id: string, hint: Text | undefined, error: Text | undefined): string {
-  return [hint === undefined ? "" : `${id}-hint`, error === undefined ? "" : `${id}-error`]
+/**
+ * The ids of a control's hint and error, then of a line elsewhere that also describes it (`also`),
+ * in that order, for aria-describedby; "" when none.
+ */
+function describedBy(
+  id: string,
+  hint: Text | undefined,
+  error: Text | undefined,
+  also?: string,
+): string {
+  return [
+    hint === undefined ? "" : `${id}-hint`,
+    error === undefined ? "" : `${id}-error`,
+    also === undefined ? "" : checkedId(also),
+  ]
     .filter((part) => part !== "")
     .join(" ");
 }
@@ -109,6 +121,13 @@ export interface FieldOptions {
    * only as approved wording rendered by mentions.ts (a refused role named by its cached name).
    */
   readonly error?: Text | undefined;
+  /**
+   * The id of a short line elsewhere on the page that also describes the control, heard after its
+   * own hint and error: such as the note above Role menu's Edit roles rows, which says what each
+   * state choice does where a closed select has no room to. Never a long note, which would be
+   * read out with every control it describes.
+   */
+  readonly describedBy?: string | undefined;
   readonly required?: boolean;
   readonly disabled?: boolean;
 }
@@ -121,7 +140,7 @@ function field(options: FieldOptions, control: SafeHtml): SafeHtml {
 /** The attributes every control shares, after its id and name. */
 function shared(options: FieldOptions): SafeHtml {
   const id = checkedId(options.id);
-  return html`${describedByAttribute(describedBy(id, options.hint, options.error))}${
+  return html`${describedByAttribute(describedBy(id, options.hint, options.error, options.describedBy))}${
     options.error === undefined ? "" : html` aria-invalid="true"`
   }${options.required ? html` required` : ""}${options.disabled ? html` disabled` : ""}`;
 }

@@ -1315,17 +1315,35 @@ describe("Role menu (2.39.0)", () => {
       expect(
         item.querySelector(".menu-category__meta .orr-badge")?.getAttribute("aria-hidden"),
       ).toBe("true");
+    // The head is one line, with the description under it. The markup keeps the hidden badges
+    // first; the stylesheet draws the name, the pick rule and how many roles, then the badges at
+    // the line's end, so every name starts at its card's left edge.
     expect(
       cards.map((item) =>
-        [...(item.querySelector(".menu-category__meta")?.children ?? [])].map(
-          (part) => part.textContent,
+        [...(item.querySelector(".menu-category__head")?.children ?? [])].map(
+          (part) => part.className,
         ),
       ),
+    ).toEqual(
+      Array(4).fill([
+        "menu-category__meta",
+        "menu-category__title",
+        "menu-category__facts",
+        "menu-category__desc",
+      ]),
+    );
+    const parts = (item: Element, selector: string) =>
+      [...(item.querySelector(selector)?.children ?? [])].map((part) => part.textContent);
+    expect(
+      cards.map((item) => [
+        parts(item, ".menu-category__meta"),
+        parts(item, ".menu-category__facts"),
+      ]),
     ).toEqual([
-      ["Published", "Pick any number"],
-      ["Published", "Pick any number"],
-      ["Draft", "Pick up to 2"],
-      ["Not offered", "Pick one"],
+      [["Published"], ["Pick any number", "4 roles"]],
+      [["Published"], ["Pick any number", "2 roles"]],
+      [["Draft"], ["Pick up to 2", "3 roles"]],
+      [["Not offered"], ["Pick one", "1 role"]],
     ]);
     const games = card(document, MENU_CATEGORY.games);
     expect(
@@ -1338,6 +1356,13 @@ describe("Role menu (2.39.0)", () => {
       ["@Valheim", "Our dedicated server.", "Opens: #valheim, #valheim-voice"],
       ["@Minecraft", "The FC's survival world.", "Opens: #minecraft"],
     ]);
+    // Every role reads in the same order: its chip, its description, then the channels it opens,
+    // each a line of its own (side by side in two columns where the card has room).
+    expect(
+      [...(games?.querySelectorAll(".menu-option") ?? [])].map((option) =>
+        [...option.children].map((part) => part.className),
+      ),
+    ).toEqual(Array(2).fill(["menu-option__role", "menu-option__desc", "menu-option__opens"]));
     // A role no longer offered says so; nothing has a problem in the healthy state.
     expect(
       card(document, MENU_CATEGORY.pronouns)?.querySelector(".menu-option__role .orr-badge")
@@ -1375,47 +1400,71 @@ describe("Role menu (2.39.0)", () => {
         String(cards.reduce((n, item) => n + item.querySelectorAll(".menu-option").length, 0)),
       ],
     ]);
-    // Each state button is described by its own line of help (UX-8).
+    // Each state button is described by its own consequence (UX-8). The buttons submit at once,
+    // so that sentence is on screen before them, in their card's state line over the toolbar, and
+    // starts with the button's own label so it reads as that button's; nothing hides it.
     for (const button of document.querySelectorAll('.menu-state button[type="submit"]')) {
       const help = document.getElementById(button.getAttribute("aria-describedby") ?? "");
       expect({
         button: button.textContent,
-        help: help?.parentElement === button.parentElement,
+        line: help?.parentElement?.matches(".menu-category__foot > .menu-category__state"),
+        card: help?.closest(".menu-category") === button.closest(".menu-category"),
+        shown:
+          help?.closest("[hidden], .visually-hidden") === null &&
+          help?.closest("[aria-hidden]") === null,
+        said: help?.textContent?.startsWith(`${visibleText(button)} `),
       }).toEqual({
         button: button.textContent,
-        help: true,
+        line: true,
+        card: true,
+        shown: true,
+        said: true,
       });
-      expect(help?.classList.contains("note")).toBe(true);
     }
     expect(
       document.querySelectorAll(".menu-state button[aria-describedby]").length,
     ).toBeGreaterThan(0);
-    // Each Edit roles row's state choices say their consequence (UX-8).
+    // Each Edit roles row's state choices are short, so a closed select shows the whole choice at
+    // any width; what they do is the note above the rows, on screen, and every state select's
+    // description, so it is heard with the choice (UX-8).
     expect(
       [...(games?.querySelector('select[name^="state:"]')?.querySelectorAll("option") ?? [])].map(
         (choice) => choice.textContent,
       ),
-    ).toEqual([
-      "Offered",
-      "Not offered: people who have it can remove it",
-      "Remove from the menu: people keep it, but can't change it here",
-    ]);
+    ).toEqual(["Offered", "Not offered", "Remove from menu"]);
+    for (const select of document.querySelectorAll('.menu-category select[name^="state:"]')) {
+      const help = document.getElementById(select.getAttribute("aria-describedby") ?? "");
+      expect({
+        id: select.id,
+        note: help?.parentElement?.matches("form > p.note") === true,
+        form: help?.closest("form") === select.closest("form"),
+        shown: help?.closest("[hidden], .visually-hidden, [aria-hidden]") === null,
+        said: help?.textContent,
+      }).toEqual({
+        id: select.id,
+        note: true,
+        form: true,
+        shown: true,
+        said: "Not offered means nobody can add the role, but people who have it can still remove it. Remove from menu means people keep the role in Discord, but can't change it on My roles.",
+      });
+    }
   });
 
-  test("the state buttons a category offers follow its state, each with its line of help", async () => {
+  test("the state buttons a category offers follow its state, each described by its consequence", async () => {
     const document = await rolePage(await editor());
     const states = (id: string) =>
       [...(card(document, id)?.querySelectorAll(".menu-state") ?? [])].map((form) => [
         form.querySelector('input[name="state"]')?.getAttribute("value"),
         visibleText(form.querySelector("button") as Element),
-        form.querySelector(".note")?.textContent,
+        document.getElementById(
+          form.querySelector("button")?.getAttribute("aria-describedby") ?? "",
+        )?.textContent,
       ]);
-    // Members and guests pick these roles on My roles, so each state's help says what happens now.
-    const publish = "Everyone with Member or Guest can pick these roles on My roles.";
-    const stop =
-      "Nobody can add these roles. People who have them can still remove them on My roles.";
+    // Each state's help says what the button does for members and guests, starting with its label.
+    const publish = "Publish lets members and guests pick these roles.";
+    const stop = "Stop offering means people can only remove these roles.";
     const draft =
-      "Only officers see a draft. People who have these roles won't be able to change them until you publish again. Nobody's roles change.";
+      "Move back to draft hides the category from all but officers; people keep these roles but can't change them until you publish again.";
     expect(states(MENU_CATEGORY.pronouns)).toEqual([
       ["removal_only", "Stop offering", stop],
       ["draft", "Move back to draft", draft],
@@ -1437,6 +1486,61 @@ describe("Role menu (2.39.0)", () => {
       ["Move down", "2"],
     ]);
     expect(moves(MENU_CATEGORY.retired)).toEqual([["Move up", "2"]]);
+    // On screen, one line over the buttons says what the card's state means, then what each of
+    // its state buttons does, in the buttons' order, in place of a paragraph per button.
+    const line = (id: string) =>
+      card(document, id)?.querySelector(".menu-category__foot > .menu-category__state")
+        ?.textContent;
+    expect(line(MENU_CATEGORY.pronouns)).toBe(
+      `Published: members and guests can pick these roles on My roles. ${stop} ${draft}`,
+    );
+    expect(line(MENU_CATEGORY.content)).toBe(`Draft: only officers see it. ${publish}`);
+    expect(line(MENU_CATEGORY.retired)).toBe(
+      `Not offered: people who have these roles can only remove them on My roles. ${publish} ${draft}`,
+    );
+  });
+
+  test("a card's actions are one toolbar: the editors, the state buttons, the moves, then Delete category", async () => {
+    const document = await rolePage(await editor());
+    // What each item of a card's toolbar is, in order: a disclosure by its summary, a button by
+    // its text, as a sighted officer reads them.
+    const toolbar = (id: string) =>
+      [
+        ...(card(document, id)?.querySelectorAll(
+          ".menu-toolbar > .menu-tool > details > summary, .menu-toolbar button",
+        ) ?? []),
+      ]
+        .filter((item) => item.tagName === "SUMMARY" || item.closest(".disclosure__body") === null)
+        .map((item) => `${item.tagName === "SUMMARY" ? "▸ " : ""}${visibleText(item)}`);
+    expect(toolbar(MENU_CATEGORY.pronouns)).toEqual([
+      "▸ Edit roles",
+      "▸ Add roles",
+      "▸ Edit category",
+      "Stop offering",
+      "Move back to draft",
+      "Move down",
+      "▸ Delete category",
+    ]);
+    expect(toolbar(MENU_CATEGORY.content)).toEqual([
+      "▸ Edit roles",
+      "▸ Add roles",
+      "▸ Edit category",
+      "Publish",
+      "Move up",
+      "Move down",
+      "▸ Delete category",
+    ]);
+    // Each card has exactly one toolbar, holding every form of the card: none sits apart from it.
+    for (const item of document.querySelectorAll(".menu-category")) {
+      expect(item.querySelectorAll(".menu-toolbar")).toHaveLength(1);
+      for (const form of item.querySelectorAll("form"))
+        expect(form.closest(".menu-toolbar")).not.toBeNull();
+    }
+    // Only Delete category is marked as the danger tool, and its panel states the consequence
+    // before the button (the destructive-button test pins the rest).
+    expect(
+      [...document.querySelectorAll(".menu-tool--danger summary")].map((item) => visibleText(item)),
+    ).toEqual(Array(4).fill("Delete category"));
   });
 
   test("fieldsets have legends, every control a label, and every button visible text", async () => {
@@ -2211,6 +2315,18 @@ describe("My roles (2.40.0)", () => {
     expect(document.getElementById(`category-${MENU_CATEGORY.pronouns}-hint`)?.textContent).toBe(
       "Pick any number. Shown on your profile, so people know how to refer to you.",
     );
+    // On screen the rule sits beside the name, on the legend's line, as a copy hidden from
+    // assistive technology, so neither the group's name nor the heading's takes it; the hint keeps
+    // it for them, visually hidden, so the hint's visible text starts with the description.
+    const rule = pronouns?.querySelector("legend > .my-category__rule");
+    expect([
+      rule?.textContent,
+      rule?.getAttribute("aria-hidden"),
+      rule?.previousElementSibling?.tagName,
+    ]).toEqual(["Pick any number", "true", "H2"]);
+    expect(visibleText(document.getElementById(`category-${MENU_CATEGORY.pronouns}-hint`))).toBe(
+      "Shown on your profile, so people know how to refer to you.",
+    );
     const rows: [string, string, boolean][] = [
       [MENU_ROLE.heHim, "He/Him", false],
       [MENU_ROLE.sheHer, "She/Her", true],
@@ -2238,6 +2354,20 @@ describe("My roles (2.40.0)", () => {
       expect(row.querySelector("input + .orr-check__text > label")).not.toBeNull();
     expect(document.querySelectorAll("main form")).toHaveLength(1);
     expect(visibleText(document.querySelector("main form button"))).toBe("Save my roles");
+  });
+
+  test("the Save hint describes the button from outside the sticky Save row", async () => {
+    const { document } = await myRolesPage(await viewOf(member));
+    const form = document.querySelector("main form.my-roles-form");
+    const button = form?.querySelector(".form-actions > button");
+    const hint = document.getElementById(button?.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toBe("Only the categories you change are saved.");
+    // On phones the row sticks to the bottom of the screen; with enlarged text a hint inside it
+    // grew it over the focused input (styles/my-roles.ts), so the hint is the form's own line,
+    // just before the row, and the row holds the button alone.
+    expect(hint?.parentElement?.matches("main form.my-roles-form")).toBe(true);
+    expect(hint?.nextElementSibling?.classList.contains("form-actions")).toBe(true);
+    expect(form?.querySelector(".form-actions")?.children).toHaveLength(1);
   });
 
   test("the form says what it showed: shown and seen per category, inputs named c-<id>", async () => {
@@ -2337,7 +2467,7 @@ describe("My roles (2.40.0)", () => {
     const { document: theirs } = await myRolesPage(await viewOf(member));
     const retired = group(theirs, MENU_CATEGORY.retired);
     expect(visibleText(retired?.querySelector("legend") ?? null)).toBe(
-      "Retired events No longer offered",
+      "Retired events You can remove these No longer offered",
     );
     expect(theirs.getElementById(`category-${MENU_CATEGORY.retired}-hint`)?.textContent).toBe(
       "You can remove these. Event roles from past seasons.",
@@ -2732,7 +2862,9 @@ describe("My roles (2.40.0)", () => {
   test("drafts show to officers only, disabled, with their roles ticked, and are never sent", async () => {
     const { document } = await myRolesPage(await viewOf(officer), { viewer: officer });
     const content = group(document, MENU_CATEGORY.content);
-    expect(visibleText(content?.querySelector("legend") ?? null)).toBe("Content Draft");
+    expect(visibleText(content?.querySelector("legend") ?? null)).toBe(
+      "Content Pick up to 2 Draft",
+    );
     expect(document.getElementById(`category-${MENU_CATEGORY.content}-hint`)?.textContent).toBe(
       "Pick up to 2. What you'd like to be pinged for. Draft: only officers can see this. Publish it on Role menu.",
     );
@@ -3056,7 +3188,7 @@ describe("My roles (2.40.0)", () => {
     expect(document.querySelectorAll("main form, main fieldset")).toHaveLength(0);
     expect(document.querySelector(".my-roles-intro__privacy")?.textContent).toBe(PRIVACY);
     expect(document.querySelector(".my-roles-intro .lead")?.textContent).toBe(
-      "Pick the roles you'd like in this server. TaruBot adds or removes them for you in Discord.",
+      "Pick the roles you'd like here, and TaruBot adds or removes them in Discord.",
     );
   });
 

@@ -336,10 +336,25 @@ export const STATUS_CSS = `/* Background work */
   }
 }
 
-/* Wide screens: the four checks in one row, the six counts in one row, labels beside times. */
+/*
+ * Wide screens: the four checks in one row, each token beside its sentence, the six counts in one
+ * row, labels beside times.
+ */
 @media (min-width: 72rem) {
   .process-health__checks {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    row-gap: var(--space-3);
+  }
+  .process-health__checks > .check-row:not(.process-health__summary) {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .process-health__checks > .process-health__summary {
+    padding-bottom: var(--space-3);
+  }
+  .process-health .orr-scale {
+    margin-top: var(--space-3);
   }
   .metrics {
     grid-template-columns: repeat(6, minmax(0, 1fr));

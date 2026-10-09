@@ -311,10 +311,11 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 /*
  * Card: glass by default, solid inside another card, holographic (with .orr-holo-edge) for the
  * page's one featured card. Its head holds an optional eyebrow (.orr-label), a title and a
- * description.
+ * description. 16px of padding (12px for a small readout) keeps a grid of cards compact, as the
+ * kit's dashboard is; the head sits 12px over the body.
  */
 .orr-card {
-  --card-pad: var(--space-5);
+  --card-pad: var(--space-4);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -380,7 +381,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 }
 
 .orr-card__head + .orr-card__body {
-  padding-top: var(--space-4);
+  padding-top: var(--space-3);
 }
 
 .orr-card__foot {
@@ -394,7 +395,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 }
 
 .orr-card--pad-sm {
-  --card-pad: var(--space-4);
+  --card-pad: var(--space-3);
 }
 
 /* Stat: a label over a mono readout; as a dl, dt is the label and dd the value. */
@@ -487,9 +488,12 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 
 /* TaruBot's shared page vocabulary */
 
-/* The page's lede, directly under the page header; and quieter supporting text. */
+/*
+ * The page's lede, directly under the page header, at a comfortable 70ch measure; and quieter
+ * supporting text.
+ */
 .lead {
-  max-width: 62ch;
+  max-width: 70ch;
   color: var(--text-secondary);
   font: var(--type-body-lg);
 }
@@ -506,7 +510,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
  * chip among them stays in the line rather than become a flex item of its own.
  */
 .notice {
-  padding: 10px 14px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   background: var(--info-bg);
@@ -526,9 +530,12 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   color: var(--info);
 }
 
-/* A page's notice right after its lead joins the description: 16px under it, not main's 32px. */
+/*
+ * A page's notice right after its lead joins the description: 12px under it, not main's
+ * --section-gap (shell.ts). The fallback is the entry pages' gap, where no .main sets it.
+ */
 .lead + .notice {
-  margin-top: calc(var(--space-4) - var(--space-8));
+  margin-top: calc(var(--space-3) - var(--section-gap, var(--space-6)));
 }
 
 /* A chip that wraps onto another line gets its padding and corners on every line. */
@@ -553,7 +560,7 @@ main code {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
   gap: var(--space-1) var(--space-6);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 
 .section-heading > .section-description {
@@ -605,7 +612,7 @@ main code {
 .facts > dt,
 .facts > dd {
   margin: 0;
-  padding: 10px 0;
+  padding: var(--space-2) 0;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -650,7 +657,7 @@ main code {
   grid-template-columns: 3.875rem minmax(0, 1fr);
   align-items: start;
   column-gap: 10px;
-  padding: 10px 0;
+  padding: 6px 0;
 }
 
 .check-row + .check-row {
@@ -708,7 +715,7 @@ main details > summary:hover {
   display: grid;
   justify-items: center;
   gap: var(--space-2);
-  padding: 28px var(--space-5);
+  padding: var(--space-5) var(--space-4);
   border-radius: var(--radius-lg);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
   color: var(--text-muted);

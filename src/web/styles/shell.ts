@@ -5,6 +5,11 @@
  * navigation, account menu at the bottom) beside a sticky 60px glass top bar with the page's
  * label, and the page sits in a 1180px column with 32px gutters (16px on phones).
  *
+ * The page's vertical rhythm is one property, --section-gap on .main: 20px between blocks on
+ * phones, 24px from 40rem. A block that belongs to the one above it (the lead under the header, a
+ * notice or banners under the lead) pulls itself closer by subtracting the same property, so the
+ * rhythm can change here without leaving those offsets behind.
+ *
  * The design kit has no layout below desktop width and builds its shell from inline styles; these
  * classes are TaruBot's own, with the kit's values. The page header and the footer are shared
  * with the entry pages (entry.ts).
@@ -330,28 +335,30 @@ html {
 }
 
 /*
- * The page: its header, then the view's sections, one column of blocks 32px apart. The column
- * track is minmax(0, 1fr), so a wide table scrolls in its own region instead of widening the page.
+ * The page: its header, then the view's sections, one column of blocks --section-gap apart. The
+ * column track is minmax(0, 1fr), so a wide table scrolls in its own region instead of widening
+ * the page.
  */
 .main {
+  --section-gap: var(--space-5);
   display: grid;
   flex: 1 0 auto;
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: var(--space-8);
+  gap: var(--section-gap);
   width: 100%;
   max-width: calc(var(--content-max) + 2 * var(--gutter));
   margin: 0 auto;
-  padding: var(--space-6) var(--space-4) var(--space-12);
+  padding: var(--space-5) var(--space-4) var(--space-10);
 }
 
 /*
- * The page header: an eyebrow, then the h1 in the display face (Sora); a view's opening .lead
- * reads as its description.
+ * The page header: an eyebrow, then the h1 in the display face (Sora), close together; a view's
+ * opening .lead reads as its description, 8px under it.
  */
 .page-header {
   display: grid;
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -363,7 +370,7 @@ html {
 }
 
 .page-header + .lead {
-  margin-top: calc(var(--space-3) - var(--space-8));
+  margin-top: calc(var(--space-2) - var(--section-gap));
 }
 
 /*
@@ -564,12 +571,13 @@ html {
   }
 }
 
-/* From tablet width, the 32px gutters. */
+/* From tablet width, the 32px gutters, and 24px between the page's blocks. */
 @media (min-width: 40rem) {
   .sidebar {
     padding-inline: var(--gutter);
   }
   .main {
+    --section-gap: var(--space-6);
     padding-inline: var(--gutter);
   }
   .site-footer {
@@ -707,7 +715,7 @@ html {
     border-bottom: 1px solid var(--border-subtle);
   }
   .main {
-    padding-top: var(--space-8);
+    padding-top: var(--space-6);
   }
 }
 `;

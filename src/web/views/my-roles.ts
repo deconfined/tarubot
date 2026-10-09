@@ -3,11 +3,12 @@
  * officers' menu, typed state in (SelfRoles.view's MyRoles) and escaped markup out, with no
  * service or gateway I/O.
  *
- * One form, one card per category the person may change, phones first: a fieldset whose legend is
- * also the category's heading, radios starting with "No role from this category" for a pick-one
- * category, checkboxes otherwise, and one Save button that stays in reach at the bottom of a
- * phone's screen. Each row is a native input with its `<label for>`, and the label's hit area
- * covers the whole row, at least 44px tall (styles/my-roles.ts), so a thumb can't miss it.
+ * One form, one card per category the person may change, in a grid that uses the screen's width,
+ * phones first: a fieldset whose legend is also the category's heading, radios starting with "No
+ * role from this category" for a pick-one category, checkboxes otherwise, and one Save button
+ * that stays in reach at the bottom of a phone's screen. Each role is a native input with its
+ * `<label for>`, drawn as a pill sized to its name whose whole area is the label's, at least 44px
+ * tall for touch (styles/my-roles.ts), so a thumb can't miss it.
  *
  * A save touches only the categories the person changed, so a stale tab, Dyno or an officer's hand
  * edit is never undone in a category they left alone. The form tells SelfRoles.choose what it
@@ -243,9 +244,8 @@ const CALLOUTS = {
 const roleMenuLink = (guildId: string): SafeHtml =>
   html`<a href="${href(ROLE_MENU_PATH.replace(":guild", guildId))}">Role menu</a>`;
 
-/** The page's opening sentence, and the privacy note under it, always shown. */
-const LEAD =
-  "Pick the roles you'd like in this server. TaruBot adds or removes them for you in Discord.";
+/** The page's opening sentence, and the privacy note under it as a small line, always shown. */
+const LEAD = "Pick the roles you'd like here, and TaruBot adds or removes them in Discord.";
 const PRIVACY =
   "Roles you choose appear on your profile in this server, where everyone can see them. TaruBot keeps no record of which roles you choose; Discord holds your roles.";
 
@@ -417,23 +417,28 @@ function keptSentence(rows: readonly ChoiceOption[], names: WebNames): SafeHtml 
 }
 
 /**
+ * A category's rule: how many someone may pick. A text-only category's rule would ask for a pick
+ * nobody can make there, so it says there is nothing to pick instead; a Stop offering category's
+ * badge says nobody can add its roles, so its rule says what's left.
+ */
+function ruleOf(layout: Layout): string {
+  if (textOnly(layout)) return "Nothing to pick right now";
+  return layout.removal ? "You can remove these" : pickRule(layout.category.max);
+}
+
+/**
  * The lines under a category's legend: its rule, description, the roles the person holds there
  * that can't be changed now, and any note about its state. They are the group's hint, which the
  * fieldset names with aria-describedby, so someone moving through the inputs hears the roles
- * they keep along with the choices. A text-only category's rule would ask for a pick nobody can
- * make there, so it says there is nothing to pick instead, and its roles are one sentence, not a
- * framed line each that could pass for a row to tap. The draft note's "Role menu" links to that
- * page (`guildId`'s), where officers publish it.
+ * they keep along with the choices. On screen the rule sits on the legend's line instead, beside
+ * the name (titleFor), so the hint's visible text starts with the description: the rule stays
+ * here for assistive technology only. A text-only category's roles are one sentence, not a framed
+ * line each that could pass for a row to tap. The draft note's "Role menu" links to that page
+ * (`guildId`'s), where officers publish it.
  */
 function hintFor(layout: Layout, names: WebNames, guildId: string): SafeHtml {
   const { category } = layout;
   const plain = textOnly(layout);
-  // A Stop offering category's badge says nobody can add its roles; its rule says what's left.
-  const rule = plain
-    ? "Nothing to pick right now"
-    : layout.removal
-      ? "You can remove these"
-      : pickRule(category.max);
   // An odd state needs the person's attention (the warning tone); a draft is only a fact.
   const draft = layout.draft
     ? html`<span class="my-category__draft">Draft: only officers can see this. Publish it on ${roleMenuLink(guildId)}.</span>`
@@ -445,10 +450,11 @@ function hintFor(layout: Layout, names: WebNames, guildId: string): SafeHtml {
         (row) =>
           html`<span class="my-category__fixed">You have ${roleName(row.roleId, names)}; it can't be changed here right now.</span>`,
       );
-  // One line each on screen; the spaces (and the rule's hidden full stop) keep them apart where
-  // they are read as one description, by aria-describedby or as text.
+  // On screen the description comes first and the rest take a line each; the spaces (and the
+  // rule's full stop) keep them apart where they are read as one description, by
+  // aria-describedby or as text.
   const parts = [
-    html`<span class="my-category__rule">${rule}<span class="visually-hidden">.</span></span>`,
+    html`<span class="visually-hidden">${ruleOf(layout)}.</span>`,
     ...(category.description === ""
       ? []
       : [html`<span class="my-category__desc">${untrusted(category.description)}</span>`]),
@@ -494,13 +500,15 @@ function oddState(layout: Layout): string | null {
 }
 
 /**
- * The category's name as its heading, with a badge for a state that isn't plain published. It is
- * the fieldset's legend too (a legend may hold a heading), so someone moving by heading reaches
- * each category, and the group is announced by the same name.
+ * The category's name as its heading, then its rule, then a badge for a state that isn't plain
+ * published. It is the fieldset's legend too (a legend may hold a heading), so someone moving by
+ * heading reaches each category, and the group is announced by the same name. The rule here is a
+ * visual copy, hidden from assistive technology, so it joins neither the group's name nor the
+ * heading's: the group's hint says it (hintFor).
  */
 function titleFor(layout: Layout): SafeHtml {
   const state = layout.draft ? badge("Draft") : layout.removal ? badge("No longer offered") : "";
-  return html`<h2 class="my-category__title">${untrusted(layout.category.name)}</h2>${state === "" ? "" : html` ${state}`}`;
+  return html`<h2 class="my-category__title">${untrusted(layout.category.name)}</h2> <span class="my-category__rule" aria-hidden="true">${ruleOf(layout)}</span>${state === "" ? "" : html` ${state}`}`;
 }
 
 /** One category's card. */
@@ -646,9 +654,10 @@ function categories(view: MyRolesView, names: WebNames, formError: SafeHtml | ""
   )}</div>`;
   // Only a category with something to change makes a form worth sending.
   if (!layouts.some((layout) => layout.submits)) return html`${formError}${cards}`;
-  // The hint sits above the Save row, not in it: on phones the row sticks to the bottom of the
+  // The hint comes before the Save row, not in it: on phones the row sticks to the bottom of the
   // screen, and with enlarged text a hint beside the button grew it into a tall column that
-  // covered the focused input, past the page's scroll padding (WCAG 2.4.11). It is still the
+  // covered the focused input, past the page's scroll padding (WCAG 2.4.11). From 64rem, where
+  // nothing sticks, the stylesheet draws the two in one row, the button first. It is still the
   // button's description.
   return postForm(
     { action: view.action, token: view.token, className: "my-roles-form" },

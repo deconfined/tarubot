@@ -299,8 +299,12 @@ describe("the stylesheet", () => {
     expect(css).not.toMatch(/appearance: none/u);
     // An invalid field shows it in the border too, not by color of the text alone.
     expect(css).toContain('.orr-input[aria-invalid="true"]');
-    // Phones zoom into fields under 16px, so the controls' text is 1rem.
+    // Phones zoom into fields under 16px, so the controls' text is 1rem; only a mouse on a wide
+    // screen gets the kit's dense 14px.
     expect(input).toContain("font-size: 1rem;");
+    expect(declaring("(min-width: 64rem) and (pointer: fine)", "font-size:")).toEqual([
+      ".orr-input",
+    ]);
     // The fieldset's own frame is reset for choice groups.
     expect(ruleFor(".choice-group")).toContain("border: 0;");
     expect(declaring("(forced-colors: active)", "border: 1px solid CanvasText;")).toEqual(
@@ -319,6 +323,40 @@ describe("the stylesheet", () => {
     expect(declaring(phone, "scroll-padding-bottom:")).toContain("html:has(.form-actions)");
     expect(css).not.toMatch(/@media \(max-width: 63\.99rem\) \{[^@]*\.form-actions \{[^}]*sticky/u);
     expect(declaring("print", "position: static;")).toContain(".form-actions");
+  });
+
+  test("My roles' pills keep a 44px touch target, and the Save hint joins its row only off phones", () => {
+    // Every pill is the label's to tap; only a mouse on a wider screen gets the denser 36px.
+    expect(ruleFor(".my-category .orr-check")).toContain("min-height: 2.75rem;");
+    expect(declaring("(min-width: 40rem) and (pointer: fine)", "min-height:")).toEqual([
+      ".my-category .orr-check",
+    ]);
+    // The button and its hint share a row only from 64rem, where the Save row no longer sticks.
+    expect(declaring("(min-width: 64rem)", "order: 1;")).toEqual([
+      ".my-roles-form > .form-actions",
+    ]);
+    expect(declaring("(min-width: 64rem)", "order: 2;")).toEqual([
+      ".my-roles-form > .my-roles-form__hint",
+    ]);
+  });
+
+  test("Role menu's toolbar draws what it holds in focus order, its groups whole, its targets 32px", () => {
+    // An open editor opens in place, a row of its own: no panel is drawn after the toolbar's
+    // other items (::details-content with an order did), so nothing Tab reaches after a panel's
+    // controls is drawn above them (WCAG 1.3.2, 2.4.3).
+    expect(css).not.toContain("::details-content");
+    expect(css).not.toMatch(/\.menu-(?:tool|toolbar|states|moves)[^{]*\{[^}]*\border:/u);
+    expect(ruleFor(".menu-tool > details[open]")).toContain("flex: 1 0 100%;");
+    // The state buttons and the moves each wrap as a unit, never a pair split across rows.
+    expect(ruleFor(".menu-tool")).toContain("display: contents;");
+    expect(ruleFor(".menu-moves")).toContain("display: flex;");
+    expect(css).toContain(".menu-states,\n.menu-moves {");
+    // Add roles' rows: the label covers each row, at least 32px tall, 44px for a finger.
+    expect(ruleFor(".menu-add .orr-check")).toContain("min-height: 2rem;");
+    expect(ruleFor(".menu-add .orr-check__label::after")).toContain("inset: 0;");
+    expect(declaring("(pointer: coarse)", "min-height: 2.75rem;")).toContain(
+      ".menu-add .orr-check",
+    );
   });
 
   test("reduced transparency, forced colors and print each have their fallback", () => {
