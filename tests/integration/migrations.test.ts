@@ -1,9 +1,9 @@
 /**
- * Migration rehearsals (005 through 012) in private PostgreSQL schemas, isolated from
+ * Migration rehearsals (005 through 013) in private PostgreSQL schemas, isolated from
  * persistence.test.ts's public schema: import/activation backfill, the new CHECKs, the
  * guest-application switch, the changelog columns, the status-notice columns, the web sessions
- * table, the self-service role menus with their payload-clearing trigger, an empty database, and
- * the real migrate() runner.
+ * table, the self-service role menus with their payload-clearing trigger, the status page's
+ * samples, an empty database, and the real migrate() runner.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -864,6 +864,97 @@ describe.skipIf(!url)("migration 012 self-service roles", () => {
           "btree (created_at) WHERE ((kind = 'roles.self'::text) AND (status = ANY (ARRAY['queued'::text, 'running'::text, 'blocked'::text, 'disabled'::text])))",
         ],
       ]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+});
+
+const STATUS_SAMPLES = "013_status_samples.sql";
+
+describe.skipIf(!url)("migration 013 status samples", () => {
+  if (!url) return;
+  const db = new Database(url);
+  afterAll(async () => {
+    await db.close();
+  });
+
+  test("an empty samples table of process-wide state only, keyed by five-minute bucket", async () => {
+    const client = await db.pool.connect();
+    /** Run a statement that must fail with `code`, inside a savepoint so the rehearsal continues. */
+    const refused = async (statement: string, values: unknown[], code: string) => {
+      await client.query("SAVEPOINT refused");
+      await expect(client.query(statement, values)).rejects.toMatchObject({ code });
+      await client.query("ROLLBACK TO SAVEPOINT refused");
+    };
+    try {
+      await client.query("BEGIN");
+      await client.query("CREATE SCHEMA m013_rehearsal");
+      await client.query("SET LOCAL search_path TO m013_rehearsal");
+      for (const file of (await migrationFiles()).filter((name) => name < STATUS_SAMPLES))
+        await client.query(await migration(file));
+      // A schema-012 guild and job, which the new table neither needs nor touches.
+      await client.query("INSERT INTO guilds (id) VALUES ('666666666666666813')");
+      await client.query(await migration(STATUS_SAMPLES));
+      expect((await client.query("SELECT 1 FROM status_samples")).rows).toEqual([]);
+      expect(
+        (
+          await client.query<{
+            column_name: string;
+            type: string;
+            is_nullable: string;
+            column_default: string | null;
+          }>(
+            `SELECT column_name, coalesce(domain_name, data_type) AS type, is_nullable, column_default
+             FROM information_schema.columns
+             WHERE table_schema='m013_rehearsal' AND table_name='status_samples' ORDER BY ordinal_position`,
+          )
+        ).rows,
+      ).toEqual(
+        (
+          [
+            ["sampled_at", "timestamp with time zone"],
+            ["ready", "boolean"],
+            ["discord", "boolean"],
+            ["database", "boolean"],
+            ["lodestone", "text"],
+            ["changes", "text"],
+            ["version", "text"],
+          ] as const
+        ).map(([column_name, type]) => ({
+          column_name,
+          type,
+          is_nullable: "NO",
+          column_default: null,
+        })),
+      );
+      // The key and the four CHECKs (PostgreSQL 18 also lists NOT NULL); no foreign key.
+      expect(
+        (
+          await client.query<{ contype: string }>(
+            "SELECT contype FROM pg_constraint WHERE conrelid='m013_rehearsal.status_samples'::regclass AND contype IN ('c', 'f', 'p', 'u', 'x') ORDER BY 1",
+          )
+        ).rows.map((row) => row.contype),
+      ).toEqual(["c", "c", "c", "c", "p"]);
+      const insert =
+        "INSERT INTO status_samples VALUES ($1, true, true, true, $2, $3, $4) ON CONFLICT (sampled_at) DO NOTHING";
+      await client.query(insert, ["2026-10-09T12:00:00Z", "available", "live", "2.41.0"]);
+      // The same bucket again changes nothing: the first sample stays.
+      await client.query(insert, ["2026-10-09T12:00:00Z", "unreachable", "paused", "2.40.0"]);
+      expect(
+        (await client.query("SELECT lodestone, changes, version FROM status_samples")).rows,
+      ).toEqual([{ lodestone: "available", changes: "live", version: "2.41.0" }]);
+      for (const at of ["2026-10-09T12:02:30Z", "2026-10-09T12:05:00.001Z"])
+        await refused(insert, [at, "available", "live", "2.41.0"], "23514");
+      await refused(insert, ["2026-10-09T12:10:00Z", "slow", "live", "2.41.0"], "23514");
+      await refused(insert, ["2026-10-09T12:10:00Z", "available", "stopped", "2.41.0"], "23514");
+      await refused(
+        insert,
+        ["2026-10-09T12:10:00Z", "available", "live", "<b>2.41.0</b>"],
+        "23514",
+      );
+      await refused(insert, ["2026-10-09T12:10:00Z", null, "live", "2.41.0"], "23502");
     } finally {
       await client.query("ROLLBACK");
       client.release();

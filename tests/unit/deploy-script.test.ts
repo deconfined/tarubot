@@ -1,10 +1,14 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   watch,
   writeFileSync,
 } from "node:fs";
@@ -54,6 +58,32 @@ const configureWeb = (box: HostSandbox, overrides: Record<string, string> = {}) 
   }
   writeFileSync(file, contents);
 };
+
+/**
+ * Commit `change` to the sandbox's origin on top of the target release and make that commit the
+ * requested one, as a published release whose files differ would be.
+ */
+const retarget = (box: HostSandbox, change: (origin: string) => void, message: string) => {
+  const origin = join(box.directory, "origin");
+  const gitExecutable = box.environment.GIT_REAL;
+  if (gitExecutable === undefined) throw new Error("Missing fixture Git executable");
+  const git = (...args: string[]) => {
+    const result = subprocess([gitExecutable, ...args], box.environment, origin);
+    if (result.code !== 0) throw new Error(`Fixture git failed: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  change(origin);
+  git("add", "--all");
+  git("commit", "-m", message);
+  box.target.commit = git("rev-parse", "HEAD");
+  const configuration = JSON.parse(readFileSync(join(box.sim, "config.json"), "utf8"));
+  configuration.target = box.target;
+  writeFileSync(join(box.sim, "config.json"), JSON.stringify(configuration));
+};
+
+/** The permission bits of `path` in the requested release's worktree. */
+const releaseMode = (box: HostSandbox, path: string) =>
+  statSync(join(box.state, "releases", `1234-${box.target.commit}`, path)).mode & 0o777;
 
 for (const request of [
   "",
@@ -613,6 +643,37 @@ describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
           box.target.version,
         );
         expect(statSync(join(box.root, ".env")).mode & 0o777).toBe(0o600);
+        // Caddy, without DAC_OVERRIDE, reads the offline page from the private worktree (2.41.0).
+        const read = subprocess(
+          [
+            docker,
+            "compose",
+            "--project-name",
+            box.environment.CADDY_NATIVE_PROJECT,
+            "--project-directory",
+            worktree,
+            "--env-file",
+            join(box.root, ".env"),
+            "-f",
+            join(worktree, "docker-compose.production.yml"),
+            "-f",
+            join(box.sim, "native-caddy.yml"),
+            "run",
+            "--rm",
+            "--no-deps",
+            "--pull",
+            "never",
+            "-T",
+            "caddy",
+            "cat",
+            "/srv/offline/index.html",
+            "/srv/offline/assets/offline.css",
+          ],
+          { ...box.environment, TARUBOT_IMAGE_DIGEST: box.target.digest },
+        );
+        expect(read.stderr).not.toContain("Permission denied");
+        expect(read.code).toBe(0);
+        expect(read.stdout).toContain("TaruBot is offline right now");
       } finally {
         if (existsSync(worktree)) {
           const cleanup = subprocess(
@@ -757,6 +818,73 @@ describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
     expect(
       JSON.parse(readFileSync(join(disabled.sim, "proxy.json"), "utf8"))[0].State.Running,
     ).toBe(false);
+  });
+
+  test("a web upgrade makes the release's offline page readable to Caddy, and nothing more", () => {
+    const box = sandbox();
+    configureWeb(box);
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(releaseMode(box, "ops/Caddyfile")).toBe(0o644);
+    for (const directory of ["ops/offline", "ops/offline/assets"])
+      expect({ directory, mode: releaseMode(box, directory) }).toEqual({ directory, mode: 0o755 });
+    const files = [
+      "ops/offline/index.html",
+      ...readdirSync(
+        join(box.state, "releases", `1234-${box.target.commit}`, "ops/offline/assets"),
+      ).map((name) => `ops/offline/assets/${name}`),
+    ];
+    expect(files).toHaveLength(11);
+    for (const file of files)
+      expect({ file, mode: releaseMode(box, file) }).toEqual({ file, mode: 0o644 });
+    // Everything else in the release stays as umask 077 left it.
+    for (const file of ["package.json", "docker-compose.web.yml", "ops/age-recipients.txt"])
+      expect({ file, mode: releaseMode(box, file) }).toEqual({ file, mode: 0o600 });
+    expect(releaseMode(box, "ops")).toBe(0o700);
+  });
+
+  test("a bot-only upgrade leaves the offline page private, like the Caddyfile", () => {
+    const box = sandbox();
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(releaseMode(box, "ops/Caddyfile")).toBe(0o600);
+    expect(releaseMode(box, "ops/offline")).toBe(0o700);
+    expect(releaseMode(box, "ops/offline/index.html")).toBe(0o600);
+  });
+
+  test("a web upgrade to a release without the offline page deploys unchanged", () => {
+    const box = sandbox();
+    configureWeb(box);
+    retarget(
+      box,
+      (origin) => rmSync(join(origin, "ops/offline"), { recursive: true }),
+      "A release before the offline page",
+    );
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    expect(
+      existsSync(join(box.state, "releases", `1234-${box.target.commit}`, "ops/offline")),
+    ).toBe(false);
+    expect(releaseMode(box, "ops/Caddyfile")).toBe(0o644);
+  });
+
+  test("a symlinked offline page is never followed: what it points at keeps its permissions", () => {
+    const box = sandbox();
+    configureWeb(box);
+    const outside = join(box.directory, "outside");
+    mkdirSync(outside, { mode: 0o700 });
+    writeFileSync(join(outside, "private.txt"), "private\n", { mode: 0o600 });
+    chmodSync(outside, 0o700);
+    retarget(
+      box,
+      (origin) => {
+        rmSync(join(origin, "ops/offline"), { recursive: true });
+        symlinkSync(outside, join(origin, "ops/offline"));
+      },
+      "An offline page that is a symlink",
+    );
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    const link = join(box.state, "releases", `1234-${box.target.commit}`, "ops/offline");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(statSync(outside).mode & 0o777).toBe(0o700);
+    expect(statSync(join(outside, "private.txt")).mode & 0o777).toBe(0o600);
   });
 
   test("already-live never becomes web settings reconciliation or proxy bootstrap", () => {

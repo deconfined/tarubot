@@ -1,6 +1,6 @@
 ---
 title: Data and privacy
-description: What TaruBot stores, how it keeps values exact and history intact, what it keeps about self-service role choices, what issue reports and public suggestions carry, and what members see.
+description: What TaruBot stores, how it keeps values exact and history intact, what it keeps about self-service role choices, what the public status page records, what issue reports and public suggestions carry, and what members see.
 sidebar:
   order: 3
 ---
@@ -22,6 +22,7 @@ Everything TaruBot knows lives in one PostgreSQL database per deployment, run by
 | Self-service roles | `self_role_menus` | Each server's role menu as its officers set it up: categories with their names, descriptions, limits and states, and the IDs of the roles on offer, each with a description. Never who picked which role: Discord holds that. |
 | Records | `audit`, `imports`, `issue_reports` | The audit trail, imports from a previous bot, and saved issue reports. |
 | Web sessions | `web_sessions` | Hashed session tokens, Discord user IDs, authentication and activity times, and expiry; never the raw browser token or Discord's OAuth token. |
+| Status page | `status_samples` | One sample every five minutes while TaruBot runs: whether it was ready, the state of its Discord connection, database, Lodestone and Discord changes, and its version. Nothing about a server, member or visitor; deleted after 90 days, apart from the very first ([status page](#status-page)). |
 | Schema | `schema_migrations` | Which migrations were applied, with their checksums. |
 
 The numbered files in [`migrations/`](https://github.com/deconfined/tarubot/tree/main/migrations) define every table, with comments, and are the authority for the schema. The bot refuses to start on a schema it doesn't expect, and an applied migration is never edited: every change is a new file.
@@ -38,7 +39,7 @@ The numbered files in [`migrations/`](https://github.com/deconfined/tarubot/tree
 - Ledger entries are immutable: database triggers refuse updates and deletes, and corrections are new entries that name the entry they correct.
 - Every officer decision, and every other command decision, is written with its **audit** record and its queued Discord work (the **outbox**) in one transaction, on one database connection. Either all three commit, or none does, so no decision is ever made without its record or its follow-up. A member's own choices for themselves are different: a role save on My roles, like the `/main` and `/nickname` preferences, commits only its state and queued work without an audit record, and Discord is the record (owner decision Q4 A; see [Self-service roles](#self-service-roles)).
 
-Expired claim challenges are deleted a week after they expire. Links, grants, rosters, audits, ledger entries, imports and job history are kept, apart from a member's finished role-choice jobs, which TaruBot deletes after 30 days; an operator can prune diagnostic history, but should keep financial and access records.
+Expired claim challenges are deleted a week after they expire. Links, grants, rosters, audits, ledger entries, imports and job history are kept, apart from a member's finished role-choice jobs, which TaruBot deletes after 30 days, and the status page's samples, deleted after 90 days apart from the very first; an operator can prune diagnostic history, but should keep financial and access records.
 
 ## What's stored about a member
 
@@ -66,6 +67,14 @@ When the dashboard is enabled, Discord sign-in asks only for `identify`. TaruBot
 Members and guests see only My roles, where they change only their own roles. Officers also see Server configuration and Background work, which show the admitted server's configuration and work and change nothing, and Role menu, where they change the server's self-service role menu. Member, role and channel names come from that server's gateway cache at render time, not a new stored directory. On Server configuration and Role menu, officers can see the name of any channel TaruBot can see when a check names it or a menu role opens it, including channels their own Discord roles don't open: each menu role's **Opens:** list is how they check the officer-channel heuristic. Application request logs use route patterns and reference IDs, not queries, cookies, form values or client addresses. The limits on how many forms someone can send and how often they can sign in are counted in memory by Discord user ID, never by address, and a restart forgets them. The caps that keep sign-ins from overloading TaruBot's connection to Discord count sign-ins across everyone (how many start each minute and how many run at once), not people.
 
 TaruBot serves the dashboard's stylesheet, fonts and icons itself, from the dashboard's own address. The pages' content security policy admits nothing from another site, so the browser makes no requests to Google Fonts or any other third party while showing them. No client scripts are loaded. If fonts cannot load, local system fonts remain usable.
+
+## Status page
+
+Once the dashboard is on, anyone can open its [status page](/tarubot/deploy/monitoring/#public-status-page), `/status`, without signing in. It shows whether TaruBot is working now and its daily uptime over the last 90 days, and nothing about any server or person: no server names, no counts of servers or members.
+
+- **What's recorded.** Every five minutes while it runs, TaruBot stores one sample: whether it was ready, whether its Discord connection and database were up, whether the Lodestone was answering, whether Discord changes were live, and its version. Samples are deleted after 90 days, apart from the very first, which TaruBot keeps to know when its history began.
+- **Visitors.** The page needs no sign-in and sets no cookie. TaruBot stores nothing about who opens it; the request log records the route, status and timing as for every page, never an address. Its visit limit counts every visitor together.
+- **When TaruBot is down,** a deployment with bundled Caddy shows a static offline page in its place. Caddy keeps no access log.
 
 ## Issue reports
 

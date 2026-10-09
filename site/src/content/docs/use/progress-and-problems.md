@@ -1,6 +1,6 @@
 ---
 title: Progress and problems
-description: Check background work, refresh your roles, and report a problem.
+description: Check background work, refresh your roles, see whether TaruBot is up, and report a problem.
 sidebar:
   order: 7
 ---
@@ -23,6 +23,15 @@ TaruBot checks the FC's roster on a schedule, and rechecks roles whenever someth
 - when the roster is recent, it rechecks roles against the roster it has.
 
 The reply gives a run ID. Follow it with `/sync status run_id:<the ID>`. Officers can add `force:true` to read the roster even when it's recent. Refreshes are rate-limited, so running `/refresh` repeatedly doesn't make it faster.
+
+## Is TaruBot up?
+
+If TaruBot stops answering commands, its status page tells you whether it's working and how it has done lately. Where your server runs the TaruBot dashboard, it's the dashboard's address followed by `/status` (every dashboard page links it at the bottom), and you don't need to sign in.
+
+- **Operational**, **Degraded** or **Down** right now, with the Discord connection, the database, the Lodestone and whether Discord changes are live, each on its own line. Degraded means TaruBot works but some of its work is waiting: character checks, while the Lodestone doesn't answer. "Paused by a setting" beside Discord changes means they haven't been turned on yet, for your server or the whole deployment: a choice, not a fault, so it doesn't change the headline.
+- **The last 90 days**, one bar per day, shorter the more of the day TaruBot was down, with those days listed underneath. A restart of a minute or two may not show: TaruBot checks itself every five minutes.
+
+While TaruBot is restarting, for an update say, the dashboard shows a short "TaruBot is offline right now" page instead, and its commands in Discord don't answer; try again in a minute or two. If even that page doesn't load, tell an officer.
 
 ## Other utilities
 

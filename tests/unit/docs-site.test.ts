@@ -483,6 +483,18 @@ describe("the site's links and public content", () => {
     expect(problems).toEqual([]);
   });
 
+  test("bundled Caddy's offline page is public content too: placeholders only (2.41.0)", async () => {
+    const files: string[] = [];
+    for await (const path of new Bun.Glob("**/*.{html,css,txt,svg}").scan({
+      cwd: root("ops/offline"),
+    }))
+      files.push(`ops/offline/${path}`);
+    expect(files).toContain("ops/offline/index.html");
+    const problems: string[] = [];
+    for (const file of files) problems.push(...publicProblems(file, await read(file)));
+    expect(problems).toEqual([]);
+  });
+
   test("the README carries no Discord invite or authorization URL either", async () => {
     // The README is public too, and its "Run a server" line points at add-to-server.
     const readme = await read("README.md");

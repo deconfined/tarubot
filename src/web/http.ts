@@ -67,7 +67,15 @@ export const PATHS = {
   /** "Sign out everywhere": deletes every session of the signed-in user. */
   logoutAll: "/logout/all",
   ready: "/health/ready",
+  /** The public status page (2.41.0): anyone, no session, from a cached snapshot. */
+  status: "/status",
 } as const;
+
+/**
+ * The status page's caching: public, since it holds nothing personal and sets no cookie, and short,
+ * since its snapshot is refreshed every minute.
+ */
+export const STATUS_CACHE_CONTROL = "public, max-age=30";
 
 /**
  * The server list itself: / with this marker always lists the user's servers, skipping the

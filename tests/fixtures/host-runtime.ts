@@ -148,6 +148,8 @@ export function hostSandbox(
       );
     cpSync(join(repository, "docker-compose.web.yml"), join(path, "docker-compose.web.yml"));
     cpSync(join(repository, "ops/Caddyfile"), join(path, "ops/Caddyfile"));
+    // The offline page bundled Caddy mounts (2.41.0), so Compose never creates the directory.
+    cpSync(join(repository, "ops/offline"), join(path, "ops/offline"), { recursive: true });
     writeFileSync(join(path, "ops/age-recipients.txt"), "age1testrecipient\n");
   };
   if (releases) {

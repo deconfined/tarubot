@@ -1,16 +1,16 @@
 /**
  * The page shell (#43, ADR E12): `lang="en"`, the viewport, the dark color scheme, the hashed
  * stylesheet and favicon, one `<h1>`, the server navigation, the sign-out forms and a footer with
- * the version, the source and license links (AGPL-3.0 §13) and the third-party licenses (the
- * fonts' and icons' notices). Pure: it renders what it is given and reads no state.
+ * the version, the status page, the source and license links (AGPL-3.0 §13) and the third-party
+ * licenses (the fonts' and icons' notices). Pure: it renders what it is given and reads no state.
  *
  * Two frames, styled by styles/shell.ts and styles/entry.ts:
  * - a server page is a console: a sidebar with the wordmark, the server switcher (a link back to
  *   the server list, and the only place the server's name appears), the page navigation and the
  *   account menu, beside a top bar and the page. From 64rem the sidebar is a fixed column; below,
  *   it is a sticky bar with the navigation as a strip under it.
- * - every other page (sign-in, the server list, "no access", errors) is an entry page on the
- *   starfield, under a plain bar with the wordmark and, when signed in, the account menu. The
+ * - every other page (sign-in, the server list, "no access", errors, the public status page) is an
+ *   entry page on the starfield, under a plain bar with the wordmark and, when signed in, the account menu. The
  *   sign-in page has no bar: its heading is the wordmark.
  *
  * Markup rules every page inherits (tests/unit/web-pages.test.ts checks the rendered output): no
@@ -207,8 +207,12 @@ const BACKDROP = html`<div class="orr-starfield entry-backdrop" aria-hidden="tru
 /** ` inert` on the shell's own parts while the main content draws a form open (LayoutFrame.modal). */
 const shut = (model: LayoutModel): SafeHtml | "" => (model.modal ? html` inert` : "");
 
+/**
+ * Every page's footer: the version, the public status page (2.41.0), the source and license links
+ * (AGPL-3.0 §13) and the third-party licenses.
+ */
 const footer = (model: LayoutModel): SafeHtml => html`<footer class="site-footer"${shut(model)}>
-<p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a> · <a href="${NOTICES.path}">Third-party licenses</a></p>
+<p>${BRAND} ${project.version} · <a href="${PATHS.status}">Status</a> · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a> · <a href="${NOTICES.path}">Third-party licenses</a></p>
 </footer>`;
 
 /** The skip link, first in the body. */

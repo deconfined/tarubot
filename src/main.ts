@@ -10,6 +10,7 @@ import {
   guildEventsKey,
   issueReportsKey,
   lifecycleKey,
+  publicStatusKey,
   synchronizationKey,
   roleAdministrationKey,
   selfRolesKey,
@@ -19,6 +20,11 @@ import {
 import { Heartbeat } from "./application/heartbeat.js";
 import { IssueReports } from "./application/issue-reports.js";
 import { ApplicationLifecycle } from "./application/lifecycle.js";
+import {
+  changesPausedAnywhere,
+  PgStatusSamples,
+  PublicStatus,
+} from "./application/public-status.js";
 import { RecentLogs } from "./application/recent-logs.js";
 import { createReporter, type Reporter } from "./application/reporting.js";
 import { SelfRoles } from "./application/self-roles.js";
@@ -143,10 +149,29 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
   // A /suggest post still at GitHub finishes, and records its row, before the lease is released;
   // a /setup overrides run stops and writes its audit row (2.35.0); the web stops listening, and
   // connections still open after 5 s are closed (their handlers aren't cancelled, like in-flight
-  // slash commands). None ever rejects.
+  // slash commands); the status page's timer stops, and a sample being written finishes (2.41.0).
+  // None ever rejects.
   drain: () =>
-    Promise.all([suggestions.drain(), roleAdministration.drain(), web?.stop()]).then(() => {}),
+    Promise.all([
+      suggestions.drain(),
+      roleAdministration.drain(),
+      web?.stop(),
+      publicStatus.stop(),
+    ]).then(() => {}),
 });
+// The public status page (2.41.0): a snapshot refreshed every minute from readiness, the Lodestone
+// client and one query, plus a sample every five minutes for its 90-day history. Started once
+// TaruBot is ready; /status reads only the snapshot.
+const publicStatus = new PublicStatus(
+  {
+    readiness: () => lifecycle.status(),
+    lodestoneFailing: () => lodestone.reachability().failingSince !== null,
+    changesPaused: () =>
+      changesPausedAnywhere(db, config.ENABLE_EFFECTS, (guildId) => lifecycle.allowsGuild(guildId)),
+    samples: new PgStatusSamples(db),
+  },
+  { report },
+);
 reports.useStatus(() => lifecycle.status());
 heartbeat.useStatus(() => lifecycle.status());
 const services = new Services()
@@ -161,7 +186,8 @@ const services = new Services()
   .provide(suggestionsKey, suggestions)
   // The Role menu's edits (2.39.0) refuse once shutdown starts and roll back if it starts mid-edit.
   .provide(selfRolesKey, new SelfRoles(app, () => lifecycle.isStopping()))
-  .provide(lifecycleKey, lifecycle);
+  .provide(lifecycleKey, lifecycle)
+  .provide(publicStatusKey, publicStatus);
 const context: BotContext = {
   client: gateway.client,
   services,
@@ -203,6 +229,9 @@ try {
   await lifecycle.stop();
   throw error;
 }
+// The writer lease is held and Discord is ready: sample from now on, web or no web, so the history
+// is complete when the page is turned on. Never rejects.
+publicStatus.start();
 // Never rejects: with WEB_PUBLIC_ORIGIN unset it returns null and nothing listens, and a web fault
 // is reported and leaves the bot running.
 web = await startWeb(

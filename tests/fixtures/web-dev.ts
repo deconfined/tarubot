@@ -60,6 +60,18 @@
  *   SelfRoles.edit would, so forms can be tried end to end. Server configuration's "Role menu"
  *   check reads the same copy. Second FC, where nobody is an officer, has a menu of its own with a
  *   pick-one category (Main role), whose radios the member sees with two of its roles held.
+ * - --state-history=incidents|new: the public status page's 90-day history (2.41.0). incidents has
+ *   seven bad stretches: six hours not running 61 days ago, 45 minutes running without Discord 33
+ *   days ago, a 20-minute host restart 18 days ago, short deploys of 5 and 10 minutes 12 and 3
+ *   days ago (the second also moves the version from 2.40.0 to 2.41.0 that day), a 5-minute
+ *   reconnect yesterday and 15 minutes down just after midnight UTC today. new has samples only
+ *   since 18:00 UTC yesterday, so the other days show no data. Without it, 90 whole days.
+ * The status page's components follow the other flags: --state-checks=fail is Down (Discord not
+ *   connected, the Lodestone unanswered), --state-cooling and --state-checks=warn cool the
+ *   Lodestone down, and --state-activation or --state-deploy-disabled pause Discord changes (on
+ *   their tile only: a setting leaves the headline Operational). Its snapshot is real
+ *   (PublicStatus over these sources and an in-memory store), so the first tick writes the current
+ *   bucket's sample as production would.
  * My roles (2.40.0) reads the same menus. Each account holds a few invented menu roles (HELD), and
  *   a save runs the real rules (SelfRoles.choose's), then a fake worker applies it about two
  *   seconds later, as the roles.self job would (planSelfRoles, every role checked again), so a
@@ -89,9 +101,11 @@ import {
   applicationKey,
   gatewayKey,
   lifecycleKey,
+  publicStatusKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
+import { PublicStatus } from "../../src/application/public-status.js";
 import { createReporter } from "../../src/application/reporting.js";
 import type {
   ConfigurationReport,
@@ -153,6 +167,12 @@ import type { WebGuild } from "../../src/web/access.js";
 import { startWeb, type WebOptions, type WebServer } from "../../src/web/server.js";
 import { type DiscordAccount, FakeDiscord } from "./discord-oauth.js";
 import { MemorySessions } from "./web-sessions.js";
+import {
+  fillHistory,
+  HARNESS_HISTORIES,
+  type HarnessHistory,
+  MemoryStatusSamples,
+} from "./status-samples.js";
 import {
   CHANNEL,
   configGuild,
@@ -222,6 +242,8 @@ export interface HarnessStates {
   readonly menuUnreadable?: boolean;
   /** --state-roles: everyone's newest role change on My roles is in this state. */
   readonly roles?: HarnessRolesState;
+  /** --state-history: the status page's invented 90-day history. */
+  readonly history?: HarnessHistory;
 }
 
 /** --state-roles' values, each a banner My roles shows. */
@@ -1468,7 +1490,7 @@ export function harnessSelfRoles(
  * The dashboard's services, answered with the existing invented configuration fixtures, and the
  * in-memory SelfRoles of Role menu and My roles.
  */
-function harnessServices(states: HarnessStates): Services {
+function harnessServices(states: HarnessStates, statusNow: () => Date): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
   // One saved menu per server for Role menu, My roles and the health check on Server
@@ -1511,7 +1533,36 @@ function harnessServices(states: HarnessStates): Services {
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway(states))
-    .provide(selfRolesKey, harnessSelfRoles(states, menus, harnessPeople()));
+    .provide(selfRolesKey, harnessSelfRoles(states, menus, harnessPeople()))
+    .provide(
+      publicStatusKey,
+      harnessStatus(states, () => lifecycle.status(), statusNow),
+    );
+}
+
+/**
+ * The status page's PublicStatus (2.41.0) over the harness's state: readiness from the lifecycle
+ * fake, the Lodestone unanswered under --state-checks=fail, Discord changes paused whenever the
+ * effects mode isn't live, and an in-memory store filled with --state-history's history up to
+ * `now`, its clock (the wall clock by default). Not started: startHarness starts it before the
+ * web, as main.ts does, and stops it with the web.
+ */
+export function harnessStatus(
+  states: HarnessStates = {},
+  readiness: () => ReturnType<ApplicationLifecycle["status"]>,
+  now: () => Date = () => new Date(),
+  samples: MemoryStatusSamples = new MemoryStatusSamples(),
+): PublicStatus {
+  fillHistory(samples, now(), states.history);
+  return new PublicStatus(
+    {
+      readiness,
+      lodestoneFailing: () => states.checks === "fail",
+      changesPaused: async () => harnessEffects(states) !== "live",
+      samples,
+    },
+    { now },
+  );
 }
 
 /**
@@ -1573,6 +1624,11 @@ async function freeOrigin(hostname: string, tls: WebOptions["tls"]): Promise<str
 export type HarnessOptions = Pick<WebOptions, "hostname" | "tls" | "port"> & {
   readonly publicOrigin?: string;
   readonly states?: HarnessStates;
+  /**
+   * The status page's clock (2.41.0), for its invented history and its snapshots; the wall clock
+   * by default. Tests pin it so what the page shows doesn't depend on the time of day.
+   */
+  readonly statusNow?: () => Date;
 };
 
 /** Default loopback harness; a public origin and private port also exercise real reverse proxies. */
@@ -1594,6 +1650,9 @@ export async function startHarness(
     fetch: authorizePage(discord, `${new URL(origin).origin}/auth/callback`),
   });
   const reporter = createReporter(log);
+  const services = harnessServices(states, options.statusNow ?? (() => new Date()));
+  const status = services.get(publicStatusKey);
+  status.start();
   let web: WebServer | null = null;
   try {
     web = await startWeb(
@@ -1604,7 +1663,7 @@ export async function startHarness(
         DISCORD_APPLICATION_ID: HARNESS_CLIENT_ID,
       },
       {
-        services: harnessServices(states),
+        services,
         allowsGuild: () => true,
         isStopping: () => false,
         resolveActor: actorResolver(states),
@@ -1622,7 +1681,10 @@ export async function startHarness(
       },
     );
   } finally {
-    if (!web) await authorize.stop(true);
+    if (!web) {
+      await status.stop();
+      await authorize.stop(true);
+    }
   }
   if (!web) throw new Error("The web didn't start; see the reported problem above");
   const running = web;
@@ -1631,6 +1693,7 @@ export async function startHarness(
     authorizeUrl: new URL("/oauth2/authorize", authorize.url),
     stop: async () => {
       await running.stop();
+      await status.stop();
       await authorize.stop(true).catch(() => {});
     },
   };
@@ -1655,6 +1718,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       "state-menu-problems": { type: "boolean", default: false },
       "state-menu-unreadable": { type: "boolean", default: false },
       "state-roles": { type: "string" },
+      "state-history": { type: "string" },
     },
     allowPositionals: false,
   });
@@ -1667,6 +1731,10 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
   const rolesState = HARNESS_ROLES_STATES.find((state) => state === roles);
   if (roles !== undefined && rolesState === undefined)
     throw new Error("Pass --state-roles=queued, blocked, failed, skipped or expired.");
+  const history = values["state-history"];
+  const historyState = HARNESS_HISTORIES.find((state) => state === history);
+  if (history !== undefined && historyState === undefined)
+    throw new Error("Pass --state-history=incidents or --state-history=new.");
   const tls =
     values.cert && values.key
       ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
@@ -1686,6 +1754,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       ...(values["state-menu-problems"] && { menuProblems: true }),
       ...(values["state-menu-unreadable"] && { menuUnreadable: true }),
       ...(rolesState && { roles: rolesState }),
+      ...(historyState && { history: historyState }),
     },
   };
 }
@@ -1708,6 +1777,7 @@ if (import.meta.main) {
     menuProblems: "--state-menu-problems",
     menuUnreadable: "--state-menu-unreadable",
     roles: "--state-roles",
+    history: "--state-history",
   } as const satisfies Record<keyof HarnessStates, string>;
   const states = Object.entries(options.states ?? {}).map(([state, value]) => {
     const flag = flags[state as keyof HarnessStates];

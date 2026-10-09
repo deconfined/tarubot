@@ -20,7 +20,7 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
-The native Caddy regressions exercise an accepted trailing-slash origin through trusted local HTTPS, fake Discord login and protected dashboard routes, plus managed deployment validation from a private Git worktree:
+The native Caddy regressions exercise an accepted trailing-slash origin through trusted local HTTPS, fake Discord login and protected dashboard routes, then the offline page once the harness stops (2.41.0: whole for any method and for conditional or range requests, with dotfiles hidden), plus managed deployment validation from a private Git worktree, whose offline page Caddy must be able to read:
 
 ```sh
 image=$(POSTGRES_PASSWORD=fixture-only docker compose --env-file /dev/null --profile web config --format json | jq -r '.services.caddy.image')

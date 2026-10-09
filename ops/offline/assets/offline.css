@@ -1,0 +1,276 @@
+/*
+ * TaruBot's offline page (ops/offline/index.html), on the design tokens in tokens.css, a copy of
+ * site/src/styles/tokens.css that tests/unit/web-parity.test.ts keeps identical. The dashboard's
+ * entry pages in miniature: the starfield, a plain bar with the wordmark, one glass card and the
+ * footer. No script, nothing animated under reduced motion, and only this page's own files.
+ */
+
+/* Fonts: SIL Open Font License 1.1, notices in third-party-licenses.txt beside this file. */
+@font-face {
+  font-family: "Sora";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/_offline/sora-latin-wght-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/_offline/manrope-latin-wght-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("/_offline/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  background: var(--bg-app);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-width: 320px;
+  min-height: 100dvh;
+  margin: 0;
+  color: var(--text-primary);
+  font: var(--type-body);
+  letter-spacing: var(--tracking-ui);
+  overflow-wrap: anywhere;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+p,
+ul {
+  margin: 0;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--text-link-hover);
+  text-decoration-color: currentColor;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* The starfield, fixed behind the page: two nebula washes and a scatter of stars. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--bg-void);
+  background-image:
+    var(--nebula-cyan),
+    var(--nebula-violet),
+    radial-gradient(1px 1px at 177px 129px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+    radial-gradient(1.2px 1.2px at 202px 461px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+    radial-gradient(1.2px 1.2px at 420px 390px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+    radial-gradient(1.2px 1.2px at 229px 434px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+    radial-gradient(1.2px 1.2px at 419px 287px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+    radial-gradient(1.2px 1.2px at 75px 315px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+    radial-gradient(1.2px 1.2px at 94px 182px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+    radial-gradient(1px 1px at 575px 342px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+    radial-gradient(1px 1px at 316px 101px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+    radial-gradient(1.8px 1.8px at 757px 557px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+    radial-gradient(1.8px 1.8px at 443px 604px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+    radial-gradient(1.8px 1.8px at 621px 220px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+    radial-gradient(1.8px 1.8px at 97px 718px, oklch(0.97 0.01 280 / 0.8), transparent 70%),
+    radial-gradient(1.8px 1.8px at 555px 127px, oklch(0.93 0.05 210 / 0.85), transparent 70%);
+  background-size:
+    100% 100%,
+    100% 100%,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    613px 613px,
+    877px 877px,
+    877px 877px,
+    877px 877px,
+    877px 877px,
+    877px 877px;
+}
+
+/* The bar: the type-only wordmark, home, over a hairline. */
+.bar {
+  display: flex;
+  align-items: center;
+  min-height: calc(var(--control-md) + 29px);
+  padding: 14px var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wordmark {
+  color: var(--text-primary);
+  font: 600 1.125rem / 1 var(--font-display);
+  font-synthesis: none;
+  letter-spacing: var(--tracking-title);
+  text-decoration: none;
+}
+
+.wordmark:hover {
+  color: var(--text-primary);
+}
+
+/* The page: one card, centered on the screen when the page is shorter than it. */
+.offline {
+  display: grid;
+  flex: 1 0 auto;
+  place-items: center;
+  padding: var(--space-8) var(--space-4) var(--space-12);
+}
+
+.card {
+  display: grid;
+  gap: var(--space-4);
+  width: min(40rem, 100%);
+  padding: var(--space-6) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 0 0 1px var(--glass-border),
+    var(--glass-edge),
+    var(--shadow-2);
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--warning);
+  font: var(--type-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.title {
+  font: 600 clamp(1.75rem, 6vw, 2.5rem) / 1.1 var(--font-display);
+  font-synthesis: none;
+  letter-spacing: var(--tracking-display);
+  text-wrap: balance;
+}
+
+.lead {
+  color: var(--text-secondary);
+  font: var(--type-body-lg);
+  text-wrap: pretty;
+}
+
+/* What to do next: a mono label beside (or, narrow, over) a sentence, rows under hairlines. */
+.next {
+  display: grid;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.next > li {
+  display: grid;
+  gap: 4px var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.next__label {
+  color: var(--text-muted);
+  font: var(--type-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.next__text {
+  color: var(--text-secondary);
+}
+
+.footer {
+  padding: var(--space-5) var(--space-4) var(--space-6);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+@media (min-width: 40rem) {
+  .bar {
+    padding-inline: var(--gutter);
+  }
+  .card {
+    padding: var(--space-8);
+  }
+  .next > li {
+    grid-template-columns: 7rem minmax(0, 1fr);
+    align-items: baseline;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    background: var(--surface-2);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .card {
+    border: 1px solid CanvasText;
+  }
+  .backdrop {
+    display: none;
+  }
+}

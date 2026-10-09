@@ -26,7 +26,7 @@ export function orm(connection: Connection): Orm {
   return instance;
 }
 /** The newest migration this build requires; startup and tools refuse any other applied head. */
-export const SCHEMA_VERSION = "012_self_roles.sql";
+export const SCHEMA_VERSION = "013_status_samples.sql";
 /** Numbered migration filenames, as stored in schema_migrations.version. */
 export const MIGRATION_FILE = /^\d{3}_[a-z0-9_]+\.sql$/;
 

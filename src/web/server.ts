@@ -2,7 +2,7 @@
  * The web listener (#43, ADR D1, D14): a second Bun.serve in the bot process, started by main.ts
  * once the writer lease is held and Discord is ready, and stopped in the shutdown drain before the
  * gateway closes and the lease is released. It is a Hono app with the fixed routes (/, sign-in,
- * sign-out, health and assets) and the discovered pages under /g/:guild/. Web faults never stop
+ * sign-out, health, the public status page and assets) and the discovered pages under /g/:guild/. Web faults never stop
  * the bot: bad settings, a broken page module or a failed bind are reported and leave the web off.
  */
 import type { Server, TLSOptions } from "bun";
@@ -11,7 +11,8 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { routePath } from "hono/route";
 import type { Logger } from "pino";
-import { databaseKey, lifecycleKey } from "../application/keys.js";
+import { databaseKey, lifecycleKey, publicStatusKey } from "../application/keys.js";
+import type { StatusSnapshot } from "../application/public-status.js";
 import type { BotContext } from "../bot/context.js";
 import type { ServiceKey, Services } from "../bot/services.js";
 import { Failure, idSchema } from "../domain/values.js";
@@ -39,6 +40,7 @@ import {
   securityHeaderRecord,
   SERVER_LIST_PARAM,
   securityHeaders,
+  STATUS_CACHE_CONTROL,
   type WebEnv,
   writeCookie,
 } from "./http.js";
@@ -49,6 +51,9 @@ import {
   RateLimiter,
   SIGN_IN_LIMIT,
   SIGN_IN_WINDOW_MS,
+  STATUS_LIMIT,
+  STATUS_WINDOW_MS,
+  statusBusy,
   stoppingRefusal,
   tooManySignIns,
 } from "./limits.js";
@@ -64,6 +69,7 @@ import {
   type SessionStore,
 } from "./sessions.js";
 import { type WebSettings, type WebSettingsInput, webSettings } from "./settings.js";
+import { renderPublicStatus, STATUS_TITLE } from "./views/public-status.js";
 import { renderHome, renderNoAccess, type ServerLink } from "./views/servers.js";
 
 /** Bun's request-body cap; hono/body-limit applies the same 64 KiB inside the app. */
@@ -215,6 +221,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   const app = new Hono<WebEnv>();
   /** Finished sign-ins per Discord user (2.40.0); the callback counts them before admission. */
   const signIns = new RateLimiter(SIGN_IN_LIMIT, SIGN_IN_WINDOW_MS, now);
+  /** Requests to the public status page, across everyone (2.41.0): one key, nothing personal. */
+  const statusBudget = new RateLimiter(STATUS_LIMIT, STATUS_WINDOW_MS, now);
 
   /**
    * The registered pattern ("/g/:guild/status"), never the path itself: paths carry server IDs and
@@ -290,9 +298,11 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     };
     // Scanners' 404s and 405s stay at debug, out of the capped production log; other refusals are
     // worth a line at info. A 5xx is at debug too: a fault already went through the reporter, and
-    // the readiness probe's 503 isn't one.
-    if (status >= 400 && status < 500 && status !== 404 && status !== 405)
-      log.info(fields, "Web request");
+    // the readiness probe's 503 isn't one. So is the status page's 429: a flood of anonymous
+    // requests must not flood the log either, and the route logs the budget running out once.
+    const quiet =
+      status === 404 || status === 405 || (status === 429 && fields.route === PATHS.status);
+    if (status >= 400 && status < 500 && !quiet) log.info(fields, "Web request");
     else log.debug(fields, "Web request");
   });
   // 3. The body cap, as Bun's own. On the listener Bun's maxRequestBodySize answers an over-cap
@@ -337,6 +347,46 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     return c.json({ ready }, ready ? 200 : 503, { "Cache-Control": "no-store" });
   });
   allow(PATHS.ready, GET_ONLY);
+
+  /**
+   * The public status page (2.41.0, owner decisions of 2026-10-09; THREAT_MODEL W1's anonymous
+   * pages). Anyone may open it, and it does as little as a page can:
+   * - no session middleware, so the cookie isn't even read, and no form, so it sets no cookie;
+   * - one global budget (STATUS_LIMIT a minute, keyed by nothing personal) refuses a flood with a
+   *   429 and Retry-After before anything else, logged once per run of refusals;
+   * - the content comes from PublicStatus's snapshot in memory, which a timer refreshes every
+   *   minute, and is rendered once per snapshot: a visit makes no database query or Discord
+   *   request, and usually renders nothing;
+   * - it takes no input: the query string is never read.
+   * The layout is the signed-out one, so nothing on it depends on who is asking, and the answer may
+   * be cached publicly for 30 seconds.
+   */
+  let rendered: { readonly snapshot: StatusSnapshot; readonly body: string } | undefined;
+  let refusing = false;
+  app.get(PATHS.status, async (c) => {
+    const wait = statusBudget.take("status");
+    if (wait > 0) {
+      if (!refusing) log.info({ retryAfter: wait }, "Status page budget spent; refusing for now");
+      refusing = true;
+      throw statusBusy(wait);
+    }
+    refusing = false;
+    const snapshot = context.services.get(publicStatusKey).snapshot();
+    // Only before PublicStatus.start(), which main.ts calls before the web starts: a 503 at warn,
+    // never an issue report.
+    if (!snapshot)
+      throw new Failure(
+        "unavailable",
+        "TaruBot's status isn't ready yet.",
+        STATUS_WINDOW_MS / 1000,
+      );
+    if (rendered?.snapshot !== snapshot) {
+      const body = layout({ title: STATUS_TITLE, signedIn: false }, renderPublicStatus(snapshot));
+      rendered = { snapshot, body: String(await body) };
+    }
+    return c.html(rendered.body, 200, { "Cache-Control": STATUS_CACHE_CONTROL });
+  });
+  allow(PATHS.status, GET_ONLY);
 
   /**
    * A sign-in link for visitors; the servers a signed-in user may open (D17), memoized like any
@@ -647,7 +697,7 @@ export async function startWeb(
     try {
       pages = await loadPages(options.pagesDirectory);
       // Like modules' requires at startup: a page whose services are missing keeps the web off.
-      const required: ServiceKey<unknown>[] = [lifecycleKey];
+      const required: ServiceKey<unknown>[] = [lifecycleKey, publicStatusKey];
       if (!options.sessions) required.push(databaseKey);
       for (const definition of pages.values()) required.push(...definition.requires);
       context.services.require(required);

@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  TaruBot's offline page (2.41.0). Bundled Caddy (ops/Caddyfile) answers with it, as a 503 that is
+  never cached, only when it gets no complete answer from the bot: stopped, restarting, crashed,
+  or the connection dropped (as for a request body over 64 KiB). Static, with no script and no
+  request beyond its own files under /_offline/, which Caddy serves from the same read-only mount
+  (ops/offline/assets). Keep it free of private data: it is public.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>TaruBot is offline</title>
+<link rel="icon" href="/_offline/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/_offline/tokens.css">
+<link rel="stylesheet" href="/_offline/offline.css">
+</head>
+<body>
+<div class="backdrop" aria-hidden="true"></div>
+<header class="bar"><a class="wordmark" href="/">TaruBot</a></header>
+<main class="offline">
+<section class="card" aria-labelledby="offline-title">
+<p class="label"><span class="dot" aria-hidden="true"></span>Offline</p>
+<h1 class="title" id="offline-title">TaruBot is offline right now</h1>
+<p class="lead">It may be restarting after an update; that usually takes a minute or two. Until it's back, its commands in Discord won't answer. Discord itself keeps working, and TaruBot picks up its waiting work when it returns.</p>
+<ul class="next">
+<li><span class="next__label">Try again</span><span class="next__text">Reload this page in a minute or two, or go to <a href="/">the start page</a>.</span></li>
+<li><span class="next__label">Status</span><span class="next__text"><a href="/status">TaruBot's status page</a> runs inside TaruBot, so it returns with it. Its uptime history shows longer outages; a short restart can fall between its five-minute checks.</span></li>
+<li><span class="next__label">Guides</span><span class="next__text"><a href="https://deconfined.github.io/tarubot/">The documentation site</a> is hosted separately and stays up.</span></li>
+</ul>
+</section>
+</main>
+<footer class="footer"><p>TaruBot · <a href="https://github.com/deconfined/tarubot">Source code</a> · <a href="https://github.com/deconfined/tarubot/blob/main/LICENSE">License (AGPL-3.0-only)</a> · <a href="/_offline/third-party-licenses.txt">Third-party licenses</a></p></footer>
+</body>
+</html>

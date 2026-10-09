@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { configurationChecks } from "../../src/discord/presenters/configuration.js";
+import { HARNESS_HISTORIES } from "../fixtures/status-samples.js";
 import {
   HARNESS_GUILDS,
   HARNESS_MENU,
@@ -68,6 +69,8 @@ describe("harnessOptions", () => {
     expect(harnessOptions(["--state-checks", "warn"]).states).toEqual({ checks: "warn" });
     for (const roles of HARNESS_ROLES_STATES)
       expect(harnessOptions([`--state-roles=${roles}`]).states).toEqual({ roles });
+    for (const history of HARNESS_HISTORIES)
+      expect(harnessOptions([`--state-history=${history}`]).states).toEqual({ history });
   });
 
   test("refuses an unknown check level, a misspelt flag and a lone --cert", () => {
@@ -77,6 +80,9 @@ describe("harnessOptions", () => {
     expect(() => harnessOptions(["--state-cooldown"])).toThrow();
     expect(() => harnessOptions(["--state-roles=applied"])).toThrow(
       "Pass --state-roles=queued, blocked, failed, skipped or expired.",
+    );
+    expect(() => harnessOptions(["--state-history=outage"])).toThrow(
+      "Pass --state-history=incidents or --state-history=new.",
     );
     expect(() => harnessOptions(["--cert", "cert.pem"])).toThrow("Pass --cert and --key together.");
   });
@@ -433,5 +439,79 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
       expect(page(path).querySelectorAll("script")).toHaveLength(0);
       expect(page(path).querySelectorAll("main img, main b, main i")).toHaveLength(0);
     }
+  });
+});
+
+describe.skipIf(!ipv6Loopback)("the public status page's review states (2.41.0)", () => {
+  /** An invented instant the status page's clock stays at, so nothing here hangs on the time of day. */
+  const NOW = new Date("2026-10-09T12:34:56Z");
+
+  /** /status as anyone sees it, no sign-in, from a harness started with `states`. */
+  async function statusPage(states: HarnessStates): Promise<Page> {
+    const harness = await startHarness({ states, statusNow: () => NOW });
+    try {
+      const response = await fetch(new URL("/status", harness.url));
+      expect(response.status).toBe(200);
+      expect(response.headers.getSetCookie()).toEqual([]);
+      return parseHTML(await response.text()).document;
+    } finally {
+      await harness.stop();
+    }
+  }
+  const overall = (page: Page) => page.querySelector("#status-overall")?.textContent;
+  const checks = (page: Page) =>
+    [...page.querySelectorAll(".status-component .check")].map((check) => check.textContent);
+
+  test("without a state: operational, and 90 whole days", async () => {
+    const page = await statusPage({});
+    expect(overall(page)).toBe("Operational");
+    expect(checks(page)).toEqual(["[OK]", "[OK]", "[OK]", "[OK]"]);
+    expect(page.querySelector(".uptime__summary")?.textContent).toBe(
+      "Uptime over the last 90 days: 100%. Every day was at 100%.",
+    );
+    expect(page.querySelectorAll(".uptime-bars .uptime-bar--full")).toHaveLength(90);
+    expect(page.querySelectorAll(".uptime-days")).toHaveLength(0);
+  });
+
+  test("--state-history=incidents: seven days below 100%, one of them across a version change", async () => {
+    const page = await statusPage({ history: "incidents" });
+    const rows = [...page.querySelectorAll(".uptime-table tbody tr")].map((row) =>
+      [...row.children].map((cell) => cell.textContent),
+    );
+    expect(page.querySelector(".uptime-days > summary")?.textContent).toBe("Days below 100% (7)");
+    // Newest first: today's 15 minutes after midnight, then each stretch the history invents.
+    expect(rows.map((row) => [row[0], row[2]])).toEqual([
+      ["2026-10-09", "15 min"],
+      ["2026-10-08", "5 min"],
+      ["2026-10-06", "10 min"],
+      ["2026-09-27", "5 min"],
+      ["2026-09-21", "20 min"],
+      ["2026-09-06", "45 min"],
+      ["2026-08-09", "6 h"],
+    ]);
+    expect(rows[2]?.[3]).toBe("2.40.0, 2.41.0");
+    for (const band of ["full", "high", "mid", "low"])
+      expect(page.querySelectorAll(`.uptime-bars .uptime-bar--${band}`).length).toBeGreaterThan(0);
+    expect(page.querySelector(".status-facts time")?.getAttribute("datetime")).toBe(
+      NOW.toISOString(),
+    );
+  });
+
+  test("--state-history=new: no data before yesterday evening", async () => {
+    const page = await statusPage({ history: "new" });
+    expect(page.querySelectorAll(".uptime-bars .uptime-bar--none")).toHaveLength(88);
+    expect(page.querySelector(".uptime__summary")?.textContent).toBe(
+      "Uptime since 2026-10-08 (UTC): 100%. Every day was at 100%.",
+    );
+  });
+
+  test("the components follow the other flags: fail is down, a pause stays on its tile", async () => {
+    const failing = await statusPage({ checks: "fail" });
+    expect(overall(failing)).toBe("Down");
+    expect(checks(failing)).toEqual(["[FAIL]", "[OK]", "[FAIL]", "[OK]"]);
+    // Cooling down and paused changes are both routine: the headline stays Operational.
+    const paused = await statusPage({ activation: true, cooling: true });
+    expect(overall(paused)).toBe("Operational");
+    expect(checks(paused)).toEqual(["[OK]", "[OK]", "[WAIT]", "[WAIT]"]);
   });
 });
