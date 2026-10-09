@@ -56,6 +56,13 @@ interface LayoutFrame {
    * screen reader announces first when the page loads, and the tab shows. The `<h1>` is unchanged.
    */
   readonly error?: boolean;
+  /**
+   * The main content draws a refused form open on top of the page, with its own blocks inert under
+   * it (Role menu's editors, PostOutcome.modal): the skip link, the navigation, the page's header
+   * and the footer are inert too, so the form is the one thing Tab and a screen reader reach, as in
+   * a modal dialog, and none of what lies under its backdrop can take focus (WCAG 2.4.11).
+   */
+  readonly modal?: boolean;
   /** The current server and the pages in it that admit the viewer: a console page. */
   readonly guild?: ServerIdentity & {
     readonly nav: readonly NavLink[];
@@ -197,18 +204,25 @@ const accountMenu = (model: LayoutModel): SafeHtml | "" =>
  */
 const BACKDROP = html`<div class="orr-starfield entry-backdrop" aria-hidden="true"><div class="orr-orbit entry-orbit"><div class="orr-orbit__ring"><span class="orr-orbit__planet orr-orbit__planet--violet"></span></div><div class="orr-orbit__ring orr-orbit__ring--dashed orr-orbit__ring--middle"></div><div class="orr-orbit__ring orr-orbit__ring--inner"><span class="orr-orbit__planet"></span></div></div></div>`;
 
-const FOOTER = html`<footer class="site-footer">
+/** ` inert` on the shell's own parts while the main content draws a form open (LayoutFrame.modal). */
+const shut = (model: LayoutModel): SafeHtml | "" => (model.modal ? html` inert` : "");
+
+const footer = (model: LayoutModel): SafeHtml => html`<footer class="site-footer"${shut(model)}>
 <p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a> · <a href="${NOTICES.path}">Third-party licenses</a></p>
 </footer>`;
+
+/** The skip link, first in the body. */
+const skip = (model: LayoutModel): SafeHtml =>
+  html`<a class="skip" href="#main"${shut(model)}>Skip to content</a>`;
 
 /**
  * The page header: the one `<h1>`, after an eyebrow on server pages and the sign-in page. Error
  * pages never get the eyebrow, because their message must be main's first paragraph.
  */
-const pageHeader = (title: string, eyebrow: boolean): SafeHtml =>
-  html`<header class="page-header">
+const pageHeader = (model: LayoutModel, eyebrow: boolean): SafeHtml =>
+  html`<header class="page-header"${shut(model)}>
 ${eyebrow ? html`<p class="orr-label page-header__eyebrow">Free Company workspace</p>` : ""}
-<h1 class="page-header__title">${title}</h1>
+<h1 class="page-header__title">${model.title}</h1>
 </header>`;
 
 /** A server page: the sidebar, the top bar with the page's label, then the page. */
@@ -219,9 +233,9 @@ function consolePage(
 ): SafeHtml {
   const side = SIDE_NOTE[guild.audience ?? "officer"];
   return html`<body class="console-page">
-<a class="skip" href="#main">Skip to content</a>
+${skip(model)}
 <div class="app">
-<header class="sidebar">
+<header class="sidebar"${shut(model)}>
 ${WORDMARK}
 ${switcher(guild)}
 <nav class="side-nav" aria-label="Server pages">
@@ -234,10 +248,10 @@ ${accountMenu(model)}
 <div class="frame">
 <div class="topbar" aria-hidden="true"><p class="orr-label">Workspace<span class="topbar__separator">/</span><span class="topbar__page">${model.title}</span></p></div>
 <main id="main" class="main orr-enter">
-${pageHeader(model.title, true)}
+${pageHeader(model, true)}
 ${main}
 </main>
-${FOOTER}
+${footer(model)}
 </div>
 </div>
 </body>`;
@@ -247,14 +261,14 @@ ${FOOTER}
 function entryPage(model: LayoutModel, main: SafeHtml): SafeHtml {
   const welcome = model.title === BRAND;
   return html`<body class="entry-page">
-<a class="skip" href="#main">Skip to content</a>
+${skip(model)}
 ${BACKDROP}
-${welcome ? "" : html`<header class="entry-bar">${WORDMARK}${accountMenu(model)}</header>`}
+${welcome ? "" : html`<header class="entry-bar"${shut(model)}>${WORDMARK}${accountMenu(model)}</header>`}
 <main id="main" class="${welcome ? "entry entry--welcome" : "entry"} orr-enter">
-${pageHeader(model.title, welcome)}
+${pageHeader(model, welcome)}
 ${main}
 </main>
-${FOOTER}
+${footer(model)}
 </body>`;
 }
 

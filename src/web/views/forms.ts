@@ -12,8 +12,9 @@
  * - a re-render passes the submitted values back in, escaped like any text, so a refused form
  *   keeps what was typed; messages are constant wording and never quote it;
  * - errorSummary() lists each problem as a link to its control, and becomes the page's focus;
- * - buttons carry visible text; a destructive one belongs inside a disclosure() that states the
- *   consequence first, so one stray tap can't delete anything.
+ * - buttons carry visible text; a destructive one belongs inside a closed disclosure(), or a page's
+ *   closed overlay (Role menu's Delete category), that states the consequence first, so one stray
+ *   tap can't delete anything.
  *
  * Labels, hints and legends take constant wording, or markup that escaped its own values (such as
  * context()'s suffix with a role or category name). Nothing here writes a style attribute or a
@@ -241,6 +242,13 @@ export interface ChoiceGroupOptions {
   /** Constant wording for the group's problem (markup as for FieldOptions.error). */
   readonly error?: Text | undefined;
   readonly disabled?: boolean;
+  /**
+   * The first control of an editor that opens on top of the page (Role menu's Add roles): opening
+   * it moves focus to the first choice that can take it, with no script. Only inside a closed
+   * dialog, where page load skips it (a hidden control can't take focus); never on a re-render,
+   * whose error summary takes focus.
+   */
+  readonly autofocus?: boolean;
 }
 
 /**
@@ -253,12 +261,17 @@ export interface ChoiceGroupOptions {
 export function choiceGroup(options: ChoiceGroupOptions): SafeHtml {
   const id = checkedId(options.id);
   const checked = new Set(options.checked ?? []);
+  const focused = options.autofocus
+    ? options.choices.findIndex((choice) => !(choice.disabled || options.disabled))
+    : -1;
   const rows = options.choices.map((choice, index) => {
     const input = `${id}-${index + 1}`;
     const hint = choice.hint === undefined ? "" : `${input}-hint`;
     return html`<div class="orr-check"><input class="orr-check__input" type="${options.type}" id="${input}" name="${options.name}" value="${choice.value}"${
       checked.has(choice.value) ? html` checked` : ""
-    }${choice.disabled || options.disabled ? html` disabled` : ""}${describedByAttribute(hint)}><div class="orr-check__text"><label class="orr-check__label" for="${input}">${choice.label}</label>${
+    }${choice.disabled || options.disabled ? html` disabled` : ""}${describedByAttribute(hint)}${
+      index === focused ? html` autofocus` : ""
+    }><div class="orr-check__text"><label class="orr-check__label" for="${input}">${choice.label}</label>${
       choice.hint === undefined
         ? ""
         : html`<p class="orr-check__desc" id="${hint}">${choice.hint}</p>`
@@ -284,7 +297,8 @@ export interface FieldError {
 }
 
 /**
- * The error summary for a re-render, first in the page's main content: "There's a problem" and a
+ * The error summary for a re-render, first in the page's main content, or first in the overlay
+ * that shows the refused form on top of the page (Role menu's editors): "There's a problem" and a
  * link to each control with its message. It takes focus when the page loads (autofocus on a
  * tabindex="-1" element, no script), and role="alert" announces it, so a screen reader hears what
  * went wrong at once. Nothing when there are no errors. A page has at most one.
@@ -326,7 +340,7 @@ export interface ButtonOptions {
 
 /**
  * A submit button with visible text ("Move up", never an arrow alone). A "danger" one belongs
- * inside a disclosure() whose body says what it does.
+ * inside a disclosure() or a closed overlay whose body says what it does.
  */
 export function submitButton(label: Text, options: ButtonOptions = {}): SafeHtml {
   const name =

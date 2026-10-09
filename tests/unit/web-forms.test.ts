@@ -215,6 +215,34 @@ describe("fields and groups", () => {
     expect(document.querySelectorAll("#c option[selected]")).toHaveLength(0);
     for (const control of document.querySelectorAll("input, select"))
       expect(control.getAttribute("class")).toBe("orr-input");
+    // Nothing takes focus unless asked: only an editor's first choice, as its dialog opens.
+    expect(document.querySelectorAll("[autofocus]")).toHaveLength(0);
+  });
+
+  test("autofocus marks one control: a group's first choice that can take focus", async () => {
+    const { document } = await body(
+      html`${choiceGroup({
+        id: "g",
+        name: "g",
+        type: "checkbox",
+        legend: "G",
+        autofocus: true,
+        choices: [
+          { value: "x", label: "X", disabled: true },
+          { value: "y", label: "Y" },
+          { value: "z", label: "Z" },
+        ],
+      })}${choiceGroup({
+        id: "h",
+        name: "h",
+        type: "radio",
+        legend: "H",
+        choices: [{ value: "x", label: "X" }],
+      })}`,
+    );
+    expect([...document.querySelectorAll("[autofocus]")].map((element) => element.id)).toEqual([
+      "g-2",
+    ]);
   });
 
   test("an id the kit would link to must be a plain identifier", () => {

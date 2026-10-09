@@ -9,24 +9,30 @@
  * mention chips that wrap or, when any role has a description, a two-column list: the names in one
  * column, each description and its "Opens:" line beside its name; and a foot with a line on what
  * the state means and what each state button does, then one toolbar. The toolbar holds every
- * action as a compact button: the editors (disclosures), the state buttons and the moves (each
- * group wrapping as one unit, never split across rows), and Delete category (a disclosure too,
- * whose panel states the consequence before its danger button). An open editor takes a row of its
- * own in place, its panel under its summary and the rest of the toolbar after it, so what is drawn
- * follows the markup's reading and focus order: a summary, its panel's controls, then the next
- * button (WCAG 1.3.2, 2.4.3).
+ * action as a compact button: the editors' buttons, the state buttons and the moves (each group
+ * wrapping as one unit, never split across rows), and Delete category.
  *
- * Forms inside a card or the Add a category card are laid out by the card's own width (container
- * queries), since a card is narrower in two columns than in one: fields go side by side where the
- * card has room, each hint and error under its control so the controls line up.
+ * The editors (Edit roles, Add roles, Edit category, and Delete category's confirmation) open on
+ * top of the page, so nothing on it moves or changes its spacing when one opens (the owner's ask,
+ * 2026-10-09): a modal dialog in the top layer (a popover where the browser has no invoker
+ * commands), a glass panel near the top of the dimmed, lightly blurred page, which neither scrolls
+ * nor takes clicks under it, or a sheet from the bottom edge on a phone. Its body scrolls under its
+ * head, so Close stays in view, and its button row is its foot. A refused editor comes back drawn
+ * the same way (.overlay--open), fixed over a backdrop of its own. The cards lay out the same
+ * whether or not an editor is open.
+ *
+ * Forms inside a panel or the Add a category card are laid out by its own width (container
+ * queries): fields go side by side where there is room, each hint and error under its control so
+ * the controls line up.
  *
  * Shared vocabulary (cards, stats, notes, notices, mentions, disclosures, empty states) lives in
  * components.ts and the form controls in forms.ts; this module only arranges them, plus the
  * design's badge, ported here because this was the first view that renders it (My roles uses it
- * too). Nothing here adds glass: every surface is an .orr-card, so media.ts's reduced-transparency,
- * forced-colors and print fallbacks already cover it. What is drawn with an inset shadow here (the
- * badge, the toolbar's summaries, an open editor's panel, a role that needs attention) gets its
- * own forced-colors border, and every control keeps base.ts's focus outline.
+ * too). The one glass added here is an open editor's panel, which has its own reduced-motion,
+ * reduced-transparency, forced-colors and print rules below; every other surface is an .orr-card,
+ * which media.ts's fallbacks already cover. What is drawn with an inset shadow here (the badge, a
+ * panel, a role that needs attention) gets its own forced-colors border, and every control keeps
+ * base.ts's focus outline.
  */
 export const ROLE_MENU_CSS = `/* Role menu */
 
@@ -221,9 +227,8 @@ export const ROLE_MENU_CSS = `/* Role menu */
 
 /*
  * Categories: one card each, in the members' order, one column until 72rem and two from there.
- * Cards in a row share its height while every editor is closed, so their toolbars line up at the
- * foot; once one opens, each card keeps its own height, so an open editor never stretches its
- * neighbour into an empty card.
+ * Cards in a row share its height, so their toolbars line up at the foot. No editor opens inside a
+ * card, so that never changes while one is open.
  */
 .menu-categories {
   display: grid;
@@ -234,7 +239,10 @@ export const ROLE_MENU_CSS = `/* Role menu */
   list-style: none;
 }
 
-/* A card's forms follow its own width, which two columns halve (container queries below). */
+/*
+ * The Add a category card's form follows its own width (container queries below); a card is a
+ * container too, so its head and roles follow the card's width, which two columns halve.
+ */
 .menu-category,
 .menu-create {
   container-type: inline-size;
@@ -435,10 +443,11 @@ export const ROLE_MENU_CSS = `/* Role menu */
 }
 
 /*
- * The toolbar: one row that wraps. A .menu-tool wrapper only keeps the markup readable, so each
- * editor's disclosure is one of the row's items; the state buttons and the moves are each one
- * item, a group that wraps as a unit, so a pair is never split across rows (Move up ending one
- * row, Move down starting the next).
+ * The toolbar: one row that wraps. A .menu-tool wrapper only keeps an editor's button and its
+ * panel together in the markup, so the button is one of the row's items (a closed panel draws
+ * nothing, an open one is on top of the page); the state buttons and the moves are each one item,
+ * a group that wraps as a unit, so a pair is never split across rows (Move up ending one row, Move
+ * down starting the next).
  */
 .menu-toolbar {
   display: flex;
@@ -460,12 +469,12 @@ export const ROLE_MENU_CSS = `/* Role menu */
 }
 
 /*
- * The row's buttons and summaries, compact: 32px tall for a mouse, 40px where the pointer is a
- * finger. The forms' own buttons, in the panels, keep their size.
+ * The row's buttons, compact: 32px tall for a mouse, 40px where the pointer is a finger. The
+ * forms' own buttons, in the panels, keep their size.
  */
 .menu-states .orr-btn,
 .menu-moves .orr-btn,
-.menu-tool > details > summary {
+.menu-opener {
   min-height: 2rem;
   padding: var(--space-1) 10px;
   border-radius: var(--radius-sm);
@@ -476,7 +485,7 @@ export const ROLE_MENU_CSS = `/* Role menu */
 @media (pointer: coarse) {
   .menu-states .orr-btn,
   .menu-moves .orr-btn,
-  .menu-tool > details > summary {
+  .menu-opener {
     min-height: 2.5rem;
   }
 }
@@ -499,79 +508,236 @@ export const ROLE_MENU_CSS = `/* Role menu */
 }
 
 /*
- * A summary looks like the buttons beside it, with the disclosure's chevron first, set a little
- * closer than components.ts's, so a phone's first row holds the three editors.
+ * An editor's button looks like the state buttons beside it (a secondary button, solid in the
+ * card), with a small chevron first that marks it as one that opens a panel rather than acting at
+ * once; set a little closer than a button's, so a phone's first row holds the three editors.
  */
-.menu-tool > details > summary {
+.menu-opener {
   gap: var(--space-1-5);
   padding-inline-start: var(--space-2);
-  color: var(--text-primary);
-  background: var(--surface-2);
-  box-shadow:
-    inset 0 0 0 1px var(--glass-border),
-    var(--inner-highlight);
 }
 
-.menu-tool > details > summary:hover,
-.menu-tool > details > summary:focus-visible {
-  color: var(--accent-strong);
-  box-shadow:
-    inset 0 0 0 1px var(--border-accent),
-    var(--inner-highlight);
-}
-
-.menu-tool > details > summary::before {
+.menu-opener::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
   margin-inline: 1px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
 }
 
-/* An open editor's summary stays lit, so it is plain which panel below is its own. */
-.menu-tool > details[open] > summary {
+/*
+ * While its panel is open the button stays lit, and while it holds a refused form (a conflict,
+ * views/role-menu.ts's .menu-opener--kept); a link stands in for it while a refused editor is
+ * drawn open. So it is plain which button the panel belongs to once it closes.
+ */
+.menu-toolbar .menu-opener:is(a, .menu-opener--kept, :has(+ :is(.overlay:modal, .overlay:popover-open))) {
   color: var(--accent-strong);
   background: oklch(0.8 0.13 210 / 0.12);
   box-shadow: inset 0 0 0 1px var(--border-accent);
 }
 
-/*
- * Delete category: the row's last item, at its end, in the danger tone; open, its summary stays at
- * the end, its consequence under it.
- */
-.menu-tool--danger > details,
-.menu-tool--danger > details > summary {
+/* Delete category: the row's last item, at its end, in the danger tone. */
+.menu-toolbar .menu-opener--danger {
   margin-inline-start: auto;
-}
-
-.menu-tool--danger > details > summary,
-.menu-tool--danger > details > summary:hover,
-.menu-tool--danger > details > summary:focus-visible {
   color: var(--danger);
 }
 
-.menu-tool--danger > details > summary:hover,
-.menu-tool--danger > details > summary:focus-visible,
-.menu-tool--danger > details[open] > summary {
+.menu-toolbar .menu-opener--danger:is(:hover, :focus-visible, :has(+ :is(.overlay:modal, .overlay:popover-open))) {
+  color: var(--danger);
   background: var(--danger-bg);
   box-shadow: inset 0 0 0 1px oklch(0.74 0.15 18 / 0.45);
 }
 
 /*
- * An open editor takes a row of its own in place, across the card: its summary, then its panel, a
- * recessed well, right under it; the toolbar's other items follow on the rows after. So nothing
- * Tab reaches after the panel's controls is drawn above them, and no button sits between a
- * summary and its panel. A form's button row inside the well reaches its edges when it sticks on
- * a phone (forms.ts reads --card-pad).
+ * An editor's panel (views/role-menu.ts's panel()): a <dialog>, which a browser without invoker
+ * commands opens as a popover instead. A head holds the title (the action, the category's name
+ * under it) and Close, then the body, laid out by its own width (a container). A closed one
+ * is display: none by the browser's own rules, so nothing here sets the panel's display unless it
+ * is open; these base rules replace the browser's dialog and popover look. The panel takes clicks
+ * while the page under a popover doesn't (below).
  */
-.menu-tool > details[open] {
-  flex: 1 0 100%;
+.overlay {
+  --card-pad: var(--space-5);
+  --overlay-width: 40rem;
+  --overlay-foot: var(--card-pad);
   min-width: 0;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  color: var(--text-primary);
+  pointer-events: auto;
 }
 
-.menu-tool > details > .disclosure__body {
-  --card-pad: var(--space-3);
-  margin-top: var(--space-2);
-  padding: var(--card-pad);
-  border-radius: var(--radius-md);
-  background: oklch(0.1 0.026 280 / 0.35);
+/* Edit roles and Add roles put their rows and checklist in columns; a confirmation is short. */
+.overlay--wide {
+  --overlay-width: 48rem;
+}
+
+.overlay--narrow {
+  --overlay-width: 32rem;
+}
+
+.overlay__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--card-pad) var(--card-pad) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.overlay__title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-primary);
+  font: 600 1.125rem / 1.3 var(--font-display);
+  font-synthesis: none;
+  letter-spacing: var(--tracking-title);
+  overflow-wrap: anywhere;
+}
+
+.overlay__subject {
+  color: var(--text-muted);
+  font: var(--type-caption);
+  letter-spacing: normal;
+}
+
+.overlay__close {
+  flex-shrink: 0;
+  min-height: 2rem;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  font: var(--type-ui-sm);
+  font-weight: var(--weight-semibold);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+@media (pointer: coarse) {
+  .overlay__close {
+    min-height: 2.5rem;
+  }
+}
+
+.overlay__body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--card-pad) var(--card-pad) var(--overlay-foot);
+  container-type: inline-size;
+}
+
+/*
+ * Open, on top of the page: a modal dialog or a popover in the top layer, or a refused editor
+ * drawn open, fixed over its backdrop. As wide as its form needs, its top a fixed way down the
+ * screen, so a panel whose content grows (Add roles' list of the roles it can't add) grows
+ * downward only and its title stays where it was; at most the screen's height less that margin
+ * twice. The body scrolls under the head, so Close and the title stay in view. Glass over the
+ * dimmed page (it sits on no other glass). :is() keeps the rule working in a browser without
+ * :popover-open, which would otherwise drop it whole.
+ */
+:is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-overlay) + 1);
+  display: flex;
+  flex-direction: column;
+  width: min(100% - 2 * var(--space-4), var(--overlay-width));
+  height: fit-content;
+  max-height: calc(100dvh - 2 * min(12dvh, 6rem));
+  margin: min(12dvh, 6rem) auto auto;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background: var(--glass-fill-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 0 0 1px var(--glass-border),
+    var(--glass-edge),
+    var(--shadow-3);
+}
+
+:is(.overlay--open, .overlay:popover-open, .overlay:modal) > .overlay__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* A panel rises into place as it opens (never with reduced motion, below). */
+:is(.overlay:popover-open, .overlay:modal) {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+@starting-style {
+  :is(.overlay:popover-open, .overlay:modal) {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/*
+ * What lies under an open panel: the page, dimmed and lightly blurred, fading in as the panel
+ * rises, which a click on closes the panel. A refused editor's backdrop is an element of its own,
+ * which takes the page's clicks (only its Close link closes it). Literal values: a ::backdrop may
+ * not inherit the tokens.
+ */
+.overlay::backdrop {
+  background: oklch(0.08 0.02 280 / 0.55);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@starting-style {
+  :is(.overlay:popover-open, .overlay:modal)::backdrop {
+    opacity: 0;
+  }
+}
+
+.overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  background: oklch(0.08 0.02 280 / 0.55);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+/*
+ * A popover (where the browser has no invoker commands) isn't modal: a click outside it would close
+ * it and also press whatever lies under the pointer, such as a state button. While one is open the
+ * page takes no clicks, so a click outside only closes it (the panel takes clicks again, .overlay).
+ * A modal dialog's page is inert already.
+ */
+:root:has(.overlay:popover-open) .app {
+  pointer-events: none;
+}
+
+/*
+ * The page doesn't scroll under an open panel, where a wheel or a swipe over the backdrop would
+ * slide it along, blurred. Its scrollbar's gutter is kept whether or not it is locked, so locking
+ * it moves nothing sideways where scrollbars take room.
+ */
+:root:has(.overlay) {
+  scrollbar-gutter: stable;
+}
+
+:root:has(:is(.overlay--open, .overlay:popover-open, .overlay:modal)) {
+  overflow: hidden;
+}
+
+/*
+ * A page drawn with a panel open skips the page entrance, as reduced motion does: the entrance's
+ * transform would make main the fixed panel's frame while it plays, drawing it off-centre.
+ */
+main.orr-enter:has(.overlay--open) {
+  animation: none;
 }
 
 /* The Edit roles rows: each role's fields under its name, split by hairlines. */
@@ -750,10 +916,11 @@ export const ROLE_MENU_CSS = `/* Role menu */
   .menu-form > .form-actions {
     grid-column: 1 / -1;
   }
-  .menu-form .orr-field__hint {
+  /* Within each field only: the form's own message (.form-error) stays at the form's top. */
+  .menu-form .orr-field > .orr-field__hint {
     order: 2;
   }
-  .menu-form .orr-field__hint--error {
+  .menu-form .orr-field > .orr-field__hint--error {
     order: 1;
   }
 }
@@ -817,19 +984,118 @@ export const ROLE_MENU_CSS = `/* Role menu */
   .menu-categories {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .menu-categories:has(details[open]) {
-    align-items: start;
+}
+
+/*
+ * On a wide screen beside the fixed sidebar, a panel is centred over the page's own column rather
+ * than the whole screen, clear of the sidebar.
+ */
+@media (min-width: 64rem) {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+    inset-inline-start: var(--sidebar-w);
+    width: min(100% - var(--sidebar-w) - 2 * var(--space-6), var(--overlay-width));
+  }
+}
+
+/*
+ * On a phone, an open panel is a sheet from the bottom edge, the full width, its body clear of the
+ * home indicator. It is as tall as its content (up to 85% of the screen), so it never shows an
+ * empty band; a disclosure opening inside it (Add roles' list of the roles it can't add) grows the
+ * sheet upward from the bottom edge, as sheets do, while the page under it stays where it was.
+ */
+@media (max-width: 39.99rem) {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+    --overlay-foot: calc(var(--card-pad) + env(safe-area-inset-bottom));
+    inset: auto 0 0;
+    width: 100%;
+    max-height: 85dvh;
+    margin: 0;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  }
+}
+
+/*
+ * A short screen (a phone on its side, or 400% zoom): the panel takes all but a little of the
+ * screen's height, and its title shares one line with the category's name, so the body keeps room.
+ */
+@media (max-height: 29.99rem) {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+    max-height: calc(100dvh - 1rem);
+    margin-top: 0.5rem;
+  }
+  .overlay__title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: var(--space-2);
+  }
+}
+
+/*
+ * An open panel's form ends in its button row, its foot: the row sticks to the panel's bottom edge
+ * while the body scrolls, solid, set off by a hairline and reaching the panel's sides (1px short,
+ * so the panel's hairline edge stays whole beside it). It takes the body's bottom padding (a
+ * sticky offset counts from inside the scroller's padding), so it sits flush with the bottom edge
+ * whether or not the body scrolls, and nothing scrolls by under it; on a phone its padding clears
+ * the home indicator, and focus scrolls clear of it (WCAG 2.4.11). A short screen can't spare the
+ * room, so there the row stays in its place, as forms.ts's does.
+ */
+@media (min-height: 30rem) {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) .form-actions {
+    position: sticky;
+    bottom: calc(-1 * var(--overlay-foot));
+    z-index: var(--z-sticky);
+    margin: 0 calc(1px - var(--card-pad)) calc(-1 * var(--overlay-foot));
+    padding: var(--space-2) calc(var(--card-pad) - 1px)
+      calc(var(--space-2) + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border-subtle);
+    background: var(--surface-1);
+  }
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) > .overlay__body {
+    scroll-padding-bottom: 5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.overlay:popover-open, .overlay:modal),
+  .overlay::backdrop {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+    background: var(--surface-1);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .overlay::backdrop,
+  .overlay-backdrop {
+    background: oklch(0.08 0.02 280 / 0.85);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }
 
 @media (forced-colors: active) {
   .orr-badge,
   .menu-options > .menu-option--attention,
-  .menu-tool > details > summary,
-  .menu-tool > details > .disclosure__body {
+  .overlay {
     border: 1px solid CanvasText;
   }
-  .menu-tool > details[open] > summary {
+  :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
+    color: CanvasText;
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  /* The system palette isn't blurred under a panel; the dimming still marks the page inactive. */
+  .overlay::backdrop,
+  .overlay-backdrop {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .menu-toolbar .menu-opener:is(a, .menu-opener--kept, :has(+ :is(.overlay:modal, .overlay:popover-open))) {
     border-color: Highlight;
   }
 }
@@ -841,7 +1107,9 @@ export const ROLE_MENU_CSS = `/* Role menu */
   }
   /* The editors and buttons are for the screen; paper keeps the menu itself. */
   .menu-category__foot,
-  .menu-summary__foot {
+  .menu-summary__foot,
+  .overlay-backdrop,
+  .overlay--open {
     display: none;
   }
 }

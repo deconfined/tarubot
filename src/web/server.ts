@@ -584,10 +584,11 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       // Post-redirect-get, to a same-origin path whatever the page returned.
       if ("redirect" in outcome) return redirect(c, safeReturnPath(outcome.redirect));
       // The page's form again, with what was submitted; any status but 409 (a module is untyped
-      // at runtime) is the input refusal's 422.
+      // at runtime) is the input refusal's 422. A form drawn open over the page makes the shell
+      // inert too, so only that form takes focus.
       return page(
         c,
-        layout({ ...model, error: true }, outcome.invalid),
+        layout({ ...model, error: true, modal: outcome.modal === true }, outcome.invalid),
         outcome.status === 409 ? 409 : 422,
       );
     };

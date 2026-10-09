@@ -51,9 +51,11 @@ import { guildNames, type WebNames } from "../../src/web/mentions.js";
 import type { Session } from "../../src/web/sessions.js";
 import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
 import {
+  drawsEditorOpen,
   noticeFor,
   type RefusedEdit,
   ROLE_MENU_NOTICES,
+  type RoleMenuView,
   renderRoleMenu,
 } from "../../src/web/views/role-menu.js";
 import {
@@ -1243,6 +1245,16 @@ describe("Role menu (2.39.0)", () => {
     options: { refused?: RefusedEdit; url?: string; names?: WebNames } = {},
   ): Promise<Document> {
     const nav = navLinks((await loadPages()).values(), officer, "/g/:guild/role-menu");
+    const view: RoleMenuView = {
+      editor: state,
+      names: options.names ?? names,
+      action: path,
+      token: TOKEN,
+      url: new URL(options.url ?? path, "https://example.org"),
+      newCategoryId: NEW_ID,
+      ...(options.refused && { refused: options.refused }),
+    };
+    // As the page module and server.ts do: a refused editor drawn open makes the shell inert.
     return inspect(
       await render(
         layout(
@@ -1252,16 +1264,9 @@ describe("Role menu (2.39.0)", () => {
             formToken: TOKEN,
             guild: { id: GUILD, name: "Example FC", nav },
             ...(options.refused && { error: true }),
+            ...(drawsEditorOpen(view) && { modal: true }),
           },
-          renderRoleMenu({
-            editor: state,
-            names: options.names ?? names,
-            action: path,
-            token: TOKEN,
-            url: new URL(options.url ?? path, "https://example.org"),
-            newCategoryId: NEW_ID,
-            ...(options.refused && { refused: options.refused }),
-          }),
+          renderRoleMenu(view),
         ),
       ),
     );
@@ -1502,16 +1507,13 @@ describe("Role menu (2.39.0)", () => {
 
   test("a card's actions are one toolbar: the editors, the state buttons, the moves, then Delete category", async () => {
     const document = await rolePage(await editor());
-    // What each item of a card's toolbar is, in order: a disclosure by its summary, a button by
-    // its text, as a sighted officer reads them.
+    // What each item of a card's toolbar is, in order, as a sighted officer reads them: a button
+    // that opens an editor's panel (drawn with a chevron) or one that acts at once, by its text.
+    // A panel's own buttons are not the toolbar's.
     const toolbar = (id: string) =>
-      [
-        ...(card(document, id)?.querySelectorAll(
-          ".menu-toolbar > .menu-tool > details > summary, .menu-toolbar button",
-        ) ?? []),
-      ]
-        .filter((item) => item.tagName === "SUMMARY" || item.closest(".disclosure__body") === null)
-        .map((item) => `${item.tagName === "SUMMARY" ? "▸ " : ""}${visibleText(item)}`);
+      [...(card(document, id)?.querySelectorAll(".menu-toolbar button") ?? [])]
+        .filter((item) => item.closest(".overlay") === null)
+        .map((item) => `${item.matches(".menu-opener") ? "▸ " : ""}${visibleText(item)}`);
     expect(toolbar(MENU_CATEGORY.pronouns)).toEqual([
       "▸ Edit roles",
       "▸ Add roles",
@@ -1539,8 +1541,120 @@ describe("Role menu (2.39.0)", () => {
     // Only Delete category is marked as the danger tool, and its panel states the consequence
     // before the button (the destructive-button test pins the rest).
     expect(
-      [...document.querySelectorAll(".menu-tool--danger summary")].map((item) => visibleText(item)),
+      [...document.querySelectorAll(".menu-opener--danger")].map((item) => visibleText(item)),
     ).toEqual(Array(4).fill("Delete category"));
+  });
+
+  test("every editor opens on top of the page: a modal dialog named by its title, with Close", async () => {
+    for (const states of [{}, { menuProblems: true }] satisfies HarnessStates[]) {
+      const document = await rolePage(await editor(states));
+      // Nothing is drawn open on a GET, no backdrop covers the page, none of it is inert, and no
+      // button is lit as holding a refused form.
+      expect(
+        document.querySelectorAll(".overlay--open, .overlay-backdrop, [inert], .menu-opener--kept"),
+      ).toHaveLength(0);
+      const tools = [...document.querySelectorAll(".menu-toolbar > .menu-tool")];
+      expect(tools.length).toBeGreaterThan(10);
+      for (const tool of tools) {
+        // The button opens its own panel, which follows it in the markup: as a modal dialog by
+        // its invoker command, or as a popover in a browser without invoker commands.
+        const [button, panel, ...rest] = [...tool.children];
+        expect(rest).toHaveLength(0);
+        const id = button?.getAttribute("commandfor") ?? "";
+        expect({
+          tag: button?.tagName,
+          type: button?.getAttribute("type"),
+          command: button?.getAttribute("command"),
+          popover: button?.getAttribute("popovertarget"),
+          popup: button?.getAttribute("aria-haspopup"),
+          panel: panel?.id,
+        }).toEqual({
+          tag: "BUTTON",
+          type: "button",
+          command: "show-modal",
+          popover: id,
+          popup: "dialog",
+          panel: id,
+        });
+        expect(document.getElementById(id) === panel).toBe(true);
+        // A closed dialog element that a click outside closes, its popover attribute the
+        // fallback; Delete category's confirmation is an alert dialog.
+        const danger = button?.matches(".menu-opener--danger") === true;
+        expect({
+          tag: panel?.tagName,
+          open: panel?.hasAttribute("open"),
+          popover: panel?.getAttribute("popover"),
+          closedby: panel?.getAttribute("closedby"),
+          role: panel?.getAttribute("role"),
+          modal: panel?.hasAttribute("aria-modal"),
+        }).toEqual({
+          tag: "DIALOG",
+          open: false,
+          popover: "auto",
+          closedby: "any",
+          role: danger ? "alertdialog" : null,
+          modal: false,
+        });
+        // Named by its title: the action the button says, then the category's name.
+        const title = document.getElementById(panel?.getAttribute("aria-labelledby") ?? "");
+        expect(title?.closest(".overlay")).toBe(panel ?? null);
+        expect(title?.tagName).toBe("H4");
+        const category = button?.closest(".menu-category")?.querySelector("h3 > span[dir]");
+        expect((title?.textContent ?? "").trim()).toBe(
+          `${visibleText(button as Element)}: ${category?.textContent}`,
+        );
+        // Never in capitals by a class (an .orr-label): Chromium names the dialog in them too.
+        expect(title?.querySelector(".orr-label")).toBeNull();
+        // Its head's Close closes it; Delete category's Cancel too. Each names what it closes.
+        const closers = [...(panel?.querySelectorAll("[command]") ?? [])];
+        expect(closers.length).toBeGreaterThan(0);
+        for (const close of closers)
+          expect([
+            close.tagName,
+            close.getAttribute("type"),
+            close.getAttribute("commandfor"),
+            close.getAttribute("command"),
+            close.getAttribute("popovertarget"),
+            close.getAttribute("popovertargetaction"),
+          ]).toEqual(["BUTTON", "button", id, "close", id, "hide"]);
+        expect(panel?.querySelector(".overlay__head > .overlay__close")).toBe(closers[0] ?? null);
+        // Opening it moves focus to one place inside: a long editor's title (Edit roles, Edit
+        // category), so a phone's keyboard doesn't cover the sheet; Add roles' first choice;
+        // Cancel in a confirmation; or Close when there is nothing to fill in.
+        const focused = [...(panel?.querySelectorAll("[autofocus]") ?? [])];
+        expect(focused).toHaveLength(1);
+        const label = visibleText(button as Element);
+        const first = panel?.querySelector('.overlay__body input:not([type="hidden"])');
+        const expected = ["Edit roles", "Edit category"].includes(label)
+          ? title
+          : danger
+            ? closers[1]
+            : (first ?? closers[0]);
+        expect({ label, focus: focused[0] === expected }).toEqual({ label, focus: true });
+        // Where focus skips the note that says what the panel is about (a confirmation, or Add
+        // roles with nothing to add), that note describes the dialog.
+        const note = document.getElementById(panel?.getAttribute("aria-describedby") ?? "");
+        if (danger || expected === closers[0])
+          expect([note?.closest(".overlay") === panel, note?.className]).toEqual([true, "note"]);
+        else expect(panel?.hasAttribute("aria-describedby")).toBe(false);
+      }
+      // Every commandfor and popovertarget on the page names a dialog there, each opened by one
+      // button.
+      for (const name of ["commandfor", "popovertarget"]) {
+        const targets = [...document.querySelectorAll(`[${name}]`)];
+        for (const target of targets)
+          expect(document.getElementById(target.getAttribute(name) ?? "")?.tagName).toBe("DIALOG");
+        const opened = targets
+          .filter((target) => target.matches(".menu-opener"))
+          .map((target) => target.getAttribute(name));
+        expect(new Set(opened).size).toBe(opened.length);
+        expect(opened).toHaveLength(document.querySelectorAll("dialog").length);
+      }
+      // Every autofocus is inside a closed dialog, which page load skips: nothing moves focus or
+      // scrolls the page when it loads.
+      for (const element of document.querySelectorAll("[autofocus]"))
+        expect(element.closest("dialog:not([open])")).not.toBeNull();
+    }
   });
 
   test("fieldsets have legends, every control a label, and every button visible text", async () => {
@@ -1608,15 +1722,34 @@ describe("Role menu (2.39.0)", () => {
     expect(visibleText(label as Element)).toBe("@Healer");
   });
 
-  test("destructive buttons sit only inside a closed disclosure that states the consequence first", async () => {
+  test("destructive buttons sit only inside a closed dialog or disclosure that states the consequence first", async () => {
     for (const states of [{}, { menuUnreadable: true }] satisfies HarnessStates[]) {
       const document = await rolePage(await editor(states));
       const dangers = [...document.querySelectorAll(".orr-btn--danger")];
       expect(dangers.length).toBeGreaterThan(0);
       for (const button of dangers) {
+        // Delete category: in a card's closed alert dialog, described by the consequence, whose
+        // first focus is Cancel, so Enter or Space as it opens deletes nothing. Reset role menu:
+        // in a closed disclosure.
+        const panel = button.closest(".overlay");
         const details = button.closest("details");
-        expect(details).not.toBeNull();
-        expect(details?.hasAttribute("open")).toBe(false);
+        expect([panel === null, details === null]).toEqual(
+          states.menuUnreadable ? [true, false] : [false, true],
+        );
+        if (panel) {
+          expect([panel.tagName, panel.getAttribute("role"), panel.hasAttribute("open")]).toEqual([
+            "DIALOG",
+            "alertdialog",
+            false,
+          ]);
+          expect(panel.classList.contains("overlay--open")).toBe(false);
+          expect(panel.querySelector("[autofocus]")?.getAttribute("command")).toBe("close");
+          expect(button.hasAttribute("autofocus")).toBe(false);
+          const note = button.closest("form")?.querySelector(".note");
+          expect(note?.id).toBeTruthy();
+          expect(panel.getAttribute("aria-describedby")).toBe(note?.id ?? "");
+        }
+        if (details) expect(details.hasAttribute("open")).toBe(false);
         const form = button.closest("form");
         expect(form?.querySelector(".note")?.textContent).toMatch(
           /[Nn]obody's roles change|keep these roles/u,
@@ -1653,8 +1786,7 @@ describe("Role menu (2.39.0)", () => {
       "@Member",
       "It's TaruBot's Member role. Access roles can't be on the role menu.",
     ]);
-    // An empty category opens its Add roles; the others stay closed. No confirmation is asked
-    // while TaruBot can read every channel.
+    // No confirmation is asked while TaruBot can read every channel.
     expect(document.querySelectorAll('fieldset[id$="-acknowledged"]')).toHaveLength(0);
     const healthy = await rolePage(
       await editor(
@@ -1672,12 +1804,20 @@ describe("Role menu (2.39.0)", () => {
         },
       ),
     );
+    // An empty category's Add roles stays closed like every editor (a dialog can't be opened
+    // from markup, and one opened on load would cover the page): the card says where to start.
+    const add = healthy
+      .querySelector(`#category-${MENU_CATEGORY.pronouns}-roles`)
+      ?.closest(".overlay");
+    expect([add?.getAttribute("popover"), add?.classList.contains("overlay--open")]).toEqual([
+      "auto",
+      false,
+    ]);
+    expect(healthy.querySelectorAll(".overlay--open")).toHaveLength(0);
     expect(
-      healthy
-        .querySelector(`#category-${MENU_CATEGORY.pronouns}-roles`)
-        ?.closest("details")
-        ?.hasAttribute("open"),
-    ).toBe(true);
+      card(healthy, MENU_CATEGORY.pronouns)?.querySelector(".menu-category__body .note")
+        ?.textContent,
+    ).toBe("No roles yet. Choose Add roles to list the roles people can pick from this category.");
   });
 
   test("drift since the menu was built shows on each role, in the summary, and in the banners", async () => {
@@ -1959,9 +2099,12 @@ describe("Role menu (2.39.0)", () => {
           target: true,
           focus: true,
         });
-        // A target inside a disclosure is in an open one.
+        // A target inside a disclosure is in an open one, and one inside an editor's panel is in
+        // the panel drawn open.
         const details = target?.closest("details");
         if (details) expect(details.hasAttribute("open")).toBe(true);
+        const panel = target?.closest(".overlay");
+        if (panel) expect(panel.classList.contains("overlay--open")).toBe(true);
       }
     }
     // The refused role is named by its cached name in the summary and beside its field.
@@ -2010,6 +2153,259 @@ describe("Role menu (2.39.0)", () => {
       "#role-menu-categories",
     );
     expect(emptyStale.querySelector(".form-error + .empty-state")).not.toBeNull();
+  });
+
+  test("a refused editor comes back drawn open on top of the page, holding the focused error summary", async () => {
+    const state = await editor();
+    const changed = [{ field: "form", message: SELF_ROLE_MESSAGES.changed }] as const;
+    // Edit roles, Add roles (with its form, and with only its note while the roles can't be read)
+    // and Edit category: each comes back open, its category's other editors still closed dialogs.
+    const editors: [SelfRoleEditor, RefusedEdit, string, string][] = [
+      [
+        state,
+        {
+          form: { kind: "add", categoryId: MENU_CATEGORY.games },
+          values: { roleIds: [], acknowledged: false },
+          revision: 7n,
+          errors: [{ field: "roleIds", message: "Choose at least one role to add." }],
+        },
+        "add-roles",
+        "Add roles: Games",
+      ],
+      [
+        await editor({}, { roles: null }),
+        {
+          form: { kind: "add", categoryId: MENU_CATEGORY.games },
+          values: { roleIds: [], acknowledged: false },
+          revision: 7n,
+          errors: [{ field: "roleIds", message: "Choose at least one role to add." }],
+        },
+        "add-roles",
+        "Add roles: Games",
+      ],
+      [
+        state,
+        {
+          form: { kind: "category", categoryId: MENU_CATEGORY.content },
+          values: { name: "", description: "", max: "any" },
+          revision: 7n,
+          errors: [{ field: "name", message: "Give the category a name." }],
+        },
+        "edit-category",
+        "Edit category: Content",
+      ],
+      [
+        state,
+        {
+          form: { kind: "options", categoryId: MENU_CATEGORY.games },
+          values: {},
+          revision: 7n,
+          errors: [{ field: "rows", message: LIMIT_MESSAGES.rows }],
+        },
+        "edit-roles",
+        "Edit roles: Games",
+      ],
+    ];
+    for (const [shown, refused, kind, name] of editors) {
+      const document = await rolePage(shown, { refused });
+      const categoryId = "categoryId" in refused.form ? refused.form.categoryId : "";
+      const id = `category-${categoryId}-${kind}`;
+      const open = [...document.querySelectorAll(".overlay--open")];
+      expect(open).toHaveLength(1);
+      const [panel] = open;
+      // The same panel as a plain element (markup can't open a dialog): a modal dialog named by
+      // its title, a heading of the page after Add a category, where it comes in the markup.
+      expect({
+        id: panel?.id,
+        tag: panel?.tagName,
+        popover: panel?.hasAttribute("popover"),
+        role: panel?.getAttribute("role"),
+        modal: panel?.getAttribute("aria-modal"),
+      }).toEqual({ id, tag: "DIV", popover: false, role: "dialog", modal: "true" });
+      const title = document.getElementById(panel?.getAttribute("aria-labelledby") ?? "");
+      expect([title?.tagName, title?.textContent?.trim()]).toEqual(["H2", name]);
+      // Last in main, over a backdrop of its own, out of every card. The page's own blocks under
+      // it are inert, and so is the shell around them (the layout's modal flag): the skip link,
+      // the navigation, the page's header and the footer. Neither Tab nor a screen reader lands
+      // on anything the panel or its backdrop hides; Close is the way out.
+      const main = document.querySelector("main");
+      expect(main?.lastElementChild).toBe(panel ?? null);
+      expect(panel?.previousElementSibling?.className).toBe("overlay-backdrop");
+      expect(panel?.closest(".menu-category")).toBeNull();
+      const blocks = [...(main?.children ?? [])];
+      expect(blocks.slice(-2)).toEqual([
+        panel?.previousElementSibling as Element,
+        panel as Element,
+      ]);
+      // The lead, any banners, the summary card, Categories and Add a category.
+      const behind = blocks.slice(1, -2);
+      expect(blocks[0]?.className).toBe("page-header");
+      expect(behind.length).toBeGreaterThanOrEqual(4);
+      for (const block of behind) expect(block.hasAttribute("inert")).toBe(true);
+      const shell = [".skip", ".sidebar", ".page-header", ".site-footer"].map((selector) =>
+        document.querySelector(selector),
+      );
+      for (const part of shell) expect(part?.hasAttribute("inert")).toBe(true);
+      expect(document.querySelectorAll("[inert]")).toHaveLength(behind.length + shell.length);
+      // The page's one error summary is the first thing in the panel's body, and the only
+      // autofocus that page load can reach (every other is in a closed dialog).
+      const summaries = [...document.querySelectorAll(".error-summary")];
+      expect(summaries).toHaveLength(1);
+      expect(panel?.querySelector(".overlay__body")?.firstElementChild).toBe(summaries[0] ?? null);
+      expect(
+        [...document.querySelectorAll("[autofocus]")].filter((item) => !item.closest("dialog")),
+      ).toEqual(summaries);
+      // Each message shows once: a message about the form as a whole is the summary's, just
+      // above the form, and not repeated at the form's top.
+      expect(panel?.querySelectorAll(".form-error")).toHaveLength(0);
+      expect(summaries[0]?.querySelectorAll("a")).toHaveLength(refused.errors.length);
+      for (const link of summaries[0]?.querySelectorAll("a") ?? [])
+        expect(
+          document.getElementById((link.getAttribute("href") ?? "").slice(1))?.closest(".overlay"),
+        ).toBe(panel ?? null);
+      // Close loads the page afresh (a new GET, not a jump within this POST's page), at the card.
+      expect(panel?.querySelector(".overlay__head > a.overlay__close")?.getAttribute("href")).toBe(
+        `${path}?category=${categoryId}#category-${categoryId}-title`,
+      );
+      // In the card, a link to the open panel stands in for the editor's button; its other
+      // editors stay closed dialogs, and no id is on the page twice.
+      const tools = card(document, categoryId)?.querySelector(".menu-toolbar");
+      expect(tools?.querySelector(`a.menu-opener[href="#${id}-title"]`)).not.toBeNull();
+      expect(
+        document.querySelectorAll(`[commandfor="${id}"], [popovertarget="${id}"]`),
+      ).toHaveLength(0);
+      expect(tools?.querySelectorAll("dialog").length).toBeGreaterThan(1);
+      const ids = [...document.querySelectorAll("[id]")].map((element) => element.id);
+      expect(ids.filter((item, at) => ids.indexOf(item) !== at)).toEqual([]);
+    }
+    // Every other refused form keeps the summary at the top, with nothing drawn open and nothing
+    // inert: a card's buttons (Delete category's included), Add a category, Publish N drafts, an
+    // editor whose category another officer removed, and a conflict (the next test).
+    const others: RefusedEdit[] = [
+      {
+        form: { kind: "action", categoryId: MENU_CATEGORY.games },
+        values: {},
+        revision: 8n,
+        errors: [...changed],
+      },
+      { form: { kind: "menu" }, values: {}, revision: 8n, errors: [...changed] },
+      {
+        form: { kind: "create" },
+        values: { name: "", description: "", max: "any", categoryId: NEW_ID },
+        revision: 7n,
+        errors: [{ field: "name", message: "Give the category a name." }],
+      },
+      {
+        form: { kind: "options", categoryId: "00000000-0000-4000-8000-000000000009" },
+        values: {},
+        revision: 8n,
+        errors: [...changed],
+      },
+      {
+        form: { kind: "options", categoryId: MENU_CATEGORY.games },
+        values: {},
+        revision: 8n,
+        errors: [...changed],
+        conflict: true,
+      },
+    ];
+    for (const refused of others) {
+      const document = await rolePage(state, { refused });
+      expect(document.querySelectorAll(".overlay--open, .overlay-backdrop, [inert]")).toHaveLength(
+        0,
+      );
+      expect(document.querySelector("main > .page-header + .error-summary")).not.toBeNull();
+    }
+  });
+
+  test("a conflict isn't drawn open: the summary links to the card, whose editor keeps the changes, its button lit", async () => {
+    const state = await editor();
+    const changed = [{ field: "form", message: SELF_ROLE_MESSAGES.changed }] as const;
+    // A 409 on each editor that can be drawn open, with what the officer changed (only that) and
+    // the current revision, as the page module passes them; and how each change shows again.
+    const conflicts: [RefusedEdit, string, (panel: Element | null) => unknown, unknown][] = [
+      [
+        {
+          form: { kind: "add", categoryId: MENU_CATEGORY.games },
+          values: { roleIds: [MENU_ROLE.tank], acknowledged: false },
+          revision: 8n,
+          errors: [...changed],
+          conflict: true,
+        },
+        "add-roles",
+        (panel) =>
+          panel?.querySelector(`input[value="${MENU_ROLE.tank}"]`)?.hasAttribute("checked"),
+        true,
+      ],
+      [
+        {
+          form: { kind: "category", categoryId: MENU_CATEGORY.content },
+          values: { name: "Kept name" },
+          revision: 8n,
+          errors: [...changed],
+          conflict: true,
+        },
+        "edit-category",
+        (panel) =>
+          panel?.querySelector(`#category-${MENU_CATEGORY.content}-name`)?.getAttribute("value"),
+        "Kept name",
+      ],
+      [
+        {
+          form: { kind: "options", categoryId: MENU_CATEGORY.games },
+          values: { rows: new Map([[MENU_ROLE.valheim, { description: "Kept description" }]]) },
+          revision: 8n,
+          errors: [...changed],
+          conflict: true,
+        },
+        "edit-roles",
+        (panel) =>
+          panel?.querySelector(`#option-${MENU_ROLE.valheim}-description`)?.getAttribute("value"),
+        "Kept description",
+      ],
+    ];
+    for (const [refused, kind, kept, expected] of conflicts) {
+      const document = await rolePage(state, { refused });
+      const categoryId = "categoryId" in refused.form ? refused.form.categoryId : "";
+      const id = `category-${categoryId}-${kind}`;
+      // Nothing is drawn open and nothing is inert: the officer can check the menu as it is now,
+      // as the message asks, rather than through a dimmed page.
+      expect(document.querySelectorAll(".overlay--open, .overlay-backdrop, [inert]")).toHaveLength(
+        0,
+      );
+      // The summary is at the top and takes focus; its one link goes to the card's heading.
+      const summary = document.querySelector("main > .page-header + .error-summary");
+      expect(summary?.hasAttribute("autofocus")).toBe(true);
+      expect(
+        [...(summary?.querySelectorAll("a") ?? [])].map((link) => [
+          link.getAttribute("href"),
+          link.textContent,
+        ]),
+      ).toEqual([[`#category-${categoryId}-title`, SELF_ROLE_MESSAGES.changed]]);
+      expect(
+        [...document.querySelectorAll("[autofocus]")].filter((item) => !item.closest("dialog")),
+      ).toEqual([summary as Element]);
+      // The editor is its card's closed dialog, holding what the officer changed at the current
+      // revision, with the message at its form's top for when they open it again.
+      const panel = document.getElementById(id);
+      expect([
+        panel?.tagName,
+        panel?.hasAttribute("open"),
+        panel?.closest(".menu-category")?.id,
+      ]).toEqual(["DIALOG", false, `category-${categoryId}`]);
+      expect(kept(panel)).toBe(expected);
+      expect(panel?.querySelector('input[name="revision"]')?.getAttribute("value")).toBe("8");
+      expect(panel?.querySelector("form > .form-error")?.textContent).toBe(
+        `Error: ${SELF_ROLE_MESSAGES.changed}`,
+      );
+      // Its button stays lit, marking where the changes wait; no other button is.
+      expect(
+        [...document.querySelectorAll(".menu-opener--kept")].map((button) => [
+          button.tagName,
+          button.getAttribute("commandfor"),
+        ]),
+      ).toEqual([["BUTTON", id]]);
+    }
   });
 
   test("the summary's headline agrees with its counts, and Delete says what each state means", async () => {
@@ -2127,13 +2523,30 @@ describe("Role menu (2.39.0)", () => {
           errors: [{ field: "rows", message: LIMIT_MESSAGES.rows }],
         },
       }),
+      await rolePage(state, {
+        refused: {
+          form: { kind: "category", categoryId: MENU_CATEGORY.games },
+          values: {},
+          revision: 8n,
+          errors: [{ field: "form", message: SELF_ROLE_MESSAGES.changed }],
+          conflict: true,
+        },
+      }),
     ];
     const classes = new Set<string>();
     for (const document of documents)
       for (const element of document.querySelectorAll("main [class]"))
         for (const name of element.classList) classes.add(name);
-    for (const name of ["orr-badge", "menu-category", "option-row", "menu-problems", "form-error"])
-      expect(classes.has(name)).toBe(true);
+    for (const name of [
+      "orr-badge",
+      "menu-category",
+      "option-row",
+      "menu-problems",
+      "form-error",
+      "overlay--open",
+      "menu-opener--kept",
+    ])
+      expect({ name, rendered: classes.has(name) }).toEqual({ name, rendered: true });
     for (const name of classes) {
       if (drawnByOthers.has(name)) continue;
       expect({ name, styled: new RegExp(`\\.${name}(?![\\w-])`, "u").test(css) }).toEqual({

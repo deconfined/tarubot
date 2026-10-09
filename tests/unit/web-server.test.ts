@@ -1253,16 +1253,24 @@ describe("the Role menu (2.39.0)", () => {
     const text = await stale.text();
     expect(text).toContain("<title>Error: Role menu · TaruBot</title>");
     const { document } = parseHTML(text);
-    const summary = document.querySelector(".error-summary");
+    // The summary is at the top of the page, linking to the category's card: nothing is drawn
+    // open or inert, so the officer sees the menu as it is now, as the message asks.
+    const summary = document.querySelector("main > .page-header + .error-summary");
     expect(summary?.querySelector("a")?.textContent).toBe(SELF_ROLE_MESSAGES.changed);
-    const target = summary?.querySelector("a")?.getAttribute("href") ?? "";
-    expect(target).toBe(`#category-${MENU_CATEGORY.pronouns}-name`);
-    // What was typed is back in the form used, escaped, inside its open disclosure, at the
-    // current revision: the officer has now seen the menu as it is.
-    const input = document.querySelector(target);
+    expect(summary?.querySelector("a")?.getAttribute("href")).toBe(
+      `#category-${MENU_CATEGORY.pronouns}-title`,
+    );
+    expect(document.querySelectorAll(".overlay--open, [inert]")).toHaveLength(0);
+    // What was typed is back in the form used, escaped, in its editor (the card's closed dialog,
+    // whose button stays lit), at the current revision: the officer has now seen the menu as it is.
+    const panel = document.getElementById(`category-${MENU_CATEGORY.pronouns}-edit-category`);
+    expect([panel?.tagName, panel?.hasAttribute("open")]).toEqual(["DIALOG", false]);
+    const input = panel?.querySelector(`#category-${MENU_CATEGORY.pronouns}-name`);
     expect(input?.getAttribute("value")).toBe("Your <pronouns>");
     expect(text).not.toContain("Your <pronouns>");
-    expect(input?.closest("details")?.hasAttribute("open")).toBe(true);
+    expect(document.querySelector(".menu-opener--kept")?.getAttribute("commandfor")).toBe(
+      panel?.id,
+    );
     expect(
       input?.closest("form")?.querySelector('input[name="revision"]')?.getAttribute("value"),
     ).toBe(String(MENU_REVISION + 1n));
@@ -1469,7 +1477,17 @@ describe("the Role menu (2.39.0)", () => {
     );
     const position = refused.querySelector(`#option-${MENU_ROLE.valheim}-position`);
     expect(position?.getAttribute("value")).toBe("0");
-    expect(position?.closest("details")?.hasAttribute("open")).toBe(true);
+    // In Edit roles, drawn open on top of the page, its error summary inside, and modal: the
+    // shell around the page is inert too (PostOutcome.modal), as is the page under the panel.
+    const panel = position?.closest(".overlay--open");
+    expect(panel?.id).toBe(`category-${MENU_CATEGORY.games}-edit-roles`);
+    expect(panel?.getAttribute("aria-modal")).toBe("true");
+    expect(panel?.querySelector(".error-summary")).toBe(refused.querySelector(".error-summary"));
+    for (const selector of [".skip", ".sidebar", ".page-header", ".site-footer"])
+      expect({ selector, inert: refused.querySelector(selector)?.hasAttribute("inert") }).toEqual({
+        selector,
+        inert: true,
+      });
     expect(
       refused.querySelector(`#option-${MENU_ROLE.valheim}-description`)?.getAttribute("value"),
     ).toBe("Our server.");

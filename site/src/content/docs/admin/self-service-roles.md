@@ -46,7 +46,7 @@ Members and guests can pick from a published category on My roles straight away.
 
 Names and descriptions are one line each. Control, text-direction and other invisible characters are refused, apart from the joiners and selectors that emoji and some scripts need, and text that shows nothing at all is refused too. Two categories can't have the same name. The menu holds at most **10 categories**, **25 roles** in a category and **50 roles** in all, and each role can be in only one category.
 
-If another officer changed the menu while you were editing, your change isn't saved: the page shows the menu as it is now and keeps what you changed in your form, with the other officer's values in the fields you didn't touch, so you can check it and send it again without undoing their change. Sending the same change twice, for example with a double tap, saves it once.
+If another officer changed the menu while you were editing, your change isn't saved: the page shows the menu as it is now, and the editor you used keeps what you changed, its button highlighted, with the other officer's values in the fields you didn't touch. Open it again to check your change and send it without undoing theirs. Sending the same change twice, for example with a double tap, saves it once.
 
 ## Taking roles off the menu
 

@@ -54,12 +54,14 @@ export interface PageContext {
  *   nothing typed is lost) and an error summary, at `status`: 422 (the default) when the input
  *   was refused, 409 when it was valid but the state changed underneath it (a stale revision).
  *   The layout prefixes the document title with "Error: ". Messages never echo submitted text.
+ *   `modal` says the re-render draws the refused form open on top of the page (Role menu's
+ *   editors), its own blocks inert under it: the layout then makes the shell inert too.
  * Refusals that end the request rather than re-render (403, 429, 503 and the rest) are thrown as
  * a Failure; server.ts renders those through the error page.
  */
 export type PostOutcome =
   | { readonly redirect: string }
-  | { readonly invalid: SafeHtml; readonly status?: 409 | 422 };
+  | { readonly invalid: SafeHtml; readonly status?: 409 | 422; readonly modal?: boolean };
 
 /** definePage's argument. */
 export interface PageOptions {
