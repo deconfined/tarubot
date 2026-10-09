@@ -12,7 +12,7 @@
  * Everything that leaves the process passes redact(): known secret shapes and this deployment's own
  * secrets. User text goes into fenced blocks, so it can't @mention anyone on GitHub.
  */
-import { and, count, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, gte, inArray, isNull, lte, not, or, sql } from "drizzle-orm";
 import type { Configuration } from "../config/env.js";
 import { project } from "../config/project.js";
 import { classifyFailure } from "../domain/failures.js";
@@ -42,6 +42,7 @@ import {
   when,
   yesNo,
 } from "../domain/reports.js";
+import { ROLE_CHOICE_KIND } from "../domain/self-roles.js";
 import { Failure } from "../domain/values.js";
 import type { GitHubIssues } from "../infrastructure/github/issues.js";
 import type { Lodestone } from "../infrastructure/lodestone/client.js";
@@ -355,7 +356,10 @@ export class IssueReports {
           ],
         ),
         guildId: job.guild_id,
-        userId: job.user_id,
+        // A member's role choices (roles.self) never name the member in a report (owner decision
+        // Q4 A): an issue outlives the 30 days their finished rows are kept, and would say who
+        // changed their roles and when. The job ID and the server are enough to look into it.
+        userId: job.kind === ROLE_CHOICE_KIND ? null : job.user_id,
         ref: job.id,
       });
       await this.saveAndQueue({
@@ -883,7 +887,16 @@ export class IssueReports {
         created: t.jobs.created_at,
       })
       .from(t.jobs)
-      .where(and(eq(t.jobs.guild_id, guildId), eq(t.jobs.user_id, userId)))
+      .where(
+        and(
+          eq(t.jobs.guild_id, guildId),
+          eq(t.jobs.user_id, userId),
+          // Never their role choices (roles.self), as in /guest status (owner decision Q4 A): a
+          // report outlives the 30 days those rows are kept, and these would say when the member
+          // changed their roles. Filtered in SQL, so frequent saves can't push out other work.
+          not(eq(t.jobs.kind, ROLE_CHOICE_KIND)),
+        ),
+      )
       .orderBy(desc(t.jobs.created_at))
       .limit(5);
     const history = await db

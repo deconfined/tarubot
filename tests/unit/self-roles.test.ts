@@ -45,11 +45,12 @@ import type { VisibilityChannel, VisibilityGuild } from "../../src/domain/visibi
 import type { GuildAccess } from "../../src/application/guild-access.js";
 import type { DiscordPort } from "../../src/application/records.js";
 import { Service } from "../../src/application/service.js";
-import type { Synchronization } from "../../src/application/synchronization.js";
+import { Synchronization } from "../../src/application/synchronization.js";
 import type { Configuration } from "../../src/config/env.js";
 import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
-import type { Database } from "../../src/infrastructure/postgres/database.js";
+import { type Database, orm } from "../../src/infrastructure/postgres/database.js";
 import { dispatcher } from "../../src/jobs/dispatch.js";
+import type { PoolClient } from "pg";
 
 const GUILD = "100";
 const BOT = "900";
@@ -1691,6 +1692,35 @@ test("permission names follow Discord, once per bit, with one phrase for unknown
 });
 
 describe("the roles.self stub (2.39.0)", () => {
+  test("the schedule pass closes every waiting role choice at once, and no other kind", async () => {
+    // Drizzle over a client that records each statement and answers no rows, so no roster is due.
+    const sent: { text: string; values: unknown[] }[] = [];
+    const client = {
+      query: async (config: { text: string }, values: unknown[] = []) => {
+        sent.push({ text: config.text, values });
+        return { rows: [], rowCount: 0, fields: [] };
+      },
+    };
+    const app = {
+      db: { orm: orm(client as unknown as PoolClient) },
+      config: { ROSTER_INTERVAL_SECONDS: 21600 },
+    } as unknown as Service;
+    await new Synchronization(app).schedule();
+    // Each statement with its bound values written in, so the whole condition reads at once.
+    const statements = sent.map(({ text, values }) =>
+      text.replace(/\$(\d+)/g, (_, n: string) => JSON.stringify(values[Number(n) - 1])),
+    );
+    const choices = statements.filter((text) => text.includes('"jobs"."kind" = "roles.self"'));
+    // One close and the 30-day retention, both limited to role choices by their outermost AND.
+    // The close has no age, server or due-time condition: 2.39.0 never runs these jobs, so every
+    // waiting one ends now, whatever holds it, except a running one with a live lease. Its
+    // status, succeeded, is one the payload-clearing trigger fires on.
+    expect(choices).toEqual([
+      'update "jobs" set "status" = "succeeded", "lease_until" = null, "completed_at" = now(), "last_error" = null, "result" = "{\\"skipped\\":\\"needs a newer TaruBot\\"}" where ("jobs"."kind" = "roles.self" and ("jobs"."status" in ("queued", "blocked", "disabled") or ("jobs"."status" = "running" and ("jobs"."lease_until" is null or "jobs"."lease_until" < now()))))',
+      'delete from "jobs" where ("jobs"."kind" = "roles.self" and "jobs"."status" in ("succeeded", "failed") and "jobs"."completed_at" < now()-30*interval \'1 day\')',
+    ]);
+  });
+
   test("a member's role choice left by 2.40.0 completes as skipped, touching nothing", async () => {
     // Every dependency throws on first use and records it: the stub must answer before any
     // database read, Discord call or delivery_attempts row.

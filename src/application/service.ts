@@ -436,7 +436,19 @@ export class Service {
           result: t.jobs.result,
         })
         .from(t.jobs)
-        .where(and(eq(t.jobs.guild_id, actor.guildId), eq(t.jobs.user_id, owner)))
+        .where(
+          and(
+            eq(t.jobs.guild_id, actor.guildId),
+            eq(t.jobs.user_id, owner),
+            // Never a member's role choices (roles.self), for anyone, here (owner decision Q4 A):
+            // officers may open any member's record, delegated officers included, and these rows
+            // would give them a timeline of when that member changed their roles, in the card and
+            // in its Full details. The member sees their own on My roles and in /sync status, and
+            // their own record reads only reconcile.user. Filtered in SQL, so frequent saves can't
+            // push the rows this record does read out of its 10-row window either.
+            not(eq(t.jobs.kind, ROLE_CHOICE_KIND)),
+          ),
+        )
         .orderBy(desc(t.jobs.created_at))
         .limit(10),
       verifiedGuestEligible: registrationEligible(facts),

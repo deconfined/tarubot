@@ -2,16 +2,21 @@
  * The Role menu's writes (2.39.0) over real PostgreSQL: SelfRoles.edit's locks, revision and audit
  * rows, the equal-state rule, conflicts and refusals, the shutdown rollback, two officers editing at
  * once; the invariant that a menu role is never an access role, in configure() and /setup
- * onboarding; the "Role menu" health check in validate(); and the 2.39.0 roles.self stub, whose
- * completion the migration's trigger clears. Any officer may make every change, with no Discord
- * permission check (owner decision, 2026-10-09). The Discord port records every call: web edits
- * read Discord, never write to it. Confined to its own schema, self_roles_it, with invented IDs.
+ * onboarding; the "Role menu" health check in validate(); and members' role choices left by 2.40.0
+ * after a rollback: the dispatcher stub and the schedule pass close them, the migration's trigger
+ * clears each, officers' job views, /guest status and issue reports never name the member, and the
+ * pass reaches them through migration 012's partial indexes. Any officer may make every change,
+ * with no Discord permission check (owner decision, 2026-10-09). The Discord port records every
+ * call: web edits read Discord, never write to it. Confined to its own schema, self_roles_it, with
+ * invented IDs.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ChannelType, PermissionFlagsBits as P } from "discord.js";
 import { and, asc, eq } from "drizzle-orm";
 import { GuildAccess } from "../../src/application/guild-access.js";
 import type { DiscordPort, MemberView } from "../../src/application/records.js";
+import { IssueReports } from "../../src/application/issue-reports.js";
+import { RecentLogs } from "../../src/application/recent-logs.js";
 import {
   RoleAdministration,
   type RoleProvisioner,
@@ -860,6 +865,106 @@ describe.skipIf(!url)("self-service role menu writes", () => {
     expect(calls).toEqual([]);
   });
 
+  test("2.39.0's schedule pass closes every waiting role choice at once, and the trigger clears each", async () => {
+    // A server TaruBot left: Queue.claim() never takes its work, so only the pass can close it.
+    const left = "666666666666666793";
+    await db.orm.insert(t.guilds).values({ id: left, active: false });
+    const choice = {
+      chosen: [ROLE.pronoun],
+      offered: [ROLE.pronoun, ROLE.game],
+      savedAt: "2026-10-09T12:00:00.000Z",
+    };
+    /** Each waiting state, as the SET clause that puts a fresh job in it. */
+    const states = {
+      queued: "due_at=now()+interval '1 hour'",
+      blocked: "status='blocked', due_at=now(), last_error='blocked: invented'",
+      disabled: "status='disabled', last_error='disabled: invented'",
+      lapsed:
+        "status='running', lease_token=gen_random_uuid(), lease_until=now()-interval '1 second'",
+      leaseless: "status='running'",
+      live: "status='running', lease_token=gen_random_uuid(), lease_until=now()+interval '1 minute'",
+    } as const;
+    let user = 0;
+    /** A job of `kind` for a user of its own, in `guild`, put in a state by `set`. */
+    const job = async (kind: string, set: string, guild = GUILD) => {
+      const owner = String(++user);
+      const payload = kind === "roles.self" ? choice : { characterId: "1" };
+      const id = await enqueue(db.pool, kind, `${kind}:${guild}:${owner}`, payload, guild, owner);
+      await db.query(`UPDATE jobs SET ${set} WHERE id=$1`, [id]);
+      return id;
+    };
+    const choices: Record<string, string> = {};
+    const others: string[] = [];
+    for (const [state, set] of Object.entries(states)) {
+      choices[state] = await job("roles.self", set);
+      // The same state for another kind, which the pass must leave alone.
+      others.push(await job("reconcile.user", set));
+    }
+    choices.left = await job("roles.self", states.queued, left);
+    // A finished role choice, inside the 30-day retention, keeps its row and its end time.
+    const finished = await job(
+      "roles.self",
+      "status='succeeded', completed_at=now()-interval '29 days'",
+    );
+    type Row = {
+      id: string;
+      status: string;
+      payload: unknown;
+      result: unknown;
+      lease_until: Date | null;
+      last_error: string | null;
+      completed_at: Date | null;
+    };
+    const rows = async () =>
+      Object.fromEntries(
+        (
+          await db.query<Row>(
+            "SELECT id, kind, status, payload, result, lease_until, last_error, completed_at, due_at FROM jobs",
+          )
+        ).map((row) => [row.id, row]),
+      );
+    /** What closing changes on a row, compared exactly: a cleared payload is `{}` and nothing more. */
+    const ending = (row: Row | undefined) =>
+      row && {
+        status: row.status,
+        payload: row.payload,
+        result: row.result,
+        lease_until: row.lease_until,
+        last_error: row.last_error,
+        ended: row.completed_at instanceof Date,
+      };
+    const closed = {
+      status: "succeeded",
+      payload: {},
+      result: { skipped: "needs a newer TaruBot" },
+      lease_until: null,
+      last_error: null,
+      ended: true,
+    };
+    const before = await rows();
+    for (const id of Object.values(choices)) expect(before[id]?.payload).toEqual(choice);
+    const sync = new Synchronization(app);
+    await sync.schedule();
+    const after = await rows();
+    // Every waiting change, whatever holds it, closed with its role IDs gone; but not the one a
+    // live lease holds, which a worker is completing.
+    for (const state of ["queued", "blocked", "disabled", "lapsed", "leaseless", "left"])
+      expect(ending(after[choices[state] ?? ""])).toEqual(closed);
+    expect(after[choices.live ?? ""]).toEqual(before[choices.live ?? ""]);
+    // Other kinds in the same states, and finished role choices, are untouched.
+    for (const id of [...others, finished]) expect(after[id]).toEqual(before[id]);
+    // A repeat changes nothing.
+    await sync.schedule();
+    expect(await rows()).toEqual(after);
+    // Once the live lease runs out, the next pass closes that one too.
+    await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1", [
+      choices.live,
+    ]);
+    await sync.schedule();
+    expect(ending((await rows())[choices.live ?? ""])).toEqual(closed);
+    expect(calls).toEqual([]);
+  });
+
   test("officers see a member's role choices as 'a member', never who (Q4 A)", async () => {
     const choice = {
       chosen: [ROLE.pronoun],
@@ -931,5 +1036,115 @@ describe.skipIf(!url)("self-service role menu writes", () => {
     await new Synchronization(app).schedule();
     const left = await db.orm.select({ id: t.jobs.id }).from(t.jobs);
     expect(left.map((row) => row.id).sort()).toEqual([recent, waiting, history].sort());
+  });
+
+  test("/guest status and an issue report's member section never list a member's role choices, for anyone (Q4 A)", async () => {
+    // The member's reconcile.user, then a dozen newer role choices, finished as 2.40.0 leaves them.
+    const reconcile = await enqueue(
+      db.pool,
+      "reconcile.user",
+      `user:${GUILD}:${MEMBER.userId}`,
+      {},
+      GUILD,
+      MEMBER.userId,
+    );
+    await db.query(
+      "UPDATE jobs SET status='succeeded', completed_at=now(), created_at=now()-interval '1 hour' WHERE id=$1",
+      [reconcile],
+    );
+    for (let save = 0; save < 12; save++) {
+      const id = await enqueue(
+        db.pool,
+        "roles.self",
+        `self-roles:${GUILD}:${MEMBER.userId}`,
+        { chosen: [ROLE.pronoun], offered: [ROLE.pronoun], savedAt: "2026-10-09T12:00:00.000Z" },
+        GUILD,
+        MEMBER.userId,
+      );
+      await db.query("UPDATE jobs SET status='succeeded', completed_at=now() WHERE id=$1", [id]);
+    }
+    expect(await db.orm.$count(t.jobs, eq(t.jobs.kind, "roles.self"))).toBe(12);
+    // Any officer, delegated ones included, and the member: the record's deliveries, and with them
+    // its card, its health and its Full details (JSON), hold the reconcile.user behind them all.
+    for (const viewer of [DELEGATED, MANAGER, MEMBER])
+      expect(
+        (await app.guestStatus(viewer, MEMBER.userId)).delivery.map((job) => [job.kind, job.id]),
+      ).toEqual([["reconcile.user", reconcile]]);
+    // An issue report's member section lists the same work. Every role choice here has finished, so
+    // the report's queue and failure tables, which list waiting and failed jobs by kind and never by
+    // member, hold none either.
+    const reports = new IssueReports(CONFIG, db, {} as Lodestone, new RecentLogs(), null);
+    await reports.user(MEMBER, "a member", "1300000000000000001", "My roles didn't change at all.");
+    const [report] = await db.orm
+      .select({ body: t.issueReports.body })
+      .from(t.issueReports)
+      .where(eq(t.issueReports.fingerprint, "user:1300000000000000001"));
+    expect(report?.body).toContain("reconcile.user");
+    expect(report?.body).not.toContain("roles.self");
+  });
+
+  test("the schedule pass reaches role choices through migration 012's partial indexes", async () => {
+    // Plenty of other work and finished role choices, two waiting ones, and fresh statistics.
+    await db.query(
+      `INSERT INTO jobs (kind, dedupe_key, payload, guild_id, user_id, status, completed_at)
+       SELECT CASE WHEN n % 5 = 0 THEN 'roles.self' ELSE 'reconcile.user' END, 'bulk:' || n, '{}',
+              $1, n::text, 'succeeded', now()
+         FROM generate_series(1, 500) AS n`,
+      [GUILD],
+    );
+    for (const user of ["1", "2"])
+      await enqueue(db.pool, "roles.self", `self-roles:${GUILD}:${user}`, {}, GUILD, user);
+    await db.query("ANALYZE jobs");
+    // The pass's statements with their bound values, as Drizzle hands them to the pool.
+    const sent: { text: string; values: unknown[] }[] = [];
+    const pool = db.pool as unknown as { query: (...args: unknown[]) => unknown };
+    const query = pool.query;
+    pool.query = (...args: unknown[]) => {
+      const [config, values] = args;
+      if (
+        typeof config === "object" &&
+        config !== null &&
+        "text" in config &&
+        Array.isArray(values)
+      )
+        sent.push({ text: String(config.text), values });
+      return query.apply(db.pool, args);
+    };
+    try {
+      await new Synchronization(app).schedule();
+    } finally {
+      pool.query = query;
+    }
+    // The waiting rows' close, then the finished rows' retention.
+    const [close, retention, ...rest] = sent.filter(({ values }) => values.includes("roles.self"));
+    expect([close?.text.split(" ")[0], retention?.text.split(" ")[0], rest]).toEqual([
+      "update",
+      "delete",
+      [],
+    ]);
+    /**
+     * Each index PostgreSQL plans `statement` with, once, its values bound as the pool binds them.
+     * No index at all would mean a sequential scan; one index can serve both arms of an OR.
+     */
+    const client = await db.pool.connect();
+    const indexes = async (statement: { text: string; values: unknown[] } | undefined) => {
+      const result = await client.query(
+        `EXPLAIN (FORMAT JSON) ${statement?.text}`,
+        statement?.values,
+      );
+      const names = JSON.stringify(result.rows[0]).matchAll(/"Index Name":"([^"]+)"/g);
+      return [...new Set([...names].map((match) => match[1]))];
+    };
+    try {
+      await client.query("BEGIN");
+      // Whether each predicate proves its partial index is under test, not the plan this small
+      // table would get, so sequential scans are off.
+      await client.query("SET LOCAL enable_seqscan = off");
+      expect(await indexes(close)).toEqual(["self_role_waiting"]);
+      expect(await indexes(retention)).toEqual(["self_role_jobs"]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 });

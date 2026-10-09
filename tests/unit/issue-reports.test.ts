@@ -248,3 +248,43 @@ test("a bound value that looks like a stack frame reaches neither the message no
   const dollar = new DrizzleQueryError("select $1", ["$&$`$'"], new Error("x"));
   expect(stackWithoutParams(dollar.stack ?? "", dollar.message)).not.toContain("$&");
 });
+
+test("an automatic report of a member's failed role choices never names the member (2.39.0)", async () => {
+  const reports = new IssueReports(
+    configuration({
+      DATABASE_URL: "postgresql://tarubot:invented-password@db.example:5432/tarubot",
+      DISCORD_TOKEN: "invented-discord-token-value",
+      DISCORD_APPLICATION_ID: "1400000000000000001",
+    }),
+    // jobFailed reaches the database only through render and saveAndQueue, both replaced below.
+    null as unknown as Database,
+    null as unknown as Lodestone,
+    new RecentLogs(),
+    null,
+  );
+  /** What each report would be built from: render adds a member section only with a user. */
+  const scopes: { guildId: string | null | undefined; userId: string | null | undefined }[] = [];
+  Object.assign(reports, {
+    render: async (input: { guildId?: string | null; userId?: string | null }) => {
+      scopes.push({ guildId: input.guildId, userId: input.userId });
+      return "body";
+    },
+    saveAndQueue: async () => {},
+  });
+  const job = (kind: string) => ({
+    id: "00000000-0000-0000-0000-000000000000",
+    kind,
+    attempts: 8,
+    guild_id: "1000000000000000001",
+    user_id: "2000000000000000001",
+  });
+  const outcome = { code: "blocked", diagnostic: "blocked: invented", source: "Failure" };
+  await reports.jobFailed(job("roles.self"), outcome);
+  await reports.jobFailed(job("reconcile.user"), outcome);
+  expect(scopes).toEqual([
+    // The server stays, so the failure can still be looked into; who changed their roles doesn't.
+    { guildId: "1000000000000000001", userId: null },
+    // Every other kind keeps its member.
+    { guildId: "1000000000000000001", userId: "2000000000000000001" },
+  ]);
+});
