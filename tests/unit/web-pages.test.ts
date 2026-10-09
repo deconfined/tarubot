@@ -872,4 +872,123 @@ describe("Status", () => {
       });
     }
   });
+
+  test("every table part names its role, and a stacked card's labels name their columns", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    const tables = [...document.querySelectorAll("main table")];
+    expect(tables).toHaveLength(2);
+    // A phone's stacked cards change every table element's display, which some browsers take as
+    // the end of the table: explicit roles keep it one, beside the pinned scopes and caption.
+    for (const table of tables) {
+      expect(table.getAttribute("role")).toBe("table");
+      expect(table.closest('.table-scroll[role="region"][tabindex="0"]')).not.toBeNull();
+      expect((table.querySelector("caption")?.textContent ?? "").trim()).not.toBe("");
+      for (const group of table.querySelectorAll("thead, tbody"))
+        expect(group.getAttribute("role")).toBe("rowgroup");
+      for (const row of table.querySelectorAll("tr")) expect(row.getAttribute("role")).toBe("row");
+      for (const heading of table.querySelectorAll("thead th"))
+        expect([heading.getAttribute("role"), heading.getAttribute("scope")]).toEqual([
+          "columnheader",
+          "col",
+        ]);
+      for (const heading of table.querySelectorAll("tbody th"))
+        expect([heading.getAttribute("role"), heading.getAttribute("scope")]).toEqual([
+          "rowheader",
+          "row",
+        ]);
+      for (const cell of table.querySelectorAll("td"))
+        expect(cell.getAttribute("role")).toBe("cell");
+      const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent ?? "");
+      for (const row of table.querySelectorAll("tbody tr")) {
+        // One cell per column: the row header, the state a card puts beside it, and the
+        // disclosure, always in the last cell, closing the card.
+        const cells = [...row.children];
+        expect(cells).toHaveLength(headers.length);
+        expect(cells[0]?.matches('th[scope="row"]')).toBe(true);
+        expect(cells[1]?.matches("td.row-state")).toBe(true);
+        expect(cells.at(-1)?.querySelectorAll("details")).toHaveLength(1);
+        expect(row.querySelectorAll("details")).toHaveLength(1);
+        // A label is its cell's own column name, out of the accessibility tree, which reads the
+        // column header from the roles instead.
+        for (const [index, cell] of cells.entries())
+          for (const label of cell.querySelectorAll(".cell-label")) {
+            expect(label.parentElement === cell).toBe(true);
+            expect(label.getAttribute("aria-hidden")).toBe("true");
+            expect(label.textContent).not.toBe("");
+            expect(headers[index]?.startsWith(label.textContent ?? "")).toBe(true);
+          }
+      }
+    }
+    const work = [...document.querySelectorAll('table[aria-describedby="work-sample"] tbody tr')];
+    const runs = [...document.querySelectorAll('table[aria-describedby="run-sample"] tbody tr')];
+    expect([work.length, runs.length]).toEqual([view.work.length, view.runs.length]);
+    for (const row of work) {
+      expect(row.querySelectorAll(".row-state .marker")).toHaveLength(1);
+      // Work labels itself: its name, marker, attempts, moments and summary each say what they are.
+      expect(row.querySelectorAll(".cell-label")).toHaveLength(0);
+    }
+    for (const row of runs) {
+      expect(row.querySelectorAll(".row-state .run-outcome")).toHaveLength(1);
+      expect([...row.querySelectorAll(".cell-label")].map((label) => label.textContent)).toEqual([
+        "Progress",
+        "Acquisition",
+      ]);
+    }
+    for (const moment of document.querySelectorAll("main .moment"))
+      expect((moment.querySelector(".orr-label")?.textContent ?? "").trim()).not.toBe("");
+  });
+
+  test("the stylesheet stacks rows into cards only on narrow screens and keeps them a table", () => {
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    const query = "@media screen and (max-width: 47.99rem) {";
+    const at = css.indexOf(query);
+    expect(at).toBeGreaterThan(-1);
+    const cards = css.slice(at, css.indexOf("\n}\n", at));
+    const rule = (text: string, selector: string): string => {
+      const start = text.indexOf(`${selector} {`);
+      return start < 0 ? "" : text.slice(start, text.indexOf("}", start));
+    };
+    // Each row becomes a card; the column headers leave the screen but stay for assistive
+    // technology (clipped, never display: none), and only there do the column labels show.
+    expect(rule(cards, ".status-table > tbody > tr")).toContain("display: grid;");
+    expect(rule(cards, ".status-table > thead")).toContain("clip-path: inset(50%);");
+    expect(rule(cards, ".status-table > thead")).not.toContain("display: none");
+    expect(rule(cards, ".status-table td > .cell-label")).toContain("display: block;");
+    expect(rule(css.slice(0, at), ".cell-label")).toContain("display: none;");
+    // A card stack has no sideways scroll to fall back on, and must not clip its cards' edges.
+    expect(rule(cards, ".status-section > .table-scroll")).toContain("overflow: visible;");
+  });
+
+  test("display: contents never lands on a table part, in any layout", async () => {
+    // display: contents drops a table part from the accessibility tree in some browsers. The
+    // populated page has every row and cell shape the stacked cards target, so each selector that
+    // sets it runs against real markup; one the parser can't read throws and fails the test.
+    const document = inspect((await statusPage(view)).markup);
+    expect(document.querySelectorAll("main table")).toHaveLength(2);
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    // A selector list splits at its top-level commas only, so :not(a, b) stays one selector.
+    const selectors = (list: string): string[] => {
+      const parts = [""];
+      let depth = 0;
+      for (const character of list) {
+        if (character === "(") depth += 1;
+        if (character === ")") depth -= 1;
+        if (character === "," && depth === 0) parts.push("");
+        else parts[parts.length - 1] += character;
+      }
+      return parts.map((part) => part.trim());
+    };
+    const found = [...css.matchAll(/([^{}]+)\{[^{}]*display: contents;/gu)].flatMap((match) =>
+      selectors(match[1] ?? ""),
+    );
+    expect(found.length).toBeGreaterThan(0);
+    for (const selector of found) {
+      const parts = [...document.querySelectorAll(selector)]
+        .map((element) => element.tagName.toLowerCase())
+        .filter((tag) => ["table", "caption", "thead", "tbody", "tr", "th", "td"].includes(tag));
+      // A bare table tag at the end is caught even where the page renders no match for it.
+      const bare = /\b(?:table|caption|thead|tbody|tr|th|td)$/u.test(selector);
+      expect({ selector, parts, bare }).toEqual({ selector, parts: [], bare: false });
+    }
+  });
 });

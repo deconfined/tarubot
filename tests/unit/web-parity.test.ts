@@ -1,7 +1,7 @@
 /**
  * One design source, two copies: the docs site's files are the originals, and the dashboard
  * carries copies because it serves nothing from disk and the site can't import from src/. The
- * design tokens, the favicon, the third-party notices and the four self-hosted fonts must be
+ * design tokens, the favicon, the third-party notices and the three self-hosted fonts must be
  * identical on both surfaces, and each font must be a whole WOFF2 file, the very file its
  * Fontsource package ships. Fixing a failure here means copying the site file over (tokens.ts,
  * notices.ts, the favicon in assets.ts) or regenerating fonts.ts with
@@ -11,13 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { FAVICON, FONTS, NOTICES } from "../../src/web/assets.js";
-import {
-  type FontFile,
-  INSTRUMENT_SERIF_ITALIC,
-  INSTRUMENT_SERIF_NORMAL,
-  JETBRAINS_MONO,
-  MANROPE,
-} from "../../src/web/fonts.js";
+import { type FontFile, JETBRAINS_MONO, MANROPE, SORA } from "../../src/web/fonts.js";
 import { THIRD_PARTY_NOTICES } from "../../src/web/notices.js";
 import { TOKENS_CSS } from "../../src/web/styles/tokens.js";
 
@@ -29,16 +23,20 @@ const bytes = async (path: string) => new Uint8Array(await Bun.file(root(path)).
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 
 /**
- * The SHA-256 of each font file in its upstream npm package: @fontsource/instrument-serif 5.3.0,
+ * The SHA-256 of each font file in its upstream npm package: @fontsource-variable/sora 5.3.0,
  * @fontsource-variable/manrope 5.3.0 and @fontsource-variable/jetbrains-mono 5.3.0, package/files/.
  * Pinned here, apart from the generated file, because fonts.ts takes its SHA-256 from the same
- * site file it encodes: a damaged site font, regenerated, would otherwise match itself.
+ * site file it encodes: a damaged site font, regenerated, would otherwise match itself. When the
+ * three packages were fetched on 2026-10-08, their npm tarballs had the registry's integrity:
+ * Sora's
+ * sha512-h8kHta4Z8SkfUGeI82TUy1n3rbrKpBRGwuk4t4qCwto5oEHxlbOFD2yGP+Df5fbmTXwKGn+o667vYp0E4K8Whw==,
+ * Manrope's
+ * sha512-6D5dgokHsWDDMtmXHznKa0hK229NN+1a4BLPmUCLqcO1Pw5EEhWY5RFt0AcXnVRAljFFPfRtLkJePQj6LSsV6g==
+ * and JetBrains Mono's
+ * sha512-F32xpS2NsGYoQi2ADSkKTgpJj7ozajsGgDJ8woTnqjmIB+dxDIqImjl4pXZVEExu8UFZ2ndhmX18EBS/hdz3Lw==.
  */
 const UPSTREAM: Readonly<Record<string, string>> = {
-  "instrument-serif-latin-400-normal":
-    "5eb09b5ac0e28b67c2f041c8ba6d244604ca0c0980d65912ab2d47fed84ddc31",
-  "instrument-serif-latin-400-italic":
-    "5a51946dfffa82972bc98745359c46761515641fda557c25116459a9f83da4a7",
+  "sora-latin-wght-normal": "fa26406eeda9a3c6ec3d9ea8813c3045d6dc755e30c716d5c094e8ef43be5a7f",
   "manrope-latin-wght-normal": "a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972",
   "jetbrains-mono-latin-wght-normal":
     "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e",
@@ -46,12 +44,7 @@ const UPSTREAM: Readonly<Record<string, string>> = {
 
 /** Where the site keeps the fonts, and the generated constant for each file. */
 const FONT_DIRECTORY = "site/src/assets/fonts";
-const GENERATED: readonly FontFile[] = [
-  INSTRUMENT_SERIF_NORMAL,
-  INSTRUMENT_SERIF_ITALIC,
-  MANROPE,
-  JETBRAINS_MONO,
-];
+const GENERATED: readonly FontFile[] = [SORA, MANROPE, JETBRAINS_MONO];
 
 describe("the dashboard's copies equal the docs site's files", () => {
   test("the design tokens", async () => {
@@ -91,7 +84,7 @@ describe("the dashboard's copies equal the docs site's files", () => {
     });
 
   test("each font travels with its family's OFL text, which the notices quote", async () => {
-    for (const family of ["instrument-serif", "manrope", "jetbrains-mono"]) {
+    for (const family of ["sora", "manrope", "jetbrains-mono"]) {
       const license = await Bun.file(root(`${FONT_DIRECTORY}/${family}-OFL.txt`)).text();
       expect(license).toContain("SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007");
       // The family's copyright line opens its license file and appears in the notices.
@@ -113,7 +106,7 @@ describe("the dashboard's copies equal the docs site's files", () => {
 
 describe("the dashboard serves the fonts it was generated from", () => {
   test("each font asset is the decoded file at its hashed path", () => {
-    const assets = [FONTS.display, FONTS.displayItalic, FONTS.sans, FONTS.mono];
+    const assets = [FONTS.display, FONTS.sans, FONTS.mono];
     expect(assets.map((asset) => asset.path)).toEqual(
       GENERATED.map((font) => `/assets/${font.stem}.${font.sha256.slice(0, 12)}.woff2`),
     );

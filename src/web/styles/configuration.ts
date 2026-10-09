@@ -28,9 +28,13 @@ export const CONFIGURATION_CSS = `/* Server configuration */
   gap: var(--space-4);
 }
 
-/* The serif's smallest size at every width; a long count wraps onto a second line instead. */
+/*
+ * The featured card's title, in the display face a step under the section titles at every width,
+ * tracked as a small title; a long count wraps onto a second line instead.
+ */
 .health-card__title {
-  font-size: var(--display-sm);
+  font-size: 1.25rem;
+  letter-spacing: var(--tracking-title);
 }
 
 /*
@@ -154,16 +158,7 @@ export const CONFIGURATION_CSS = `/* Server configuration */
 
 /* Settings: the read-only notice, then cards that add a column whenever one fits. */
 .settings-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
   margin-bottom: var(--space-4);
-}
-
-.settings-notice > .orr-icon {
-  margin-top: 1px;
-  font-size: 1rem;
-  color: var(--info);
 }
 
 .settings-grid {
@@ -216,8 +211,12 @@ export const CONFIGURATION_CSS = `/* Server configuration */
   overflow-wrap: anywhere;
 }
 
-/* The health checklist: one card of groups, each group's name above (later beside) its rows. */
+/*
+ * The health checklist: one card of groups, each group's name above (later beside) its rows. The
+ * note under the heading keeps the section description's measure.
+ */
 .checklist-note {
+  max-width: 72ch;
   margin-bottom: var(--space-4);
 }
 
@@ -286,6 +285,17 @@ export const CONFIGURATION_CSS = `/* Server configuration */
   /* Level with the first row's text (the rows' own 10px top padding). */
   .check-group__title {
     padding-top: 10px;
+  }
+}
+
+/*
+ * Text this large for the screen (under 15rem across, as shell.ts's bar): a whole FC ID can be
+ * wider than its card, so commands and IDs wrap like the text around them. The default text size
+ * never gets here, as a page is at least 20rem wide.
+ */
+@media (max-width: 14.99rem) {
+  .settings-facts code {
+    white-space: normal;
   }
 }
 

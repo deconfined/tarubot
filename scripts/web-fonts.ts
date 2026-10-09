@@ -1,7 +1,7 @@
 /**
  * Regenerate src/web/fonts.ts from the site's self-hosted fonts (site/src/assets/fonts, the
  * Fontsource latin subsets with their OFL texts beside them). The dashboard image has no asset
- * directory and serves nothing from disk (#43, ADR D11), so it carries the same four files as
+ * directory and serves nothing from disk (#43, ADR D11), so it carries the same three files as
  * base64 constants, each with the SHA-256 of its bytes. Run it after changing a font there:
  *
  *   bun --no-env-file scripts/web-fonts.ts
@@ -12,8 +12,7 @@ import { createHash } from "node:crypto";
 
 /** The site's fonts, in the order the generated file lists them; the stem is the file name. */
 const FONTS = [
-  { name: "INSTRUMENT_SERIF_NORMAL", stem: "instrument-serif-latin-400-normal" },
-  { name: "INSTRUMENT_SERIF_ITALIC", stem: "instrument-serif-latin-400-italic" },
+  { name: "SORA", stem: "sora-latin-wght-normal" },
   { name: "MANROPE", stem: "manrope-latin-wght-normal" },
   { name: "JETBRAINS_MONO", stem: "jetbrains-mono-latin-wght-normal" },
 ] as const;
@@ -56,8 +55,8 @@ const header = `/**
  * \`bun --no-env-file scripts/web-fonts.ts\` after changing a font there.
  *
  * The dashboard's self-hosted fonts as base64 constants, so the image needs no asset directory
- * (#43, ADR D11). assets.ts decodes and serves each at a hashed path. Instrument Serif, Manrope
- * and JetBrains Mono are under the SIL Open Font License 1.1; their notices are in notices.ts.
+ * (#43, ADR D11). assets.ts decodes and serves each at a hashed path. Sora, Manrope and
+ * JetBrains Mono are under the SIL Open Font License 1.1; their notices are in notices.ts.
  */
 
 /** One font file, as the site ships it. */

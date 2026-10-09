@@ -35,7 +35,7 @@ describe("assets", () => {
     expect(new Set(ASSETS.map((asset) => asset.path)).size).toBe(ASSETS.length);
     // Every font and the notices are served, not just built.
     expect(ASSETS).toEqual(
-      expect.arrayContaining([NOTICES, FONTS.display, FONTS.displayItalic, FONTS.sans, FONTS.mono]),
+      expect.arrayContaining([NOTICES, FONTS.display, FONTS.sans, FONTS.mono]),
     );
   });
 
@@ -43,7 +43,7 @@ describe("assets", () => {
     expect(NOTICES.path).toMatch(/^\/assets\/licenses\.[0-9a-f]{12}\.txt$/u);
     expect(NOTICES.contentType).toBe("text/plain; charset=utf-8");
     for (const component of [
-      "@fontsource/instrument-serif",
+      "@fontsource-variable/sora",
       "@fontsource-variable/manrope",
       "@fontsource-variable/jetbrains-mono",
       "lucide-static",
@@ -60,15 +60,12 @@ describe("assets", () => {
     expect(STYLESHEET.path).toContain(createHash("sha256").update(body).digest("hex").slice(0, 12));
     // One face per font file, each at its hashed path, all shown with fallback text first.
     const urls = [...FONT_FACES.matchAll(/url\("([^"]+)"\)/gu)].map((match) => match[1]);
-    expect(urls).toEqual([
-      FONTS.display.path,
-      FONTS.displayItalic.path,
-      FONTS.sans.path,
-      FONTS.mono.path,
-    ]);
-    expect(FONT_FACES.match(/@font-face \{/gu)).toHaveLength(4);
-    expect(FONT_FACES.match(/font-display: swap;/gu)).toHaveLength(4);
-    expect(FONT_FACES).toContain("font-weight: 400 700;");
+    expect(urls).toEqual([FONTS.display.path, FONTS.sans.path, FONTS.mono.path]);
+    expect(FONT_FACES.match(/@font-face \{/gu)).toHaveLength(3);
+    expect(FONT_FACES.match(/font-display: swap;/gu)).toHaveLength(3);
+    // Sora ships no italic and none is declared; Sora and Manrope 400-700, JetBrains Mono 400-600.
+    expect(FONT_FACES).not.toContain("font-style: italic;");
+    expect(FONT_FACES.match(/font-weight: 400 700;/gu)).toHaveLength(2);
     expect(FONT_FACES).toContain("font-weight: 400 600;");
     expect(FONT_FACES).toContain(NOTICES.path);
     // Whatever else the stylesheet holds, every url() in it is one of these assets: the CSP's
@@ -85,21 +82,25 @@ describe("assets", () => {
     const families = [...TOKENS_CSS.matchAll(/--font-(?:display|sans|mono): "([^"]+)"/gu)].map(
       (match) => match[1],
     );
-    expect(families).toEqual(["Instrument Serif", "Manrope", "JetBrains Mono"]);
+    expect(families).toEqual(["Sora", "Manrope", "JetBrains Mono"]);
     for (const family of families) expect(FONT_FACES).toContain(`font-family: "${family}";`);
   });
 });
 
 describe("icons", () => {
   test("every icon is one a page draws: the shell, a view or a page module names it", async () => {
-    // icons.ts holds only the icons in use. An icon name is quoted where it is drawn (icon("…"),
-    // a page's icon option, a view's mark or readout table), so a name quoted nowhere else is an
-    // icon no page renders.
+    // icons.ts holds only the icons in use. An icon name is quoted where it is drawn: icon("…"),
+    // a view's readout("…"), or a line of its own in a record (a page's `icon: "…",`, a view's
+    // mark table). Any other quoted word doesn't count, as a common one such as "info" or "list"
+    // can appear for another reason (http.ts quotes "info" as a log level).
     const web = fileURLToPath(new URL("../../src/web/", import.meta.url));
-    let source = "";
+    const sources: string[] = [];
     for await (const path of new Bun.Glob("**/*.ts").scan({ cwd: web }))
-      if (path !== "icons.ts") source += await Bun.file(`${web}${path}`).text();
-    expect(ICON_NAMES.filter((name) => !source.includes(`"${name}"`))).toEqual([]);
+      if (path !== "icons.ts") sources.push(await Bun.file(`${web}${path}`).text());
+    const source = sources.join("\n");
+    const drawn = (name: string): boolean =>
+      new RegExp(`(?:icon\\(|readout\\()"${name}"|^\\s*[\\w-]+: "${name}",?$`, "mu").test(source);
+    expect(ICON_NAMES.filter((name) => !drawn(name))).toEqual([]);
     expect(ICON_NAMES.length).toBeGreaterThan(0);
   });
 
@@ -226,6 +227,15 @@ describe("the stylesheet", () => {
   test("focus is an outline, which forced colors keep, not only a box-shadow ring", () => {
     expect(ruleFor(":focus-visible")).toContain("outline: 2px solid var(--focus-ring);");
     expect(css).not.toMatch(/outline: none/u);
+    // An outline that marks a state in forced colors (the current page) outranks the focus ring,
+    // so each one gets a focus rule of its own, or focus there would change nothing (WCAG 2.4.7).
+    const outlined = declaring("(forced-colors: active)", "outline:");
+    expect(outlined.length).toBeGreaterThan(0);
+    for (const selector of outlined.filter((entry) => !entry.endsWith(":focus-visible")))
+      expect({ selector, focus: outlined.includes(`${selector}:focus-visible`) }).toEqual({
+        selector,
+        focus: true,
+      });
   });
 
   test("reduced motion stops every animation, the sheen, the press and the nudge", () => {

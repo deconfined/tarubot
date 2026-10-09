@@ -1047,7 +1047,7 @@ describe("readiness and assets", () => {
   test("assets are served at their hashed paths as immutable, and nothing else is", async () => {
     const w = await world();
     const visitor = new Browser(w);
-    // Text and binary alike: the stylesheet, favicon, notices and the four fonts.
+    // Text and binary alike: the stylesheet, favicon, notices and the three fonts.
     expect(new Set(ASSETS.map((asset) => asset.contentType))).toEqual(
       new Set([
         "text/css; charset=utf-8",

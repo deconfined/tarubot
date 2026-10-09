@@ -27,4 +27,4 @@ Normal Compose deployments pull `ghcr.io/deconfined/tarubot`; an explicit versio
 
 ## License
 
-First-party code is [GNU Affero General Public License v3.0](LICENSE), SPDX **AGPL-3.0-only**. `/version` provides source and license links. Third-party dependencies retain their own licenses. The dashboard and documentation site bundle the Instrument Serif, Manrope and JetBrains Mono fonts (SIL OFL 1.1) and Lucide icons (ISC); their notices are in [the third-party licenses file](site/public/third-party-licenses.txt).
+First-party code is [GNU Affero General Public License v3.0](LICENSE), SPDX **AGPL-3.0-only**. `/version` provides source and license links. Third-party dependencies retain their own licenses. The dashboard and documentation site bundle the Sora, Manrope and JetBrains Mono fonts (SIL OFL 1.1), and the dashboard bundles Lucide icons (ISC, with portions from Feather under the MIT License); their notices are in [the third-party licenses file](site/public/third-party-licenses.txt).

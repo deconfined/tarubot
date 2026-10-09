@@ -363,6 +363,15 @@ describe("configuration rendering", () => {
       expect(rows.length).toBeGreaterThanOrEqual(4);
       expect(fold.querySelectorAll(".check-row .check-ok")).toHaveLength(rows.length);
     }
+    // Each summary is named by its group's title, then its own words, so no two folds share a
+    // name for assistive technology.
+    const named = [...folds].map((fold) => {
+      const summary = fold.querySelector(":scope > summary");
+      const title = fold.closest(".check-group")?.querySelector(":scope > h3");
+      expect(summary?.getAttribute("aria-labelledby")).toBe(`${title?.id} ${summary?.id}`);
+      return `${title?.textContent} ${summary?.textContent?.trim()}`;
+    });
+    expect(new Set(named).size).toBe(named.length);
     // One failing role keeps its whole group open, beside the other three that passed.
     const failing = await documentOf(
       configReport({ capabilities: { member_role_id: "Role is above TaruBot" } }),

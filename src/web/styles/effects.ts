@@ -15,6 +15,13 @@
  *   rule missed (the entrance, the button sheen and press, the server links' arrow nudge).
  */
 export const EFFECTS_CSS = `/* Effects: from the Orrery design system's styles/effects.css */
+
+/*
+ * The ambient loops (holographic edge and button drift, starfield twinkle, orbit rings) keep
+ * looping, with no pause control: the owner accepted the WCAG 2.2.2 (Pause, Stop, Hide) finding
+ * on 2026-10-08. prefers-reduced-motion stops every loop (media.ts). Don't re-raise it without a
+ * new owner decision.
+ */
 @keyframes orr-holo-drift {
   from {
     background-position: 0% 50%;

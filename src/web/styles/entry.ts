@@ -30,14 +30,47 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
   transform: translate(-50%, -50%);
 }
 
-/* The bar over every entry page but the sign-in: the wordmark home, the account menu. */
+/*
+ * Where the planets start, and where they rest under reduced motion. From twelve o'clock the cyan
+ * planet would sit in the heading and the violet one on the bar's hairline. The orbit is centered
+ * on the screen, so the inner ring always crosses the centered content and no angle clears all of
+ * it: these were measured on every entry page from 320px to 2560px wide to keep both planets off
+ * every heading (on a phone the cyan one can still rest behind the No access card's text).
+ * \`rotate\` adds to the spin's transform, so the loop turns on from there.
+ */
+.entry-orbit > .orr-orbit__ring--inner {
+  rotate: 105deg;
+}
+
+.entry-orbit > .orr-orbit__ring:not(.orr-orbit__ring--middle, .orr-orbit__ring--inner) {
+  rotate: 40deg;
+}
+
+/*
+ * The bar over every entry page but the sign-in: the wordmark home, the account menu, which wraps
+ * under the wordmark when a large text setting leaves no room beside it. It stays at the bar's
+ * end when it wraps: its menu opens leftward from the summary's right edge (shell.ts), so a summary
+ * at the start would push the menu off the screen.
+ *
+ * The bar is as tall without the account menu (no access, or an error when signed out) as with
+ * it, so its hairline and the centered page under it don't jump between entry pages: at least the
+ * summary's height (shell.ts), the padding and the hairline. It is a floor, so a large text
+ * setting still grows the bar around its contents.
+ */
 .entry-bar {
+  --bar-pad-block: 14px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-4);
-  padding: 14px var(--space-4);
+  gap: var(--space-2) var(--space-4);
+  min-height: calc(var(--control-md) + 2 * var(--bar-pad-block) + 1px);
+  padding: var(--bar-pad-block) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.entry-bar > .account {
+  margin-inline-start: auto;
 }
 
 /*
@@ -216,10 +249,13 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
   color: var(--cyan-400);
 }
 
+/*
+ * The brand heading, up to the display scale's top step: TaruBot's largest type. Its smallest size
+ * is also capped by the screen's width, so a large text setting on a phone can't split the name.
+ */
 .entry--welcome .page-header__title {
-  font-size: clamp(3.5rem, 13vw, var(--display-2xl));
-  line-height: 0.98;
-  letter-spacing: -0.02em;
+  font-size: clamp(min(2.75rem, 14vw), 10vw, var(--display-2xl));
+  line-height: 1.05;
 }
 
 .welcome-copy {
@@ -231,7 +267,9 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .welcome-copy__title {
-  font: 400 clamp(var(--display-sm), 4vw, var(--display-md)) / 1.1 var(--font-display);
+  font: 600 clamp(var(--display-sm), 3vw, var(--display-md)) / 1.15 var(--font-display);
+  font-synthesis: none;
+  letter-spacing: var(--tracking-display);
 }
 
 .welcome-copy__lead {
@@ -303,7 +341,9 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 }
 
 .sign-in__title {
-  font: 400 clamp(var(--display-sm), 4vw, var(--display-md)) / 1.1 var(--font-display);
+  font: 600 clamp(var(--display-sm), 3vw, var(--display-md)) / 1.15 var(--font-display);
+  font-synthesis: none;
+  letter-spacing: var(--tracking-display);
 }
 
 .sign-in__text {
@@ -332,7 +372,8 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
 
 @media (min-width: 64rem) {
   .entry-bar {
-    padding: 16px 40px;
+    --bar-pad-block: 16px;
+    padding: var(--bar-pad-block) 40px;
   }
   .entry {
     padding: var(--space-16) var(--space-10) var(--space-24);

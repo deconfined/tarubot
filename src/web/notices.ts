@@ -22,9 +22,9 @@ Public License, version 3 only (AGPL-3.0-only); its source code and license are
 at https://github.com/deconfined/tarubot.
 
 Component                            Version  License  Use
-@fontsource/instrument-serif         5.3.0    OFL-1.1  Instrument Serif regular and
-                                                       italic (latin subset): headings
-                                                       and the TaruBot wordmark
+@fontsource-variable/sora            5.3.0    OFL-1.1  Sora, weights 400 to 700
+                                                       (latin subset): headings and
+                                                       the TaruBot wordmark
 @fontsource-variable/manrope         5.3.0    OFL-1.1  Manrope, weights 400 to 700
                                                        (latin subset): body text and
                                                        controls
@@ -32,15 +32,16 @@ Component                            Version  License  Use
                                                        600 (latin subset): labels,
                                                        readouts and code
 lucide-static                        0.460.0  ISC      Lucide icons, inlined as SVG
+                                                       in the dashboard
 
 The fonts are served unmodified from the Fontsource packages named above.
 
 
 ===============================================================================
-Instrument Serif, Manrope and JetBrains Mono: SIL Open Font License 1.1
+Sora, Manrope and JetBrains Mono: SIL Open Font License 1.1
 ===============================================================================
 
-Copyright 2022 The Instrument Serif Project Authors (https://github.com/Instrument/instrument-serif)
+Copyright 2019 The Sora Project Authors (https://github.com/sora-xor/sora-font)
 Copyright 2019 The Manrope Project Authors (https://github.com/sharanda/manrope)
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 

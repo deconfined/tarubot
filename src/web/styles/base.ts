@@ -1,6 +1,6 @@
 /**
  * Base element styles for the dashboard: the Orrery design system's styles/base.css (box sizing,
- * the dark body, quiet headings, links, code, selection and scrollbars), plus what every TaruBot
+ * the dark body, headings, links, code, selection and scrollbars), plus what every TaruBot
  * page needs on top of it: an outline focus ring, the skip link, a visually hidden utility and the
  * default look of headings inside a page.
  *
@@ -46,11 +46,16 @@ p {
   margin: 0;
 }
 
+/*
+ * The export sets headings at weight 400 for its display face; TaruBot's display face (Sora) is
+ * set at 600, and so is a sans heading. Small titles keep near-normal tracking; a display-sized
+ * title sets --tracking-display itself.
+ */
 h1,
 h2,
 h3 {
-  font-weight: 400;
-  letter-spacing: var(--tracking-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-title);
   text-wrap: balance;
 }
 
@@ -152,16 +157,35 @@ textarea {
   white-space: nowrap;
 }
 
-/* Headings in a page: section titles in the serif at 28px, its smallest size; the rest in sans. */
+/*
+ * Headings in a page: section titles in the display face (Sora), the rest in sans. Synthesis is
+ * off wherever the display face is used: it has no italic, and nothing may fake one or a weight.
+ */
 main h2 {
   color: var(--text-primary);
   font: var(--type-h3);
   font-synthesis: none;
+  letter-spacing: var(--tracking-display);
 }
 
 main h3 {
   color: var(--text-primary);
   font: var(--type-subtitle);
   letter-spacing: var(--tracking-ui);
+}
+
+/*
+ * A timestamp reads as one unit, so a line never breaks inside its date ("2026-10-" | "09 00:06
+ * UTC"). Under 20rem of measure (the narrowest phones, or a large text setting, which scales this
+ * rem query too) it may wrap again, rather than run out of its box.
+ */
+main time {
+  white-space: nowrap;
+}
+
+@media (max-width: 19.99rem) {
+  main time {
+    white-space: normal;
+  }
 }
 `;

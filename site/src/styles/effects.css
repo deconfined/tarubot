@@ -6,6 +6,11 @@
  *
  * Everything that paints is screen-only, so printing gets Starlight's plain light page. Every
  * animation stops under prefers-reduced-motion, at the end of this file.
+ *
+ * The ambient loops (twinkle, holographic drift, orbit rings, and the hero button's drift in
+ * components.css) keep looping, with no pause control: the owner accepted the WCAG 2.2.2 (Pause,
+ * Stop, Hide) finding on 2026-10-08, and reduced motion is their off switch. Don't re-raise it
+ * without a new owner decision.
  */
 
 @keyframes orr-holo-drift {
@@ -138,8 +143,12 @@
     animation: orr-twinkle var(--dur-twinkle) var(--ease-in-out) infinite;
   }
 
-  /* Holographic text: one word per view, the splash title. */
+  /*
+   * Holographic text: one word per view, the splash title. Upright: it is an <em>, and the display
+   * face (Sora) has no italic.
+   */
   .orr-holo-text {
+    font-style: normal;
     background: var(--holo-text);
     background-size: 200% 100%;
     -webkit-background-clip: text;

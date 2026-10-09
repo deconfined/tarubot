@@ -80,8 +80,8 @@
 
 /*
  * Type. Prose stays at Starlight's 16px (rem, so it follows the reader's browser setting) with the
- * design's long-form line height, in Manrope. Headings follow the design's display scale: h1 and
- * h2 are set in the serif below, h3 and smaller in Manrope.
+ * design's long-form line height, in Manrope. Headings follow the display scale: h1 and h2 are set
+ * in the display face (Sora) below, h3 and smaller in Manrope.
  */
 :root {
   --sl-font: var(--font-sans);
@@ -98,40 +98,44 @@
     monospace;
   --sl-line-height: 1.6;
 
-  --sl-text-h1: 2.25rem;
-  --sl-text-h2: 1.75rem;
-  --sl-text-h3: 1.25rem;
-  --sl-text-h4: 1.125rem;
+  --sl-text-h1: 1.75rem;
+  --sl-text-h2: 1.375rem;
+  --sl-text-h3: 1.1875rem;
+  --sl-text-h4: 1.0625rem;
   --sl-text-h5: 1rem;
 }
 
 @media (min-width: 50em) {
   :root {
-    --sl-text-h1: 3rem;
-    --sl-text-h2: 2.25rem;
-    --sl-text-h3: 1.375rem;
+    --sl-text-h1: 2.25rem;
+    --sl-text-h2: 1.5rem;
+    --sl-text-h3: 1.25rem;
     --sl-text-h4: 1.125rem;
   }
 }
 
 /*
- * The display serif: page titles (the splash hero's and every page's h1#_top), Markdown h1 and h2,
- * and the site title. Nowhere smaller than 28px except the site title, the design's wordmark.
- * Instrument Serif ships one weight, so 400 with synthesis off: Starlight's 600 would be a faked
- * bold.
+ * The display face (Sora): page titles (the splash hero's and every page's h1#_top), Markdown h1
+ * and h2, and the site title, the wordmark. Weight 600, with synthesis off: Sora has no italic,
+ * and nothing may fake one or a weight. Display sizes track tight; the small wordmark nearly
+ * normal.
  */
 h1#_top,
 .sl-markdown-content :is(h1, h2):not(:where(.not-content *)),
 .site-title {
   font-family: var(--font-display);
-  font-weight: 400;
+  font-weight: 600;
   font-synthesis: none;
   letter-spacing: var(--tracking-display);
 }
 
+.site-title {
+  letter-spacing: var(--tracking-title);
+}
+
 h1#_top,
 .sl-markdown-content :is(h1, h2):not(:where(.not-content *)) {
-  line-height: 1.1;
+  line-height: 1.15;
   text-wrap: balance;
 }
 

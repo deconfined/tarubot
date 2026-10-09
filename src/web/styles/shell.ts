@@ -68,11 +68,11 @@ html {
   grid-area: account;
 }
 
-/* The type-only wordmark (no logo exists); the design's one serif use below 28px. */
+/* The type-only wordmark (no logo exists), in the display face (Sora). */
 .wordmark {
-  font: 400 var(--text-2xl) / 1 var(--font-display);
+  font: 600 1.125rem / 1 var(--font-display);
   font-synthesis: none;
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-title);
   white-space: nowrap;
   color: var(--text-primary);
   text-decoration: none;
@@ -80,7 +80,8 @@ html {
 
 /*
  * The server switcher: a link back to the server list, filled like the kit's but without its own
- * blur, since it sits on the glass bar. The name truncates; the full name is on the server list.
+ * blur, since it sits on the glass bar. A long name wraps onto a second line, then truncates; the
+ * full name is on the server list.
  */
 .server-switch {
   display: flex;
@@ -118,24 +119,25 @@ html {
 }
 
 .server-switch__name {
-  overflow: hidden;
   font: 600 var(--text-md) / 1.2 var(--font-sans);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /*
- * The name itself is the isolate (untrusted() gives it dir="auto"), so the ellipsis goes on it:
- * there it cuts the name's end in the name's own direction. On the line box around it, a name in
- * a right-to-left script would lose its start and show only a trailing Latin part. A name that
- * fits stays at the left, beside the initials, whatever its direction.
+ * The name itself is the isolate (untrusted() gives it dir="auto"), so the two-line clamp and its
+ * ellipsis go on it: there the ellipsis cuts the name's end in the name's own direction. On the
+ * line box around it, a name in a right-to-left script would lose its start and show only a
+ * trailing Latin part. Two lines tell apart servers whose names share a long prefix; a name with
+ * no spaces breaks anywhere rather than run out of the box. The name aligns to its own start: the
+ * clamp puts its ellipsis after the last line's end, which a right-to-left name forced to the left
+ * would push out of the box, so a cut name would look whole.
  */
 .server-switch__name > [dir="auto"] {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 
 .server-switch__hint {
@@ -241,7 +243,7 @@ html {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  min-height: 36px;
+  min-height: var(--control-md);
   padding: 0 10px;
   border-radius: var(--radius-md);
   color: var(--text-secondary);
@@ -304,6 +306,7 @@ html {
 
 .account__action {
   justify-content: flex-start;
+  text-align: start;
 }
 
 .frame {
@@ -342,7 +345,10 @@ html {
   padding: var(--space-6) var(--space-4) var(--space-12);
 }
 
-/* The page header: an eyebrow, the serif h1; a view's opening .lead reads as its description. */
+/*
+ * The page header: an eyebrow, then the h1 in the display face (Sora); a view's opening .lead
+ * reads as its description.
+ */
 .page-header {
   display: grid;
   gap: 10px;
@@ -351,7 +357,7 @@ html {
 
 .page-header__title {
   color: var(--text-primary);
-  font: 400 clamp(var(--display-sm), 6vw, 2.75rem) / 1.05 var(--font-display);
+  font: 600 clamp(1.625rem, 4.5vw, 2.125rem) / 1.1 var(--font-display);
   font-synthesis: none;
   letter-spacing: var(--tracking-display);
 }
@@ -360,7 +366,10 @@ html {
   margin-top: calc(var(--space-3) - var(--space-8));
 }
 
-/* The footer: version, source and licenses (AGPL-3.0 section 13), on every page. */
+/*
+ * The footer: version, source and licenses (AGPL-3.0 section 13), on every page. Each link stays
+ * on one line, so a phone never splits "License (AGPL-3.0-only)" at its hyphen.
+ */
 .site-footer {
   width: 100%;
   max-width: calc(var(--content-max) + 2 * var(--gutter));
@@ -380,6 +389,7 @@ html {
   text-decoration: underline;
   text-decoration-color: var(--border-strong);
   text-underline-offset: 3px;
+  white-space: nowrap;
 }
 
 .site-footer a:hover {
@@ -402,9 +412,37 @@ html {
   }
 }
 
+/*
+ * Tablets, where the bar has room to spare, so nothing stretches to fill it. The switcher is a
+ * pill sized to the server's name, up to 20rem, not a full-width select. The tabs are the design
+ * kit's: sized to their labels, 2px apart, the underline 10px in from each side, and the first
+ * tab's 12px padding in the gutter, so its label starts in line with the wordmark and the heading.
+ */
 @media (min-width: 40rem) and (max-width: 63.99rem) {
+  .sidebar > .server-switch {
+    justify-self: start;
+    max-width: 20rem;
+  }
+  .side-nav__list {
+    display: flex;
+    gap: 2px;
+    margin-inline-start: -12px;
+  }
+  .nav-item {
+    padding-inline: 12px;
+  }
   .sidebar .account__menu {
     right: var(--gutter);
+  }
+}
+
+/*
+ * The account menu's summary is as tall as the switcher in the row they share. Not under 15rem,
+ * where the bar wraps and its scroll padding (below) is measured for the shorter summary.
+ */
+@media (min-width: 15rem) and (max-width: 63.99rem) {
+  .sidebar .account__summary {
+    min-height: 44px;
   }
 }
 
@@ -445,6 +483,44 @@ html {
   }
 }
 
+/*
+ * Text this large for the screen (under 15rem across, such as a 320px phone at a 24px default
+ * font size): one row can't hold the wordmark, the switcher and the account menu. The switcher
+ * takes a row of its own under the other two, which wrap onto two rows themselves if even they
+ * don't fit, and the open account menu, under the taller bar, needs more scroll padding. A footer
+ * link may wrap again, rather than widen the page. The default text size never gets here, as a
+ * page is at least 20rem wide.
+ */
+@media (max-width: 14.99rem) {
+  .sidebar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+  }
+  .sidebar > .account {
+    order: 1;
+  }
+  .sidebar > .server-switch {
+    flex: 1 0 100%;
+    order: 2;
+  }
+  .sidebar > .side-nav {
+    flex: 1 0 100%;
+    order: 3;
+  }
+  .site-footer a {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 14.99rem) and (min-height: 30rem) {
+  html:has(.sidebar > .account[open]) {
+    scroll-padding-top: 17rem;
+  }
+}
+
 @media (max-width: 29.99rem) {
   .server-switch__hint {
     position: absolute;
@@ -464,7 +540,7 @@ html {
 
 @media (min-width: 30rem) {
   .wordmark {
-    font-size: 1.625rem;
+    font-size: 1.25rem;
   }
 }
 
@@ -541,10 +617,14 @@ html {
   .nav-item:hover {
     background: var(--surface-hover);
   }
+  /*
+   * The current page: the pill's accent edge is the cue that reaches 3:1 against the sidebar, as
+   * the strip's underline does on phones; the fill and the weight only add to it.
+   */
   .nav-item[aria-current="page"] {
     background: var(--surface-active);
     box-shadow:
-      inset 0 0 0 1px var(--border-default),
+      inset 0 0 0 1px var(--border-accent),
       var(--inner-highlight);
   }
   .nav-item::after {

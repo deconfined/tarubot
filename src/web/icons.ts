@@ -1,7 +1,9 @@
 /**
  * The dashboard's inline icons: Lucide path data from lucide-static 0.460.0, under the ISC license
  * with portions from Feather under MIT. notices.ts carries both notices, served as the
- * "Third-party licenses" asset every page footer links to.
+ * "Third-party licenses" asset every page footer links to. When the package was fetched on
+ * 2026-10-08, its npm tarball had the registry's integrity
+ * sha512-X6pIdg7jVxv7YQ/uR241hwhNiztcAfmj181TbcX7HCxxk/3mGaRtAc6b2ftUvQBufbJE6ehgyzO2uVsa604tWg==.
  *
  * Each icon is constant markup: the children of the upstream package/icons/<name>.svg inside one
  * shared `<svg class="orr-icon">`. Icons are decorative: aria-hidden (and focusable="false" for

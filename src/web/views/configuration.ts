@@ -190,7 +190,12 @@ function checkItem(row: HealthCheck, names: WebNames): SafeHtml {
   return html`<li class="check-row">${token(row.check)}<span class="check-copy">${mentionText(row.text, names)}</span></li>`;
 }
 
-/** Group the shared Discord checklist without hiding any section, unset resource or warning. */
+/**
+ * Group the shared Discord checklist without hiding any section, unset resource or warning. A
+ * folded group's summary is named by its group's title and then its own words ("Access roles All 4
+ * checks passed"), so two folds never share one name in a list of controls. The ids come from the
+ * group's position, never from text.
+ */
 function checklist(checks: readonly HealthCheck[], names: WebNames): SafeHtml[] {
   const sections = new Map<HealthSection, HealthCheck[]>();
   for (const row of checks) {
@@ -198,12 +203,13 @@ function checklist(checks: readonly HealthCheck[], names: WebNames): SafeHtml[] 
     if (group) group.push(row);
     else sections.set(row.section, [row]);
   }
-  return [...sections].map(([section, rows]) => {
+  return [...sections].map(([section, rows], index) => {
+    const id = `check-group-${index}`;
     const items = html`<ul class="checklist">${rows.map((row) => checkItem(row, names))}</ul>`;
     const folded = rows.length >= FOLD_AT && rows.every((row) => row.check === "ok");
     return html`<section class="check-group">
-<h3 class="check-group__title">${section}</h3>
-${folded ? html`<details class="check-group__fold"><summary>${icon("circle-check")}All ${rows.length} checks passed</summary>${items}</details>` : items}
+<h3 class="check-group__title" id="${id}">${section}</h3>
+${folded ? html`<details class="check-group__fold"><summary id="${id}-fold" aria-labelledby="${id} ${id}-fold">${icon("circle-check")}All ${rows.length} checks passed</summary>${items}</details>` : items}
 </section>`;
   });
 }

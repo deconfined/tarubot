@@ -3,7 +3,8 @@
  * - reduced motion stops all of the design's motion: the ambient loops it already stopped, plus
  *   the page entrance, the button sheen and press, the server links' arrow nudge and every
  *   transition. Every rule that starts an animation lists its selector here, and
- *   web-assets.test.ts checks that none is missing;
+ *   web-assets.test.ts checks that none is missing. This is the loops' only off switch: they keep
+ *   looping otherwise (the owner accepted the WCAG 2.2.2 finding on 2026-10-08, see effects.ts);
  * - reduced transparency swaps every glass surface for a solid one;
  * - forced colors (Windows contrast themes) drop the box-shadows the design draws every edge
  *   with, so cards, status badges, buttons and the current page get real borders. Focus is
@@ -73,6 +74,11 @@ export const MEDIA_CSS = `/* Preferences and print */
   .nav-item[aria-current="page"] {
     outline: 2px solid CanvasText;
     outline-offset: -2px;
+  }
+  /* The current page's outline marks the page, so focus there needs a ring of its own. */
+  .nav-item[aria-current="page"]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
   }
   .orr-holo-edge::before,
   .orr-starfield::before,

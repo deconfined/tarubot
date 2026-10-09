@@ -1,5 +1,5 @@
 /**
- * The web's only static files (#43, ADR D11): the stylesheet, the site favicon, the four
+ * The web's only static files (#43, ADR D11): the stylesheet, the site favicon, the three
  * self-hosted fonts and the third-party notices, kept as constants so the image needs no asset
  * directory and nothing is served from disk. Each path carries a hash of its body, so a response
  * can be cached as immutable and a new release's change gets a new path. The favicon, the fonts,
@@ -7,13 +7,7 @@
  * tests/unit/web-parity.test.ts keeps each copy identical to its site original.
  */
 import { createHash } from "node:crypto";
-import {
-  type FontFile,
-  INSTRUMENT_SERIF_ITALIC,
-  INSTRUMENT_SERIF_NORMAL,
-  JETBRAINS_MONO,
-  MANROPE,
-} from "./fonts.js";
+import { type FontFile, JETBRAINS_MONO, MANROPE, SORA } from "./fonts.js";
 import { THIRD_PARTY_NOTICES } from "./notices.js";
 import { BASE_CSS } from "./styles/base.js";
 import { COMPONENTS_CSS } from "./styles/components.js";
@@ -48,13 +42,12 @@ const font = (file: FontFile): Asset =>
   asset(file.stem, "woff2", "font/woff2", Uint8Array.fromBase64(file.base64));
 
 /**
- * The four fonts (fonts.ts, generated from the site's copies), by role: Instrument Serif for
- * display (regular and italic), Manrope for text, JetBrains Mono for labels and readouts. Latin
+ * The three fonts (fonts.ts, generated from the site's copies), by role: Sora for display
+ * headings and the wordmark, Manrope for text, JetBrains Mono for labels and readouts. Latin
  * subsets only; the token font stacks fall back to system fonts for anything else.
  */
 export const FONTS = {
-  display: font(INSTRUMENT_SERIF_NORMAL),
-  displayItalic: font(INSTRUMENT_SERIF_ITALIC),
+  display: font(SORA),
   sans: font(MANROPE),
   mono: font(JETBRAINS_MONO),
 } as const;
@@ -73,26 +66,20 @@ export const NOTICES: Asset = asset(
 /**
  * The fonts' `@font-face` rules, pointing at their hashed paths, under the family names the token
  * font stacks use. `swap` shows fallback text at once instead of invisible text while a font
- * loads; the weight ranges clamp the variable fonts to the weights the design uses (Manrope
- * 400–700, JetBrains Mono 400–600). STYLESHEET puts these first and is hashed after they are
- * interpolated, so a changed font also gives the stylesheet a new path. The site declares its own
- * rules for the same files, because its URLs differ.
+ * loads; the weight ranges clamp the variable fonts to the weights the design uses (Sora and
+ * Manrope 400–700, JetBrains Mono 400–600). Sora has no italic face, and the display rules turn
+ * font synthesis off, so the browser never fakes a slanted or bolder copy of it. STYLESHEET puts
+ * these first and is hashed after they are interpolated, so a changed font also gives the
+ * stylesheet a new path. The site declares its own rules for the same files, because its URLs
+ * differ.
  */
 export const FONT_FACES = `/* Fonts: SIL Open Font License 1.1, notices at ${NOTICES.path} */
 @font-face {
-  font-family: "Instrument Serif";
+  font-family: "Sora";
   font-style: normal;
-  font-weight: 400;
+  font-weight: 400 700;
   font-display: swap;
   src: url("${FONTS.display.path}") format("woff2");
-}
-
-@font-face {
-  font-family: "Instrument Serif";
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  src: url("${FONTS.displayItalic.path}") format("woff2");
 }
 
 @font-face {
@@ -156,7 +143,6 @@ export const ASSETS: readonly Asset[] = [
   FAVICON,
   NOTICES,
   FONTS.display,
-  FONTS.displayItalic,
   FONTS.sans,
   FONTS.mono,
 ];

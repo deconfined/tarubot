@@ -3,18 +3,19 @@
  * TaruBot's pages render (icon, button, badge, avatar, card, stat and table), then the vocabulary
  * the pages share on top of them: status tokens, mentions, notes and notices, section headings,
  * fact lists, checklists, disclosures and empty states. A part no page renders is left out until
- * one does, so every rule here styles markup that exists.
+ * one does, so every rule here styles markup that exists, apart from the guard that keeps a nested
+ * card solid.
  *
  * Left out on purpose: the form controls, switches, sliders, dialog, tooltip and toast (v3 pages
  * have no controls; disclosures are `<details>`), the icon-only button (every control has a visible
  * label), the danger button and the Discord message preview. Not yet rendered, so not ported:
- * tags, tabs, keyboard keys, the badge's own classes and dot, the interactive, solid and padding
- * card variants, the card actions, and the stat's unit and meta lines.
+ * tags, tabs, keyboard keys, the badge's own classes and dot, the interactive and solid card
+ * variants and the other padding sizes, the card actions, and the stat's unit and meta lines.
  *
  * Fixes to the export, each marked where it applies: link components don't inherit the link
- * hover (base.ts lowers its specificity), a table styles only its column headers as labels and
- * keeps row headers and captions readable, glass never nests inside glass, and focus keeps
- * base.ts's outline with the design's glow beside it.
+ * hover (base.ts lowers its specificity), a button's label wraps rather than overflow, a table
+ * styles only its column headers as labels and keeps row headers readable, glass never nests
+ * inside glass, and focus keeps base.ts's outline with the design's glow beside it.
  *
  * TaruBot's test-pinned semantic classes (.check-*, .marker-*, .mention, .featured, .ref) stay on
  * the markup next to the design's classes; the status tokens are styled as badges through them, so
@@ -32,7 +33,12 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   stroke-width: var(--icon-stroke, 1.85);
 }
 
-/* Button: primary (holographic, one per page), secondary (glass) and ghost. */
+/*
+ * Button: primary (holographic, one per page), secondary (glass) and ghost. Fix: the export's
+ * labels never wrap, so a large text setting on a phone pushed a button past the screen's edge;
+ * here a label wraps when it must, and the block padding keeps wrapped lines off the edges. A
+ * label that fits keeps the export's one line and height.
+ */
 .orr-btn {
   position: relative;
   isolation: isolate;
@@ -41,12 +47,12 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   justify-content: center;
   gap: var(--space-2);
   min-height: var(--control-md);
-  padding: 0 var(--space-4);
+  padding: var(--space-1-5) var(--space-4);
   border: 0;
   border-radius: var(--radius-md);
   font: var(--type-ui);
   font-weight: var(--weight-semibold);
-  white-space: nowrap;
+  text-align: center;
   cursor: pointer;
   user-select: none;
   text-decoration: none;
@@ -69,16 +75,9 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   transform: scale(0.975);
 }
 
-.orr-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
-  box-shadow: none;
-  transform: none;
-}
-
 .orr-btn--sm {
   min-height: var(--control-sm);
-  padding: 0 var(--space-3);
+  padding: var(--space-1) var(--space-3);
   gap: var(--space-1-5);
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
@@ -90,7 +89,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 
 .orr-btn--lg {
   min-height: var(--control-lg);
-  padding: 0 var(--space-5);
+  padding: var(--space-1-5) var(--space-5);
   border-radius: var(--radius-lg);
   font-size: 0.9375rem;
 }
@@ -146,10 +145,6 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
     inset 0 1px 0 oklch(1 0 0 / 0.5),
     inset 0 -1px 0 oklch(0.3 0.08 280 / 0.25),
     var(--glow-cyan-lg);
-}
-
-.orr-btn--primary:disabled {
-  animation: none;
 }
 
 .orr-btn--secondary {
@@ -216,8 +211,7 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
 
 /* Accent: work in progress and checks waiting on something. */
 .check-wait,
-.marker-running,
-.marker-saved {
+.marker-running {
   color: var(--cyan-400);
   background: var(--info-bg);
   box-shadow: inset 0 0 0 1px oklch(0.8 0.13 210 / 0.3);
@@ -453,14 +447,6 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   text-align: left;
 }
 
-.orr-table caption {
-  padding: 0 16px 10px;
-  caption-side: top;
-  text-align: left;
-  font: var(--type-caption);
-  color: var(--text-muted);
-}
-
 .orr-table thead th {
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-subtle);
@@ -514,7 +500,11 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   font: var(--type-caption);
 }
 
-/* A static callout, such as "Read-only. Update settings with /config in Discord." */
+/*
+ * A static callout, such as "Read-only. Update settings with /config in Discord.". With an info
+ * icon, the icon sits level with the first line, and the words go in one span after it, so a code
+ * chip among them stays in the line rather than become a flex item of its own.
+ */
 .notice {
   padding: 10px 14px;
   border-radius: var(--radius-md);
@@ -522,6 +512,18 @@ export const COMPONENTS_CSS = `/* Components: from the Orrery design system's st
   background: var(--info-bg);
   box-shadow: inset 0 0 0 1px oklch(0.8 0.13 210 / 0.22);
   font: var(--type-caption);
+}
+
+.notice:has(> .orr-icon) {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.notice > .orr-icon {
+  margin-top: 1px;
+  font-size: 1rem;
+  color: var(--info);
 }
 
 /* A page's notice right after its lead joins the description: 16px under it, not main's 32px. */
@@ -540,9 +542,11 @@ main code {
 }
 
 /*
- * A section of a page: its heading row, then content. The serif title shares its row only with a
+ * A section of a page: its heading row, then content. The title shares its row only with a
  * short count, kept at the end like the design's "All logs"; a description sentence wraps under
- * the title, where it reads as the title's own.
+ * the title, where it reads as the title's own, at a readable measure (the lead's, a little wider
+ * for the smaller text). On the narrowest phones the count goes under the title instead, so a
+ * two-word title keeps one line at its full size.
  */
 .section-heading {
   display: grid;
@@ -564,6 +568,17 @@ main code {
 .section-description {
   color: var(--text-muted);
   font: var(--type-caption);
+}
+
+.section-description:not(.section-count) {
+  max-width: 72ch;
+}
+
+@media (max-width: 21.24rem) {
+  .section-heading > .section-count {
+    grid-row: auto;
+    grid-column: 1 / -1;
+  }
 }
 
 /* A role or channel mention (mentions.ts), the design's Discord mention chip. */
@@ -607,6 +622,16 @@ main code {
 
 .facts > dd {
   color: var(--text-primary);
+}
+
+/*
+ * A timestamp among facts, on either page, is a mono readout like the times in Background work's
+ * rows (the design's face for numbers, IDs and timestamps); a time inside a sentence stays sans.
+ */
+.facts time,
+.settings-facts time {
+  color: var(--text-secondary);
+  font: var(--type-code);
 }
 
 /*

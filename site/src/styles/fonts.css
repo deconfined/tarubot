@@ -1,25 +1,19 @@
 /*
- * The site's three type families, self-hosted: Instrument Serif for display headings, Manrope for
- * text and JetBrains Mono for code and labels. They are Fontsource's latin subsets under the SIL
- * Open Font License 1.1; each license sits beside its font in src/assets/fonts, and the published
- * notices are /tarubot/third-party-licenses.txt. Relative url()s let the build fingerprint each
- * file and add the /tarubot/ base. The dashboard declares the same faces at its own asset paths.
+ * The site's three type families, self-hosted: Sora for display headings and the wordmark, Manrope
+ * for text and JetBrains Mono for code and labels. They are Fontsource's latin subsets under the
+ * SIL Open Font License 1.1; each license sits beside its font in src/assets/fonts, and the
+ * published notices are /tarubot/third-party-licenses.txt. Relative url()s let the build
+ * fingerprint each file and add the /tarubot/ base. The dashboard declares the same faces at its
+ * own asset paths. Sora has no italic face; the display rules turn font synthesis off, so the
+ * browser never fakes a slanted or bolder copy of it.
  */
 
 @font-face {
-  font-family: "Instrument Serif";
+  font-family: "Sora";
   font-style: normal;
-  font-weight: 400;
+  font-weight: 400 700;
   font-display: swap;
-  src: url("../assets/fonts/instrument-serif-latin-400-normal.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Instrument Serif";
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  src: url("../assets/fonts/instrument-serif-latin-400-italic.woff2") format("woff2");
+  src: url("../assets/fonts/sora-latin-wght-normal.woff2") format("woff2");
 }
 
 @font-face {

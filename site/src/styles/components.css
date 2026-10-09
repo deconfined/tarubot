@@ -21,9 +21,14 @@
     box-shadow: var(--inner-highlight);
   }
 
-  /* The wordmark: the name in the display serif, the design's one exception to its 28px floor. */
+  /*
+   * The wordmark: the name in the display face (Sora), within the dashboard's 18–20px range: 18px
+   * on a 320px phone, scaling to 20px by about 22rem (356px). It keeps to the width the header
+   * leaves it beside the search and menu buttons, so a large text setting on a phone can't cut it
+   * off.
+   */
   .site-title {
-    font-size: 1.625rem;
+    font-size: min(1.25rem, 5.625vw);
     color: var(--text-primary);
   }
 
@@ -129,7 +134,11 @@
     background-color: var(--surface-hover);
   }
 
-  /* The current page: a lit fill with an inner ring, as in the design system's navigation. */
+  /*
+   * The current page: a lit fill with an inner ring, as in the design system's navigation. The
+   * ring's accent edge is the cue that reaches 3:1 against the sidebar, as the dashboard's
+   * navigation pill does; the fill and the weight only add to it.
+   */
   .sidebar-content a[aria-current="page"],
   .sidebar-content a[aria-current="page"]:hover,
   .sidebar-content a[aria-current="page"]:focus {
@@ -137,7 +146,7 @@
     color: var(--text-primary);
     background-color: var(--surface-active);
     box-shadow:
-      inset 0 0 0 1px var(--border-default),
+      inset 0 0 0 1px var(--border-accent),
       var(--inner-highlight);
   }
 
@@ -208,9 +217,12 @@
     color: var(--text-muted);
   }
 
+  /* A chip that wraps onto another line gets its padding, ring and corners on every line. */
   .sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
     border-radius: var(--radius-xs);
     box-shadow: inset 0 0 0 1px var(--border-subtle);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
   }
 
   .sl-markdown-content blockquote:not(:where(.not-content *)) {
@@ -472,11 +484,22 @@
 
   /* ---------- The splash ---------- */
 
-  /* Hero: the display serif at the design's hero size, the orbit drawing beside it. */
+  /*
+   * A hero page (the splash, the 404) has no sidebar, so its content lines up with the header's
+   * wordmark: Starlight widens the header's gutter from 50rem but the content's only from 72rem.
+   */
+  :root[data-has-hero] {
+    --sl-content-pad-x: var(--sl-nav-pad-x);
+  }
+
+  /*
+   * Hero: the display face (Sora) up to the display scale's top step, the orbit drawing beside it.
+   * Phones get the dashboard sign-in's brand size, capped by the screen's width as there, so a
+   * large text setting can't push the name past the edge.
+   */
   .hero h1#_top {
-    font-size: clamp(2.75rem, 1.25rem + 6vw, 5.5rem);
-    line-height: 1;
-    letter-spacing: -0.02em;
+    font-size: clamp(min(2.75rem, 14vw), 1rem + 4.5vw, var(--display-2xl));
+    line-height: 1.05;
     color: var(--text-primary);
   }
 
@@ -572,6 +595,17 @@
   }
 }
 
+/*
+ * Below 50rem Starlight gives a hero no top padding, as the splash leads with its drawing. A hero
+ * without one (the generated 404) would put its title right under the header, so it takes the
+ * wider screens' padding, capped for a phone.
+ */
+@media screen and (max-width: 49.99rem) {
+  .hero:not(:has(> .hero-html)) {
+    padding-top: clamp(2.5rem, calc(1rem + 10vmin), 5rem);
+  }
+}
+
 @media screen and (min-width: 50rem) {
   /* Beside the content the sidebar is a darker, quieter pane than the phone menu. */
   .sidebar-pane {
@@ -617,11 +651,12 @@
 /*
  * A column narrower than 32rem (a phone, or between both sidebars on a small laptop) can't show a
  * table's columns side by side, and scrolling one sideways hides its prose columns entirely. Each
- * row stacks instead: the first cell leads, the cells after it follow, each named by its column
- * (data-label, from the build), and the last starts its own line. A two-column table needs no
- * names, since its second cell explains its first. The header row stays for assistive technology,
- * which still reads the cells as a table through their explicit roles. Screen only, as the
- * container is.
+ * row stacks instead: the first cell leads on a line of its own, the cells after it follow on the
+ * next, each named by its column (data-label, from the build), and the last starts its own line.
+ * The lead's own line keeps a row with short values from pulling its next cells up beside it, so
+ * a table's rows take the same shape. A two-column table needs no names, since its second cell
+ * explains its first. The header row stays for assistive technology, which still reads the cells
+ * as a table through their explicit roles. Screen only, as the container is.
  */
 @container markdown (max-width: 32rem) {
   .sl-markdown-content .table-scroll:not(:where(.not-content *)) {
@@ -668,6 +703,7 @@
   }
 
   .sl-markdown-content .table-scroll td:first-child:not(:where(.not-content *)) {
+    flex-basis: 100%;
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -685,6 +721,19 @@
     letter-spacing: var(--tracking-label);
     text-transform: uppercase;
     color: var(--text-muted);
+  }
+
+  /*
+   * The label repeats the column head, which assistive technology already reads with the cell, and
+   * generated text would join the cell's own with no space between them. An empty alternative text
+   * keeps it out; a browser without alternative text in content reads the label too.
+   */
+  @supports (content: "" / "") {
+    .sl-markdown-content
+      .table-scroll
+      td[data-label]:not(:first-child, :nth-child(2):last-child, :where(.not-content *))::before {
+      content: attr(data-label) / "";
+    }
   }
 }
 

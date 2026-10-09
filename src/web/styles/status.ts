@@ -9,8 +9,10 @@
  * - the work and run tables, like the design's log table: mono times under small labels, marker
  *   badges, and each row's facts and diagnostic in a disclosure that opens on a solid panel (never
  *   glass inside the glass card). Each table keeps a minimum width and scrolls in its own region
- *   on a narrow screen, so the page itself never scrolls sideways; opening a disclosure never
- *   moves the columns.
+ *   if it must, so the page itself never scrolls sideways; opening a disclosure never moves the
+ *   columns;
+ * - below tablet width (48rem), the same tables stack each row into a card instead, so a phone
+ *   reads a job or run top to bottom rather than scrolling sideways.
  *
  * Every class here is the view's own; the shared vocabulary (status tokens, facts, checklists,
  * section headings, notes, notices, empty states, disclosures) lives in components.ts.
@@ -31,7 +33,7 @@ export const STATUS_CSS = `/* Background work */
   margin-top: var(--space-5);
 }
 
-/* A page's sections: heading, description, then content, 16px apart. */
+/* A page's sections: the heading (title, count and description), then content, 16px apart. */
 .status-section {
   display: grid;
   gap: var(--space-4);
@@ -129,6 +131,11 @@ export const STATUS_CSS = `/* Background work */
   margin-top: var(--space-2);
 }
 
+/* A column's name inside a cell (views/status.ts): only a stacked card shows it, see below. */
+.cell-label {
+  display: none;
+}
+
 /* Short IDs and job kinds read as plain mono text in a row, not as code chips. */
 .cell-meta code,
 .row-details > summary code {
@@ -152,11 +159,9 @@ export const STATUS_CSS = `/* Background work */
   gap: 2px;
 }
 
-.time-stack time,
-.row-details .facts time {
+.time-stack time {
   color: var(--text-secondary);
   font: var(--type-code);
-  white-space: nowrap;
 }
 
 /* A run's aggregate outcome: its words, after a dot in the outcome's tone. */
@@ -217,6 +222,15 @@ export const STATUS_CSS = `/* Background work */
   white-space: nowrap;
 }
 
+/*
+ * A disclosure that opens its cell (a job's): the summary's tap height centers its label half a
+ * rem under the cell's top, so it rises by that much to read on the row's first line, beside the
+ * name. A run's summary follows its badge instead, and a stacked card resets this (see below).
+ */
+.status-table td > .row-details:first-child > summary {
+  margin-top: -0.5rem;
+}
+
 .row-details__panel {
   container-type: inline-size;
   display: grid;
@@ -233,6 +247,13 @@ export const STATUS_CSS = `/* Background work */
   grid-template-columns: 7.5rem minmax(0, 1fr);
 }
 
+/* The panel's labels are the card's mono labels, as every other label in the row. */
+.row-details .facts > dt {
+  font: var(--type-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
 .row-details .facts > dt,
 .row-details .facts > dd {
   padding-block: 8px;
@@ -243,10 +264,16 @@ export const STATUS_CSS = `/* Background work */
   overflow-wrap: anywhere;
 }
 
-/* A narrow panel (the column's width, see .status-table above): each value under its label. */
+/*
+ * A narrow panel (the column's width, see .status-table above): each value under its label, and a
+ * time may wrap before "UTC" rather than run into the panel's edge.
+ */
 @container (max-width: 18rem) {
   .row-details .facts {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .row-details .facts time {
+    white-space: normal;
   }
   .row-details .facts > dt {
     padding-bottom: 0;
@@ -325,6 +352,218 @@ export const STATUS_CSS = `/* Background work */
   /* The moment's label and time become cells of the stack's two columns. */
   .moment {
     display: contents;
+  }
+}
+
+/*
+ * The runs table from tablet width to 80rem: its five columns would squeeze the first to about
+ * 100px and break "Lodestone fetch" and "Run <ID>" in two, while the times have room to spare. So
+ * the details column takes only what it needs, not its share, and the cells close up to 8px a side
+ * (16px still at the table's edges). From 80rem the share returns, so an open panel keeps room for
+ * its facts beside their labels. A run's title and short ID are short fixed words, kept whole.
+ */
+@media screen and (min-width: 48rem) {
+  .status-table[aria-describedby="run-sample"] th > :is(.cell-title, .cell-meta) {
+    white-space: nowrap;
+  }
+}
+
+@media screen and (min-width: 48rem) and (max-width: 79.99rem) {
+  .status-table[aria-describedby="run-sample"] thead th:last-child {
+    width: auto;
+  }
+  .status-table[aria-describedby="run-sample"] :is(thead th, tbody th, td) {
+    padding-inline: 8px;
+  }
+  .status-table[aria-describedby="run-sample"] tr > :first-child {
+    padding-left: 16px;
+  }
+  .status-table[aria-describedby="run-sample"] tr > :last-child {
+    padding-right: 16px;
+  }
+}
+
+/*
+ * Phones and small tablets: each row is a card, stacked 16px apart like the stat cards above,
+ * instead of a table row that scrolls sideways. The tables need a 40rem column: under 44rem the
+ * gutters leave less than that, and up to 48rem they would fit only at their tightest, with no
+ * room for a long name. The table keeps its markup, roles and caption; only the display changes,
+ * and the column headers leave the screen but stay for assistive technology. The region drops
+ * its glass, so each card is glass over the nebula, never glass in glass; it no longer scrolls or
+ * clips (the cards' shadows reach past it), so focusing it only rings the stack.
+ *
+ * A card is a grid of three columns: labels, values, and the row's state.
+ * - The head: the row header (the name, a job's kind, and the short ID) beside the state cell (a
+ *   job's marker and attempts, or a run's aggregate outcome).
+ * - The labelled lines, under a rule: a run's progress, then each moment ("Added" beside its time).
+ *   Their cells subgrid the card's columns, so labels share one column and every value lines up.
+ * - The last cell, under a rule, across the card: a run's acquisition, then the disclosure.
+ * Nothing here keeps the table's no-wrap: with no scroll region to fall back on, a long name,
+ * kind, badge, summary or time wraps inside the card instead of running off the screen. Screen
+ * only, so print keeps the table.
+ */
+@media screen and (max-width: 47.99rem) {
+  .status-section > .table-scroll {
+    overflow: visible;
+    background: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+  .status-table {
+    display: block;
+    min-width: 0;
+  }
+  .status-table > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .status-table > tbody {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .status-table > tbody > tr {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) auto;
+    gap: var(--space-2) 12px;
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    background: var(--glass-fill);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow:
+      inset 0 0 0 1px var(--glass-border),
+      var(--glass-edge),
+      var(--shadow-1);
+  }
+  /* Cells drop the table's padding, rules and row hover: the card draws the row. */
+  .status-table tbody th,
+  .status-table td,
+  .status-table tr > :first-child,
+  .status-table tr > :last-child,
+  .status-table tbody tr:hover > * {
+    min-width: 0;
+    padding: 0;
+    border-bottom: 0;
+    background: none;
+  }
+  .status-table tbody th {
+    grid-column: 1 / 3;
+    text-align: start;
+  }
+  .status-table .row-state {
+    grid-column: 3;
+    grid-row: 1;
+    text-align: end;
+  }
+  .status-table .row-state .marker {
+    white-space: normal;
+  }
+  /*
+   * The labelled lines. The two-column template is the fallback where subgrid is missing: each
+   * cell then sizes its own label column.
+   */
+  .status-table td:not(.row-state, :last-child) {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-columns: subgrid;
+    align-items: baseline;
+  }
+  .status-table td:not(.row-state, :last-child) > * {
+    grid-column: 2 / -1;
+  }
+  .status-table td > .cell-label {
+    display: block;
+    grid-column: 1;
+  }
+  /* A subgrid's normal gap is the card's, so the times line up with the progress above them. */
+  .status-table td > .time-stack {
+    grid-column: 1 / -1;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-columns: subgrid;
+    column-gap: normal;
+    align-items: baseline;
+  }
+  .status-table .moment {
+    display: contents;
+  }
+  .status-table .moment > .orr-label {
+    grid-column: 1;
+  }
+  .status-table .moment > time {
+    grid-column: 2 / -1;
+  }
+  /*
+   * The last cell: a run's acquisition label and badge on one line, then the disclosure; a job's
+   * disclosure keeps its whole tap height under the rule.
+   */
+  .status-table td:last-child {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    grid-column: 1 / -1;
+  }
+  .status-table td:last-child > *,
+  .status-table td > .row-details:first-child > summary {
+    margin-top: 0;
+  }
+  .status-table td:last-child > .row-details {
+    flex-basis: 100%;
+  }
+  /* A rule opens the lines and the last cell, 12px clear on both sides; lines are 8px apart. */
+  .status-table .row-state + td,
+  .status-table td:last-child {
+    margin-top: calc(var(--space-3) - var(--space-2));
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .status-table .time-stack time,
+  .status-table .facts time,
+  .status-table .cell-meta code,
+  .status-table .run-progress,
+  .status-table .row-details > summary {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/*
+ * Under 20rem of measure (the narrowest phones, or any phone at a large text setting, which
+ * scales these rem breakpoints too), the state no longer fits beside the head's name: it goes
+ * under it, so the name keeps the card's width.
+ */
+@media screen and (max-width: 19.99rem) {
+  .status-table tbody th {
+    grid-column: 1 / -1;
+  }
+  .status-table .row-state {
+    grid-column: 1 / -1;
+    grid-row: auto;
+    text-align: start;
+  }
+}
+
+@media screen and (max-width: 47.99rem) and (prefers-reduced-transparency: reduce) {
+  .status-table > tbody > tr {
+    background: var(--surface-1);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* Forced colors: each card gets the border media.ts gives every card, and the region none. */
+@media screen and (max-width: 47.99rem) and (forced-colors: active) {
+  .status-section > .table-scroll {
+    border: 0;
+  }
+  .status-table > tbody > tr {
+    border: 1px solid CanvasText;
   }
 }
 

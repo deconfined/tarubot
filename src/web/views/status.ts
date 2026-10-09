@@ -5,9 +5,12 @@
  * Built from the design system's dashboard parts (styles/status.ts): process health is the page's
  * one featured card, laid out like the design's bot status card; the sample counts are a row of
  * stats; work and runs are tables in their own scroll regions, like the design's log table, with
- * each row's facts and diagnostic in a native disclosure. The view has no controls: changes and
- * retries happen in Discord. The test-pinned hooks stay beside the design's classes: .featured,
- * the bracketed .check tokens, the .marker badges, .metrics dd, #work-sample and .diagnostic.
+ * each row's facts and diagnostic in a native disclosure. On a phone the same tables stack each
+ * row into a card (CSS only), so every table element names its role and a cell whose column the
+ * card would otherwise lose carries that column's name as a label. The view has no controls:
+ * changes and retries happen in Discord. The test-pinned hooks stay beside the design's classes:
+ * .featured, the bracketed .check tokens, the .marker badges, .metrics dd, #work-sample and
+ * .diagnostic.
  */
 import type { ApplicationLifecycle } from "../../application/lifecycle.js";
 import type { EffectsMode, SyncRunRow, SyncStatusView } from "../../application/results.js";
@@ -16,6 +19,7 @@ import { jobLabel, jobMarker } from "../../discord/presenters/jobs.js";
 import { CHECK, type Check, MARKER } from "../../discord/presenters/style.js";
 import { RUN_LABEL, runState, runType } from "../../discord/presenters/synchronization.js";
 import { html, type SafeHtml, untrusted } from "../html.js";
+import { icon } from "../icons.js";
 import { EMPTY_NAMES, mentionText, type WebNames, userName } from "../mentions.js";
 import { time } from "../time.js";
 
@@ -147,6 +151,14 @@ const rowDetails = (summary: string, id: string, body: SafeHtml): SafeHtml =>
 <div class="row-details__panel">${body}</div>
 </details>`;
 
+/**
+ * A column's name inside one of its cells, shown only where the row is a stacked card and the
+ * column header is out of sight (styles/status.ts). It is hidden from assistive technology, which
+ * already reads the cell's column header from the table roles.
+ */
+const cellLabel = (column: string): SafeHtml =>
+  html`<span class="orr-label cell-label" aria-hidden="true">${column}</span>`;
+
 /** A run's aggregate outcome is distinct from the acquisition job's outcome. */
 function runRow(run: SyncRunRow, mode: EffectsMode, names: WebNames): SafeHtml {
   const acquisition =
@@ -159,18 +171,18 @@ function runRow(run: SyncRunRow, mode: EffectsMode, names: WebNames): SafeHtml {
         });
   // The outcome's dot only repeats its words; the state class picks the dot's tone.
   const state = runState(run, mode);
-  return html`<tr>
-<th scope="row"><span class="cell-title">${runType(run)}</span><span class="cell-meta">Run <code>${untrusted(shortId(run.id))}</code></span></th>
-<td><span class="run-outcome run-outcome--${state}">${RUN_LABEL[state]}</span></td>
-<td><span class="run-progress">${grouped(run.work_completed)}/${grouped(run.work_total)} done</span>${
+  return html`<tr role="row">
+<th scope="row" role="rowheader"><span class="cell-title">${runType(run)}</span><span class="cell-meta">Run <code>${untrusted(shortId(run.id))}</code></span></th>
+<td role="cell" class="row-state"><span class="run-outcome run-outcome--${state}">${RUN_LABEL[state]}</span></td>
+<td role="cell">${cellLabel("Progress")}<span class="run-progress">${grouped(run.work_completed)}/${grouped(run.work_total)} done</span>${
     run.work_blocked > 0
       ? html`<span class="cell-meta">${grouped(run.work_blocked)} ${mode === "live" ? "blocked" : "held"}</span>`
       : ""
   }${run.work_failed > 0 ? html`<span class="cell-meta">${grouped(run.work_failed)} failed</span>` : ""}</td>
-<td><div class="time-stack">${moment("Started", run.created_at)}${
+<td role="cell"><div class="time-stack">${moment("Started", run.created_at)}${
     run.completed_at === null ? "" : moment("Completed", run.completed_at)
   }</div></td>
-<td>${
+<td role="cell">${cellLabel("Acquisition")}${
     acquisition === null
       ? html`<span class="cell-meta">No acquisition job recorded.</span>`
       : html`<span class="marker marker-${acquisition.marker}">${MARKER[acquisition.marker]}</span>`
@@ -196,10 +208,10 @@ ${diagnostic(run.last_error, names)}`,
 /** A sampled job, with facts only for timestamps the service actually supplies. */
 function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml {
   const state = jobMarker(job);
-  return html`<tr>
-<th scope="row"><span class="cell-title">${untrusted(jobLabel(job.kind))}</span><span class="cell-meta"><code>${untrusted(job.kind)}</code></span><span class="cell-meta">Job <code>${untrusted(shortId(job.id))}</code></span></th>
-<td><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span><span class="cell-meta">Attempts: ${grouped(job.attempts)}</span></td>
-<td><div class="time-stack">${
+  return html`<tr role="row">
+<th scope="row" role="rowheader"><span class="cell-title">${untrusted(jobLabel(job.kind))}</span><span class="cell-meta"><code>${untrusted(job.kind)}</code></span><span class="cell-meta">Job <code>${untrusted(shortId(job.id))}</code></span></th>
+<td role="cell" class="row-state"><span class="marker marker-${state.marker}">${MARKER[state.marker]}</span><span class="cell-meta">Attempts: ${grouped(job.attempts)}</span></td>
+<td role="cell"><div class="time-stack">${
     state.marker === "queued" || state.marker === "waiting"
       ? moment(state.wait === "retrying" ? "Retry" : "Next", job.due_at)
       : ""
@@ -208,7 +220,7 @@ function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml
       ? ""
       : moment(state.marker === "failed" ? "Stopped" : "Completed", job.completed_at)
   }</div></td>
-<td>${rowDetails(
+<td role="cell">${rowDetails(
     "Job details",
     job.id,
     html`<dl class="facts">
@@ -241,9 +253,15 @@ function sampleMetrics(work: SyncStatusView["work"]): SafeHtml {
 }
 
 /**
- * A table in its own labelled scroll region, a glass card: a phone scrolls the table sideways
- * inside it rather than the page. The caption names the table for assistive technology and is
- * hidden on screen, where the section heading already names it.
+ * A table in its own labelled scroll region, a glass card: a narrow table scrolls sideways inside
+ * it rather than the page. The caption names the table for assistive technology and is hidden on
+ * screen, where the section heading already names it.
+ *
+ * On a phone the stylesheet stacks each row into a card, which changes the display of every table
+ * element; some browsers then drop a table's semantics, so the table, its row groups, rows, header
+ * cells and cells name their roles explicitly. The region keeps its tabindex in both layouts,
+ * since without script it can't follow the layout: a card stack doesn't scroll, so there focus
+ * only rings the stack, which the region still names.
  */
 const dataTable = (
   name: "work" | "run",
@@ -251,10 +269,10 @@ const dataTable = (
   columns: readonly string[],
   rows: readonly SafeHtml[],
 ): SafeHtml =>
-  html`<div class="orr-card table-scroll" tabindex="0" role="region" aria-labelledby="${name}-caption"><table class="orr-table status-table" aria-describedby="${name}-sample">
+  html`<div class="orr-card table-scroll" tabindex="0" role="region" aria-labelledby="${name}-caption"><table class="orr-table status-table" role="table" aria-describedby="${name}-sample">
 <caption id="${name}-caption" class="visually-hidden">${caption}</caption>
-<thead><tr>${columns.map((column) => html`<th scope="col">${column}</th>`)}</tr></thead>
-<tbody>${rows}</tbody>
+<thead role="rowgroup"><tr role="row">${columns.map((column) => html`<th scope="col" role="columnheader">${column}</th>`)}</tr></thead>
+<tbody role="rowgroup">${rows}</tbody>
 </table></div>`;
 
 /** The Status route stays stable; Background work is its read-only officer dashboard. */
@@ -262,11 +280,14 @@ export function renderStatus(view: StatusView): SafeHtml {
   const { runs, work, effectsMode } = view.sync;
   const names = view.names ?? EMPTY_NAMES;
   return html`<p class="lead">Track this server's refresh runs and outstanding work.</p>
-<p class="notice">Read-only. All times are UTC. Manage changes and retries in Discord.</p>
+<p class="notice">${icon("info")}<span>Read-only. All times are UTC. Manage changes and retries in Discord.</span></p>
 ${processHealth(view.process, effectsMode)}
 <section class="status-section" aria-labelledby="displayed-work">
-<div class="section-heading"><h2 id="displayed-work">Outstanding work</h2><p class="section-description section-count">${grouped(work.length)} displayed</p></div>
+<div class="section-heading">
+<h2 id="displayed-work">Outstanding work</h2>
+<p class="section-description section-count">${grouped(work.length)} displayed</p>
 <p class="section-description" id="work-sample">Limited sample: up to 25 latest outstanding jobs for this server. Counts cover displayed jobs only, not server-wide or global totals. Successful-job history is not shown.</p>
+</div>
 ${sampleMetrics(work)}
 ${
   work.length === 0
@@ -280,8 +301,11 @@ ${
 }
 </section>
 <section class="status-section" aria-labelledby="recent-runs">
-<div class="section-heading"><h2 id="recent-runs">Recent refresh runs</h2><p class="section-description section-count">${grouped(runs.length)} displayed</p></div>
+<div class="section-heading">
+<h2 id="recent-runs">Recent refresh runs</h2>
+<p class="section-description section-count">${grouped(runs.length)} displayed</p>
 <p class="section-description" id="run-sample">Up to 10 recent runs for this server. Progress and aggregate outcome belong to the run; acquisition has its own status.</p>
+</div>
 ${
   runs.length === 0
     ? html`<div class="empty-state"><p class="cell-title">No recent refresh runs to display.</p><p class="note">Request a refresh in Discord to start a new run.</p></div>`
