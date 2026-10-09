@@ -37,6 +37,7 @@ import { Failure } from "../../domain/values.js";
 import { guildNames } from "../mentions.js";
 import { definePage, type PageContext } from "../page.js";
 import { noticeLocation } from "../views/forms.js";
+import { ROLE_MENU_PATH } from "../views/my-roles.js";
 import {
   ANY_NUMBER,
   NOTICE_CATEGORY,
@@ -287,7 +288,7 @@ function render(context: PageContext, editor: SelfRoleEditor, refused?: RefusedE
 }
 
 export default definePage({
-  path: "/g/:guild/role-menu",
+  path: ROLE_MENU_PATH,
   title: "Role menu",
   access: ["officer"],
   requires: [selfRolesKey, gatewayKey],

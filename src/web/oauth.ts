@@ -12,6 +12,9 @@
  * claim support for it; `token_type` "Bearer" is compared case-insensitively; `scope` is a string.
  * The client credentials go in the form body (the library's ClientSecretPost), which Discord's OAuth2
  * documentation accepts alongside HTTP Basic.
+ *
+ * Every exchange goes through D16's gate (limits.ts's ExchangeGate, 2.40.0): a pause after
+ * Discord's 429, a global rate and a concurrency cap, each refusing before any Discord request.
  */
 import { timingSafeEqual } from "node:crypto";
 import * as oauth from "oauth4webapi";
@@ -19,6 +22,7 @@ import { z } from "zod";
 import { project } from "../config/project.js";
 import type { FailureDetail } from "../domain/failures.js";
 import { Failure, idSchema } from "../domain/values.js";
+import { ExchangeGate } from "./limits.js";
 import { safeReturnPath } from "./return-path.js";
 
 /** Discord's issuer and endpoints, fixed in code; only tests can swap the authorize URL. */
@@ -74,6 +78,12 @@ export interface DiscordSignInOptions {
   readonly fetch?: typeof fetch;
   /** The harness's fake authorize page. Defaults to DISCORD_AUTHORIZE_URL; never a setting. */
   readonly authorizeUrl?: string;
+  /**
+   * The gate every token exchange passes (D16). Defaults to a new ExchangeGate with production's
+   * limits; tests pass one on their own clock. One DiscordSignIn serves the whole web, so one gate
+   * covers every sign-in.
+   */
+  readonly gate?: ExchangeGate;
 }
 
 /**
@@ -211,7 +221,10 @@ function oauthFailure(error: unknown): unknown {
  *   code: `expired` (stale, 409), decided before any fetch;
  * - `error=` on the callback (the user cancelled, say): `expired`, with no fetch;
  * - `invalid_grant` from the token endpoint: `expired`, with friendly wording to sign in again;
- * - HTTP 429 from Discord: `unavailable` with retryAfter from Retry-After (503 + Retry-After);
+ * - HTTP 429 from Discord: `unavailable` with retryAfter from Retry-After (503 + Retry-After), which
+ *   also pauses every sign-in's exchange until it has passed;
+ * - an exchange the gate holds back (that pause, too many running, or too many this minute):
+ *   `unavailable` with a Retry-After, before any request to Discord (503);
  * - another error status, malformed JSON or an unexpected shape: `invalid_response` or
  *   `unavailable` (upstream, 503);
  * - a bot account: `forbidden` with scope `human` (403);
@@ -221,10 +234,12 @@ function oauthFailure(error: unknown): unknown {
 export class DiscordSignIn {
   private readonly client: oauth.Client;
   private readonly authentication: oauth.ClientAuth;
+  private readonly gate: ExchangeGate;
 
   constructor(private readonly options: DiscordSignInOptions) {
     this.client = { client_id: options.clientId };
     this.authentication = oauth.ClientSecretPost(options.clientSecret);
+    this.gate = options.gate ?? new ExchangeGate();
   }
 
   /**
@@ -259,10 +274,10 @@ export class DiscordSignIn {
    */
   async finish(callback: URL, loginCookie: string | undefined): Promise<SignInResult> {
     // Everything up to the exchange is decided locally: a cross-site, cancelled or stale callback
-    // (no login cookie with a matching state) costs Discord no request. Any client can still get a
-    // matching state from /login, or write the cookie itself, and then costs one token request per
-    // callback; bounding those for the bot's shared egress address is D16's OAuth cap and 429
-    // pause (3.0.0).
+    // (no login cookie with a matching state) costs Discord no request, and doesn't count against
+    // the gate. Any client can still get a matching state from /login, or write the cookie itself,
+    // and then costs one token request per callback; the gate bounds those for the bot's shared
+    // egress address (D16's pause, rate and concurrency cap).
     const handshake = decodeHandshake(loginCookie);
     const parameters = callback.searchParams;
     const states = parameters.getAll("state");
@@ -278,7 +293,7 @@ export class DiscordSignIn {
     }
     const codes = validated.getAll("code");
     if (codes.length !== 1 || !codes[0]) throw stale();
-    const userId = await this.exchange(validated, handshake.verifier);
+    const userId = await this.gate.run(() => this.exchange(validated, handshake.verifier));
     return { userId, returnPath: handshake.returnPath };
   }
 

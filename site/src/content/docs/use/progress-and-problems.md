@@ -2,7 +2,7 @@
 title: Progress and problems
 description: Check background work, refresh your roles, and report a problem.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 ## Check on background work

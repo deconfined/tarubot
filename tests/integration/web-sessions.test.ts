@@ -23,6 +23,7 @@ import {
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
+  SESSIONS_PER_USER,
   type SessionStore,
 } from "../../src/web/sessions.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
@@ -176,6 +177,54 @@ function scenarios(harness: () => Harness) {
     expect(await h.store.get(fresh.token)).not.toBeNull();
     for (const { token } of [old, idle]) expect(await h.store.get(token)).toBeNull();
     expect(await h.store.sweep()).toBe(0);
+  });
+
+  test("a user keeps at most ten live sessions: a sign-in beyond them ends the oldest", async () => {
+    const h = harness();
+    expect(SESSIONS_PER_USER).toBe(10);
+    const alice = [];
+    for (let index = 0; index < SESSIONS_PER_USER; index++) {
+      alice.push(await h.store.create(ALICE));
+      // Distinct sign-in times, oldest first.
+      await h.elapse(1_000);
+    }
+    const bob = await h.store.create(BOB);
+    const newest = await h.store.create(ALICE);
+    const [oldest, second] = alice;
+    if (!oldest || !second) throw new Error("Missing session");
+    expect(await h.store.get(oldest.token)).toBeNull();
+    expect(await h.store.get(second.token)).not.toBeNull();
+    expect(await h.store.get(newest.token)).not.toBeNull();
+    // Another user's sessions don't count, and aren't touched.
+    expect(await h.store.get(bob.token)).not.toBeNull();
+    const rows = await h.rows();
+    expect(rows.filter((row) => row.userId === ALICE)).toHaveLength(SESSIONS_PER_USER);
+    // The next sign-in ends the next oldest, and the one just made always stays.
+    const latest = await h.store.create(ALICE);
+    expect(await h.store.get(second.token)).toBeNull();
+    expect(await h.store.get(latest.token)).not.toBeNull();
+    expect(await h.store.get(newest.token)).not.toBeNull();
+  });
+
+  test("only live sessions count toward the cap; expired ones are left to sweep", async () => {
+    const h = harness();
+    // The oldest sign-in, kept alive by use.
+    const active = await h.store.create(ALICE);
+    await h.elapse(1_000);
+    // Nine newer sign-ins that are never used again.
+    for (let index = 1; index < SESSIONS_PER_USER; index++) await h.store.create(ALICE);
+    for (let day = 0; day < 7; day++) {
+      await h.elapse(DAY);
+      expect(await h.store.get(active.token)).not.toBeNull();
+    }
+    await h.elapse(SESSION_TOUCH_MS);
+    expect(await h.store.get(active.token)).not.toBeNull();
+    // Ten rows, nine of them idle-expired: a sign-in now ends nothing live. Counting every row by
+    // sign-in time would have kept the nine dead ones and ended the one in use.
+    const fresh = await h.store.create(ALICE);
+    expect(await h.store.get(active.token)).not.toBeNull();
+    expect(await h.store.get(fresh.token)).not.toBeNull();
+    expect(await h.store.sweep()).toBe(SESSIONS_PER_USER - 1);
   });
 
   test("a malformed cookie value is refused without touching storage", async () => {

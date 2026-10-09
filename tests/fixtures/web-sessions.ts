@@ -2,8 +2,8 @@
  * An in-memory SessionStore with an injectable clock, for web unit tests that need sessions without
  * PostgreSQL. It keeps PgSessions' rules (tests/integration/web-sessions.test.ts runs the same
  * scenarios against both): SHA-256 keys only, idle and absolute expiry with the same boundaries,
- * a touch at most every SESSION_TOUCH_MS, malformed tokens refused before any lookup, and user IDs
- * checked like the external_id domain.
+ * a touch at most every SESSION_TOUCH_MS, malformed tokens refused before any lookup, user IDs
+ * checked like the external_id domain, and at most SESSIONS_PER_USER live sessions per user.
  */
 import { idSchema } from "../../src/domain/values.js";
 import {
@@ -13,6 +13,7 @@ import {
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
+  SESSIONS_PER_USER,
   type Session,
   type SessionStore,
 } from "../../src/web/sessions.js";
@@ -44,7 +45,22 @@ export class MemorySessions implements SessionStore {
       lastSeenAt: at,
       expiresAt: new Date(at.getTime() + SESSION_ABSOLUTE_MS),
     };
-    this.byHash.set(hashToken(token), session);
+    const key = hashToken(token);
+    // The cap, as PgSessions applies it: the user's other live sessions, newest sign-in first
+    // (ties by hash, descending), keep SESSIONS_PER_USER - 1 places beside the new one.
+    const others = [...this.byHash]
+      .filter(([, other]) => other.userId === userId && live(other, at.getTime()))
+      .sort(([leftKey, left], [rightKey, right]) =>
+        right.createdAt.getTime() !== left.createdAt.getTime()
+          ? right.createdAt.getTime() - left.createdAt.getTime()
+          : rightKey < leftKey
+            ? -1
+            : rightKey > leftKey
+              ? 1
+              : 0,
+      );
+    for (const [ended] of others.slice(SESSIONS_PER_USER - 1)) this.byHash.delete(ended);
+    this.byHash.set(key, session);
     return { token, session };
   }
 

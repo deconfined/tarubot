@@ -69,6 +69,16 @@ export const PATHS = {
   ready: "/health/ready",
 } as const;
 
+/**
+ * The server list itself: / with this marker always lists the user's servers, skipping the
+ * redirect that takes someone with one server and one page straight to it (server.ts). The shell's
+ * "Switch server" links here, so for a member or guest whose only page is My roles it opens the
+ * list instead of reloading the page they're on. The marker carries no value and nothing reads it
+ * but that check.
+ */
+export const SERVER_LIST_PARAM = "servers";
+export const SERVER_LIST = `${PATHS.home}?${SERVER_LIST_PARAM}`;
+
 /** A new request reference: a random UUID, never derived from the request. */
 export function newRef(): string {
   return randomUUID();
@@ -93,7 +103,7 @@ export const CONTENT_SECURITY_POLICY = [
 /** Strict-Transport-Security on an https origin only; no includeSubDomains, no preload. */
 export const HSTS = "max-age=31536000";
 
-/** Pages are for signed-in officers, never for search engines. */
+/** Pages are for signed-in people, never for search engines. */
 const X_ROBOTS_TAG = "noindex";
 
 /**

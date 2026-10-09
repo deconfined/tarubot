@@ -1,7 +1,8 @@
 /**
  * The Role menu (2.39.0): officers build the server's self-service role menu, typed state in and
- * escaped markup out, with no service or gateway I/O. Members and guests pick from it from 2.40.0;
- * until then nothing here changes anyone's roles, and the page says so.
+ * escaped markup out, with no service or gateway I/O. Members and guests pick from it on My roles
+ * (2.40.0, views/my-roles.ts), whose address the lead gives, ready to copy; nothing here changes
+ * anyone's roles itself.
  *
  * One page of small native forms (PAGE_PATH takes no parameters), each carrying `op`, the IDs it
  * acts on, the menu `revision` it was rendered at (the officers' optimistic lock) and the session's
@@ -31,7 +32,7 @@ import {
   type SelfRoleMenu,
   type SelfRoleOption,
 } from "../../domain/self-roles.js";
-import { html, type SafeHtml, untrusted } from "../html.js";
+import { href, html, type SafeHtml, untrusted } from "../html.js";
 import { icon } from "../icons.js";
 import { channelName, mentionText, roleName, type WebNames } from "../mentions.js";
 import {
@@ -51,6 +52,7 @@ import {
   submitButton,
   textField,
 } from "./forms.js";
+import { MY_ROLES_PATH, pickRule } from "./my-roles.js";
 
 // ---------------------------------------------------------------------------------------------
 // Notices and the forms' vocabulary, shared with the page module
@@ -139,12 +141,6 @@ export const ANY_NUMBER = "any";
 /** A category's limit as its select value. */
 export const maxValue = (max: number | null): string => (max === null ? ANY_NUMBER : String(max));
 
-/** How many someone may pick, in words. */
-export function pickRule(max: number | null): string {
-  if (max === null) return "Pick any number";
-  return max === 1 ? "Pick one" : `Pick up to ${max}`;
-}
-
 /** The limit's choices: any number, one, then up to 2…MENU_LIMITS.max. */
 const MAX_OPTIONS: readonly SelectOption[] = [
   { value: ANY_NUMBER, label: pickRule(null) },
@@ -178,18 +174,17 @@ const STATE_BADGES: Readonly<Record<CategoryState, { text: string; tone: string 
 };
 
 /**
- * The state buttons, each with its one line of help. Members and guests can't pick roles until
- * 2.40.0, so what each state does for them is said as what will happen, and never as "here": they
- * will pick on a page of their own, not this one.
+ * The state buttons, each with its one line of help. What each state does for members and guests
+ * is said as what happens on My roles, their own page, never as "here".
  */
 const STATE_ACTIONS: Readonly<Record<CategoryState, { label: string; help: string }>> = {
   published: {
     label: "Publish",
-    help: "Once members and guests can pick roles, everyone with Member or Guest can pick these.",
+    help: "Everyone with Member or Guest can pick these roles on My roles.",
   },
   removal_only: {
     label: "Stop offering",
-    help: "Nobody can add these roles. People who have them will still be able to remove them themselves.",
+    help: "Nobody can add these roles. People who have them can still remove them on My roles.",
   },
   draft: {
     label: "Move back to draft",
@@ -199,24 +194,26 @@ const STATE_ACTIONS: Readonly<Record<CategoryState, { label: string; help: strin
 
 /**
  * Delete category's consequence, by the category's state: only a published category can offer Stop
- * offering instead (NEXT_STATES), and only officers have ever seen a draft.
+ * offering instead (NEXT_STATES). Members and guests don't see a draft now, though one moved back
+ * from published may have been on My roles before, so its note promises nothing about the past.
  */
 const DELETE_NOTES: Readonly<Record<CategoryState, string>> = {
   published:
     "People keep these roles in Discord, but won't be able to add or remove them themselves. To let people still remove them, choose Stop offering instead.",
   removal_only:
     "People keep these roles in Discord, but won't be able to remove them themselves any more.",
-  draft: "Only officers have seen this draft. People keep these roles in Discord.",
+  draft:
+    "Members and guests don't see a draft. People keep these roles in Discord, but won't be able to change them on My roles.",
 };
 
 /**
- * What Publish N drafts does. Members and guests can't pick roles until 2.40.0, so it says when
- * published categories reach them, and that a server replacing a reaction-role bot keeps its
- * drafts until the switch (the officer guide's cutover steps). Revisit in 2.40.0, when publishing
- * becomes immediate.
+ * What Publish N drafts does: members and guests can pick from a published category at once, so a
+ * server replacing a reaction-role bot keeps its drafts until the switch (the officer guide's
+ * cutover steps). Publishing is also when owner decision Q3 B starts to apply to the category's
+ * roles: reconciliation takes those that open channels from anyone with no access role.
  */
 const PUBLISH_NOTE =
-  "Published categories go live for members and guests with the release that lets them pick roles. If you're replacing a reaction-role bot, keep drafts until you switch over.";
+  "Members and guests can pick from a category on My roles as soon as it's published. From then on, TaruBot also takes its roles that open channels from anyone with none of the Member, Guest, Officer and FC Leader roles. If you're replacing a reaction-role bot, keep drafts until you switch over.";
 
 /** The states a category can move to from each state, in the order the buttons show. */
 const NEXT_STATES: Readonly<Record<CategoryState, readonly CategoryState[]>> = {
@@ -1079,7 +1076,7 @@ function categoriesSection(view: RoleMenuView, menu: SelfRoleMenu, checks: Check
 <div class="section-heading">
 <h2 id="${CATEGORIES}" tabindex="-1">Categories</h2>
 <p class="section-description section-count">${count} of ${MENU_LIMITS.categories}</p>
-<p class="section-description">Members and guests will see published categories in this order, each with its roles.</p>
+<p class="section-description">Members and guests see published categories on My roles in this order, each with its roles.</p>
 </div>
 ${
   count === 0
@@ -1157,7 +1154,13 @@ function summaryErrors(view: RoleMenuView): FieldError[] {
 /** The Role menu page's main content. */
 export function renderRoleMenu(view: RoleMenuView): SafeHtml {
   const { editor } = view;
-  const lead = html`<p class="lead" id="${INTRO}" tabindex="-1">Officers list existing Discord roles here, in categories, such as pronouns or games. Members and guests will pick their own roles from this menu in an upcoming TaruBot update; until then, nothing here changes anyone's roles.</p>`;
+  // My roles' address on this server, from the request URL rebuilt on WEB_PUBLIC_ORIGIN (never the
+  // Host header), for officers to share with members, such as in the old reaction-roles channel.
+  const myRoles = MY_ROLES_PATH.replace(":guild", editor.guildId);
+  // The one change TaruBot makes unasked is owner decision Q3 B's (Synchronization.user), so the
+  // lead says it where officers read what the menu does; it covers people who never had Member or
+  // Guest too, such as lobby users given a game role by another bot.
+  const lead = html`<p class="lead" id="${INTRO}" tabindex="-1">Officers list existing Discord roles here, in categories, such as pronouns or games. Members and guests pick their own roles from this menu on <a href="${href(myRoles)}">My roles</a>, and TaruBot adds or removes a listed role only when that person asks, apart from roles that open channels, which it takes from anyone with none of the Member, Guest, Officer and FC Leader roles. Share this link with them: <code>${new URL(myRoles, view.url).href}</code></p>`;
   // The success notice goes in its category's card when the redirect named one on the menu.
   const top = html`${errorSummary(summaryErrors(view))}${
     noticeCard(view, editor.menu) === null ? notice(view.url, ROLE_MENU_NOTICES) : ""

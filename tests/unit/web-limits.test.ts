@@ -1,15 +1,27 @@
 /**
  * The web's in-memory limits (src/web/limits.ts): fixed windows per key, pruning of
- * ended windows, Retry-After rounding, and the two POST refusals as the error page shows them.
+ * ended windows, Retry-After rounding, the two POST refusals as the error page shows them, and
+ * (2.40.0) the sign-in limits: the per-user refusal and D16's exchange gate, with its pause after
+ * Discord's 429, its global rate and its concurrency cap.
  */
 import { describe, expect, test } from "bun:test";
+import { Failure } from "../../src/domain/values.js";
 import { problemOf } from "../../src/web/http.js";
 import {
+  EXCHANGE_BUSY_SECONDS,
+  EXCHANGE_CONCURRENCY,
+  EXCHANGE_LIMIT,
+  EXCHANGE_WINDOW_MS,
+  ExchangeGate,
   overBudget,
   POST_WINDOW_MS,
   RateLimiter,
+  SIGN_IN_LIMIT,
+  SIGN_IN_WINDOW_MS,
   STOPPING_RETRY_AFTER,
+  signInsBusy,
   stoppingRefusal,
+  tooManySignIns,
 } from "../../src/web/limits.js";
 
 /** A limiter over a clock the test moves. */
@@ -111,8 +123,9 @@ describe("POST refusals", () => {
     const problem = problemOf(overBudget(412), "ref");
     expect(problem).toMatchObject({ status: 429, code: "rate_limited", retryAfter: 412 });
     // The error page names the wait from Retry-After, so the message names none of its own.
+    // Saves sent, not changes made: a POST that changes nothing counts too, on any page.
     expect(problem.message).toBe(
-      "That's a lot of changes in a short time, so TaruBot didn't save this one.",
+      "You've sent a lot of saves in a short time, so TaruBot didn't take this one.",
     );
   });
 
@@ -126,5 +139,175 @@ describe("POST refusals", () => {
       message: "TaruBot is restarting, so nothing was saved.",
       level: "info",
     });
+  });
+});
+
+describe("sign-in limits (2.40.0)", () => {
+  test("the owner's numbers: 10 sign-ins per user per 10 minutes, 30 exchanges a minute, 4 at once", () => {
+    expect([SIGN_IN_LIMIT, SIGN_IN_WINDOW_MS]).toEqual([10, 600_000]);
+    expect([EXCHANGE_LIMIT, EXCHANGE_WINDOW_MS, EXCHANGE_CONCURRENCY]).toEqual([30, 60_000, 4]);
+  });
+
+  test("the per-user refusal is a 429 and the gate's a 503, each with Retry-After", () => {
+    expect(problemOf(tooManySignIns(120), "ref")).toMatchObject({
+      status: 429,
+      code: "rate_limited",
+      retryAfter: 120,
+      message: "That's a lot of sign-ins in a short time, so TaruBot didn't sign you in.",
+      level: "info",
+    });
+    expect(problemOf(signInsBusy(7), "ref")).toMatchObject({
+      status: 503,
+      code: "unavailable",
+      retryAfter: 7,
+      message: "Lots of people are signing in right now, so TaruBot didn't sign you in.",
+    });
+    // A Retry-After is never 0, which would send none.
+    expect(signInsBusy(0).retryAfter).toBe(1);
+  });
+});
+
+/** A deferred exchange the test settles. */
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+/** What run() threw, or "ran" with its value. */
+const outcome = (run: Promise<unknown>) =>
+  run.then(
+    (value) => ({ ran: value }),
+    (error: unknown) =>
+      error instanceof Failure
+        ? { code: error.code, retryAfter: error.retryAfter }
+        : { error: String(error) },
+  );
+
+describe("ExchangeGate", () => {
+  /** Discord's 429 as oauth.ts's triage throws it. */
+  const limited = (seconds: number) =>
+    new Failure("unavailable", "Discord is limiting sign-ins right now.", seconds, {
+      kind: "discord",
+      what: "api",
+    });
+
+  test("caps the exchanges running at once, and frees a place when one settles", async () => {
+    const clock = { now: 0 };
+    const gate = new ExchangeGate({ now: () => clock.now, concurrency: 2 });
+    const first = deferred<string>();
+    const second = deferred<string>();
+    const running = [gate.run(() => first.promise), gate.run(() => second.promise)];
+    expect(gate.inFlight).toBe(2);
+    let started = false;
+    expect(
+      await outcome(
+        gate.run(async () => {
+          started = true;
+          return "third";
+        }),
+      ),
+    ).toEqual({ code: "unavailable", retryAfter: EXCHANGE_BUSY_SECONDS });
+    expect(started).toBe(false);
+    // A failed exchange frees its place as a successful one does.
+    first.reject(new Error("transport"));
+    second.resolve("second");
+    expect(await Promise.allSettled(running)).toMatchObject([
+      { status: "rejected" },
+      { status: "fulfilled", value: "second" },
+    ]);
+    expect(gate.inFlight).toBe(0);
+    expect(await outcome(gate.run(async () => "again"))).toEqual({ ran: "again" });
+  });
+
+  test("starts at most `limit` exchanges a window, across every user, then says when", async () => {
+    const clock = { now: 0 };
+    const gate = new ExchangeGate({ now: () => clock.now, limit: 3, windowMs: 60_000 });
+    for (let index = 0; index < 3; index++)
+      expect(await outcome(gate.run(async () => index))).toEqual({ ran: index });
+    clock.now += 20_000;
+    expect(await outcome(gate.run(async () => "over"))).toEqual({
+      code: "unavailable",
+      retryAfter: 40,
+    });
+    clock.now += 40_000;
+    expect(await outcome(gate.run(async () => "next window"))).toEqual({ ran: "next window" });
+  });
+
+  test("a refusal by the cap spends none of the rate", async () => {
+    const clock = { now: 0 };
+    const gate = new ExchangeGate({ now: () => clock.now, limit: 2, concurrency: 1 });
+    const held = deferred<string>();
+    const running = gate.run(() => held.promise);
+    for (let index = 0; index < 5; index++)
+      expect(await outcome(gate.run(async () => "refused"))).toMatchObject({
+        code: "unavailable",
+      });
+    held.resolve("done");
+    await running;
+    expect(await outcome(gate.run(async () => "second of two"))).toEqual({ ran: "second of two" });
+  });
+
+  test("Discord's 429 pauses every exchange until its Retry-After has passed", async () => {
+    const clock = { now: 0 };
+    const gate = new ExchangeGate({ now: () => clock.now });
+    // The 429 itself reaches its sign-in unchanged.
+    expect(
+      await outcome(
+        gate.run(async () => {
+          throw limited(30);
+        }),
+      ),
+    ).toEqual({ code: "unavailable", retryAfter: 30 });
+    expect(gate.pausedFor()).toBe(30);
+    clock.now += 12_500;
+    let asked = 0;
+    const ask = async () => {
+      asked++;
+      return "signed in";
+    };
+    expect(await outcome(gate.run(ask))).toEqual({ code: "unavailable", retryAfter: 18 });
+    expect(asked).toBe(0);
+    clock.now += 17_500;
+    expect(gate.pausedFor()).toBe(0);
+    expect(await outcome(gate.run(ask))).toEqual({ ran: "signed in" });
+    expect(asked).toBe(1);
+  });
+
+  test("a later, longer 429 extends the pause and a shorter one never shortens it", async () => {
+    const clock = { now: 0 };
+    const gate = new ExchangeGate({ now: () => clock.now, concurrency: 2 });
+    const long = deferred<never>();
+    const short = deferred<never>();
+    const runs = [gate.run(() => long.promise), gate.run(() => short.promise)];
+    long.reject(limited(60));
+    short.reject(limited(5));
+    await Promise.allSettled(runs);
+    expect(gate.pausedFor()).toBe(60);
+  });
+
+  test("other failures, including Discord being unreachable, start no pause", async () => {
+    const gate = new ExchangeGate({ now: () => 0 });
+    for (const error of [
+      new Failure("unavailable", "Discord's sign-in isn't answering right now."),
+      new Failure("expired", "That sign-in code expired or was already used."),
+      new Failure("rate_limited", "Not Discord's answer.", 30),
+      new Error("transport"),
+    ])
+      await outcome(
+        gate.run(async () => {
+          throw error;
+        }),
+      );
+    expect(gate.pausedFor()).toBe(0);
+  });
+
+  test("refuses a concurrency cap that isn't a positive whole number", () => {
+    for (const concurrency of [0, -1, 1.5, Number.NaN])
+      expect(() => new ExchangeGate({ concurrency })).toThrow();
   });
 });

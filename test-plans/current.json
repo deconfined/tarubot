@@ -1,22 +1,22 @@
 {
-  "title": "Session: 2.39.0 Role menu review",
-  "objective": "Review the 2.39.0 Role menu on owner-authorized staging: officers build the self-service role menu on the dashboard, every role is checked, and nothing changes anyone's Discord roles yet. Migration 012 is additive. The changelog channel gets this release's update post. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.40.0 My roles review",
+  "objective": "Review the 2.40.0 My roles page on owner-authorized staging: members and guests sign in and pick their own roles from the published role menu, TaruBot applies them in the background, and people who lose every access role lose channel-opening menu roles. No migration. The changelog channel gets this release's update post. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; it applies migration 012, so going back to 2.38.1 needs the pre-migration backup.",
-    "Afterwards check the test guild's changelog channel for one 'TaruBot updated to v2.39.0' post with this release's note, or a paused changelog.post in /sync status while effects are off.",
-    "Sign in as an officer, open Role menu on a phone and a desktop, then create, edit, move, publish, stop offering and delete a test category; add invented test roles and read each one's problems and Opens list.",
-    "Check that /config validate shows the Role menu section, that /config roles refuses a role on the menu, that a non-officer is refused the page, and that both sign-outs still work. Approve production only after its own healthy baseline."
+    "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; it adds no migration, and going back to 2.39.0 needs no restore.",
+    "Afterwards check the test guild's changelog channel for one 'TaruBot updated to v2.40.0' post with this release's note, or a paused changelog.post in /sync status while effects are off.",
+    "With TaruBot lacking Administrator, publish a throwaway test category, sign in as a test member and a test guest on a phone and a desktop, and save, change and clear picks on My roles; check the banners, Discord's audit-log reason and that Background work shows 'A member'.",
+    "Check a first sign-in by an account that never authorized the application, a timed-out account (view only), a lobby account (refused), and that revoking a test guest removes a channel-opening test role but keeps a cosmetic one. Approve production only after its own healthy baseline."
   ],
   "assistant": [
-    "Before release, review the credential-free harness from 320 to 1440 px in the default, --state-menu-problems and --state-menu-unreadable states, and run the full suite with disposable PostgreSQL and the documentation site build.",
+    "Before release, review the credential-free harness as officer, member, guest and timed-out member from 320 to 1440 px, including --state-roles=queued|blocked|failed|skipped|expired, and run the full suite with disposable PostgreSQL and the documentation site build.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; require Discord sign-in, officer authority and the session's form token, and keep server reads scoped.",
-    "Keep acquisition and reconciliation in the declared test guild; Role menu edits change only the stored menu and its audit, and no page changes Discord roles or triggers Discord retries or decisions.",
+    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; admit officers, and Member or Guest holders while TaruBot lacks Administrator; require the session's form token and keep server reads scoped.",
+    "Apply My roles saves as roles.self jobs, one role at a time with an audit-log reason; keep role IDs out of results, logs and officer views, close changes still waiting after 7 days and delete finished ones after 30.",
     "Queue one update post for each server whose changelog channel stored an older version, listing the notes since then; park it while effects are paused.",
-    "Expose database, Discord and writer-lease readiness; report 2.39.0, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.40.0, startup time and effect state without pinging members."
   ]
 }

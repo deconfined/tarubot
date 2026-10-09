@@ -1,6 +1,6 @@
 // Static documentation site: built into site/dist and published to GitHub Pages under /tarubot/.
 import starlight from "@astrojs/starlight";
-import { defineConfig } from "astro/config";
+import { defineConfig, passthroughImageService } from "astro/config";
 import starlightLinksValidator from "starlight-links-validator";
 
 /** The element children of a HAST node. */
@@ -104,6 +104,9 @@ const markdownTables = {
 export default defineConfig({
   site: "https://deconfined.github.io",
   base: "/tarubot",
+  // Guide screenshots (src/assets) are committed already compressed and served as they are, with
+  // their size read from the file, so the docs toolchain needs no image-processing package (sharp).
+  image: { service: passthroughImageService() },
   integrations: [
     starlight({
       title: "TaruBot",

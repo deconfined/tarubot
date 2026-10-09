@@ -1,7 +1,9 @@
 /**
  * Discord sign-in (#43, ADR D4): the authorize URL, the stateless login cookie, and every refusal
- * the callback decides before calling Discord, against the fake in tests/fixtures/discord-oauth.ts.
- * The wire format and Discord's answers are in tests/contract/discord-oauth.test.ts.
+ * the callback decides before calling Discord, against the fake in tests/fixtures/discord-oauth.ts;
+ * and (2.40.0) that every exchange, and only an exchange, passes D16's gate. The wire format and
+ * Discord's answers are in tests/contract/discord-oauth.test.ts; the gate's own rules are in
+ * web-limits.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -13,6 +15,7 @@ import {
   DiscordSignIn,
   type SignInStart,
 } from "../../src/web/oauth.js";
+import { ExchangeGate } from "../../src/web/limits.js";
 import { FakeDiscord } from "../fixtures/discord-oauth.js";
 
 /** Invented application and users. */
@@ -22,7 +25,7 @@ const ORIGIN = "https://tarubot.example.org";
 const REDIRECT = `${ORIGIN}/auth/callback`;
 const MEMBER = { id: "940000000000000001" };
 
-function signIn(options: { authorizeUrl?: string } = {}) {
+function signIn(options: { authorizeUrl?: string; gate?: ExchangeGate } = {}) {
   const discord = new FakeDiscord(CLIENT, SECRET);
   const client = new DiscordSignIn({
     clientId: CLIENT,
@@ -248,5 +251,61 @@ describe("finish", () => {
     expect(JSON.stringify(result)).not.toContain(token);
     expect(Bun.inspect(client, { depth: 10 })).not.toContain(token);
     expect(Object.keys(result).sort()).toEqual(["returnPath", "userId"]);
+  });
+});
+
+describe("the exchange gate (D16)", () => {
+  test("refusals decided locally don't spend it; each exchange does", async () => {
+    const { discord, client } = signIn({ gate: new ExchangeGate({ now: () => 0, limit: 1 }) });
+    const start = await client.start("/");
+    const callback = discord.authorize(start.authorizeUrl, MEMBER);
+    // Stale and cancelled callbacks, as many as anyone sends, cost the gate nothing.
+    for (let index = 0; index < 5; index++) {
+      expect((await refusal(client.finish(callback, undefined))).code).toBe("expired");
+      expect(
+        (await refusal(client.finish(discord.cancel(start.authorizeUrl), start.loginCookie))).code,
+      ).toBe("expired");
+    }
+    expect((await client.finish(callback, start.loginCookie)).userId).toBe(MEMBER.id);
+    // The one exchange this minute is spent: the next is refused before Discord is asked.
+    const next = await client.start("/");
+    const asked = discord.requests.length;
+    const busy = await refusal(
+      client.finish(discord.authorize(next.authorizeUrl, MEMBER), next.loginCookie),
+    );
+    expect({ code: busy.code, retryAfter: busy.retryAfter }).toEqual({
+      code: "unavailable",
+      retryAfter: 60,
+    });
+    expect(discord.requests).toHaveLength(asked);
+  });
+
+  test("a 429 from /users/@me pauses sign-ins like one from the token endpoint", async () => {
+    const clock = { now: 0 };
+    const { discord, client } = signIn({ gate: new ExchangeGate({ now: () => clock.now }) });
+    discord.userAnswer = () =>
+      Response.json({ message: "rl" }, { status: 429, headers: { "retry-after": "12" } });
+    const first = await client.start("/");
+    const limited = await refusal(
+      client.finish(discord.authorize(first.authorizeUrl, MEMBER), first.loginCookie),
+    );
+    expect({ code: limited.code, retryAfter: limited.retryAfter }).toEqual({
+      code: "unavailable",
+      retryAfter: 12,
+    });
+    discord.userAnswer = undefined;
+    const second = await client.start("/");
+    const asked = discord.requests.length;
+    const paused = await refusal(
+      client.finish(discord.authorize(second.authorizeUrl, MEMBER), second.loginCookie),
+    );
+    expect(paused.retryAfter).toBe(12);
+    expect(discord.requests).toHaveLength(asked);
+    clock.now += 12_000;
+    const third = await client.start("/");
+    expect(
+      (await client.finish(discord.authorize(third.authorizeUrl, MEMBER), third.loginCookie))
+        .userId,
+    ).toBe(MEMBER.id);
   });
 });

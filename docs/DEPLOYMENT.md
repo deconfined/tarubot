@@ -138,6 +138,13 @@ For explicit bundled-proxy disable, clear the central profile and append `--prof
 
 Recreation must retain the recorded exact image/schema identity and one writer, and prove sustained private readiness before routine delivery resumes. Caddy health checks its loopback admin process and the private bot web response, with startup depending on the bot's main readiness; it does not prove public DNS, certificate issuance, HTTPS redirects or OAuth acceptance. Separately verify the public origin with trusted TLS and authorized Discord login, following the site's recipe. Preserve pending evidence and follow owner recovery if any operation leaves state uncertain; `already-live` does not repair or bootstrap that state.
 
+Every member and guest of a served server can sign in, for My roles. Before production members use it, the owner confirms (owner decision Q1, 2026-10-09; agents run none of these steps):
+
+- the web is enabled in production: the origin, the bundled or external HTTPS proxy, the exact `/auth/callback` redirect in Discord, and AAAA as well as A records;
+- TaruBot no longer holds Administrator in the server: `/config validate` says it's no longer needed after `/setup overrides`, and the owner removes it. The code refuses members and guests until then;
+- on staging, an account that never authorized the application signs in with `prompt=none`. If Discord refuses it, a consent fallback is built and passes the same check first;
+- Discord changes are live, TaruBot's role sits as the [officer guide](../site/src/content/docs/admin/roles.md#where-tarubots-role-sits) says, the "Role menu" health check is clean, and the restore checklist below carries its sign-out and role-choice steps.
+
 ## Backups and restore
 
 `ops/backup.sh` retains age encryption, settings backup and offsite storage. Host settings include `BACKUP_STORAGE_ENDPOINT`, `BACKUP_STORAGE_ACCESS_KEY`, `BACKUP_STORAGE_SECRET_KEY`, `BACKUP_STORAGE_REGION` and optional `HEALTHCHECKS_BACKUP_URL`. Public recipients are in [age-recipients.txt](../ops/age-recipients.txt); [bucket lifecycle](../ops/bucket-lifecycle.xml) specifies daily/settings retention of 30 days and monthly retention of 365 days. The owner verifies the actual storage lifecycle and daily schedule; these repository files do not prove live configuration.
@@ -153,8 +160,16 @@ Owner restore checklist:
 3. Fetch/decrypt privately. Restore with verified TLS and `pg_restore --no-owner --no-privileges --exit-on-error`. Keep plaintext scratch artifacts restricted and remove them after acceptance.
 4. Use the matching release's `check-restore.js`. Source/copy schema must match; before migration use the deployed image or explicitly select the old schema head. Exact row comparison needs a stopped-writer dump and no later source writes.
 5. Once `check-restore.js` has passed, and before any bot starts on the restored database, sign everyone out of the dashboard with `DELETE FROM web_sessions`: the backup would otherwise revive sessions ended since it was taken ([persistence](PERSISTENCE.md#web-sessions)). Deleting earlier would fail the exact row comparison; a backup older than migration 011 has no such table yet.
-6. Rehearse pending migration only in the isolated permitted target. Verify recovered data/schema, credentials/access and the matching image before starting one bot.
-7. Account for Discord effects already sent: restore cannot undo them; update-post baselines may need owner reconciliation to avoid repeat announcements. Verify readiness, command inventory and data; retain the source until acceptance.
+6. In the same window, close the members' role changes the backup caught waiting, so the restored copy never replays older choices over newer ones; the database then clears the role IDs they held ([persistence](PERSISTENCE.md#self-service-role-menus)). Members save again if they still want them:
+
+   ```sql
+   UPDATE jobs SET status='succeeded', completed_at=now(), lease_until=NULL, last_error=NULL,
+          result='{"skipped":"restored"}'
+    WHERE kind='roles.self' AND status IN ('queued','running','blocked','disabled');
+   ```
+
+7. Rehearse pending migration only in the isolated permitted target. Verify recovered data/schema, credentials/access and the matching image before starting one bot.
+8. Account for Discord effects already sent: restore cannot undo them; update-post baselines may need owner reconciliation to avoid repeat announcements. Verify readiness, command inventory and data; retain the source until acceptance.
 
 Managed PITR, where configured and proven, is another recovery source, not a substitute for independent encrypted dumps. A timestamp alone does not prove usable PITR. A provider restore/new cluster needs fresh address, CA and access checks.
 

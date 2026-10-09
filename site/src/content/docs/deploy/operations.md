@@ -92,7 +92,7 @@ To go back, pin the previous `TARUBOT_IMAGE_TAG`, restore the matching main mani
 
 If the previous release predates the shared web setup, use its original manifest and disable/remove Caddy explicitly as above; that older bot has no dashboard. Retain certificate volumes for a later re-enable instead of grafting new proxy files onto the older source.
 
-That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating: 2.39.0's `012_self_roles.sql`, for example, stops 2.38.1 from starting. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
+That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating: 2.39.0's `012_self_roles.sql`, for example, stops 2.38.1 from starting. Going back from 2.40.0 to 2.39.0 needs no restore: 2.39.0 has no My roles page, and completes members' waiting role choices as skipped without changing any roles. After the next update, those members are told their last change wasn't applied. While 2.39.0 runs, people a pass leaves with none of the Member, Guest, Officer and FC Leader roles keep their channel-opening menu roles (the next guild pass after returning to 2.40.0 removes them), and a change parked by a pause, or stuck in a server TaruBot left, isn't expired until 2.40.0 is back. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
 
 ## Single database writer
 
@@ -237,9 +237,20 @@ To recover from a broken or lost database:
    ```
 
    Everyone has to sign in again; nothing else is lost.
-7. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
+7. Close the role changes members saved on My roles that were still waiting when the backup was taken, so the restored copy never applies older choices over newer ones. The database then clears the roles they named:
 
-Discord work the restored database still owes resumes from its durable jobs. A restore never undoes Discord changes the bot already made; the next reconciliation brings Discord in line with the restored decisions.
+   ```sh
+   docker compose exec -T postgres psql -U tarubot -d tarubot <<'SQL'
+   UPDATE jobs SET status='succeeded', completed_at=now(), lease_until=NULL, last_error=NULL,
+          result='{"skipped":"restored"}'
+    WHERE kind='roles.self' AND status IN ('queued','running','blocked','disabled');
+   SQL
+   ```
+
+   Members whose change was closed see that it wasn't applied, and save again if they still want it.
+8. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
+
+Discord work the restored database still owes resumes from its durable jobs, apart from the role changes step 7 closed. A restore never undoes Discord changes the bot already made; the next reconciliation brings Discord in line with the restored decisions.
 
 ## Volumes
 

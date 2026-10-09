@@ -37,12 +37,21 @@ import {
   SESSION_COOKIE,
   sameOrigin,
   securityHeaderRecord,
+  SERVER_LIST_PARAM,
   securityHeaders,
   type WebEnv,
   writeCookie,
 } from "./http.js";
 import { BRAND, errorPage, type LayoutModel, layout, navLinks } from "./layout.js";
-import { overBudget, POST_WINDOW_MS, RateLimiter, stoppingRefusal } from "./limits.js";
+import {
+  overBudget,
+  POST_WINDOW_MS,
+  RateLimiter,
+  SIGN_IN_LIMIT,
+  SIGN_IN_WINDOW_MS,
+  stoppingRefusal,
+  tooManySignIns,
+} from "./limits.js";
 import { DiscordSignIn } from "./oauth.js";
 import type { Page, PageContext, PageServices } from "./page.js";
 import { loadPages } from "./pages.js";
@@ -107,7 +116,10 @@ export interface WebAppDependencies {
   readonly access: AccessResolver;
   /** Already the web's child logger (component "web"), with no redact override. */
   readonly log: Logger;
-  /** The POST budgets' clock in milliseconds; defaults to performance.now. Tests pass their own. */
+  /**
+   * The POST budgets' and the sign-in limit's clock in milliseconds; defaults to performance.now.
+   * Tests pass their own.
+   */
   readonly now?: () => number;
 }
 
@@ -161,6 +173,15 @@ const staleSignOut = (): Failure =>
     "This sign-out form was out of date, so you're still signed in. Use Sign out in the Account menu to end this session.",
   );
 
+/**
+ * A page this signed-in person can't use here, refused on a GET: the actor resolved, but none of
+ * the page's access flags holds (a member following a Status or Role menu link, or someone who
+ * lost Member and Guest opening My roles). The 403's own sentence also names a forged request,
+ * which a plain GET can never be, so it would only confuse. Nothing says which flag was missing.
+ */
+const notOpen = (): Failure =>
+  new Failure("forbidden", "This page isn't open to you in this server.");
+
 /** The stale sign-out's heading, which says the one thing that matters. */
 const STILL_SIGNED_IN: ErrorFrame = { heading: "Still signed in" };
 
@@ -192,6 +213,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   const now = dependencies.now ?? (() => performance.now());
   const { secure, origin } = settings;
   const app = new Hono<WebEnv>();
+  /** Finished sign-ins per Discord user (2.40.0); the callback counts them before admission. */
+  const signIns = new RateLimiter(SIGN_IN_LIMIT, SIGN_IN_WINDOW_MS, now);
 
   /**
    * The registered pattern ("/g/:guild/status"), never the path itself: paths carry server IDs and
@@ -315,7 +338,13 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   });
   allow(PATHS.ready, GET_ONLY);
 
-  // A sign-in link for visitors; the servers a signed-in user may open (D17), memoized like any GET.
+  /**
+   * A sign-in link for visitors; the servers a signed-in user may open (D17), memoized like any
+   * GET. Someone with exactly one server and exactly one page there (a member or guest, whose only
+   * page is My roles) goes straight to it (303), so sign-in, whose return path is / by default,
+   * lands them on their page. Anyone with more gets the list, and so does anyone who asked for it
+   * (SERVER_LIST, the shell's "Switch server"), so that link never reloads the page it is on.
+   */
   app.get(PATHS.home, session, async (c) => {
     const current = c.get("session");
     const token = c.get("formToken");
@@ -327,11 +356,16 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       current.userId,
       access,
       pages.values(),
-      false,
+      "get",
     )) {
       const links = navLinks(pages.values(), entry.actor);
       if (links.length > 0) servers.push({ id: entry.guild.id, name: entry.guild.name, links });
     }
+    // Exactly one server with exactly one page: straight there. The href is the page's own path
+    // in a server the gateway listed, never request text.
+    const links = servers.length === 1 ? (servers[0]?.links ?? []) : [];
+    const listAsked = new URL(c.req.url).searchParams.has(SERVER_LIST_PARAM);
+    if (!listAsked && links.length === 1 && links[0]) return redirect(c, links[0].href);
     return page(
       c,
       layout(
@@ -352,14 +386,24 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   });
   allow(PATHS.login, GET_ONLY);
 
-  // Discord's return. finish() checks state against the login cookie before any request to
-  // Discord; then admission (D17): a session only for a user some server's page admits.
+  /**
+   * Discord's return. finish() checks state against the login cookie before any request to
+   * Discord, then exchanges the code through D16's gate (limits.ts's ExchangeGate: refused with a
+   * 503 and Retry-After while Discord's 429 pause lasts, while four exchanges run, or past thirty
+   * this minute). Then the per-user sign-in limit (a 429 with Retry-After, with no session and the
+   * browser's session left as it was), counted before admission because admission costs a Discord
+   * request per server. Then admission (D17): a session only for a user some server's page admits,
+   * each server resolved afresh in the light mode.
+   */
   app.get(PATHS.callback, async (c) => {
     const handshake = readCookie(c, LOGIN_COOKIE, secure);
     // The handshake is single-use: every answer clears it, a refusal or an error page included.
     clearCookie(c, LOGIN_COOKIE, secure);
     const { userId, returnPath } = await signIn.finish(new URL(c.req.url), handshake);
-    const servers = await listServers(candidates(), userId, access, pages.values(), true);
+    // Keyed by the Discord user, never an address.
+    const wait = signIns.take(userId);
+    if (wait > 0) throw tooManySignIns(wait);
+    const servers = await listServers(candidates(), userId, access, pages.values(), "sign-in");
     // Rotation: whatever session this browser presented ends here, admitted or not, so a sign-in
     // never continues a session that existed before it (fixation) or keeps another account's.
     const presented = readCookie(c, SESSION_COOKIE, secure);
@@ -420,28 +464,38 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
    *    servers TaruBot serves.
    * 3. The server must be one the gateway has cached and this deployment serves, else 404, before
    *    any Discord call.
-   * A POST then passes three more, none of which costs a Discord request:
+   * A POST then passes four more, none of which costs a Discord request:
    * 4. The form must carry the session's form token (403, "Form out of date"); the field is
    *    removed before post().
    * 5. Once shutdown has begun, nothing new starts (429 with Retry-After): the drain stops the web
    *    before the writer lease goes, and this keeps a write from beginning inside that window.
-   * 6. The page's budget for this user in this server (429 with Retry-After), before the fresh
+   * 6. An answer the actor memo already holds (AccessResolver.peek) that this page wouldn't admit
+   *    refuses at once, as 8 and 9 would: 404 for not a current human member, else 403. It only
+   *    ever refuses: an admitting answer, or none, goes on to the full resolution. Without it, a
+   *    member could POST to a page they can't use (Role menu, say) and make TaruBot spend 3 REST
+   *    calls on the per-server buckets each time, up to that page's whole budget; with it, the
+   *    full resolution refreshes the memo and their next POSTs within ACTOR_MEMO_MS cost nothing.
+   *    A stale refusal (someone promoted less than a minute ago) is what that page's own GET
+   *    already answers inside the same window.
+   * 7. The page's budget for this user in this server (429 with Retry-After), before the fresh
    *    actor, so a POST over budget costs no Discord REST call.
    * And every request:
-   * 7. The actor resolves like a slash command's (memoized up to 60 s on GET, fresh on POST); not a
-   *    current human member is 404, so responses never reveal membership elsewhere.
-   * 8. A missing access flag is 403.
+   * 8. The actor resolves like a slash command's (memoized up to 60 s on GET and resolved light on a
+   *    miss, fresh and full on POST: AccessResolver's ActorUse); not a current human member is 404,
+   *    so responses never reveal membership elsewhere.
+   * 9. A missing access flag is 403: on a GET with its own sentence (notOpen), on a POST with the
+   *    status's own.
    * The application operations a page calls authorize the actor again, as REQUIREMENTS.md asks of
    * commands and buttons ("reauthorize the current actor"), and check for shutdown once more just
    * before they commit, throwing the domain's stoppingRefusal() (which limits.ts re-exports), so
    * the write rolls back and its form gets the same 429.
    *
-   * The error page for a refused POST (steps 4 to 6, and post()'s own refusals, such as a form it
-   * can't use or that pre-commit 429) links back to the page, by its own href for this server:
-   * reloading the answer to a POST would only send the same form again. The actor checks (7 and
-   * 8) refuse without the link, since the page wouldn't open for that user anyway.
+   * The error page for a refused POST (steps 4, 5 and 7, and post()'s own refusals, such as a form
+   * it can't use or that pre-commit 429) links back to the page, by its own href for this server:
+   * reloading the answer to a POST would only send the same form again. The actor checks (6, 8 and
+   * 9) refuse without the link, since the page wouldn't open for that user anyway.
    *
-   * Those error pages don't carry the submitted values, so a form refused at steps 4 to 6, or by
+   * Those error pages don't carry the submitted values, so a form refused at steps 4 to 7, or by
    * the pre-commit 429, loses what was typed: an accepted, rare loss (a restart during a deploy,
    * a budget of many saves, a tab older than the latest sign-in), and each message says nothing
    * was saved. Only a page's own 409 and 422 re-render the form with its values. A stale-token
@@ -479,18 +533,27 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         }
         form.delete(FORM_TOKEN_FIELD);
         if (context.isStopping()) throw stoppingRefusal();
+        // Step 6: refuse from the memo alone, before the budget, so these refusals cost neither a
+        // Discord request nor budget. Never admits: anything else goes on to the full resolution.
+        const known = await access.peek(guildId, current.userId);
+        if (known !== undefined && (known === null || !admits(known, definition.access))) {
+          c.set("errorFrame", null);
+          throw new HTTPException(known === null ? 404 : 403);
+        }
         // Keyed by page, server and Discord user, never by address. A POST refused by the token,
-        // shutdown or budget check isn't counted; one refused later, by the actor check or the
-        // page, is.
+        // shutdown, memo or budget check isn't counted; one refused later, by the actor check or
+        // the page, is.
         const wait = budget?.take(`${definition.path} ${guildId} ${current.userId}`) ?? 0;
         if (wait > 0) throw overBudget(wait);
         c.set("errorFrame", null);
       }
-      const actor = await access.actor(guildId, current.userId, post);
+      const actor = await access.actor(guildId, current.userId, post ? "post" : "get");
       // The resolver answers for this server and user; anything else is a bug, refused as absent.
       if (!actor || actor.guildId !== guildId || actor.userId !== current.userId)
         throw new HTTPException(404);
-      if (!admits(actor, definition.access)) throw new HTTPException(403);
+      // A GET can only be refused for access, so it says just that; a POST keeps the status's own
+      // sentence, which also covers a form that didn't come from TaruBot's pages.
+      if (!admits(actor, definition.access)) throw post ? new HTTPException(403) : notOpen();
       const pageContext: PageContext = {
         request: c.req.raw,
         url: new URL(target, origin),
@@ -510,6 +573,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
           id: guildId,
           name: guild.name,
           nav: navLinks(pages.values(), actor, definition.path),
+          // The side navigation's note: officers configure, members and guests pick roles.
+          audience: actor.officer ? "officer" : "member",
         },
       };
       if (!form || !definition.post)

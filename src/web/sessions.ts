@@ -4,11 +4,12 @@
  * token, the Discord user ID and timestamps: no IP address, user agent or Discord token. Expiry is
  * judged on the database clock, so a restored backup or a skewed host can't revive a session past
  * its absolute expiry. Sessions are created only for admitted users (ADR D17), and sign-in deletes
- * any session the browser already presented before creating a fresh one (rotation).
+ * any session the browser already presented before creating a fresh one (rotation). A user keeps
+ * at most SESSIONS_PER_USER live sessions: a sign-in beyond it ends their oldest (2.40.0).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { and, eq, gt, lte, or, sql } from "drizzle-orm";
-import type { Database } from "../infrastructure/postgres/database.js";
+import { and, desc, eq, gt, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { type Database, orm } from "../infrastructure/postgres/database.js";
 import { webSessions } from "../infrastructure/postgres/schema.js";
 
 /** A session ends after seven days without a request. */
@@ -19,6 +20,13 @@ export const SESSION_ABSOLUTE_MS = 30 * 24 * 3600_000;
 export const SESSION_TOUCH_MS = 10 * 60_000;
 /** How often startWeb's timer deletes expired rows. */
 export const SESSION_SWEEP_MS = 3600_000;
+/**
+ * Live sessions one user may hold (2.40.0, owner decision Q7): every member and guest can now sign
+ * in, so one account can't pile up rows by signing in again and again. A sign-in beyond it ends
+ * the user's oldest live sessions (by sign-in time), silently: the newest, including the one being
+ * created, are kept. Ten covers a person's phones, computers and browsers with room to spare.
+ */
+export const SESSIONS_PER_USER = 10;
 
 /** One signed-in browser. The token itself is never part of it. */
 export interface Session {
@@ -33,7 +41,11 @@ export interface Session {
 
 /** Where sessions live: PgSessions in the bot, an in-memory fake in unit tests. */
 export interface SessionStore {
-  /** A new random token (32 bytes, base64url) for an admitted user; only its SHA-256 is stored. */
+  /**
+   * A new random token (32 bytes, base64url) for an admitted user; only its SHA-256 is stored. The
+   * user's live sessions beyond SESSIONS_PER_USER, oldest sign-in first, end in the same step;
+   * the new one always stays.
+   */
   create(userId: string): Promise<{ token: string; session: Session }>;
   /**
    * null when unknown, idle-expired or absolutely expired, judged on the database clock. Touches
@@ -120,20 +132,43 @@ const LIVE = and(
 export class PgSessions implements SessionStore {
   constructor(private readonly db: Database) {}
 
+  /**
+   * One transaction inserts the session and ends the user's live sessions beyond
+   * SESSIONS_PER_USER. A per-user advisory lock serializes a user's concurrent sign-ins, so two of
+   * them can't each count nine others and leave eleven. Rows already expired are left to sweep():
+   * they admit nothing, and the cap counts only sessions that still could. Ties in sign-in time are
+   * broken by the stored hash, so the choice is deterministic; the new row is excluded from the
+   * deletion outright, never ranked.
+   */
   async create(userId: string): Promise<{ token: string; session: Session }> {
     const token = newSessionToken();
-    // created_at, authenticated_at and last_seen_at take their now() defaults: the same instant
-    // as the expiry's now(), since now() is fixed for the statement's transaction.
-    const [session] = await this.db.orm
-      .insert(s)
-      .values({
-        token_hash: hashToken(token),
-        user_id: userId,
-        expires_at: sql`now()+${ABSOLUTE_SECONDS}*interval '1 second'`,
-      })
-      .returning(SESSION);
-    if (!session) throw new Error("The session insert returned no row");
-    return { token, session };
+    const tokenHash = hashToken(token);
+    return this.db.transaction(async (client) => {
+      const db = orm(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `web-sessions:${userId}`,
+      ]);
+      // created_at, authenticated_at and last_seen_at take their now() defaults: the same instant
+      // as the expiry's now(), since now() is fixed for the transaction.
+      const [session] = await db
+        .insert(s)
+        .values({
+          token_hash: tokenHash,
+          user_id: userId,
+          expires_at: sql`now()+${ABSOLUTE_SECONDS}*interval '1 second'`,
+        })
+        .returning(SESSION);
+      if (!session) throw new Error("The session insert returned no row");
+      const others = and(eq(s.user_id, userId), ne(s.token_hash, tokenHash), LIVE);
+      const newest = db
+        .select({ token_hash: s.token_hash })
+        .from(s)
+        .where(others)
+        .orderBy(desc(s.created_at), desc(s.token_hash))
+        .limit(SESSIONS_PER_USER - 1);
+      await db.delete(s).where(and(others, notInArray(s.token_hash, newest)));
+      return { token, session };
+    });
   }
 
   /**

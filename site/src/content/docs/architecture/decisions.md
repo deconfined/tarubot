@@ -17,7 +17,7 @@ These are the current design choices and their engineering rationale. Implementa
 
 ## Durable decisions, then effects
 
-**Decision.** Every decision is one transaction that writes the state change, its audit record and its queued Discord work together. Discord changes happen afterwards, from a queue in PostgreSQL.
+**Decision.** Every decision is one transaction that writes the state change, its audit record and its queued Discord work together. Discord changes happen afterwards, from a queue in PostgreSQL. A member's own choices for themselves are different: a role save on My roles, like the `/main` and `/nickname` preferences, commits only its state and queued work, with no audit record, and Discord is the record of which roles they hold (owner decision Q4 A; see [Data and privacy](/tarubot/architecture/data-and-privacy/#self-service-roles)).
 
 **Why.** Discord and the Lodestone fail, rate-limit and time out. Keeping them out of decision transactions means a decision is never half-made, and work the bot owes survives crashes, restarts and outages. Replies can say honestly what was saved and what is still queued.
 

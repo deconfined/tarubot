@@ -51,7 +51,7 @@ Two sections of `/config validate` judge TaruBot's own access **as if Administra
 
 ### Role menu
 
-The **Role menu** section checks the [self-service role menu](/tarubot/admin/self-service-roles/) the way members and guests will see it: every role in a published or Not offered category, judged on the same fresh view of the server as the sections above. It needs a **2.39.0 or newer** release.
+The **Role menu** section checks the [self-service role menu](/tarubot/admin/self-service-roles/) the way members and guests see it on My roles: every role in a published or Not offered category, judged on the same fresh view of the server as the sections above. It needs a **2.39.0 or newer** release.
 
 - `[OFF] No roles outside drafts`: every category is still a draft, or the menu is empty.
 - `[OK] N roles outside drafts; all pass`: the roles in published and Not offered categories.
@@ -77,17 +77,18 @@ Members see only their own requests and work, in plain words.
 
 ## Dashboard
 
-The dashboard requires a **2.37.0 or newer** release, and Role menu **2.39.0 or newer**.
+The dashboard requires a **2.37.0 or newer** release, Role menu **2.39.0 or newer**, and My roles **2.40.0 or newer**.
 
-When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same officer authority as the bot. Ordinary members and guests can't open these pages yet.
+When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same access checks as the bot. Members and guests can sign in too, for **My roles** only, while TaruBot doesn't have Administrator in the server; see [the dashboard's access](/tarubot/admin/access/#the-dashboard). If My roles in one server is the only page open to someone, signing in takes them straight to it.
 
 - **Server configuration** groups the FC and roster, access roles, channels, officer access, onboarding and Discord automation into cards, including guest-application availability and configuration revision. The health snapshot says how many checks need attention, counts those that passed, are waiting or are off, and links to the full checklist, using the same checks as `/config validate`. A checklist group of four or more checks that all passed is folded; open it to see each one. A group with anything else is always shown in full. The check's time is shown in UTC; successful checks are reused for up to 30 seconds, so reloading within that window does not run a new check.
 - **Background work** shows process health, up to 10 recent refresh runs and up to 25 outstanding jobs for this server. Counts describe only those displayed jobs, not the whole server or deployment. Open a job's or run's details to read its full ID and diagnostic. A failed decision DM does not undo the guest decision.
-- **Role menu** is where officers build the [self-service role menu](/tarubot/admin/self-service-roles/). It's the only page that changes anything.
+- **Role menu** is where officers build the [self-service role menu](/tarubot/admin/self-service-roles/).
+- **My roles** is where members, guests and officers [pick their own roles](/tarubot/use/pick-your-roles/) from that menu. Officers also see draft categories there, disabled.
 
-Server configuration and Background work are read-only: the dashboard offers no retries or guest decisions, and every other setting is still changed with the Discord commands. Names come from TaruBot's cache; an uncached name shows an ID, and a hidden channel shows that TaruBot cannot see it. Times are UTC throughout. The layout works on phones, where Background work shows each job and run as a card, and the pages are dark only.
+Those two pages change things: officers change the menu, and members, guests and officers change their own roles. Server configuration and Background work are read-only: the dashboard offers no retries or guest decisions, and every other setting is still changed with the Discord commands. Names come from TaruBot's cache; an uncached name shows an ID, and a hidden channel shows that TaruBot cannot see it. Times are UTC throughout. The layout works on phones, where Background work shows each job and run as a card, and the pages are dark only.
 
-The **Account** menu offers **Sign out** for this browser and **Sign out everywhere** for all your sessions. See [dashboard sessions and fonts](/tarubot/architecture/data-and-privacy/#dashboard-sessions-and-fonts). Every form on the dashboard, sign-out included, carries a code tied to your current sign-in, so a form left open from before you last signed in is refused as out of date: open the page again, then redo your change. A sign-out refused that way says **Still signed in**, because nothing ended: use **Sign out** in the **Account** menu on that page. A form refused as out of date, over the limit or while TaruBot restarts doesn't keep what you typed, and nothing from it was saved.
+The **Account** menu offers **Sign out** for this browser and **Sign out everywhere** for all your sessions. Each person can be signed in on up to 10 browsers at once; signing in on another ends the oldest. See [dashboard sessions and fonts](/tarubot/architecture/data-and-privacy/#dashboard-sessions-and-fonts). Every form on the dashboard, sign-out included, carries a code tied to your current sign-in, so a form left open from before you last signed in is refused as out of date: open the page again, then redo your change. A sign-out refused that way says **Still signed in**, because nothing ended: use **Sign out** in the **Account** menu on that page. A form refused as out of date, over the limit or while TaruBot restarts doesn't keep what you typed, and nothing from it was saved.
 
 ## Repeats and unsetting
 

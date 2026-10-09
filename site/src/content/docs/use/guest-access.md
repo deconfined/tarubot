@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-The Guest role is for people who aren't in the Free Company but belong in the server: friends, alliance members and former members. There are three ways to get it.
+The Guest role is for people who aren't in the Free Company but belong in the server: friends, alliance members and former members. There are three ways to get it. With it, you can also [pick your own roles](/tarubot/use/pick-your-roles/) on the web, just as members can.
 
 ## With a linked character
 

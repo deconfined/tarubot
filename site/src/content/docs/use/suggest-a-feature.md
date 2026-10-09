@@ -2,7 +2,7 @@
 title: Suggest a feature
 description: Send an idea for TaruBot with /suggest, what goes public on GitHub and what never does, and the limits.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Have an idea for TaruBot? [`/suggest`](/tarubot/reference/commands/#suggest) posts it as a public issue in [TaruBot's GitHub repository](https://github.com/deconfined/tarubot/issues), where the maintainers keep feature requests. It goes up at once, and the reply links to it.

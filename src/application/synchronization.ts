@@ -9,7 +9,11 @@ import {
   type Actor,
 } from "../domain/policy.js";
 import { effectsPaused, WAITING_CODES } from "../domain/failures.js";
-import { ROLE_CHOICE_KIND, ROLE_CHOICE_RETENTION_DAYS } from "../domain/self-roles.js";
+import {
+  ROLE_CHOICE_EXPIRY_DAYS,
+  ROLE_CHOICE_KIND,
+  ROLE_CHOICE_RETENTION_DAYS,
+} from "../domain/self-roles.js";
 import { type Departure, statusObservation } from "../domain/status.js";
 import { Failure, json, nickname, normalized } from "../domain/values.js";
 import { desiredRankRole, rankAccess, rankDecisive } from "./rank-policy.js";
@@ -48,6 +52,7 @@ import type { GuildRecord, MemberView } from "./records.js";
 import type { RefreshResult } from "./results.js";
 import type { Service } from "./service.js";
 import { accessFacts } from "./access-facts.js";
+import { accessLossRoles } from "./self-roles.js";
 import {
   type DepartingOwner,
   lockDepartingOwners,
@@ -887,6 +892,24 @@ export class Synchronization {
         if (wanted && !member.roles.includes(role)) add.push(role);
         if (!wanted && member.roles.includes(role)) remove.push(role);
       }
+      // Self-service roles that open channels (owner decision Q3 B, 2.40.0): someone this pass
+      // leaves with none of Member, Guest, Officer or FC Leader loses them, revoked guests
+      // included, so an opt-in channel stays behind Member or Guest as well as the role ("if you
+      // don't have one of member or guest, you can't see ANY channels except for the lobby").
+      // Cosmetic menu roles, drafts and roles TaruBot can't remove are left alone; a server that
+      // binds neither Member nor Guest has no access TaruBot manages, so nothing is taken there.
+      // The narrow exception to "reconciliation never touches menu roles": it only removes.
+      const after = new Set([...member.roles.filter((role) => !remove.includes(role)), ...add]);
+      const keepsAccess = [
+        guild.member_role_id,
+        guild.guest_role_id,
+        guild.officer_role_id,
+        guild.leader_role_id,
+      ].some((role) => role !== null && after.has(role));
+      const menuRoles =
+        (guild.member_role_id || guild.guest_role_id) && !keepsAccess
+          ? await accessLossRoles(db, this.app.discord, guild, member.roles)
+          : [];
       if (preview) {
         const [preferences] = await db
           .select({ ...getTableColumns(t.guildUsers), name: t.characters.name })
@@ -926,6 +949,8 @@ export class Synchronization {
           remove,
           desired,
           nickname: { current: member.nickname, desired: target },
+          // A count, never which roles: they are the member's own choices (owner decision Q4 A).
+          ...(menuRoles.length > 0 ? { selfRoles: menuRoles.length } : {}),
         };
       }
       if (!guild.effects_enabled || !this.app.config.ENABLE_EFFECTS)
@@ -946,6 +971,21 @@ export class Synchronization {
       } catch (error) {
         roleError = error;
       }
+      // Q3 B's removals, after the access change and only once it applied: written one role at a
+      // time, each refusal skipped (a role deleted or moved above TaruBot meanwhile), so they can
+      // never block or undo the access change. Never in the job result's role lists or `applied`
+      // history: those name roles, and these are the member's own choices (a count instead).
+      let menuError: unknown;
+      let menuRemoved: number | undefined;
+      if (!roleError && menuRoles.length > 0 && this.app.discord.selfRoles)
+        try {
+          await guard();
+          menuRemoved = (
+            await this.app.discord.selfRoles(guild.id, member.id, [], menuRoles, "access")
+          ).removed;
+        } catch (error) {
+          menuError = error;
+        }
       // Nicknames are an independent capability; a blocked role does not block them.
       let nicknameError: unknown;
       try {
@@ -1038,6 +1078,7 @@ export class Synchronization {
           );
       }
       if (roleError) throw roleError;
+      if (menuError) throw menuError;
       if (nicknameError) throw nicknameError;
       // Queue completion carries the stored `applied` history into this final result.
       return {
@@ -1047,6 +1088,7 @@ export class Synchronization {
         status: "applied",
         roles,
         nickname: nicknameResult,
+        ...(menuRemoved !== undefined ? { selfRoles: menuRemoved } : {}),
       };
     } finally {
       if (locked)
@@ -1216,17 +1258,17 @@ export class Synchronization {
         Math.random() * 30,
       );
     await db.delete(t.challenges).where(lt(t.challenges.expires_at, sql`now()-interval '7 days'`));
-    // 2.39.0 never runs a member's role change (roles.self, queued from 2.40.0), so after a rollback
-    // every waiting one is closed here at once, as the dispatcher closes one it claims, and the
-    // trigger clears its payload as the row ends (owner decision Q4 A): the payload holds role IDs
-    // that can reveal pronouns or gender identity. The dispatcher alone would leave some for as
-    // long as 2.39.0 runs: Queue.claim() takes only rows in an active server, a change parked as
-    // disabled waits for a restart or /config change to requeue it, and a running one whose lease
-    // is null is never reclaimed. A running one with a live lease is left: a worker is completing
-    // it, or a stopped 2.40.0 worker held it and its lease runs out within 45 seconds, after which
-    // the next pass closes it. Closed rows leave the waiting states, so a repeat changes nothing,
-    // and the self_role_waiting index keeps this to the waiting rows. 2.40.0, which runs these
-    // jobs, replaces this with its 7-day expiry. Closed rows then go after 30 days, as below.
+    // A member's role change still waiting 7 days after their last save is closed (owner decision
+    // Q4 A): its payload holds role IDs that can reveal pronouns or gender identity, and the
+    // trigger clears it as the row ends. The clock is the payload's savedAt, which every save
+    // moves (created_at stays at the first). A running one with a live lease is left to finish.
+    // A running one whose lease ran out (or never had one) is dead: its worker crashed or was
+    // killed, and Queue.claim() reclaims it only in an active server, so in a server TaruBot left
+    // meanwhile it would otherwise keep its role IDs for good; it is closed like a waiting one.
+    // A payload without a readable savedAt (one already cleared to {}, which holds nothing) falls
+    // back to created_at, and the pattern test keeps a malformed value from failing the cast and
+    // with it this pass. The self_role_waiting index keeps this to the waiting rows.
+    const savedAt = sql`${t.jobs.payload}->>'savedAt'`;
     await db
       .update(t.jobs)
       .set({
@@ -1234,7 +1276,7 @@ export class Synchronization {
         completed_at: sql`now()`,
         lease_until: null,
         last_error: null,
-        result: { skipped: "needs a newer TaruBot" },
+        result: { skipped: "expired" },
       })
       .where(
         and(
@@ -1246,12 +1288,15 @@ export class Synchronization {
               or(isNull(t.jobs.lease_until), lt(t.jobs.lease_until, sql`now()`)),
             ),
           ),
+          lt(
+            sql`coalesce(CASE WHEN ${savedAt} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9]{2}:[0-9]{2})$' THEN (${savedAt})::timestamptz END, ${t.jobs.created_at})`,
+            sql`now()-${ROLE_CHOICE_EXPIRY_DAYS}*interval '1 day'`,
+          ),
         ),
       );
     // Finished role-choice jobs (who changed their roles and when, never which) go after 30 days
     // (owner decision Q4 A): the one kind of job history that is pruned (docs/PERSISTENCE.md). No
-    // delivery attempt or sync-run link ever references one. 2.39.0 queues none, but meets them
-    // after a rollback from 2.40.0, and keeps the promise then too.
+    // delivery attempt or sync-run link ever references one.
     await db
       .delete(t.jobs)
       .where(

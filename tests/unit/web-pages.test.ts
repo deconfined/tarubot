@@ -15,16 +15,26 @@ import {
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import type { JobView, SyncRunRow, SyncStatusView } from "../../src/application/results.js";
-import type { SelfRoleEditor } from "../../src/application/self-roles.js";
+import {
+  type MyRoles,
+  RoleChoiceJob,
+  type RoleChoiceStatus,
+  type SelfRoleEditor,
+  SelfRoles,
+} from "../../src/application/self-roles.js";
 import { Service } from "../../src/application/service.js";
 import { ServiceKey, Services } from "../../src/bot/services.js";
 import { project } from "../../src/config/project.js";
 import type { Actor } from "../../src/domain/policy.js";
 import {
+  CHOICE_MESSAGES,
+  choiceMenu,
   LIMIT_MESSAGES,
   MENU_LIMITS,
   MENU_OPERATIONS,
   type MenuOperation,
+  menuRoleIds,
+  type RoleChecker,
   SELF_ROLE_MESSAGES,
   type SelfRoleMenu,
 } from "../../src/domain/self-roles.js";
@@ -46,18 +56,36 @@ import {
   ROLE_MENU_NOTICES,
   renderRoleMenu,
 } from "../../src/web/views/role-menu.js";
+import {
+  MY_ROLES_NOTICES,
+  type RefusedChoice,
+  renderMyRoles,
+  skippedText,
+  UNCHANGED_WHILE_WAITING,
+} from "../../src/web/views/my-roles.js";
 import { renderStatus } from "../../src/web/views/status.js";
 import {
+  HARNESS_ACCOUNTS,
+  HARNESS_GUILDS,
   HARNESS_MENU,
+  type HarnessMenus,
   type HarnessStates,
+  HELD,
   harnessGateway,
+  harnessPeople,
   harnessSelfRoles,
   MENU_CATEGORY,
+  MENU_REVISION,
   MENU_ROLE,
+  SECOND_CATEGORY,
+  SECOND_MENU,
 } from "../fixtures/web-dev.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
+/** The no-access answers' exception for members and guests refused under A2. */
+const NO_ACCESS_EXCEPTION =
+  "While officers sort out TaruBot's permissions in a server, only officers can sign in there. If you already have the Member or Guest role, ask an officer.";
 const REF = "00000000-0000-4000-8000-000000000000";
 /** An invented form token, as the session middleware derives one. */
 const TOKEN = Buffer.from("form-token-for-tests-00000000000").toString("base64url");
@@ -176,6 +204,12 @@ describe("definePage", () => {
       "manager",
       "officer",
     ]);
+    // 2.40.0: members and guests (My roles declares both, and officer).
+    expect(definePage({ ...base, access: ["member", "guest", "officer"] }).access).toEqual([
+      "member",
+      "guest",
+      "officer",
+    ]);
     const key = new ServiceKey("number", (value): value is number => typeof value === "number");
     expect(definePage({ ...base, requires: [key] }).requires).toEqual([key]);
   });
@@ -209,8 +243,12 @@ describe("definePage", () => {
       [{ title: 42 }, "A page needs a title."],
       [{ access: undefined }, "A page must declare access"],
       [{ access: [] }, "A page must declare access"],
-      [{ access: ["member"] }, "A page must declare access, any of: officer, manager."],
-      [{ access: ["officer", "guest"] }, "A page must declare access"],
+      [
+        { access: ["operator"] },
+        "A page must declare access, any of: officer, manager, member, guest.",
+      ],
+      [{ access: ["officer", "operator"] }, "A page must declare access"],
+      [{ access: ["Member"] }, "A page must declare access"],
       [{ access: "officer" }, "A page must declare access"],
       [{ access: null }, "A page must declare access"],
       [{ requires: undefined }, "A page must declare the services it requires"],
@@ -297,6 +335,30 @@ describe("the shell and /", () => {
     expect(document.body.classList.contains("entry-page")).toBe(true);
   });
 
+  test("the welcome speaks to members and guests first, then officers (2.40.0)", async () => {
+    const document = inspect(
+      await render(layout({ title: "TaruBot", signedIn: false }, renderHome({ signedIn: false }))),
+    );
+    expect(document.querySelector(".welcome-copy__lead")?.textContent).toBe(
+      "Pick your roles in your FC's server. Officers also get a clear view of its configuration, health and background work.",
+    );
+    expect([...document.querySelectorAll(".feature dt")].map((term) => term.textContent)).toEqual([
+      "Pick your roles",
+      "Know what's configured",
+      "See what needs attention",
+    ]);
+    expect(document.querySelector(".disclosure summary")?.textContent).toBe("Who can sign in?");
+    const answer = [...document.querySelectorAll(".disclosure p")].map((line) => line.textContent);
+    expect(answer).toEqual([
+      "Anyone with the server's Member or Guest role can sign in to pick their roles. Officers can also sign in to manage TaruBot.",
+      "Signing in asks Discord only who you are. TaruBot checks your server access and keeps no Discord token.",
+    ]);
+    // The officer-era wording is gone: nothing says the pages are read-only or officers' alone.
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("read-only");
+    expect(text).not.toContain("The pages are for FC officers");
+  });
+
   test("a signed-in user gets both sign-out forms and their servers, names escaped and isolated", async () => {
     const servers = HOSTILE.map((name, index) => ({
       id: `10000000000000000${index}`,
@@ -356,6 +418,8 @@ describe("the shell and /", () => {
     expect(document.querySelector("main")?.textContent).toContain(
       "You don't have access to TaruBot's pages in any server right now.",
     );
+    // Someone refused while TaruBot holds Administrator (A2) isn't told the opposite.
+    expect(document.querySelector("main")?.textContent).toContain(NO_ACCESS_EXCEPTION);
     expect(document.querySelectorAll(".servers")).toHaveLength(0);
   });
 
@@ -379,11 +443,47 @@ describe("the shell and /", () => {
     expect(current?.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
     expect(document.querySelector("nav")?.getAttribute("aria-label")).toBe("Server pages");
     // The name appears once, in the switcher back to the server list; the top bar repeats only
-    // the page's title, for sight.
-    expect(document.querySelector('.server-switch[href="/"] [dir="auto"]')?.textContent).toBe(name);
+    // the page's title, for sight. The switcher asks for the list itself, so it never lands back
+    // on the only page someone has (server.ts's / redirect).
+    expect(
+      document.querySelector('.server-switch[href="/?servers"] [dir="auto"]')?.textContent,
+    ).toBe(name);
     expect(document.querySelector(".topbar")?.getAttribute("aria-hidden")).toBe("true");
     expect(document.querySelector(".topbar")?.textContent).toBe("Workspace/Status");
     expect(document.body.classList.contains("console-page")).toBe(true);
+    // Officers (and a model that doesn't say) get the officers' side note.
+    expect(document.querySelector(".side-nav__context")?.textContent).toBe(
+      "Settings and background workMost settings are changed in Discord; the role menu is set here.",
+    );
+  });
+
+  test("a member's console says where their roles are picked, not how settings are run", async () => {
+    const guild = { id: GUILD, name: "Example FC", nav: [], audience: "member" } as const;
+    const document = inspect(
+      await render(
+        layout({ title: "My roles", signedIn: true, formToken: TOKEN, guild }, html`<p>Body</p>`),
+      ),
+    );
+    expect(document.querySelector(".side-nav__context p")?.textContent).toBe("Your roles");
+    expect(document.querySelector(".side-nav__note")?.textContent).toBe(
+      "Pick your roles here. Everything else is in Discord.",
+    );
+    const officer = inspect(
+      await render(
+        layout(
+          {
+            title: "My roles",
+            signedIn: true,
+            formToken: TOKEN,
+            guild: { ...guild, audience: "officer" },
+          },
+          html`<p>Body</p>`,
+        ),
+      ),
+    );
+    expect(officer.querySelector(".side-nav__note")?.textContent).toBe(
+      "Most settings are changed in Discord; the role menu is set here.",
+    );
   });
 
   test("server initials take letters and digits only, on a hue fixed by the server ID", async () => {
@@ -430,8 +530,26 @@ describe("the shell and /", () => {
       await render(layout({ title: "No access", signedIn: false }, renderNoAccess())),
     );
     expect(document.querySelector("main")?.textContent).toContain("you aren't signed in");
+    const lines = [...document.querySelectorAll("main .entry-panel p")].map(
+      (line) => line.textContent,
+    );
+    expect(lines).toContain(
+      "Anyone with the server's Member or Guest role can sign in to pick their roles. Officers can also sign in to manage TaruBot. If you've just been given access, wait a minute and sign in again.",
+    );
+    // A Member or Guest refused while TaruBot holds Administrator (A2) reads why, in a constant
+    // sentence that names no server and no permission.
+    expect(lines).toContain(NO_ACCESS_EXCEPTION);
     expect(document.querySelectorAll("form")).toHaveLength(0);
-    expect(document.querySelector('main a[href="/"]')).not.toBeNull();
+    // It asks people to sign in again, so it offers that, and the start page.
+    expect(
+      [...document.querySelectorAll(".entry-panel__actions a")].map((link) => [
+        link.getAttribute("href"),
+        link.textContent,
+      ]),
+    ).toEqual([
+      ["/login", "Sign in again"],
+      ["/", "Go to the TaruBot start page"],
+    ]);
   });
 });
 
@@ -1166,9 +1284,10 @@ describe("Role menu (2.39.0)", () => {
     expect(page?.postLimit).toBe(120);
     expect(page?.nav).toBe("Role menu");
     expect(page?.icon).toBe("list");
-    // Officers' navigation, in path order.
+    // Officers' navigation, in path order: My roles (2.40.0) is theirs too (owner decision Q6).
     expect(navLinks((await loadPages()).values(), officer).map((link) => link.label)).toEqual([
       "Server configuration",
+      "My roles",
       "Role menu",
       "Background work",
     ]);
@@ -1233,12 +1352,12 @@ describe("Role menu (2.39.0)", () => {
     expect(
       [...document.querySelectorAll(".orr-btn--primary")].map((button) => button.textContent),
     ).toEqual(["Publish 1 draft"]);
-    // What publishing does, as 2.39.0 has it: nobody picks roles yet, so not "at once" (UX-3);
-    // the line describes the button, so it is heard with it (UX-8).
+    // What publishing does, not "at once" (UX-3), and that it starts owner decision Q3 B's
+    // removals; the line describes the button, so it is heard with it (UX-8).
     const publish = document.querySelector(".orr-btn--primary");
     const publishHelp = document.getElementById(publish?.getAttribute("aria-describedby") ?? "");
     expect(publishHelp?.textContent).toBe(
-      "Published categories go live for members and guests with the release that lets them pick roles. If you're replacing a reaction-role bot, keep drafts until you switch over.",
+      "Members and guests can pick from a category on My roles as soon as it's published. From then on, TaruBot also takes its roles that open channels from anyone with none of the Member, Guest, Officer and FC Leader roles. If you're replacing a reaction-role bot, keep drafts until you switch over.",
     );
     expect(document.querySelector("main")?.textContent).not.toContain("at once");
     // The readouts add up: every category is published, not offered or a draft (UX-11).
@@ -1291,11 +1410,10 @@ describe("Role menu (2.39.0)", () => {
         visibleText(form.querySelector("button") as Element),
         form.querySelector(".note")?.textContent,
       ]);
-    // Members and guests can't pick roles before 2.40.0, so publishing is said as what will happen.
-    const publish =
-      "Once members and guests can pick roles, everyone with Member or Guest can pick these.";
+    // Members and guests pick these roles on My roles, so each state's help says what happens now.
+    const publish = "Everyone with Member or Guest can pick these roles on My roles.";
     const stop =
-      "Nobody can add these roles. People who have them will still be able to remove them themselves.";
+      "Nobody can add these roles. People who have them can still remove them on My roles.";
     const draft =
       "Only officers see a draft. People who have these roles won't be able to change them until you publish again. Nobody's roles change.";
     expect(states(MENU_CATEGORY.pronouns)).toEqual([
@@ -1807,7 +1925,8 @@ describe("Role menu (2.39.0)", () => {
       "Every category is published or no longer offered.",
     );
     expect(await headline([pronouns, content])).toBe("1 draft isn't published yet.");
-    // Only a published category offers Stop offering; only officers have seen a draft.
+    // Only a published category offers Stop offering; a draft may have been published before, so
+    // its note says only what holds now.
     const document = await rolePage(await editor());
     const note = (id: string) =>
       card(document, id)?.querySelector(".orr-btn--danger")?.closest("form")?.querySelector(".note")
@@ -1816,7 +1935,7 @@ describe("Role menu (2.39.0)", () => {
       "People keep these roles in Discord, but won't be able to add or remove them themselves. To let people still remove them, choose Stop offering instead.",
     );
     expect(note(MENU_CATEGORY.content)).toBe(
-      "Only officers have seen this draft. People keep these roles in Discord.",
+      "Members and guests don't see a draft. People keep these roles in Discord, but won't be able to change them on My roles.",
     );
     expect(note(MENU_CATEGORY.retired)).toBe(
       "People keep these roles in Discord, but won't be able to remove them themselves any more.",
@@ -1918,5 +2037,1269 @@ describe("Role menu (2.39.0)", () => {
         styled: true,
       });
     }
+  });
+});
+
+describe("My roles (2.40.0)", () => {
+  const SECOND = HARNESS_GUILDS.second.id;
+  const MY_ROLES = "/g/:guild/my-roles";
+
+  /** Someone admitted to My roles here, as actor resolution makes them: a member by default. */
+  const person = (userId: string, overrides: Partial<Actor> = {}, guildId = GUILD): Actor => ({
+    guildId,
+    userId,
+    officer: false,
+    manageRoles: false,
+    member: true,
+    guest: false,
+    botAdministrator: false,
+    timedOut: false,
+    ...overrides,
+  });
+  const member = person(HARNESS_ACCOUNTS.member.id);
+  const guest = person(HARNESS_ACCOUNTS.guest.id, { member: false, guest: true });
+  const officer = person(HARNESS_ACCOUNTS.officer.id, { officer: true });
+
+  /** A people store where `actor` holds exactly `held` (menu roles) in their server. */
+  const holding = (actor: Actor, held: readonly string[]) => {
+    const people = harnessPeople();
+    people.held.set(`${actor.guildId}:${actor.userId}`, new Set(held));
+    return people;
+  };
+
+  /** What SelfRoles.view gives `actor` over the harness's invented menus, with any field replaced. */
+  async function viewOf(
+    actor: Actor,
+    options: {
+      states?: HarnessStates;
+      menus?: HarnessMenus;
+      people?: ReturnType<typeof harnessPeople>;
+      overrides?: Partial<MyRoles>;
+    } = {},
+  ): Promise<MyRoles> {
+    const service = harnessSelfRoles(options.states ?? {}, options.menus, options.people);
+    return { ...(await service.view(actor)), ...options.overrides };
+  }
+
+  /** The whole document for a My roles view, as the page renders it for `viewer`. */
+  async function myRolesPage(
+    roles: MyRoles,
+    options: { viewer?: Actor; url?: string; refused?: RefusedChoice } = {},
+  ): Promise<{ document: Document; markup: string }> {
+    const viewer = options.viewer ?? member;
+    const path = `/g/${roles.guildId}/my-roles`;
+    const markup = await render(
+      layout(
+        {
+          title: "My roles",
+          signedIn: true,
+          formToken: TOKEN,
+          guild: {
+            id: roles.guildId,
+            name: "Example FC",
+            nav: navLinks((await loadPages()).values(), viewer, MY_ROLES),
+            audience: viewer.officer ? "officer" : "member",
+          },
+          ...(options.refused && { error: true }),
+        },
+        renderMyRoles({
+          roles,
+          officer: viewer.officer,
+          action: path,
+          token: TOKEN,
+          url: new URL(options.url ?? path, "https://example.org"),
+          ...(options.refused && { refused: options.refused }),
+        }),
+      ),
+    );
+    return { document: inspect(markup), markup };
+  }
+
+  /** Text without visually hidden parts: what a sighted person reads. */
+  const visibleText = (element: Element | null): string => {
+    if (!element) return "";
+    const copy = element.cloneNode(true) as Element;
+    for (const hidden of copy.querySelectorAll(".visually-hidden")) hidden.remove();
+    return (copy.textContent ?? "").replace(/\s+/gu, " ").trim();
+  };
+
+  /** A category's fieldset, and what its inputs carry. */
+  const group = (document: Document, categoryId: string) =>
+    document.querySelector(`fieldset#category-${categoryId}`);
+  const inputs = (document: Document, categoryId: string) =>
+    [...(group(document, categoryId)?.querySelectorAll("input") ?? [])].map((input) => ({
+      value: input.getAttribute("value"),
+      type: input.getAttribute("type"),
+      name: input.getAttribute("name"),
+      checked: input.hasAttribute("checked"),
+      disabled: input.hasAttribute("disabled"),
+      label: visibleText(document.querySelector(`label[for="${input.getAttribute("id")}"]`)),
+    }));
+  /** The hidden fields a save sends: `shown` and each category's `seen`. */
+  const hiddenValues = (document: Document, name: string) =>
+    [...document.querySelectorAll(`main input[type="hidden"][name="${name}"]`)].map((input) =>
+      input.getAttribute("value"),
+    );
+  const statusText = (document: Document) =>
+    [...document.querySelectorAll("#status .notice")].map((banner) => banner.textContent);
+  const callouts = (document: Document) =>
+    [...document.querySelectorAll(".my-roles-callouts .notice")].map((note) => note.textContent);
+  const PRIVACY =
+    "Roles you choose appear on your profile in this server, where everyone can see them. TaruBot keeps no record of which roles you choose; Discord holds your roles.";
+  /**
+   * A rule set that refuses `roleIds` as roles above TaruBot's (so nobody can add or remove them
+   * here) and passes every other role.
+   */
+  const refusing =
+    (...roleIds: string[]): RoleChecker =>
+    (roleId) => ({
+      roleId,
+      problems: roleIds.includes(roleId)
+        ? [{ code: "above_bot", message: "It sits above TaruBot's role." }]
+        : [],
+      opens: [],
+    });
+
+  test("the page module: members, guests and officers, SelfRoles alone, a budget of 10 POSTs", async () => {
+    const pages = await loadPages();
+    const page = pages.get(MY_ROLES);
+    expect(page?.access).toEqual(["member", "guest", "officer"]);
+    // Every member and guest reaches this page's code, so it can reach no other service.
+    expect(page?.requires).toEqual([selfRolesKey]);
+    // Nor can the service it gets write to Discord: the roles.self job's write lives on
+    // RoleChoiceJob, which only the job dispatcher builds.
+    expect("apply" in SelfRoles.prototype).toBeFalse();
+    expect(typeof RoleChoiceJob.prototype.apply).toBe("function");
+    expect(page?.postLimit).toBe(10);
+    expect(page?.nav).toBe("My roles");
+    expect(page?.icon).toBe("user");
+    expect(page?.title).toBe("My roles");
+    // Members and guests see My roles alone; with Administrator (A2), nothing at all.
+    for (const actor of [member, guest])
+      expect(navLinks(pages.values(), actor).map((link) => link.label)).toEqual(["My roles"]);
+    expect(navLinks(pages.values(), { ...member, botAdministrator: true })).toEqual([]);
+    // Unknown (TaruBot's own member isn't cached) counts as holding it.
+    const unknown: Actor = {
+      guildId: GUILD,
+      userId: member.userId,
+      officer: false,
+      manageRoles: false,
+      member: true,
+    };
+    expect(navLinks(pages.values(), unknown)).toEqual([]);
+  });
+
+  test("one card per category the person may change, each a fieldset whose legend is its heading", async () => {
+    const { document } = await myRolesPage(await viewOf(member));
+    const groups = [...document.querySelectorAll("main fieldset.choice-group")];
+    expect(groups.map((fieldset) => fieldset.querySelector("legend > h2")?.textContent)).toEqual([
+      "Pronouns",
+      "Games",
+      "Retired events",
+    ]);
+    // The page's one h1, then a heading per category, so someone can move between them.
+    expect([...document.querySelectorAll("main h2")].map((h2) => h2.textContent)).toEqual([
+      "Pronouns",
+      "Games",
+      "Retired events",
+    ]);
+    // The legend, the rule and the description are read with the group; each in words.
+    const pronouns = group(document, MENU_CATEGORY.pronouns);
+    expect(pronouns?.getAttribute("aria-describedby")).toBe(
+      `category-${MENU_CATEGORY.pronouns}-hint`,
+    );
+    expect(document.getElementById(`category-${MENU_CATEGORY.pronouns}-hint`)?.textContent).toBe(
+      "Pick any number. Shown on your profile, so people know how to refer to you.",
+    );
+    const rows: [string, string, boolean][] = [
+      [MENU_ROLE.heHim, "He/Him", false],
+      [MENU_ROLE.sheHer, "She/Her", true],
+      [MENU_ROLE.theyThem, "They/Them", false],
+      // Held, no longer offered: ticked, and unticking it removes it.
+      [MENU_ROLE.askMe, "Ask my pronouns No longer offered", true],
+    ];
+    expect(inputs(document, MENU_CATEGORY.pronouns)).toEqual(
+      rows.map(([value, label, checked]) => ({
+        value,
+        type: "checkbox",
+        name: `c-${MENU_CATEGORY.pronouns}`,
+        checked,
+        disabled: false,
+        label,
+      })),
+    );
+    // An option's description is tied to its input, not part of its name.
+    const ask = document.querySelector(`input[value="${MENU_ROLE.askMe}"]`);
+    expect(document.getElementById(ask?.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
+      "Replaced by your profile's own pronouns field.",
+    );
+    // Every row's label covers its row (styles/my-roles.ts): a native input with its own label.
+    for (const row of document.querySelectorAll(".my-category .orr-check"))
+      expect(row.querySelector("input + .orr-check__text > label")).not.toBeNull();
+    expect(document.querySelectorAll("main form")).toHaveLength(1);
+    expect(visibleText(document.querySelector("main form button"))).toBe("Save my roles");
+  });
+
+  test("the form says what it showed: shown and seen per category, inputs named c-<id>", async () => {
+    const { document } = await myRolesPage(await viewOf(member));
+    expect(hiddenValues(document, "shown")).toEqual([
+      MENU_CATEGORY.pronouns,
+      MENU_CATEGORY.games,
+      MENU_CATEGORY.retired,
+    ]);
+    expect(hiddenValues(document, `seen:${MENU_CATEGORY.pronouns}`)).toEqual([
+      MENU_ROLE.sheHer,
+      MENU_ROLE.askMe,
+    ]);
+    expect(hiddenValues(document, `seen:${MENU_CATEGORY.games}`)).toEqual([MENU_ROLE.valheim]);
+    expect(hiddenValues(document, `seen:${MENU_CATEGORY.retired}`)).toEqual([MENU_ROLE.halloween]);
+    // Every hidden field is the token, `shown` or a `seen`: nothing else rides along.
+    expect(
+      new Set(
+        [...document.querySelectorAll('main input[type="hidden"]')].map((input) =>
+          (input.getAttribute("name") ?? "").replace(/:.*$/u, ":"),
+        ),
+      ),
+    ).toEqual(new Set([FORM_TOKEN_FIELD, "shown", "seen:"]));
+  });
+
+  test("a pick-one category: radios starting with None, preselected by what is held", async () => {
+    const actor = person(HARNESS_ACCOUNTS.member.id, {}, SECOND);
+    const main = SECOND_CATEGORY.mainRole;
+    const values = (document: Document) =>
+      inputs(document, main).map(({ value, type, checked }) => ({ value, type, checked }));
+    const radio = (value: string, checked: boolean) => ({ value, type: "radio", checked });
+    // Healer and Tank both held (Dyno leftovers): no radio preselected, a note, and each held row
+    // says so; the form shows nothing ticked, so it sends no `seen` and counts as unchanged.
+    const { document: several } = await myRolesPage(await viewOf(actor));
+    expect(values(several)).toEqual([
+      radio("", false),
+      radio(MENU_ROLE.healer, false),
+      radio(MENU_ROLE.tank, false),
+      radio(MENU_ROLE.dps, false),
+    ]);
+    expect(inputs(several, main).map((row) => row.label)).toEqual([
+      "No role from this category",
+      "Healer You have this",
+      "Tank You have this",
+      "DPS",
+    ]);
+    expect(several.getElementById(`category-${main}-hint`)?.textContent).toBe(
+      "Pick one. What you usually play in duties. You have 2 of these roles. Pick one to keep it and remove the others.",
+    );
+    expect(hiddenValues(several, "shown")).toContain(main);
+    expect(hiddenValues(several, `seen:${main}`)).toEqual([]);
+    // One held: that one; none held: "No role from this category", sent as "" in `seen`.
+    const { document: one } = await myRolesPage(
+      await viewOf(actor, { people: holding(actor, [MENU_ROLE.tank]) }),
+    );
+    expect(values(one).filter((row) => row.checked)).toEqual([radio(MENU_ROLE.tank, true)]);
+    expect(hiddenValues(one, `seen:${main}`)).toEqual([MENU_ROLE.tank]);
+    expect(one.querySelector(".my-category__note")).toBeNull();
+    const { document: none } = await myRolesPage(
+      await viewOf(actor, { people: holding(actor, []) }),
+    );
+    expect(values(none).filter((row) => row.checked)).toEqual([radio("", true)]);
+    expect(hiddenValues(none, `seen:${main}`)).toEqual([""]);
+  });
+
+  test("pick-several: an 'up to N' hint, and a note when more are held than a lowered limit", async () => {
+    const menus: HarnessMenus = new Map([
+      [
+        GUILD,
+        {
+          menu: {
+            ...HARNESS_MENU,
+            categories: HARNESS_MENU.categories.map((category) =>
+              category.id === MENU_CATEGORY.pronouns ? { ...category, max: 2 } : category,
+            ),
+          },
+          revision: MENU_REVISION,
+        },
+      ],
+    ]);
+    const people = holding(member, [MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem]);
+    const { document } = await myRolesPage(await viewOf(member, { menus, people }));
+    expect(document.getElementById(`category-${MENU_CATEGORY.pronouns}-hint`)?.textContent).toBe(
+      "Pick up to 2. Shown on your profile, so people know how to refer to you. You have 3; the limit is now 2.",
+    );
+    expect(
+      inputs(document, MENU_CATEGORY.pronouns)
+        .filter((row) => row.checked)
+        .map((row) => row.value),
+    ).toEqual([MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem]);
+    expect(inputs(document, MENU_CATEGORY.pronouns).every((row) => row.type === "checkbox")).toBe(
+      true,
+    );
+  });
+
+  test("roles no longer offered show only to the people who hold them, to remove", async () => {
+    const { document: theirs } = await myRolesPage(await viewOf(member));
+    const retired = group(theirs, MENU_CATEGORY.retired);
+    expect(visibleText(retired?.querySelector("legend") ?? null)).toBe(
+      "Retired events No longer offered",
+    );
+    expect(theirs.getElementById(`category-${MENU_CATEGORY.retired}-hint`)?.textContent).toBe(
+      "You can remove these. Event roles from past seasons.",
+    );
+    expect(inputs(theirs, MENU_CATEGORY.retired).map((row) => [row.label, row.checked])).toEqual([
+      ["Halloween 2025", true],
+    ]);
+    // The guest holds neither Halloween 2025 nor Ask my pronouns: neither shows.
+    const { document: others } = await myRolesPage(await viewOf(guest), { viewer: guest });
+    expect(group(others, MENU_CATEGORY.retired)).toBeNull();
+    expect(others.querySelector(`input[value="${MENU_ROLE.askMe}"]`)).toBeNull();
+    expect(others.querySelector(`input[value="${MENU_ROLE.halloween}"]`)).toBeNull();
+    expect(inputs(others, MENU_CATEGORY.pronouns).map((row) => row.label)).toEqual([
+      "He/Him",
+      "She/Her",
+      "They/Them",
+    ]);
+  });
+
+  test("a held role that fails a rule now can still be unticked, and says it can't be picked again", async () => {
+    // --state-menu-problems, judged by the real rule set: They/Them sits above the Moderator and
+    // Dyno roles (above_staff), and She/Her gained Mention @everyone (a server permission). Neither
+    // stops its holders removing it, so each held one is still an input, but once unticked and
+    // saved it's gone for good until officers fix it: the badge warns before that one-way change.
+    const badge = "Can't be picked again right now";
+    const states = { menuProblems: true };
+    const { document: theirs } = await myRolesPage(await viewOf(officer, { states }), {
+      viewer: officer,
+    });
+    expect(
+      inputs(theirs, MENU_CATEGORY.pronouns).map((row) => [row.label, row.checked, row.disabled]),
+    ).toEqual([
+      ["He/Him", false, false],
+      [`They/Them ${badge}`, true, false],
+    ]);
+    // The member's own view of the same rule set (in the harness TaruBot also holds Administrator
+    // there, which keeps members out until it doesn't; the actor here says it doesn't).
+    const { document: mine } = await myRolesPage(await viewOf(member, { states }));
+    expect(inputs(mine, MENU_CATEGORY.pronouns).map((row) => [row.label, row.checked])).toEqual([
+      ["He/Him", false],
+      [`She/Her ${badge}`, true],
+      // Not offered says so already; it never gets both.
+      ["Ask my pronouns No longer offered", true],
+    ]);
+    // The badge is part of the input's accessible name, and never says why.
+    const sheHer = mine.querySelector(`input[value="${MENU_ROLE.sheHer}"]`);
+    expect(mine.querySelector(`label[for="${sheHer?.getAttribute("id")}"]`)?.textContent).toContain(
+      badge,
+    );
+    for (const document of [theirs, mine])
+      expect(document.querySelector("main")?.textContent).not.toMatch(/Moderator|Mention/u);
+    // A role nobody holds that fails a rule isn't shown at all, so it never gets the badge.
+    expect(mine.querySelector(`input[value="${MENU_ROLE.theyThem}"]`)).toBeNull();
+    // A pick-one category's radio says the same.
+    const actor = person(HARNESS_ACCOUNTS.member.id, {}, SECOND);
+    const aboveStaff: RoleChecker = (roleId) => ({
+      roleId,
+      problems:
+        roleId === MENU_ROLE.healer
+          ? [{ code: "above_staff", message: "It sits above a moderation role." }]
+          : [],
+      opens: [],
+    });
+    const { document: radios } = await myRolesPage(
+      await viewOf(actor, {
+        overrides: {
+          categories: choiceMenu(SECOND_MENU, {
+            held: [MENU_ROLE.healer],
+            waiting: null,
+            check: aboveStaff,
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(
+      inputs(radios, SECOND_CATEGORY.mainRole).map((row) => [row.type, row.label, row.checked]),
+    ).toEqual([
+      ["radio", "No role from this category", false],
+      ["radio", `Healer ${badge}`, true],
+      ["radio", "Tank", false],
+      ["radio", "DPS", false],
+    ]);
+  });
+
+  test("roles held that can't be changed now are text, not inputs; nothing to save, no form", async () => {
+    const held = HELD[GUILD]?.[member.userId] ?? [];
+    const roles = await viewOf(member, {
+      overrides: {
+        // Every menu role moved above TaruBot: those held can't be changed, the rest don't show.
+        categories: choiceMenu(HARNESS_MENU, {
+          held,
+          waiting: null,
+          check: refusing(...menuRoleIds(HARNESS_MENU)),
+          officer: false,
+        }),
+      },
+    });
+    const { document } = await myRolesPage(roles);
+    expect(document.querySelectorAll("main form, main input:not([type=hidden])")).toHaveLength(0);
+    expect(document.querySelectorAll('main input[type="hidden"]')).toHaveLength(0);
+    expect([...document.querySelectorAll("main h2")].map((h2) => h2.textContent)).toEqual([
+      "Pronouns",
+      "Games",
+    ]);
+    // Nothing to pick: the rule says so instead of asking for a pick, and the roles kept are one
+    // sentence per category, by name, in its hint under its heading. No framed line passes for a
+    // row to tap.
+    expect(
+      [...document.querySelectorAll(".my-category .orr-field__hint")].map(
+        (hint) => hint.textContent,
+      ),
+    ).toEqual([
+      "Nothing to pick right now. Shown on your profile, so people know how to refer to you. You have @She/Her and @Ask my pronouns. They can't be changed here right now.",
+      "Nothing to pick right now. Each game's role opens its channels. You have @Valheim. It can't be changed here right now.",
+    ]);
+    expect(document.querySelectorAll(".my-category__fixed")).toHaveLength(0);
+    expect(callouts(document)).toEqual([]);
+  });
+
+  test("a pick-one category with a role held that can't be changed: alone it is text; beside another, no radio preselected", async () => {
+    const actor = person(HARNESS_ACCOUNTS.member.id, {}, SECOND);
+    const main = SECOND_CATEGORY.mainRole;
+    // Healer moved above TaruBot; Tank and DPS can still be picked.
+    const shown = async (held: string[]) =>
+      (
+        await myRolesPage(
+          await viewOf(actor, {
+            overrides: {
+              categories: choiceMenu(SECOND_MENU, {
+                held,
+                waiting: null,
+                check: refusing(MENU_ROLE.healer),
+                officer: false,
+              }),
+            },
+          }),
+        )
+      ).document;
+    // Healer alone: Healer fills the one place, so picking Tank or DPS would be refused and "No
+    // role from this category" would change nothing. No radio could do anything, so the category
+    // is text, like one with only roles that can't change, and the form sends nothing for it.
+    const alone = await shown([MENU_ROLE.healer]);
+    expect(group(alone, main)).toBeNull();
+    expect(alone.querySelectorAll(`input[name="c-${main}"]`)).toHaveLength(0);
+    expect(hiddenValues(alone, "shown")).not.toContain(main);
+    expect(hiddenValues(alone, `seen:${main}`)).toEqual([]);
+    // The role they keep, and why there is nothing to pick, under the category's heading.
+    const plain = [...alone.querySelectorAll(".my-category__plain")].find(
+      (card) => card.querySelector("h2")?.textContent === "Main role",
+    );
+    // Said once: no "Pick one" above a card with nothing to pick, and no note repeating it.
+    expect(plain?.querySelector(".orr-field__hint")?.textContent).toBe(
+      "Nothing to pick right now. What you usually play in duties. You have @Healer. It can't be changed here right now.",
+    );
+    expect(plain?.querySelector(".my-category__note")).toBeNull();
+    // With Tank as well: Tank says it is held, and the note says how to get back to one.
+    const both = await shown([MENU_ROLE.healer, MENU_ROLE.tank]);
+    expect(inputs(both, main).map((row) => [row.label, row.checked])).toEqual([
+      ["No role from this category", false],
+      ["Tank You have this", false],
+      ["DPS", false],
+    ]);
+    expect(both.getElementById(`category-${main}-hint`)?.textContent).toBe(
+      "Pick one. What you usually play in duties. You have @Healer; it can't be changed here right now. You have 2 of these roles, and one can't be changed here right now. Choose No role from this category to remove the others.",
+    );
+    // Pick several: a role they keep counts toward a lowered limit, as a save counts it.
+    const upToTwo: SelfRoleMenu = {
+      v: 1,
+      categories: [
+        { ...(HARNESS_MENU.categories[0] as SelfRoleMenu["categories"][number]), max: 2 },
+      ],
+    };
+    const { document: pronouns } = await myRolesPage(
+      await viewOf(member, {
+        overrides: {
+          categories: choiceMenu(upToTwo, {
+            held: [MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem],
+            waiting: null,
+            check: refusing(MENU_ROLE.heHim),
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(pronouns.querySelector(".my-category__note")?.textContent).toBe(
+      "You have 3; the limit is now 2.",
+    );
+    // Pick several, with exactly as many roles that can't change as the limit, and nothing else
+    // ticked: any pick would go over it, so the category is text, saying there's nothing to pick.
+    const { document: full } = await myRolesPage(
+      await viewOf(member, {
+        overrides: {
+          categories: choiceMenu(upToTwo, {
+            held: [MENU_ROLE.heHim, MENU_ROLE.sheHer],
+            waiting: null,
+            check: refusing(MENU_ROLE.heHim, MENU_ROLE.sheHer),
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(group(full, MENU_CATEGORY.pronouns)).toBeNull();
+    expect(full.querySelectorAll("main form, main input")).toHaveLength(0);
+    expect(full.querySelector(".my-category__plain .orr-field__hint")?.textContent).toBe(
+      "Nothing to pick right now. Shown on your profile, so people know how to refer to you. You have @He/Him and @She/Her. They can't be changed here right now.",
+    );
+    expect(full.querySelector(".my-category__plain .my-category__note")).toBeNull();
+    // A lowered limit is news even with nothing to pick, so that note stays.
+    const { document: lowered } = await myRolesPage(
+      await viewOf(member, {
+        overrides: {
+          categories: choiceMenu(upToTwo, {
+            held: [MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem],
+            waiting: null,
+            check: refusing(MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem),
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(lowered.querySelector(".my-category__plain .orr-field__hint")?.textContent).toBe(
+      "Nothing to pick right now. Shown on your profile, so people know how to refer to you. You have @He/Him, @She/Her and @They/Them. They can't be changed here right now. You have 3; the limit is now 2.",
+    );
+  });
+
+  test("while a change waits, its ticks show with a badge saying which way each row is waiting", async () => {
+    // The waiting change asks for Minecraft instead of Valheim; the member still holds Valheim.
+    for (const states of [
+      { roles: "queued" },
+      { roles: "queued", activation: true },
+      { roles: "blocked" },
+    ] as const) {
+      const { document } = await myRolesPage(await viewOf(member, { states }));
+      expect({
+        states,
+        rows: inputs(document, MENU_CATEGORY.games).map((row) => [row.label, row.checked]),
+      }).toEqual({
+        states,
+        rows: [
+          ["Valheim Waiting to remove", false],
+          ["Minecraft Waiting to add", true],
+        ],
+      });
+      // Pronouns aren't in the change: as held, no badge.
+      expect(
+        inputs(document, MENU_CATEGORY.pronouns).some((row) => row.label.includes("Waiting")),
+      ).toBe(false);
+    }
+    // Nothing waiting, nothing badged.
+    const { document: settled } = await myRolesPage(await viewOf(member));
+    expect(settled.body.textContent).not.toContain("Waiting to");
+    // A pick-one category where Healer can't change and a waiting change asks for Tank: Tank is
+    // ticked, but isn't held, so it never says "You have this", and the note speaks of the change.
+    const actor = person(HARNESS_ACCOUNTS.member.id, {}, SECOND);
+    const main = SECOND_CATEGORY.mainRole;
+    const { document } = await myRolesPage(
+      await viewOf(actor, {
+        overrides: {
+          categories: choiceMenu(SECOND_MENU, {
+            held: [MENU_ROLE.healer],
+            waiting: { chosen: [MENU_ROLE.tank], offered: [MENU_ROLE.tank, MENU_ROLE.dps] },
+            check: refusing(MENU_ROLE.healer),
+            officer: false,
+          }),
+          status: {
+            state: "blocked",
+            skipped: 0,
+            changed: false,
+            recent: false,
+            completedAt: null,
+          },
+        },
+      }),
+    );
+    expect(inputs(document, main).map((row) => row.label)).toEqual([
+      "No role from this category",
+      "Tank Waiting to add",
+      "DPS",
+    ]);
+    expect(document.getElementById(`category-${main}-hint`)?.textContent).toBe(
+      "Pick one. What you usually play in duties. You have @Healer; it can't be changed here right now. With your saved change you'd have 2 of these roles, and one can't be changed here right now. Choose No role from this category to remove the others.",
+    );
+    // A lowered limit with a change waiting: the count is the change's, never "You have".
+    const oneGame: SelfRoleMenu = {
+      ...HARNESS_MENU,
+      categories: HARNESS_MENU.categories.map((category) =>
+        category.id === MENU_CATEGORY.games ? { ...category, max: 1 } : category,
+      ),
+    };
+    const lowered = await myRolesPage(
+      await viewOf(member, {
+        menus: new Map([[GUILD, { menu: oneGame, revision: MENU_REVISION }]]),
+        overrides: {
+          categories: choiceMenu(oneGame, {
+            held: HELD[GUILD]?.[member.userId] ?? [],
+            waiting: {
+              chosen: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+              offered: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+            },
+            check: refusing(),
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(
+      lowered.document.getElementById(`category-${MENU_CATEGORY.games}-hint`)?.textContent,
+    ).toContain(
+      "With your saved change you'd have 2 of these roles. Pick one to keep it and remove the others.",
+    );
+  });
+
+  test("published roles that all fail a rule now: nothing to pick right now, never 'officers haven't set up'", async () => {
+    // Every menu role refused (TaruBot lost Manage Roles, say), and the person holds none.
+    const nothing = (actor: Actor) =>
+      viewOf(actor, {
+        people: holding(actor, []),
+        overrides: {
+          categories: choiceMenu(HARNESS_MENU, {
+            held: [],
+            waiting: null,
+            check: refusing(...menuRoleIds(HARNESS_MENU)),
+            officer: false,
+          }),
+        },
+      });
+    /** The empty state's paragraphs. */
+    const empty = (document: Document) =>
+      [...document.querySelectorAll(".empty-state p")].map((line) => visibleText(line));
+    const roles = await nothing(member);
+    expect(roles.offers).toBe(true);
+    const { document } = await myRolesPage(roles);
+    expect(document.querySelectorAll("main .my-category, main form")).toHaveLength(0);
+    expect(empty(document)).toEqual(["There are no roles to pick here right now."]);
+    expect(document.body.textContent).not.toContain("haven't set up");
+    // An officer is pointed at Role menu, which names each role's problem.
+    const { document: theirs } = await myRolesPage(await nothing(officer), { viewer: officer });
+    expect(empty(theirs)).toEqual([
+      "There are no roles to pick here right now.",
+      "Role menu shows which roles have a problem.",
+    ]);
+    // A menu that offers nothing yet: members are told officers haven't set it up; officers,
+    // who would see drafts here, that nothing is published.
+    const none: HarnessMenus = new Map([
+      [GUILD, { menu: { v: 1, categories: [] }, revision: MENU_REVISION }],
+    ]);
+    const bare = await viewOf(member, { menus: none });
+    expect(bare.offers).toBe(false);
+    expect(empty((await myRolesPage(bare)).document)).toEqual([
+      "Your officers haven't set up any roles to pick yet.",
+      "Roles they offer, such as pronouns or games, will show up here.",
+    ]);
+    const { document: officers } = await myRolesPage(await viewOf(officer, { menus: none }), {
+      viewer: officer,
+    });
+    expect(empty(officers)).toEqual([
+      "Nothing is published yet.",
+      "Add a category with roles on Role menu, then publish it.",
+    ]);
+  });
+
+  test("without TaruBot's view of the roles only the reason shows: no card, and no role as a bare ID", async () => {
+    const held = HELD[GUILD]?.[member.userId] ?? [];
+    const { document, markup } = await myRolesPage(
+      await viewOf(member, {
+        overrides: {
+          available: false,
+          canSave: false,
+          roleNames: new Map(),
+          // What view() makes without TaruBot's view of the roles: nothing is changeable.
+          categories: choiceMenu(HARNESS_MENU, {
+            held,
+            waiting: null,
+            check: null,
+            officer: false,
+          }),
+        },
+      }),
+    );
+    expect(document.querySelectorAll("main .my-category, main form, main fieldset")).toHaveLength(
+      0,
+    );
+    for (const roleId of held)
+      expect({ roleId, shown: markup.includes(roleId) }).toEqual({ roleId, shown: false });
+    expect(callouts(document)).toEqual([
+      "TaruBot can't read this server's roles right now, so they can't be changed here. Try again in a minute.",
+    ]);
+    expect(document.querySelector(".empty-state")).toBeNull();
+  });
+
+  test("drafts show to officers only, disabled, with their roles ticked, and are never sent", async () => {
+    const { document } = await myRolesPage(await viewOf(officer), { viewer: officer });
+    const content = group(document, MENU_CATEGORY.content);
+    expect(visibleText(content?.querySelector("legend") ?? null)).toBe("Content Draft");
+    expect(document.getElementById(`category-${MENU_CATEGORY.content}-hint`)?.textContent).toBe(
+      "Pick up to 2. What you'd like to be pinged for. Draft: only officers can see this. Publish it on Role menu.",
+    );
+    expect(
+      inputs(document, MENU_CATEGORY.content).map(({ value, checked, disabled }) => ({
+        value,
+        checked,
+        disabled,
+      })),
+    ).toEqual([
+      { value: MENU_ROLE.savage, checked: true, disabled: true },
+      { value: MENU_ROLE.maps, checked: false, disabled: true },
+      { value: MENU_ROLE.mahjong, checked: false, disabled: true },
+    ]);
+    expect(hiddenValues(document, "shown")).not.toContain(MENU_CATEGORY.content);
+    expect(hiddenValues(document, `seen:${MENU_CATEGORY.content}`)).toEqual([]);
+    // The officer's published categories still save.
+    expect(hiddenValues(document, "shown")).toEqual([MENU_CATEGORY.pronouns, MENU_CATEGORY.games]);
+    // Members never see a draft.
+    const { document: theirs } = await myRolesPage(await viewOf(member));
+    expect(group(theirs, MENU_CATEGORY.content)).toBeNull();
+    expect(theirs.querySelector(".my-category--draft")).toBeNull();
+  });
+
+  test("officers' notes link to Role menu, where they act on them; members never get the link", async () => {
+    const roleMenu = `/g/${GUILD}/role-menu`;
+    /** The text around each link to Role menu in the page's content (the nav isn't in main). */
+    const linked = (document: Document) =>
+      [...document.querySelectorAll(`main a[href="${roleMenu}"]`)].map((link) => [
+        link.textContent,
+        link.parentElement?.textContent,
+      ]);
+    // A draft's note, in its card.
+    const { document: drafts } = await myRolesPage(await viewOf(officer), { viewer: officer });
+    expect(linked(drafts)).toEqual([
+      ["Role menu", "Draft: only officers can see this. Publish it on Role menu."],
+    ]);
+    // An unreadable menu's callout.
+    const { document: broken } = await myRolesPage(
+      await viewOf(officer, { states: { menuUnreadable: true } }),
+      { viewer: officer },
+    );
+    expect(linked(broken)).toEqual([
+      [
+        "Role menu",
+        "The saved role menu can't be read by this TaruBot version, so members and guests have nothing to pick. Reset it on Role menu.",
+      ],
+    ]);
+    // Every role failing a rule now, and a menu with nothing published.
+    const failing = (actor: Actor) =>
+      viewOf(actor, {
+        people: holding(actor, []),
+        overrides: {
+          categories: choiceMenu(HARNESS_MENU, {
+            held: [],
+            waiting: null,
+            check: refusing(...menuRoleIds(HARNESS_MENU)),
+            officer: false,
+          }),
+        },
+      });
+    const { document: problems } = await myRolesPage(await failing(officer), { viewer: officer });
+    expect(linked(problems)).toEqual([
+      ["Role menu", "Role menu shows which roles have a problem."],
+    ]);
+    const none: HarnessMenus = new Map([
+      [GUILD, { menu: { v: 1, categories: [] }, revision: MENU_REVISION }],
+    ]);
+    const { document: empty } = await myRolesPage(await viewOf(officer, { menus: none }), {
+      viewer: officer,
+    });
+    expect(linked(empty)).toEqual([
+      ["Role menu", "Add a category with roles on Role menu, then publish it."],
+    ]);
+    // Members and guests, in the same states, see no officer note and so no link.
+    for (const document of [
+      (await myRolesPage(await viewOf(member))).document,
+      (await myRolesPage(await viewOf(member, { states: { menuUnreadable: true } }))).document,
+      (await myRolesPage(await failing(member))).document,
+      (await myRolesPage(await viewOf(guest, { menus: none }), { viewer: guest })).document,
+    ])
+      expect(document.querySelectorAll('a[href$="/role-menu"]')).toHaveLength(0);
+  });
+
+  test("the status banner says what became of the person's newest change, by state", async () => {
+    // `changed`: an applied change added or removed a role, unless a case says it changed nothing.
+    const at = (
+      state: RoleChoiceStatus["state"],
+      skipped = 0,
+      recent = true,
+      completedAt: Date | null = null,
+      changed = state === "applied",
+    ): RoleChoiceStatus => ({ state, skipped, changed, recent, completedAt });
+    // When a change ended, as the database stored it; banners show it in UTC to the minute.
+    const ended = new Date("2026-10-03T14:05:30.000Z");
+    const cases: [RoleChoiceStatus | null, string | null][] = [
+      [null, null],
+      [
+        at("waiting", 0, false),
+        "Saved. TaruBot is updating your roles in Discord. This usually takes under a minute; reload to check.",
+      ],
+      // The form is locked while paused, so the banner never asks for a save.
+      [
+        at("paused", 0, false),
+        "Saved. Role changes are paused in this server, so yours will be applied when they resume. If that takes more than 7 days, your change is dropped and you can pick again.",
+      ],
+      // A save that changes nothing retries nothing, so the banner promises only the retries
+      // TaruBot makes by itself.
+      [
+        at("blocked", 0, false),
+        "Saved, but TaruBot can't change roles in this server right now. Officers can see why. TaruBot keeps trying for up to 7 days after your last saved change.",
+      ],
+      // A change that ended unapplied no longer shows ticked, so each says to pick again.
+      [
+        at("failed"),
+        "TaruBot couldn't apply your last change. Check your roles below and pick again, then save. If it keeps happening, ask an officer.",
+      ],
+      [at("applied"), "Your roles were updated in Discord."],
+      // An old success is no news: nothing is said.
+      [at("applied", 0, false), null],
+      // A change that dropped choices says so for as long as it is the newest. Nothing records
+      // which (owner decision Q4 A), so it never says anyone can tell, or that it's "right now".
+      [
+        at("applied", 1, false),
+        "Your roles were updated, but 1 of your choices couldn't be applied. Check your roles below, or ask an officer.",
+      ],
+      [
+        at("applied", 3),
+        "Your roles were updated, but 3 of your choices couldn't be applied. Check your roles below, or ask an officer.",
+      ],
+      // Applied, but every choice was skipped: nothing was updated, so it never says so.
+      [
+        at("applied", 2, true, null, false),
+        "TaruBot couldn't apply your last change. Check your roles below and pick again, then save.",
+      ],
+      [
+        at("expired", 0, false),
+        "TaruBot couldn't apply your last change within 7 days, so it was dropped. Pick your roles again, then save.",
+      ],
+      // Any other skip: a restore, an older TaruBot after a rollback, nothing left to apply.
+      [
+        at("dropped", 0, false),
+        "TaruBot couldn't apply your last change. Check your roles below and pick again, then save.",
+      ],
+      // Each warning that lasts as long as its row (30 days) says when the change ended, so one
+      // that outlives the problem reads as history; without a stored time it says only what.
+      [
+        at("failed", 0, false, ended),
+        "TaruBot couldn't apply your last change, and stopped trying on 2026-10-03 14:05 UTC. Check your roles below and pick again, then save. If it keeps happening, ask an officer.",
+      ],
+      [
+        at("applied", 2, false, ended),
+        "Your roles were updated on 2026-10-03 14:05 UTC, but 2 of your choices couldn't be applied. Check your roles below, or ask an officer.",
+      ],
+      [
+        at("applied", 1, false, ended, false),
+        "TaruBot couldn't apply your last change on 2026-10-03 14:05 UTC. Check your roles below and pick again, then save.",
+      ],
+      [
+        at("expired", 0, false, ended),
+        "TaruBot couldn't apply your last change within 7 days, so it was dropped on 2026-10-03 14:05 UTC. Pick your roles again, then save.",
+      ],
+      [
+        at("dropped", 0, false, ended),
+        "TaruBot couldn't apply your last change, and dropped it on 2026-10-03 14:05 UTC. Check your roles below and pick again, then save.",
+      ],
+      // News needs no date: it shows only within 10 minutes.
+      [at("applied", 0, true, ended), "Your roles were updated in Discord."],
+    ];
+    for (const [status, text] of cases) {
+      const { document } = await myRolesPage(await viewOf(member, { overrides: { status } }));
+      expect({ status, banners: statusText(document) }).toEqual({
+        status,
+        banners: text === null ? [] : [text],
+      });
+      if (text !== null) {
+        // The fragment a save's redirect names, polite, and able to take that focus.
+        const region = document.getElementById("status");
+        expect(region?.getAttribute("role")).toBe("status");
+        expect(region?.getAttribute("tabindex")).toBe("-1");
+      }
+      // A date is a <time> element with the exact instant.
+      const dated = [...document.querySelectorAll("#status time")].map((element) =>
+        element.getAttribute("datetime"),
+      );
+      expect({ status, dated }).toEqual({
+        status,
+        dated: text?.includes(" UTC") ? [ended.toISOString()] : [],
+      });
+    }
+    expect(String(skippedText(2))).toContain("2 of your choices couldn't be applied");
+    for (const count of [1, 2, 30])
+      expect(String(skippedText(count, ended))).not.toMatch(/Officers can see|right now/u);
+  });
+
+  test("the 'unchanged' notice shows from its fixed table only, never the token", async () => {
+    const page = async (query: string) =>
+      (await myRolesPage(await viewOf(member), { url: `/g/${GUILD}/my-roles${query}` })).document;
+    expect(statusText(await page("?notice=unchanged"))).toEqual([MY_ROLES_NOTICES.unchanged]);
+    expect(MY_ROLES_NOTICES.unchanged).toBe("Nothing to save. Those are already your roles.");
+    for (const query of ["?notice=saved", "?notice=%3Cb%3Ex", "?notice=toString", "?other=1"]) {
+      const document = await page(query);
+      expect({ query, banners: statusText(document) }).toEqual({ query, banners: [] });
+      expect(document.getElementById("status")).toBeNull();
+    }
+    // While a change waits, the form shows it ticked, so sending it back changes nothing; but
+    // those roles aren't the person's yet, so it never says "Those are already your roles".
+    for (const state of ["waiting", "paused", "blocked"] as const) {
+      const { document } = await myRolesPage(
+        await viewOf(member, {
+          overrides: {
+            status: { state, skipped: 0, changed: false, recent: false, completedAt: null },
+          },
+        }),
+        { url: `/g/${GUILD}/my-roles?notice=unchanged` },
+      );
+      const banners = statusText(document);
+      expect({ state, first: banners[0], count: banners.length }).toEqual({
+        state,
+        first: UNCHANGED_WHILE_WAITING,
+        count: 2,
+      });
+      expect(banners.join(" ")).not.toContain("Those are already your roles");
+    }
+    expect(UNCHANGED_WHILE_WAITING).toBe("Nothing new to save.");
+    // Once the change has ended, the form shows the roles held again, and the sentence is true.
+    const { document: ended } = await myRolesPage(
+      await viewOf(member, {
+        overrides: {
+          status: { state: "failed", skipped: 0, changed: false, recent: true, completedAt: null },
+        },
+      }),
+      { url: `/g/${GUILD}/my-roles?notice=unchanged` },
+    );
+    expect(statusText(ended)[0]).toBe(MY_ROLES_NOTICES.unchanged);
+  });
+
+  test("a time-out, paused changes or no setup lock the page with a reason; the privacy note stays", async () => {
+    const locked = async (actor: Actor, overrides: Partial<MyRoles>, viewer = actor) => {
+      const { document } = await myRolesPage(await viewOf(actor, { overrides }), { viewer });
+      // Inputs show, disabled; there is no form and no Save button to send.
+      expect(document.querySelectorAll("main form, main button")).toHaveLength(0);
+      for (const input of document.querySelectorAll("main fieldset input"))
+        expect(input.hasAttribute("disabled")).toBe(true);
+      expect(document.querySelector(".my-roles-intro__privacy")?.textContent).toBe(PRIVACY);
+      return callouts(document);
+    };
+    const timedOut = person(HARNESS_ACCOUNTS.timedOut.id, { timedOut: true });
+    expect(await locked(timedOut, {})).toEqual([CHOICE_MESSAGES.timedOut]);
+    // A locked form is still the person's view of their own roles: its cards carry the modifier
+    // that keeps the rows readable (styles/my-roles.ts), which a form that can save never has.
+    const { document: theirs } = await myRolesPage(await viewOf(timedOut), { viewer: timedOut });
+    expect(
+      theirs.querySelector(".my-categories")?.classList.contains("my-categories--locked"),
+    ).toBe(true);
+    const { document: open } = await myRolesPage(await viewOf(member));
+    expect(open.querySelector(".my-categories--locked")).toBeNull();
+    const paused =
+      "Role changes are paused in this server right now. You can see your roles here, but changes can't be saved until they resume.";
+    for (const effectsMode of ["awaiting_activation", "deployment_disabled"] as const)
+      expect(await locked(member, { effectsMode, canSave: false })).toEqual([paused]);
+    // A change parked by the pause already says so in its banner, so the callout isn't repeated;
+    // a short line still says why there is no Save button.
+    expect(
+      await locked(member, {
+        effectsMode: "awaiting_activation",
+        canSave: false,
+        status: { state: "paused", skipped: 0, changed: false, recent: false, completedAt: null },
+      }),
+    ).toEqual(["You can't change your roles here until role changes resume."]);
+    // No setup: only officers get in, and there is nothing to pick.
+    expect(
+      await locked(
+        officer,
+        { configured: false, categories: [], canSave: false, administrator: null },
+        officer,
+      ),
+    ).toEqual(["TaruBot isn't set up in this server yet, so there are no roles to pick here."]);
+  });
+
+  test("officers see the Administrator banner (A2) and an unreadable menu's note; members never do", async () => {
+    const administrator =
+      "Members and guests can't open this page while TaruBot has Administrator in this server. Use /setup overrides, then remove Administrator once /config validate says it's no longer needed.";
+    const { document } = await myRolesPage(
+      await viewOf(officer, { states: { menuProblems: true } }),
+      { viewer: officer },
+    );
+    expect(callouts(document)).toEqual([administrator]);
+    const unreadable = await viewOf(officer, { states: { menuUnreadable: true } });
+    const { document: broken } = await myRolesPage(unreadable, { viewer: officer });
+    expect(callouts(broken)).toEqual([
+      "The saved role menu can't be read by this TaruBot version, so members and guests have nothing to pick. Reset it on Role menu.",
+    ]);
+    expect(broken.querySelector(".empty-state")?.textContent).toBe(
+      "There are no roles to pick here right now.",
+    );
+    // A member with the same facts gets neither officer note.
+    const { document: theirs } = await myRolesPage(
+      await viewOf(member, {
+        states: { menuUnreadable: true },
+        overrides: { administrator: true },
+      }),
+    );
+    expect(callouts(theirs)).toEqual([]);
+    expect(theirs.querySelector(".empty-state")?.textContent).toBe(
+      "There are no roles to pick here right now.",
+    );
+  });
+
+  test("an empty menu says so; the privacy note is there on every page", async () => {
+    const menus: HarnessMenus = new Map([
+      [GUILD, { menu: { v: 1, categories: [] }, revision: MENU_REVISION }],
+    ]);
+    const { document } = await myRolesPage(await viewOf(member, { menus }));
+    expect(
+      [...document.querySelectorAll(".empty-state p")].map((line) => line.textContent),
+    ).toEqual([
+      "Your officers haven't set up any roles to pick yet.",
+      "Roles they offer, such as pronouns or games, will show up here.",
+    ]);
+    expect(document.querySelectorAll("main form, main fieldset")).toHaveLength(0);
+    expect(document.querySelector(".my-roles-intro__privacy")?.textContent).toBe(PRIVACY);
+    expect(document.querySelector(".my-roles-intro .lead")?.textContent).toBe(
+      "Pick the roles you'd like in this server. TaruBot adds or removes them for you in Discord.",
+    );
+  });
+
+  test("a refused save comes back: 422 with what was picked and each category marked, 409 as it is now", async () => {
+    const pronouns = MENU_CATEGORY.pronouns;
+    const refused: RefusedChoice = {
+      kind: "invalid",
+      errors: [
+        { categoryId: pronouns, max: 2, message: CHOICE_MESSAGES.max(2) },
+        {
+          categoryId: pronouns,
+          roleId: MENU_ROLE.theyThem,
+          message: CHOICE_MESSAGES.unavailableRole(MENU_ROLE.theyThem),
+        },
+        // A category this person can't see any more: said at the top of the form instead.
+        { categoryId: MENU_CATEGORY.content, max: 1, message: CHOICE_MESSAGES.max(1) },
+      ],
+      submitted: [
+        {
+          categoryId: pronouns,
+          seen: [MENU_ROLE.sheHer, MENU_ROLE.askMe],
+          picked: [MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem],
+        },
+      ],
+    };
+    const { document } = await myRolesPage(await viewOf(member), { refused });
+    expect(document.title).toBe("Error: My roles · TaruBot");
+    const links = [...document.querySelectorAll(".error-summary a")];
+    // Away from its card a limit names its category (WCAG 2.4.4, 3.3.1); a role's own refusal
+    // names its role; a category this person can't see has no name to give.
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Pronouns: pick at most 2 roles.",
+      "@They/Them can't be picked right now. Choose something else, then save again.",
+      "Pick only one role here.",
+    ]);
+    // Every link lands on something on the page that can take focus.
+    for (const link of links) {
+      const target = document.getElementById((link.getAttribute("href") ?? "").slice(1));
+      expect(target).not.toBeNull();
+      expect(target?.getAttribute("tabindex")).toBe("-1");
+    }
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      `#category-${pronouns}`,
+      `#category-${pronouns}`,
+      "#my-roles-error",
+    ]);
+    const fieldset = group(document, pronouns);
+    expect(fieldset?.getAttribute("aria-describedby")).toBe(
+      `category-${pronouns}-hint category-${pronouns}-error`,
+    );
+    expect(document.getElementById(`category-${pronouns}-error`)?.textContent).toBe(
+      "Error: Pick at most 2 roles here. @They/Them can't be picked right now. Choose something else, then save again.",
+    );
+    expect(document.getElementById("my-roles-error")?.textContent).toBe(
+      "Error: Pick only one role here.",
+    );
+    // What was picked comes back ticked; `seen` is still what the first render showed.
+    expect(
+      inputs(document, pronouns)
+        .filter((row) => row.checked)
+        .map((row) => row.value),
+    ).toEqual([MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem]);
+    expect(hiddenValues(document, `seen:${pronouns}`)).toEqual([MENU_ROLE.sheHer, MENU_ROLE.askMe]);
+    // The other categories are as they are now.
+    expect(hiddenValues(document, `seen:${MENU_CATEGORY.games}`)).toEqual([MENU_ROLE.valheim]);
+
+    const { document: conflict } = await myRolesPage(await viewOf(member), {
+      refused: { kind: "conflict" },
+    });
+    expect([...conflict.querySelectorAll(".error-summary a")].map((a) => a.textContent)).toEqual([
+      CHOICE_MESSAGES.conflict,
+    ]);
+    expect(conflict.querySelector(".error-summary a")?.getAttribute("href")).toBe(
+      "#my-roles-error",
+    );
+    expect(conflict.getElementById("my-roles-error")?.textContent).toBe(
+      `Error: ${CHOICE_MESSAGES.conflict}`,
+    );
+    expect(
+      inputs(conflict, pronouns)
+        .filter((row) => row.checked)
+        .map((row) => row.value),
+    ).toEqual([MENU_ROLE.sheHer, MENU_ROLE.askMe]);
+
+    // A limit reached with a role the person keeps: the card says which role; the summary also
+    // names the category.
+    const { document: fixed } = await myRolesPage(await viewOf(member), {
+      refused: {
+        kind: "invalid",
+        errors: [
+          {
+            categoryId: MENU_CATEGORY.games,
+            message: CHOICE_MESSAGES.fixedMax([MENU_ROLE.valheim], 1),
+          },
+        ],
+        submitted: [
+          {
+            categoryId: MENU_CATEGORY.games,
+            seen: [MENU_ROLE.valheim],
+            picked: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+          },
+        ],
+      },
+    });
+    const fixedLimit =
+      "@Valheim can't be changed here right now and counts toward this category's limit of one role, so you can't pick another role here.";
+    expect([...fixed.querySelectorAll(".error-summary a")].map((a) => a.textContent)).toEqual([
+      `Games: ${fixedLimit}`,
+    ]);
+    expect(fixed.getElementById(`category-${MENU_CATEGORY.games}-error`)?.textContent).toBe(
+      `Error: ${fixedLimit}`,
+    );
+  });
+
+  test("every control's accessible name is unique, and every button has visible text", async () => {
+    for (const [roles, viewer] of [
+      [await viewOf(member), member],
+      [await viewOf(officer), officer],
+      [await viewOf(person(HARNESS_ACCOUNTS.member.id, {}, SECOND)), member],
+    ] as const) {
+      const { document } = await myRolesPage(roles, { viewer });
+      const names = [
+        ...document.querySelectorAll('main input:not([type="hidden"]), main button'),
+      ].map((control) => accessibleName(document, control));
+      expect(new Set(names).size).toBe(names.length);
+      for (const button of document.querySelectorAll("main button"))
+        expect(visibleText(button)).not.toBe("");
+    }
+    // Two pick-one categories each have their own None, told apart by the category's name.
+    const { document } = await myRolesPage(
+      await viewOf(person(HARNESS_ACCOUNTS.member.id, {}, SECOND)),
+    );
+    const none = document.querySelector(`input[value=""]`);
+    expect(accessibleName(document, none as Element)).toBe("No role from this category: Main role");
+  });
+
+  test("nothing about anyone else: no other person's ID, and role names of the menu only", async () => {
+    const roles = await viewOf(member);
+    expect([...roles.roleNames.keys()].sort()).toEqual([...menuRoleIds(HARNESS_MENU)].sort());
+    const { document, markup } = await myRolesPage(roles);
+    const main = document.querySelector("main")?.innerHTML ?? "";
+    for (const account of Object.values(HARNESS_ACCOUNTS))
+      expect({ account: account.id, shown: markup.includes(account.id) }).toEqual({
+        account: account.id,
+        shown: false,
+      });
+    // Not even the server's access roles or its staff: only the menu's own roles.
+    for (const name of ["Officer", "FC Leader", "Moderator", "Dyno", "Announcer", "Council"])
+      expect({ name, shown: main.includes(name) }).toEqual({ name, shown: false });
+  });
+
+  test("the Role menu's lead links to My roles, with its address to share", async () => {
+    const editor = await harnessSelfRoles().editor({
+      guildId: GUILD,
+      userId: USER,
+      officer: true,
+      manageRoles: false,
+    });
+    const markup = await render(
+      renderRoleMenu({
+        editor,
+        names: guildNames(harnessGateway(), GUILD),
+        action: `/g/${GUILD}/role-menu`,
+        token: TOKEN,
+        url: new URL(`/g/${GUILD}/role-menu`, "https://example.org"),
+        newCategoryId: "00000000-0000-4000-8000-000000000301",
+      }),
+    );
+    const lead = parseHTML(`<main>${markup}</main>`).document.getElementById("role-menu-intro");
+    expect(lead?.querySelector("a")?.getAttribute("href")).toBe(`/g/${GUILD}/my-roles`);
+    expect(lead?.querySelector("a")?.textContent).toBe("My roles");
+    expect(lead?.querySelector("code")?.textContent).toBe(
+      `https://example.org/g/${GUILD}/my-roles`,
+    );
+    // Owner decision Q3 B is the one change TaruBot makes to listed roles unasked, also to people
+    // who never had Member or Guest, so the lead says so where officers read what the menu does.
+    expect(lead?.textContent).toContain(
+      "TaruBot adds or removes a listed role only when that person asks, apart from roles that open channels, which it takes from anyone with none of the Member, Guest, Officer and FC Leader roles.",
+    );
+  });
+
+  test("every class the view renders has a rule in the stylesheet", async () => {
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    const second = person(HARNESS_ACCOUNTS.member.id, {}, SECOND);
+    const held = HELD[GUILD]?.[member.userId] ?? [];
+    const documents = [
+      (await myRolesPage(await viewOf(member, { states: { roles: "queued" } }))).document,
+      (await myRolesPage(await viewOf(officer), { viewer: officer, url: "/x?notice=unchanged" }))
+        .document,
+      (await myRolesPage(await viewOf(second))).document,
+      (
+        await myRolesPage(
+          await viewOf(member, {
+            overrides: {
+              categories: choiceMenu(HARNESS_MENU, {
+                held,
+                waiting: null,
+                check: refusing(MENU_ROLE.sheHer),
+                officer: false,
+              }),
+              status: {
+                state: "applied",
+                skipped: 0,
+                changed: true,
+                recent: true,
+                completedAt: null,
+              },
+            },
+          }),
+        )
+      ).document,
+      (await myRolesPage(await viewOf(person(HARNESS_ACCOUNTS.timedOut.id, { timedOut: true }))))
+        .document,
+      (await myRolesPage(await viewOf(member), { refused: { kind: "conflict" } })).document,
+      (
+        await myRolesPage(
+          await viewOf(member, {
+            menus: new Map([[GUILD, { menu: { v: 1, categories: [] }, revision: MENU_REVISION }]]),
+          }),
+        )
+      ).document,
+    ];
+    const classes = new Set<string>();
+    for (const document of documents)
+      for (const element of document.querySelectorAll("main [class]"))
+        for (const name of element.classList) classes.add(name);
+    for (const name of [
+      "my-category",
+      "my-category--draft",
+      "my-categories--locked",
+      "my-category__fixed",
+      "my-category__note",
+      "my-category__draft",
+      "my-roles-status",
+      "notice--success",
+      "form-error",
+      "empty-state",
+    ])
+      expect({ name, rendered: classes.has(name) }).toEqual({ name, rendered: true });
+    for (const name of classes)
+      expect({ name, styled: new RegExp(`\\.${name}(?![\\w-])`, "u").test(css) }).toEqual({
+        name,
+        styled: true,
+      });
   });
 });

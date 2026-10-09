@@ -7,7 +7,7 @@
  * backtick or "${", so the template literal keeps it byte for byte.
  */
 export const TOKENS_CSS = `/*
- * TaruBot's design tokens, shared by the officer dashboard and the documentation site. Ported from
+ * TaruBot's design tokens, shared by the web dashboard and the documentation site. Ported from
  * the Orrery design system export (tokens/colors.css, typography.css, spacing.css, effects.css and
  * motion.css, in that order), dark only. Deliberate changes from the export: the display face is
  * Sora instead of the export's, with the display scale, weight and tracking retuned for it (see

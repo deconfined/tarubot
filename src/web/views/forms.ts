@@ -256,8 +256,10 @@ export interface FieldError {
    */
   readonly id: string;
   /**
-   * Constant wording, the same as the field's own message; never the submitted text. Markup only as
-   * approved wording rendered by mentions.ts, so a role or channel shows by its cached name.
+   * Constant wording, the same as the field's own message or that message with the field's name in
+   * front (a category's name, untrusted(), where the message alone says only "here"); never the
+   * submitted text. Markup only as approved wording rendered by mentions.ts, so a role or channel
+   * shows by its cached name, and that untrusted() name.
    */
   readonly message: Text;
 }

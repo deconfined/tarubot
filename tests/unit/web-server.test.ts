@@ -25,15 +25,26 @@ import type { SyncStatusView } from "../../src/application/results.js";
 import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import type { ReportOptions } from "../../src/domain/failures.js";
-import type { Actor } from "../../src/domain/policy.js";
-import { LIMIT_MESSAGES, SELF_ROLE_MESSAGES } from "../../src/domain/self-roles.js";
+import type { Actor, ActorResolution } from "../../src/domain/policy.js";
+import {
+  CHOICE_MESSAGES,
+  LIMIT_MESSAGES,
+  SELF_ROLE_MESSAGES,
+} from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
 import { AccessResolver, type WebGuild } from "../../src/web/access.js";
 import { ASSET_CACHE_CONTROL, ASSETS, STYLESHEET } from "../../src/web/assets.js";
 import { html } from "../../src/web/html.js";
 import { FORM_TOKEN_FIELD, securityHeaderRecord, type WebEnv } from "../../src/web/http.js";
 import { icon } from "../../src/web/icons.js";
-import { stoppingRefusal } from "../../src/web/limits.js";
+import {
+  EXCHANGE_BUSY_SECONDS,
+  EXCHANGE_LIMIT,
+  ExchangeGate,
+  SIGN_IN_LIMIT,
+  SIGN_IN_WINDOW_MS,
+  stoppingRefusal,
+} from "../../src/web/limits.js";
 import { DiscordSignIn } from "../../src/web/oauth.js";
 import { definePage, type Page } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
@@ -50,11 +61,15 @@ import { notice, noticeLocation } from "../../src/web/views/forms.js";
 import { type DiscordAccount, discordOAuthError, FakeDiscord } from "../fixtures/discord-oauth.js";
 import { THROWN } from "../fixtures/web-pages/throws/boom.page.js";
 import {
+  HARNESS_APPLY_MS,
   HARNESS_GUILDS,
+  HARNESS_MENU,
   type HarnessMenus,
+  type HarnessPeople,
   type HarnessStates,
   harnessGateway,
   harnessOptions,
+  harnessPeople,
   harnessSelfRoles,
   MENU_CATEGORY,
   MENU_REVISION,
@@ -74,10 +89,17 @@ const UNSERVED = "100000000000000002";
 /** A well-formed ID the gateway doesn't have. */
 const ABSENT = "100000000000000009";
 const OFFICER = "200000000000000001";
+/** Holds the bound Member role: admitted to member pages (2.40.0). */
 const MEMBER = "200000000000000002";
 const OUTSIDER = "200000000000000003";
 /** A second officer, for budgets kept per user. */
 const SECOND_OFFICER = "200000000000000004";
+/** Holds the bound Guest role: admitted like a member. */
+const GUEST = "200000000000000005";
+/** In the server with neither access role (a lobby newcomer): admitted nowhere. */
+const LOBBY = "200000000000000006";
+/** A member in a Discord time-out: still admitted, to view. */
+const TIMED_OUT = "200000000000000007";
 const CLIENT_ID = "300000000000000001";
 const CLIENT_SECRET = "invented-client-secret";
 /** Text that must never reach a page, a log line or stderr. */
@@ -141,6 +163,11 @@ interface WorldOptions {
   readonly syncStatus?: () => Promise<SyncStatusView>;
   /** The Role menu's review states (the harness's), none by default. */
   readonly menuStates?: HarnessStates;
+  /**
+   * Serve the fixture pages only, without the discovered ones, so a test can count a member's
+   * pages exactly (the / redirect).
+   */
+  readonly fixturesOnly?: boolean;
 }
 
 /** Everything a test needs: the app and every fake behind it. */
@@ -151,6 +178,15 @@ interface World {
   readonly sessions: MemorySessions;
   /** (guild, user) per resolver call. */
   readonly resolutions: [string, string][];
+  /** The mode each resolver call asked for, in order. */
+  readonly modes: ActorResolution[];
+  /** Whether TaruBot holds Administrator in every server (A2); false by default. */
+  readonly botAdministrator: { now: boolean };
+  /**
+   * While `until` is set, every request to Discord waits for it before the fake answers, so a test
+   * can hold token exchanges in flight; `waiting` counts the requests held so far.
+   */
+  readonly discordHold: { until: Promise<void> | null; waiting: number };
   readonly reports: Reported[];
   /** Forms the form page received. */
   readonly posts: Record<string, unknown>[];
@@ -161,6 +197,8 @@ interface World {
   readonly stopping: { now: boolean };
   /** The Role menu's saved menus by server, as the harness's SelfRoles keeps them. */
   readonly menus: HarnessMenus;
+  /** My roles' held roles and newest changes (2.40.0), on `clock`. */
+  readonly people: HarnessPeople;
   readonly logs: () => LogLine[];
 }
 
@@ -169,7 +207,7 @@ interface World {
  * harness's in-memory SelfRoles over `menus`, in the review `states` given.
  */
 function services(
-  world: Pick<World, "lifecycle" | "menus">,
+  world: Pick<World, "lifecycle" | "menus" | "people">,
   syncStatus: () => Promise<SyncStatusView>,
   states: HarnessStates = {},
 ) {
@@ -209,13 +247,21 @@ function services(
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway())
-    .provide(selfRolesKey, harnessSelfRoles(states, world.menus));
+    .provide(selfRolesKey, harnessSelfRoles(states, world.menus, world.people));
 }
 
-/** The bot's resolver over invented membership: an officer, a member, and Unknown Member. */
-function resolver(resolutions: [string, string][]) {
-  return async (guildId: string, userId: string): Promise<Actor> => {
+/**
+ * The bot's resolver over invented membership: officers, a member, a guest, a timed-out member,
+ * a lobby newcomer and Unknown Member, with TaruBot's Administrator as `administrator` says.
+ */
+function resolver(
+  resolutions: [string, string][],
+  modes: ActorResolution[] = [],
+  administrator: { now: boolean } = { now: false },
+) {
+  return async (guildId: string, userId: string, mode?: ActorResolution): Promise<Actor> => {
     resolutions.push([guildId, userId]);
+    modes.push(mode ?? "full");
     if (userId === OUTSIDER)
       throw new Failure("forbidden", "Not a member.", 0, {
         kind: "scope",
@@ -226,6 +272,10 @@ function resolver(resolutions: [string, string][]) {
       userId,
       officer: userId === OFFICER || userId === SECOND_OFFICER,
       manageRoles: false,
+      member: userId === MEMBER || userId === TIMED_OUT,
+      guest: userId === GUEST,
+      botAdministrator: administrator.now,
+      timedOut: userId === TIMED_OUT,
     };
   };
 }
@@ -248,6 +298,9 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const lifecycle = { ready: true };
   const stopping = { now: false };
   const resolutions: [string, string][] = [];
+  const modes: ActorResolution[] = [];
+  const botAdministrator = { now: false };
+  const discordHold: World["discordHold"] = { until: null, waiting: 0 };
   const reports: Reported[] = [];
   const posts: Record<string, unknown>[] = [];
   const lines: string[] = [];
@@ -330,20 +383,30 @@ async function world(options: WorldOptions = {}): Promise<World> {
       return html`<p>Never shown</p>`;
     },
   });
+  // A page members and guests may open (2.40.0), and officers too, as My roles declares; it
+  // stands in for any such page, so these tests don't depend on one page's own behavior.
+  const picksPage = definePage({
+    path: "/g/:guild/picks",
+    title: "Picks",
+    access: ["member", "guest", "officer"],
+    requires: [],
+    nav: "Picks",
+    get: ({ actor }) => html`<p>Picks for ${actor.timedOut ? "a timed-out viewer" : "you"}</p>`,
+  });
   const pages = new Map<string, Page>([
-    ...(await loadPages()),
-    ...[formPage, kitPage, limitedPage, undeclaredPage].map((fixture): [string, Page] => [
-      fixture.path,
-      fixture,
-    ]),
+    ...(options.fixturesOnly ? [] : await loadPages()),
+    ...[formPage, kitPage, limitedPage, undeclaredPage, picksPage].map(
+      (fixture): [string, Page] => [fixture.path, fixture],
+    ),
   ]);
   const discord = new FakeDiscord(CLIENT_ID, CLIENT_SECRET);
   const sessions = new MemorySessions(() => clock.now);
-  const resolve = resolver(resolutions);
+  const resolve = resolver(resolutions, modes, botAdministrator);
   const menus: HarnessMenus = new Map();
+  const people = harnessPeople(() => clock.now);
   const context: WebContext = {
     services: services(
-      { lifecycle, menus },
+      { lifecycle, menus, people },
       options.syncStatus ?? (async () => SYNC),
       options.menuStates,
     ),
@@ -363,7 +426,18 @@ async function world(options: WorldOptions = {}): Promise<World> {
       clientId: settings.clientId,
       clientSecret: settings.clientSecret,
       redirectUri: settings.redirectUri,
-      fetch: discord.fetch,
+      fetch: Object.assign(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          if (discordHold.until) {
+            discordHold.waiting++;
+            await discordHold.until;
+          }
+          return discord.fetch(input, init);
+        },
+        { preconnect: fetch.preconnect },
+      ),
+      // D16's gate on the test clock, with production's limits.
+      gate: new ExchangeGate({ now: () => clock.now }),
     }),
     access: new AccessResolver(resolve, { now: () => clock.now }),
     log,
@@ -375,12 +449,16 @@ async function world(options: WorldOptions = {}): Promise<World> {
     discord,
     sessions,
     resolutions,
+    modes,
+    botAdministrator,
+    discordHold,
     reports,
     posts,
     clock,
     lifecycle,
     stopping,
     menus,
+    people,
     logs: () => lines.map((line) => JSON.parse(line) as LogLine),
   };
 }
@@ -450,8 +528,11 @@ class Browser {
     });
   }
 
-  /** Sign in through /login, the fake authorize page and the callback. */
-  async signIn(account: DiscordAccount, to?: string): Promise<Response> {
+  /**
+   * Start a sign-in through /login and the fake authorize page: the callback path and query the
+   * browser would be sent to, not yet followed.
+   */
+  async authorize(account: DiscordAccount, to?: string): Promise<string> {
     const login = await this.get(
       to === undefined ? "/login" : `/login?to=${encodeURIComponent(to)}`,
     );
@@ -460,7 +541,12 @@ class Browser {
       new URL(login.headers.get("location") ?? ""),
       account,
     );
-    return this.get(`${callback.pathname}${callback.search}`);
+    return `${callback.pathname}${callback.search}`;
+  }
+
+  /** Sign in through /login, the fake authorize page and the callback. */
+  async signIn(account: DiscordAccount, to?: string): Promise<Response> {
+    return this.get(await this.authorize(account, to));
   }
 }
 
@@ -697,8 +783,41 @@ describe("the POST pipeline (E1)", () => {
     const response = await member.post(form, "name=ok");
     expect(response.status).toBe(403);
     expect(w.posts).toEqual([]);
-    // Decided on a fresh resolution, never on a memoized answer.
+    // With nothing memoized, decided on a fresh resolution.
     expect(w.resolutions).toEqual([[GUILD, MEMBER]]);
+  });
+
+  test("a page someone can't use refuses their POSTs from the memo: at most one full resolution a minute", async () => {
+    const w = await world();
+    const roleMenu = `/g/${GUILD}/role-menu`;
+    // A member signs in (My roles admits them) and posts to Role menu, which doesn't, more often
+    // than its officers' budget of 120 allows: every POST is 403, none costs a Discord request
+    // while sign-in's answer is memoized, and none spends the budget.
+    const member = await signedIn(w, MEMBER);
+    w.modes.length = 0;
+    for (let attempt = 0; attempt < 125; attempt++)
+      expect((await member.post(roleMenu, "op=category.create")).status).toBe(403);
+    expect(w.modes).toEqual([]);
+    // Once the memo's minute is over, one full resolution refreshes it, and the rest are free.
+    w.clock.now += 61_000;
+    for (let attempt = 0; attempt < 5; attempt++)
+      expect((await member.post(roleMenu, "op=category.create")).status).toBe(403);
+    expect(w.modes).toEqual(["full"]);
+    expect(w.menus.has(GUILD)).toBe(false);
+    // An officer's POST, admitted by the memo's answer, still makes exactly one full resolution.
+    const officer = await signedIn(w);
+    w.modes.length = 0;
+    expect((await officer.post(form, "name=ok")).status).toBe(303);
+    expect(w.modes).toEqual(["full"]);
+    // Someone not in the server (their session made directly): 404 each time, after one
+    // resolution, which the memo then answers.
+    const outsider = new Browser(w);
+    outsider.jar.set("tarubot", (await w.sessions.create(OUTSIDER)).token);
+    w.resolutions.length = 0;
+    for (let attempt = 0; attempt < 3; attempt++)
+      expect((await outsider.post(form, "name=ok")).status).toBe(404);
+    expect(w.resolutions).toEqual([[GUILD, OUTSIDER]]);
+    expect(w.posts).toEqual([{ name: "ok" }]);
   });
 
   test("zod failures re-render with 422; success redirects 303, only ever on this origin", async () => {
@@ -820,7 +939,9 @@ describe("the write foundation", () => {
     expect(over.status).toBe(429);
     expect(over.headers.get("retry-after")).toBe("600");
     const refusal = await over.text();
-    expect(refusal).toContain("didn&#39;t save this one");
+    expect(refusal).toContain(
+      "You&#39;ve sent a lot of saves in a short time, so TaruBot didn&#39;t take this one.",
+    );
     expect(refusal).toContain(`href="${limited}">Back to Limited</a>`);
     // One wait, from Retry-After.
     expect(refusal).toContain("Try again in about 10 minutes.");
@@ -1687,7 +1808,9 @@ describe("sign-in", () => {
 
   test("a user no server admits gets no access and no session cookie", async () => {
     const w = await world();
-    for (const userId of [MEMBER, OUTSIDER]) {
+    // From 2.40.0 a member is admitted (their own pages); a lobby newcomer holding neither access
+    // role and someone not in the server are not.
+    for (const userId of [LOBBY, OUTSIDER]) {
       const browser = new Browser(w);
       const response = await browser.signIn({ id: userId });
       expect(response.status).toBe(403);
@@ -1744,6 +1867,18 @@ describe("sign-in", () => {
     expect(w.reports.map((report) => report.options)).toEqual([
       { scope: "web:/auth/callback", level: "warn" },
     ]);
+    // D16's pause: until Discord's Retry-After has passed, every sign-in is refused here, with
+    // what is left of it, and Discord isn't asked again.
+    const asked = w.discord.requests.length;
+    w.clock.now += 3_000;
+    const paused = await new Browser(w).signIn({ id: MEMBER });
+    expect(paused.status).toBe(503);
+    expect(paused.headers.get("retry-after")).toBe("4");
+    expect(await paused.text()).toContain(
+      "Lots of people are signing in right now, so TaruBot didn&#39;t sign you in.",
+    );
+    expect(w.discord.requests).toHaveLength(asked);
+    w.clock.now += 4_000;
     w.discord.tokenAnswer = () =>
       discordOAuthError(400, "invalid_grant", 'Invalid "code" in request.');
     const expired = await browser.signIn({ id: OFFICER });
@@ -1768,7 +1903,7 @@ describe("sign-in", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.tokenHash).not.toBe(before?.tokenHash);
     // A refused sign-in in a signed-in browser ends that session too.
-    await browser.signIn({ id: MEMBER });
+    await browser.signIn({ id: LOBBY });
     expect(w.sessions.rows()).toEqual([]);
     expect(browser.jar.has("tarubot")).toBe(false);
   });
@@ -1784,6 +1919,518 @@ describe("sign-in", () => {
       const response = await new Browser(w).signIn({ id: OFFICER }, to);
       expect({ to, location: response.headers.get("location") }).toEqual({ to, location: "/" });
     }
+  });
+});
+
+describe("members and guests (2.40.0)", () => {
+  const picks = `/g/${GUILD}/picks`;
+
+  test("a member, a guest and a timed-out member sign in and open only the pages their flag opens", async () => {
+    const w = await world();
+    for (const userId of [MEMBER, GUEST, TIMED_OUT]) {
+      const browser = await signedIn(w, userId);
+      const page = await browser.get(picks);
+      expect({ userId, status: page.status }).toEqual({ userId, status: 200 });
+      // A time-out doesn't close the page; it is the page's (and the application's) to refuse
+      // saves.
+      expect(await page.text()).toContain(
+        userId === TIMED_OUT ? "Picks for a timed-out viewer" : "Picks for you",
+      );
+      for (const officerOnly of [`/g/${GUILD}/status`, `/g/${GUILD}/form`])
+        expect({ userId, officerOnly, status: (await browser.get(officerOnly)).status }).toEqual({
+          userId,
+          officerOnly,
+          status: 403,
+        });
+      const post = await browser.post(`/g/${GUILD}/form`, "name=Moogle");
+      expect({ userId, post: post.status }).toEqual({ userId, post: 403 });
+    }
+    expect(w.posts).toEqual([]);
+  });
+
+  test("a member's side navigation lists only their pages, with the members' note", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    const document = parseHTML(await (await member.get(picks)).text()).document;
+    const nav = [...document.querySelectorAll(".side-nav a")].map((link) =>
+      link.getAttribute("href"),
+    );
+    expect(nav).toContain(picks);
+    expect(nav).not.toContain(`/g/${GUILD}/status`);
+    expect(nav).not.toContain(`/g/${GUILD}/form`);
+    expect(document.querySelector(".side-nav__note")?.textContent).toBe(
+      "Pick your roles here. Everything else is in Discord.",
+    );
+    const officer = await signedIn(w);
+    const officerView = parseHTML(await (await officer.get(picks)).text()).document;
+    expect(officerView.querySelector(".side-nav__note")?.textContent).toBe(
+      "Most settings are changed in Discord; the role menu is set here.",
+    );
+  });
+
+  test("while TaruBot holds Administrator, members and guests are refused and officers aren't (A2)", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    w.botAdministrator.now = true;
+    // A member already signed in loses the page once the memo's minute is over.
+    expect((await member.get(picks)).status).toBe(200);
+    w.clock.now += 61_000;
+    expect((await member.get(picks)).status).toBe(403);
+    for (const userId of [MEMBER, GUEST, TIMED_OUT]) {
+      const browser = new Browser(w);
+      const response = await browser.signIn({ id: userId });
+      expect({ userId, status: response.status }).toEqual({ userId, status: 403 });
+      expect(browser.jar.has("tarubot")).toBe(false);
+      // The no-access page doesn't only say Member or Guest can sign in: it says why someone with
+      // one may be refused, without naming the server or the permission.
+      const text = await response.text();
+      expect(text).toContain(
+        "While officers sort out TaruBot&#39;s permissions in a server, only officers can sign in there.",
+      );
+      expect(text).not.toContain("Administrator");
+    }
+    // Officers already run under W1's accepted risk, so A2 doesn't refuse them.
+    const officer = await signedIn(w);
+    expect((await officer.get(picks)).status).toBe(200);
+    expect((await officer.get(`/g/${GUILD}/status`)).status).toBe(200);
+  });
+
+  test("sign-in and GETs resolve light, one member fetch; every POST resolves full", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    // Admission: one light resolution for the one served server.
+    expect(w.modes).toEqual(["light"]);
+    await officer.get(`/g/${GUILD}/status`);
+    expect(w.modes).toEqual(["light"]);
+    w.clock.now += 61_000;
+    await officer.get(`/g/${GUILD}/status`);
+    expect(w.modes).toEqual(["light", "light"]);
+    expect((await officer.post(`/g/${GUILD}/form`, "name=Moogle")).status).toBe(303);
+    expect(w.modes).toEqual(["light", "light", "full"]);
+  });
+
+  test("/ goes straight to someone's only page in their only server; anyone with more gets the list", async () => {
+    const w = await world({ fixturesOnly: true });
+    const member = new Browser(w);
+    // Sign-in returns to / by default, which then lands a member on their page.
+    const done = await member.signIn({ id: MEMBER });
+    expect(done.headers.get("location")).toBe("/");
+    const home = await member.get("/");
+    expect(home.status).toBe(303);
+    expect(home.headers.get("location")).toBe(picks);
+    expect(home.headers.get("cache-control")).toBe("no-store");
+    // The shell's "Switch server" asks for the list itself, so it never reloads that one page.
+    const page = await member.get(picks);
+    const switcher = parseHTML(await page.text()).document.querySelector(".server-switch");
+    expect(switcher?.getAttribute("href")).toBe("/?servers");
+    const asked = await member.get("/?servers");
+    expect(asked.status).toBe(200);
+    expect(await asked.text()).toContain(`href="${picks}"`);
+    // An officer has Form and Picks there: the list.
+    const officer = await signedIn(w);
+    const list = await officer.get("/");
+    expect(list.status).toBe(200);
+    const text = await list.text();
+    expect(text).toContain(`href="${picks}"`);
+    expect(text).toContain(`href="/g/${GUILD}/form"`);
+    // A visitor still gets the sign-in page.
+    expect((await new Browser(w).get("/")).status).toBe(200);
+  });
+});
+
+describe("My roles (2.40.0)", () => {
+  const myRoles = `/g/${GUILD}/my-roles`;
+  const pronouns = MENU_CATEGORY.pronouns;
+  const games = MENU_CATEGORY.games;
+
+  /**
+   * The My roles form as a browser would send it (without the token, which Browser.post adds):
+   * every hidden field, then each enabled input that is checked after ticking `tick` and unticking
+   * `untick`. Ticking a radio unticks the others in its group.
+   */
+  function body(
+    document: Document,
+    change: { tick?: readonly string[]; untick?: readonly string[] } = {},
+  ): string {
+    const tick = new Set(change.tick ?? []);
+    const untick = new Set(change.untick ?? []);
+    const form = document.querySelector("form.my-roles-form");
+    if (!form) throw new Error("No My roles form on the page");
+    const inputs = [...form.querySelectorAll("input")];
+    const radioGroups = new Set(
+      inputs
+        .filter((input) => input.getAttribute("type") === "radio")
+        .filter((input) => tick.has(input.getAttribute("value") ?? ""))
+        .map((input) => input.getAttribute("name")),
+    );
+    const params = new URLSearchParams();
+    for (const input of inputs) {
+      const name = input.getAttribute("name") ?? "";
+      const value = input.getAttribute("value") ?? "";
+      const type = input.getAttribute("type");
+      if (name === FORM_TOKEN_FIELD) continue;
+      if (type === "hidden") params.append(name, value);
+      else if (!input.hasAttribute("disabled")) {
+        let checked = input.hasAttribute("checked");
+        if (type === "radio" && radioGroups.has(name)) checked = tick.has(value);
+        else if (tick.has(value)) checked = true;
+        if (untick.has(value)) checked = false;
+        if (checked) params.append(name, value);
+      }
+    }
+    return params.toString();
+  }
+
+  /** The page as `browser` sees it now. */
+  const read = async (browser: Browser, path = myRoles) => {
+    const response = await browser.get(path);
+    expect(response.status).toBe(200);
+    return parseHTML(await response.text()).document;
+  };
+  const banners = (document: Document) =>
+    [...document.querySelectorAll("#status .notice")].map((banner) => banner.textContent);
+  const ticked = (document: Document, categoryId: string) =>
+    [...document.querySelectorAll(`fieldset#category-${categoryId} input[checked]`)].map((input) =>
+      input.getAttribute("value"),
+    );
+
+  test("members, guests, timed-out members and officers open it; officers keep their pages", async () => {
+    const w = await world();
+    for (const userId of [MEMBER, GUEST, TIMED_OUT, OFFICER]) {
+      const browser = await signedIn(w, userId);
+      const document = await read(browser);
+      expect({ userId, h1: document.querySelector("h1")?.textContent }).toEqual({
+        userId,
+        h1: "My roles",
+      });
+      const nav = [...document.querySelectorAll(".side-nav a")].map((a) => a.textContent);
+      expect({ userId, mine: nav.includes("My roles") }).toEqual({ userId, mine: true });
+      expect({ userId, officerPages: nav.includes("Background work") }).toEqual({
+        userId,
+        officerPages: userId === OFFICER,
+      });
+    }
+    // A member once TaruBot holds Administrator (A2): refused after the memo's minute.
+    const member = await signedIn(w, MEMBER);
+    w.botAdministrator.now = true;
+    w.clock.now += 61_000;
+    expect((await member.get(myRoles)).status).toBe(403);
+  });
+
+  test("a page a member can't use says so on a GET, never that the request was forged", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    for (const path of [`/g/${GUILD}/status`, `/g/${GUILD}/role-menu`]) {
+      const response = await member.get(path);
+      const document = parseHTML(await response.text()).document;
+      expect({
+        path,
+        status: response.status,
+        heading: document.querySelector("h1")?.textContent,
+        message: document.querySelector("main p")?.textContent,
+      }).toEqual({
+        path,
+        status: 403,
+        heading: "Not allowed",
+        message: "This page isn't open to you in this server.",
+      });
+      expect(document.querySelector("main")?.textContent).not.toContain("come from");
+    }
+    // A POST refused for access keeps the status's own sentence, which covers a forged form too.
+    const posted = await member.post(`/g/${GUILD}/role-menu`, "op=category.create");
+    expect(posted.status).toBe(403);
+    expect(parseHTML(await posted.text()).document.querySelector("main p")?.textContent).toBe(
+      "You don't have access to this, or the request didn't come from TaruBot's own pages.",
+    );
+  });
+
+  test("a save: 303 to the status banner, the waiting change shows, then the job's result", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    const before = await read(member);
+    expect(banners(before)).toEqual([]);
+    expect(ticked(before, games)).toEqual([MENU_ROLE.valheim]);
+    const modes = w.modes.length;
+    const saved = await member.post(
+      myRoles,
+      body(before, { tick: [MENU_ROLE.minecraft], untick: [MENU_ROLE.valheim] }),
+    );
+    expect(saved.status).toBe(303);
+    expect(saved.headers.get("location")).toBe(`${myRoles}#status`);
+    // A POST resolves the actor fully, as every write does.
+    expect(w.modes.slice(modes)).toEqual(["full"]);
+    const waiting = await read(member);
+    expect(banners(waiting)).toEqual([
+      "Saved. TaruBot is updating your roles in Discord. This usually takes under a minute; reload to check.",
+    ]);
+    expect(ticked(waiting, games)).toEqual([MENU_ROLE.minecraft]);
+    // Only the category the member changed is in the change; Pronouns is left alone.
+    expect(w.people.jobs.get(`${GUILD}:${MEMBER}`)?.payload).toMatchObject({
+      chosen: [MENU_ROLE.minecraft],
+      offered: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+    });
+    // The fake worker applies it, as the roles.self job would; the payload goes with it.
+    w.clock.now += HARNESS_APPLY_MS;
+    const applied = await read(member);
+    expect(banners(applied)).toEqual(["Your roles were updated in Discord."]);
+    expect(ticked(applied, games)).toEqual([MENU_ROLE.minecraft]);
+    expect(w.people.jobs.get(`${GUILD}:${MEMBER}`)?.payload).toBeNull();
+    // Ten minutes on, it's no news.
+    w.clock.now += 10 * 60_000;
+    expect(banners(await read(member))).toEqual([]);
+  });
+
+  test("a double submit lands on the same 303; a form sent back as shown is 'nothing to save'", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    const page = await read(member);
+    const change = body(page, { untick: [MENU_ROLE.sheHer] });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await member.post(myRoles, change);
+      expect({
+        attempt,
+        status: response.status,
+        location: response.headers.get("location"),
+      }).toEqual({
+        attempt,
+        status: 303,
+        location: `${myRoles}#status`,
+      });
+    }
+    expect(w.people.jobs.size).toBe(1);
+    const unchanged = await member.post(myRoles, body(page));
+    expect(unchanged.status).toBe(303);
+    expect(unchanged.headers.get("location")).toBe(`${myRoles}?notice=unchanged#status`);
+    // The first change still waits, so its roles aren't the member's yet: the notice says only
+    // that nothing new was saved, beside the waiting change's banner.
+    expect(banners(await read(member, `${myRoles}?notice=unchanged`))).toEqual([
+      "Nothing new to save.",
+      "Saved. TaruBot is updating your roles in Discord. This usually takes under a minute; reload to check.",
+    ]);
+    // Applied, the form shows the roles held, and sending it back as shown is nothing to save.
+    w.clock.now += HARNESS_APPLY_MS;
+    const now = await read(member);
+    expect((await member.post(myRoles, body(now))).headers.get("location")).toBe(
+      `${myRoles}?notice=unchanged#status`,
+    );
+    expect(banners(await read(member, `${myRoles}?notice=unchanged`))).toEqual([
+      "Nothing to save. Those are already your roles.",
+      "Your roles were updated in Discord.",
+    ]);
+    expect(w.people.jobs.size).toBe(1);
+  });
+
+  test("while Discord changes are paused the form is disabled, and a save is refused with 503", async () => {
+    const w = await world({ menuStates: { activation: true } });
+    const member = await signedIn(w, MEMBER);
+    const page = await read(member);
+    expect(page.querySelectorAll("main form, main button")).toHaveLength(0);
+    expect(page.querySelectorAll("main fieldset input:not([disabled])")).toHaveLength(0);
+    const refused = await member.post(
+      myRoles,
+      `shown=${pronouns}&seen%3A${pronouns}=${MENU_ROLE.sheHer}`,
+    );
+    expect(refused.status).toBe(503);
+    const text = await refused.text();
+    expect(text).toContain(CHOICE_MESSAGES.paused);
+    expect(text).toContain(`href="${myRoles}"`);
+    expect(w.people.jobs.size).toBe(0);
+  });
+
+  test("a member in a time-out sees the form disabled, and a save is refused with 403", async () => {
+    const w = await world();
+    const timedOut = await signedIn(w, TIMED_OUT);
+    const page = await read(timedOut);
+    expect(page.querySelectorAll("main form, main button")).toHaveLength(0);
+    expect(
+      [...page.querySelectorAll(".my-roles-callouts .notice")].map((note) => note.textContent),
+    ).toEqual([CHOICE_MESSAGES.timedOut]);
+    const refused = await timedOut.post(
+      myRoles,
+      `shown=${pronouns}&seen%3A${pronouns}=${MENU_ROLE.sheHer}`,
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain(CHOICE_MESSAGES.timedOut);
+    expect(w.people.jobs.size).toBe(0);
+  });
+
+  test("too many picked: 422 with what was picked kept; a role not on offer: 409 as it is now", async () => {
+    const w = await world();
+    w.menus.set(GUILD, {
+      menu: {
+        ...HARNESS_MENU,
+        categories: HARNESS_MENU.categories.map((category) =>
+          category.id === pronouns ? { ...category, max: 2 } : category,
+        ),
+      },
+      revision: MENU_REVISION,
+    });
+    const member = await signedIn(w, MEMBER);
+    const page = await read(member);
+    const tooMany = await member.post(
+      myRoles,
+      body(page, { tick: [MENU_ROLE.heHim, MENU_ROLE.theyThem], untick: [MENU_ROLE.askMe] }),
+    );
+    expect(tooMany.status).toBe(422);
+    const invalid = parseHTML(await tooMany.text()).document;
+    expect(invalid.title).toBe("Error: My roles · TaruBot");
+    // The summary names the category; its card says "here".
+    expect([...invalid.querySelectorAll(".error-summary a")].map((a) => a.textContent)).toEqual([
+      "Pronouns: pick at most 2 roles.",
+    ]);
+    expect(invalid.getElementById(`category-${pronouns}-error`)?.textContent).toBe(
+      "Error: Pick at most 2 roles here.",
+    );
+    expect(ticked(invalid, pronouns)).toEqual([
+      MENU_ROLE.heHim,
+      MENU_ROLE.sheHer,
+      MENU_ROLE.theyThem,
+    ]);
+    // A role the menu doesn't offer here (officers changed it, or a tampered form).
+    const conflict = await member.post(
+      myRoles,
+      `${body(page)}&c-${pronouns}=${MENU_ROLE.moderator}`,
+    );
+    expect(conflict.status).toBe(409);
+    const current = parseHTML(await conflict.text()).document;
+    expect(current.querySelector(".error-summary a")?.textContent).toBe(CHOICE_MESSAGES.conflict);
+    expect(ticked(current, pronouns)).toEqual([MENU_ROLE.sheHer, MENU_ROLE.askMe]);
+    expect(w.people.jobs.size).toBe(0);
+  });
+
+  test("a form the page never made is refused whole, before anything is read", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    for (const form of [
+      "shown=not-a-category",
+      `shown=${pronouns}&c-${pronouns}=not-a-role`,
+      `shown=${pronouns}&seen%3A${pronouns}=%3Cb%3E`,
+      [...Array(11)].map((_, at) => `shown=00000000-0000-4000-8000-0000000000${10 + at}`).join("&"),
+      `shown=${pronouns}&${[...Array(27)].map(() => `c-${pronouns}=${MENU_ROLE.heHim}`).join("&")}`,
+    ]) {
+      const response = await member.post(myRoles, form);
+      expect({ form, status: response.status }).toEqual({ form, status: 400 });
+      const text = await response.text();
+      expect(text).toContain(LIMIT_MESSAGES.form);
+      // Nothing submitted comes back.
+      expect(text).not.toContain("not-a-");
+      expect(text).not.toContain("&lt;b&gt;");
+    }
+    expect(w.people.jobs.size).toBe(0);
+  });
+
+  test("ten saves in ten minutes per person and server, then 429 with Retry-After", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    const page = await read(member);
+    for (let attempt = 0; attempt < 10; attempt++)
+      expect((await member.post(myRoles, body(page))).status).toBe(303);
+    const over = await member.post(myRoles, body(page));
+    expect(over.status).toBe(429);
+    expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
+    // Another person's budget is their own.
+    const guest = await signedIn(w, GUEST);
+    expect((await guest.post(myRoles, body(await read(guest)))).status).toBe(303);
+  });
+});
+
+describe("sign-in limits (2.40.0)", () => {
+  /** Whether a response set a session cookie. */
+  const setsSession = (w: World, response: Response): boolean =>
+    response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${sessionCookie(w)}=`));
+
+  test("ten sign-ins per user in ten minutes; the next is a 429 with Retry-After and no session", async () => {
+    const w = await world();
+    const first = await signedIn(w);
+    for (let index = 1; index < SIGN_IN_LIMIT; index++) {
+      w.clock.now += 1;
+      expect((await new Browser(w).signIn({ id: OFFICER })).status).toBe(303);
+    }
+    const before = w.sessions.rows().length;
+    w.resolutions.length = 0;
+    const refused = await first.signIn({ id: OFFICER });
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("retry-after"))).toBe(SIGN_IN_WINDOW_MS / 1000);
+    expect(await refused.text()).toContain(
+      "That&#39;s a lot of sign-ins in a short time, so TaruBot didn&#39;t sign you in.",
+    );
+    // Counted before admission, which costs a Discord request per server: a refused sign-in
+    // resolves nobody anywhere.
+    expect(w.resolutions).toEqual([]);
+    expect(setsSession(w, refused)).toBe(false);
+    expect(clearsLogin(w, refused)).toBe(true);
+    // Nothing was created or ended: the browser stays signed in as it was.
+    expect(w.sessions.rows()).toHaveLength(before);
+    expect((await first.get(`/g/${GUILD}/status`)).status).toBe(200);
+    // Counted per Discord user: another officer still signs in.
+    expect((await new Browser(w).signIn({ id: SECOND_OFFICER })).status).toBe(303);
+    w.clock.now += SIGN_IN_WINDOW_MS;
+    expect((await new Browser(w).signIn({ id: OFFICER })).status).toBe(303);
+  });
+
+  test("a user keeps at most ten sessions: a sign-in beyond them ends the oldest", async () => {
+    const w = await world();
+    const browsers: Browser[] = [];
+    for (let index = 0; index < SIGN_IN_LIMIT; index++) {
+      w.clock.now += 1_000;
+      browsers.push(await signedIn(w));
+    }
+    w.clock.now += SIGN_IN_WINDOW_MS;
+    const newest = await signedIn(w);
+    const mine = w.sessions.rows().filter((row) => row.session.userId === OFFICER);
+    expect(mine).toHaveLength(10);
+    const [oldest, next] = browsers;
+    expect((await oldest?.get(`/g/${GUILD}/status`))?.status).toBe(303);
+    expect((await next?.get(`/g/${GUILD}/status`))?.status).toBe(200);
+    expect((await newest.get(`/g/${GUILD}/status`)).status).toBe(200);
+  });
+
+  test("thirty token exchanges a minute across every user; the next is a 503 without asking Discord", async () => {
+    const w = await world();
+    for (const userId of [OFFICER, SECOND_OFFICER, MEMBER])
+      for (let index = 0; index < EXCHANGE_LIMIT / 3; index++)
+        expect((await new Browser(w).signIn({ id: userId })).status).toBe(303);
+    const asked = w.discord.requests.length;
+    w.clock.now += 20_000;
+    const refused = await new Browser(w).signIn({ id: GUEST });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("retry-after")).toBe("40");
+    expect(setsSession(w, refused)).toBe(false);
+    expect(w.discord.requests).toHaveLength(asked);
+    // A refusal before the exchange costs no admission either.
+    expect(w.resolutions.filter(([, user]) => user === GUEST)).toEqual([]);
+    w.clock.now += 40_000;
+    expect((await new Browser(w).signIn({ id: GUEST })).status).toBe(303);
+  });
+
+  test("four token exchanges at once; a fifth is a 503 without asking Discord", async () => {
+    const w = await world();
+    const accounts = [OFFICER, SECOND_OFFICER, MEMBER, GUEST];
+    const started = await Promise.all(
+      accounts.map(async (id) => {
+        const browser = new Browser(w);
+        return { browser, callback: await browser.authorize({ id }) };
+      }),
+    );
+    let release = () => {};
+    w.discordHold.until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const running = started.map(({ browser, callback }) => browser.get(callback));
+    for (let tick = 0; w.discordHold.waiting < accounts.length && tick < 500; tick++)
+      await Bun.sleep(1);
+    expect(w.discordHold.waiting).toBe(accounts.length);
+    const refused = await new Browser(w).signIn({ id: TIMED_OUT });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("retry-after")).toBe(String(EXCHANGE_BUSY_SECONDS));
+    expect(w.discordHold.waiting).toBe(accounts.length);
+    w.discordHold.until = null;
+    release();
+    expect((await Promise.all(running)).map((response) => response.status)).toEqual([
+      303, 303, 303, 303,
+    ]);
+    // The places are free again.
+    expect((await new Browser(w).signIn({ id: TIMED_OUT })).status).toBe(303);
   });
 });
 
@@ -2126,7 +2773,10 @@ describe("startWeb", () => {
     syncStatus: () => Promise<SyncStatusView> = async () => SYNC,
   ): WebContext {
     return {
-      services: services({ lifecycle: { ready: true }, menus: new Map() }, syncStatus),
+      services: services(
+        { lifecycle: { ready: true }, menus: new Map(), people: harnessPeople() },
+        syncStatus,
+      ),
       allowsGuild: () => true,
       isStopping: () => false,
       resolveActor: resolver([]),
@@ -2531,8 +3181,11 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
       expect(done.headers.get("location")).toBe(status);
       const home = await (await browse(harness.url)).text();
       expect(home).toContain("Example FC");
-      // A member there, not an officer, so Second FC isn't listed.
-      expect(home).not.toContain("Second");
+      // A member of Second FC, not an officer there (2.40.0): it is listed, with My roles only.
+      const second = HARNESS_GUILDS.second.id;
+      expect(home).toContain("Second &lt;FC&gt; &amp; Friends");
+      expect(home).toContain(`href="/g/${second}/my-roles"`);
+      expect(home).not.toContain(`href="/g/${second}/status"`);
       const page = await browse(new URL(status, harness.url));
       expect(page.status).toBe(200);
       // Sign-out is a form with the session's form token, read from the page like a browser.
@@ -2590,10 +3243,55 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
     ).toEqual(["menu.reset"]);
   });
 
-  test("a member, an outsider and a bot are refused; the fake serves only its redirect URI", async () => {
+  test("a member, a guest and a timed-out member sign in to My roles; with Administrator, only officers", async () => {
     const harness = await startHarness();
     try {
-      for (const account of ["member", "outsider", "bot"] as const) {
+      const myRoles = (guild: string) => `/g/${guild}/my-roles`;
+      const example = HARNESS_GUILDS.example.id;
+      for (const account of ["member", "guest", "timedOut"] as const) {
+        const browse = client();
+        const done = await signIn(browse, harness.url, account);
+        expect({ account, status: done.status }).toEqual({ account, status: 303 });
+        // Officer pages stay closed to them.
+        const status = await browse(new URL(`/g/${example}/status`, harness.url));
+        expect({ account, status: status.status }).toEqual({ account, status: 403 });
+        const page = await browse(new URL(myRoles(example), harness.url));
+        expect({ account, myRoles: page.status }).toEqual({ account, myRoles: 200 });
+        // The member has two servers, so / lists them; the others go straight to My roles.
+        const home = await browse(harness.url);
+        if (account === "member") {
+          expect(home.status).toBe(200);
+          const text = await home.text();
+          for (const guild of [example, HARNESS_GUILDS.second.id])
+            expect(text).toContain(`href="${myRoles(guild)}"`);
+        } else {
+          expect({ account, home: home.status }).toEqual({ account, home: 303 });
+          expect(home.headers.get("location")).toBe(myRoles(example));
+        }
+      }
+    } finally {
+      await harness.stop();
+    }
+    // --state-menu-problems gives TaruBot Administrator again: A2 refuses every member and guest,
+    // and the officer still signs in.
+    const drifted = await startHarness({ states: { menuProblems: true } });
+    try {
+      for (const account of ["member", "guest", "timedOut", "officer"] as const) {
+        const response = await signIn(client(), drifted.url, account);
+        expect({ account, status: response.status }).toEqual({
+          account,
+          status: account === "officer" ? 303 : 403,
+        });
+      }
+    } finally {
+      await drifted.stop();
+    }
+  });
+
+  test("a lobby newcomer, an outsider and a bot are refused; the fake serves only its redirect URI", async () => {
+    const harness = await startHarness();
+    try {
+      for (const account of ["lobby", "outsider", "bot"] as const) {
         const response = await signIn(client(), harness.url, account);
         expect({ account, status: response.status }).toEqual({ account, status: 403 });
         expect(response.headers.getSetCookie().some((c) => c.startsWith("tarubot="))).toBe(false);

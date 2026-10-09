@@ -235,21 +235,35 @@ export class Service {
     readonly lodestone: Lodestone,
     readonly config: Configuration,
   ) {}
-  /** Delegate bot-only officer authority without granting Discord server permissions. */
+  /**
+   * Add what the active guild row says about the actor's held roles: `member` and `guest` (2.40.0)
+   * when they hold the bound Member or Guest role now (owner decision Q6 A: the held role, as
+   * Discord shows it and Dyno keyed on), and delegated bot-only officer authority, which grants no
+   * Discord server permission. The row is read for every actor, server managers included, so the
+   * two flags are always set: one primary-key read per resolution. No row (TaruBot not set up
+   * there) or an unbound role leaves the flag false.
+   */
   async enrichActor(actor: Actor): Promise<Actor> {
-    if (actor.serverManager ?? actor.officer) return actor;
     const [guild] = await this.db.orm
       .select()
       .from(t.guilds)
       .where(and(eq(t.guilds.id, actor.guildId), eq(t.guilds.active, true)));
-    if (!guild?.officer_role_id || !actor.roleIds?.includes(guild.officer_role_id)) return actor;
+    const held = (role: string | null | undefined): boolean =>
+      role !== null && role !== undefined && actor.roleIds?.includes(role) === true;
+    const enriched: Actor = {
+      ...actor,
+      member: held(guild?.member_role_id),
+      guest: held(guild?.guest_role_id),
+    };
+    if (actor.serverManager ?? actor.officer) return enriched;
+    if (!guild?.officer_role_id || !held(guild.officer_role_id)) return enriched;
     const access = await rankAccess(
       this.db,
       guild,
       actor.userId,
       this.config.ROSTER_INTERVAL_SECONDS,
     );
-    return { ...actor, officer: !access.revoked && access.officer !== "no" };
+    return { ...enriched, officer: !access.revoked && access.officer !== "no" };
   }
   /** Read configured state without silently creating a guild for an ordinary/read-only command. */
   async guild(actor: Actor): Promise<GuildRecord> {
@@ -596,7 +610,7 @@ export class Service {
       // A member's role choices (roles.self) never name the member to anyone else (owner decision
       // Q4 A): officers see "a member" (ROLE_CHOICE_KIND). Delegated officers may lack Discord's
       // View Audit Log, and these rows would otherwise give them a timeline of who changed their
-      // roles. 2.39.0 queues none, but meets them after a rollback from 2.40.0.
+      // roles. The rule holds in 2.39.0 too, after a rollback.
       work: work.map((job) =>
         job.kind === ROLE_CHOICE_KIND && job.user_id !== actor.userId
           ? { ...job, user_id: null }

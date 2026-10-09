@@ -7,14 +7,23 @@ import type { Service } from "../application/service.js";
 import type { Synchronization } from "../application/synchronization.js";
 import type { GuildAccess } from "../application/guild-access.js";
 import type { IssueReports } from "../application/issue-reports.js";
+import { RoleChoiceJob } from "../application/self-roles.js";
 import { deliverStatus, dropStatus } from "../application/status-notices.js";
 import { project } from "../config/project.js";
 import { changelogStep } from "../domain/changelog.js";
 import { effectsPaused } from "../domain/failures.js";
 import { RELEASE_NOTES } from "../domain/release-notes.js";
+import { ROLE_CHOICE_KIND } from "../domain/self-roles.js";
 import { Failure } from "../domain/values.js";
 import { managedRoleOrder } from "../domain/role-layout.js";
 import { enqueue, type Job } from "./queue.js";
+
+/** A payload the database cleared: migration 012's trigger leaves `{}` when a job ends. */
+const emptyPayload = (payload: unknown): boolean =>
+  typeof payload === "object" &&
+  payload !== null &&
+  !Array.isArray(payload) &&
+  Object.keys(payload).length === 0;
 
 /**
  * Bind application capabilities once; each invocation revalidates its persisted payload. `notes`
@@ -27,6 +36,10 @@ export function dispatcher(
   reports?: IssueReports,
   notes: Readonly<Record<string, string>> = RELEASE_NOTES,
 ): (job: Job, guard: () => Promise<void>) => Promise<unknown> {
+  // The roles.self job's operation, built here and nowhere else: it writes any member's roles from
+  // the job it is given, so no service key provides it and no web page can reach it. The worker
+  // runs under the writer lease, whose guard fences every Discord write.
+  const choices = new RoleChoiceJob(app);
   return async (job, guard) => {
     if (job.payload_version !== 1)
       throw new Failure(
@@ -61,11 +74,6 @@ export function dispatcher(
     // A refresh an older image queued before the upgrade completes without a Lodestone request.
     // A later release can drop this once no such job can remain queued.
     if (job.kind === "profile") return { skipped: "profile refreshes retired" };
-    // 2.40.0's member role choices (self-service roles). An older image that meets one after a
-    // rollback completes it without a Discord call or a delivery_attempts row, and the database
-    // then clears its payload (migration 012's trigger); the member is told to save again. Without
-    // this, a rollback would fail each one as invalid_job and file an issue report.
-    if (job.kind === "roles.self") return { skipped: "needs a newer TaruBot" };
     // Outbound messages use current guild configuration, not a stale channel copied into a job.
     const [guild] = await app.db.orm
       .select()
@@ -103,11 +111,19 @@ export function dispatcher(
       await guard();
       return dropStatus(app, guild.id);
     }
+    // A member's role choices (2.40.0) whose payload the database already cleared (an operator
+    // retried a failed one, say) have nothing left to apply: they complete here, before the
+    // effects gate, so empty work never parks as disabled (the roles.layout precedent above).
+    if (job.kind === ROLE_CHOICE_KIND && emptyPayload(job.payload))
+      return { skipped: "nothing to apply" };
     if (!app.config.ENABLE_EFFECTS || !guild.effects_enabled)
       throw effectsPaused(app.config.ENABLE_EFFECTS);
     // The status post has its own resume, window, freeze, send and mark (status-notices.ts), and
     // records its own delivery attempts, so it bypasses the shared single-send tail below.
     if (job.kind === "officer.status") return deliverStatus(app, guild, job, guard);
+    // A member's role choices change roles, not messages: no delivery attempt is recorded, which
+    // also leaves nothing referencing these rows when the 30-day retention deletes them.
+    if (job.kind === ROLE_CHOICE_KIND) return choices.apply(job, guard);
     if (job.kind === "roles.layout") {
       // Setup and layout share a session lock, keeping network operations outside transactions.
       const client = await app.db.pool.connect();

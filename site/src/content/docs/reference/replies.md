@@ -83,7 +83,7 @@ Replies describe saved and background work with text markers, so color is never 
 
 Two more markers describe the request itself: `• SAVED` (committed to the database) and `= NO CHANGE` (it was already that way, so nothing was saved or queued).
 
-Members see labels: Role update, Server-wide role check, FC roster check, Departure confirmation, Character profile refresh, Channel access, Role layout, Update post, Ledger post, Guest review message, Decision DM, Officer notice, Status notice, Role choices (a member's picks from the self-service role menu, from a later release). Officers see the raw job kind (such as `reconcile.user`), the first 8 characters of the job ID, the attempt, the next time and the stored diagnostic, cut to 150 characters.
+Members see labels: Role update, Server-wide role check, FC roster check, Departure confirmation, Character profile refresh, Channel access, Role layout, Update post, Ledger post, Guest review message, Decision DM, Officer notice, Status notice, Role choices (a member's own picks on [My roles](/tarubot/use/pick-your-roles/), which officers see without the member's name). Officers see the raw job kind (such as `reconcile.user`), the first 8 characters of the job ID, the attempt, the next time and the stored diagnostic, cut to 150 characters.
 
 An immediate reply never uses completion words. `… QUEUED` or `‖ PAUSED` there means the work was saved; only a view that reads stored jobs back (`/sync status`, `/guest status`, `/ledger balance` and `/ledger history`) can show `✓ DONE`.
 

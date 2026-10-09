@@ -170,7 +170,8 @@ const context: BotContext = {
   isStopping: () => lifecycle.isStopping(),
   publicResponseGuildId:
     config.PUBLIC_TEST_RESPONSES && config.TEST_GUILD_ID ? config.TEST_GUILD_ID : undefined,
-  resolveActor: async (guildId, userId) => app.enrichActor(await gateway.actor(guildId, userId)),
+  resolveActor: async (guildId, userId, mode) =>
+    app.enrichActor(await gateway.actor(guildId, userId, mode)),
   enrichActor: (actor) => app.enrichActor(actor),
 };
 services.provide(interactionRouterKey, new InteractionRouter(context, commands, components));

@@ -61,6 +61,17 @@ A pass compares desired roles and nicknames with Discord's current state and sen
 
 Other passes: **channel access** (`channels.access`) keeps onboarding's visibility policy, and **role layout** (`roles.layout`) keeps the managed roles' display and order while the switch is on.
 
+## Self-service roles
+
+Roles on the [self-service role menu](/tarubot/admin/self-service-roles/) aren't decided from evidence: each person chooses their own on My roles, and Discord is the record of who holds them. A save queues one **role choices** job (`roles.self`) per member, which a newer save merges into while it waits. The job:
+
+- re-reads the member and the current menu, and acts only on roles still listed there, in the categories that person changed;
+- takes the same per-member lock as `reconcile.user`, so the two never change one member's roles at once, and waits without spending an attempt while the other runs;
+- checks each role again against a fresh view of the server just before writing it, then adds or removes it alone, so unrelated roles are never touched; a role that fails a check, or that Discord refuses because it was deleted or moved above TaruBot, is skipped and counted, never named;
+- never touches Member, Guest, Officer, FC Leader or a role being cleaned up, whatever the menu says.
+
+Reconciliation leaves menu roles alone, with one exception (owner decision of 2026-10-09): when a `reconcile.user` pass leaves someone with none of Member, Guest, Officer and FC Leader, it also removes the menu roles they hold that open channels, in published and Not offered categories, after their access change. That keeps an opt-in channel behind Member or Guest as well as the role, since Discord adds up the permissions of all of a member's roles. Roles that open nothing, such as pronouns, stay, and so does a role TaruBot can't remove. A role-choice job doesn't add a channel-opening role to someone with none of those roles either.
+
 After a pass writes a member's roles, TaruBot records their Member, Guest, Officer and FC Leader for the officers' [status posts](/tarubot/admin/notices-and-updates/#member-status-changes), but only decisions that don't depend on the roles the member already holds: a decision kept on unconfirmed evidence, such as an out-of-date roster, waits until a fresh roster confirms it. The accepted roster records confirmed departures in the same transaction, and one job per server posts what changed about 2 minutes after the first change.
 
 ## Nicknames

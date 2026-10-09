@@ -28,6 +28,8 @@ TaruBot manages up to four roles. Your server may call them something else.
 
 TaruBot adds and removes these roles to match the FC's roster and your links, and it repairs one that is changed by hand. With several linked characters, the best one counts: any character in the FC makes you a Member. An officer can also grant or revoke Guest access, and those decisions last until an officer changes them.
 
+Your officers may also offer roles you choose for yourself, such as pronouns or games. With Member or Guest, you pick them on the web: see [Pick your roles](/tarubot/use/pick-your-roles/).
+
 To get started, [link your character](/tarubot/use/link-a-character/).
 
 ## Reading a reply
@@ -56,7 +58,7 @@ TaruBot keeps what it needs to decide access and keep the ledger exact:
 - **An audit trail** of changes, such as links, grants and settings, with who made them.
 - **Public Lodestone data** for your characters: name, world, FC and rank, as the Lodestone shows them.
 
-Your Lodestone token is never stored; only a one-way fingerprint of it is. A guest application's answers go to the officers' review channel, never to a public reply.
+Your Lodestone token is never stored; only a one-way fingerprint of it is. A guest application's answers go to the officers' review channel, never to a public reply. TaruBot keeps no record of which roles you [pick for yourself](/tarubot/use/pick-your-roles/#your-privacy): Discord holds them.
 
 `/issue` sends a report to the people who run this TaruBot deployment. It includes your description, your Discord username and ID, your linked characters and settings in this server, your recent TaruBot activity, and the bot's health. Known secrets are removed first. See [Progress and problems](/tarubot/use/progress-and-problems/#report-a-problem).
 

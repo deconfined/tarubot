@@ -46,6 +46,11 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
     "Update posts in this channel now cover every change members, guests or officers can notice, not only new features for members.",
   "2.39.0":
     "Officers can now build a menu of roles people choose for themselves, such as pronouns or games, on the dashboard's new Role menu page. Members and guests will pick from it in an upcoming update.",
+  // Conditional, as 2.37.0's is: member sign-in waits for owner steps (the web on, no Administrator
+  // for TaruBot, a staging check) that this release may well run before, and its post can't be
+  // corrected once it has gone out.
+  "2.40.0":
+    "Members and guests can pick their own roles, such as pronouns or games, on TaruBot's new My roles page once it's turned on for your server. Roles you already have show up there.",
 };
 
 /**
