@@ -51,7 +51,7 @@ When the dashboard is enabled, Discord sign-in asks only for `identify`. TaruBot
 
 The read-only pages show the admitted server's configuration and work. Member, role and channel names come from that server's gateway cache at render time, not a new stored directory. Application request logs use route patterns and reference IDs, not queries, cookies, form values or client addresses.
 
-The dashboard loads Chakra Petch and Martian Mono from Google Fonts. Google receives the browser's normal requests for the font stylesheet and files; TaruBot does not put server or member records into those URLs. No client scripts are loaded. If fonts cannot load, local system fonts remain usable.
+TaruBot serves the dashboard's stylesheet, fonts and icons itself, from the dashboard's own address. The pages' content security policy admits nothing from another site, so the browser makes no requests to Google Fonts or any other third party while showing them. No client scripts are loaded. If fonts cannot load, local system fonts remain usable.
 
 ## Issue reports
 

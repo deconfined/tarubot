@@ -1,6 +1,6 @@
 ---
 title: Thank you
-description: The people who tested TaruBot v2, its maintainer and in-game contact, and the community project it reads the Lodestone with.
+description: The people who tested TaruBot v2, its maintainer and in-game contact, the community project it reads the Lodestone with, and the fonts and icons its pages use.
 ---
 
 TaruBot v2 was shaped by the people who used it first. Thank you to everyone below.
@@ -22,3 +22,5 @@ TaruBot is maintained by [@deconfined](https://github.com/deconfined) on GitHub,
 ## Built on
 
 TaruBot reads the Lodestone with the community-maintained [`xivapi/lodestone-css-selectors`](https://github.com/xivapi/lodestone-css-selectors) definitions, which its parser applies and keeps current. Thank you to everyone who maintains them. The selector data keeps its own license.
+
+The dashboard and this site are set in [Sora](https://github.com/sora-xor/sora-font), [Manrope](https://github.com/sharanda/manrope) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), under the SIL Open Font License 1.1. The dashboard's icons are from [Lucide](https://lucide.dev), under the ISC License with portions from Feather under the MIT License. Their copyright notices and license texts are in the [third-party licenses](/tarubot/third-party-licenses.txt) file.

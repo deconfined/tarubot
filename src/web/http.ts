@@ -53,14 +53,15 @@ export function newRef(): string {
 }
 
 /**
- * The Content-Security-Policy on every response. No script source. The two design fonts use
- * Google's stylesheet/font hosts; all other styles and images stay on this origin. Forms post
- * only here and pages cannot be framed.
+ * The Content-Security-Policy on every response. No script source, so no script runs at all, and
+ * no 'unsafe-inline', so style attributes and style elements are refused. Styles, fonts and
+ * images come only from this origin: the fonts are self-hosted assets (assets.ts), so a page makes
+ * no third-party request. Forms post only here and pages cannot be framed.
  */
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
-  "style-src 'self' https://fonts.googleapis.com",
-  "font-src https://fonts.gstatic.com",
+  "style-src 'self'",
+  "font-src 'self'",
   "img-src 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
@@ -108,8 +109,8 @@ export function securityHeaderRecord(secure: boolean): Record<string, string> {
 const SECURE_HEADER_OPTIONS = {
   contentSecurityPolicy: {
     defaultSrc: ["'none'"],
-    styleSrc: ["'self'", "https://fonts.googleapis.com"],
-    fontSrc: ["https://fonts.gstatic.com"],
+    styleSrc: ["'self'"],
+    fontSrc: ["'self'"],
     imgSrc: ["'self'"],
     formAction: ["'self'"],
     frameAncestors: ["'none'"],

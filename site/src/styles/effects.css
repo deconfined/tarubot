@@ -1,0 +1,255 @@
+/*
+ * The design system's effects, as the documentation site uses them: the page backdrops (a nebula
+ * wash behind every page, the starfield on the splash), the orbit rings and holographic word in
+ * the splash hero, and the entrance motion. Ported from the Orrery export's styles/effects.css,
+ * with its class names; the splash's hero markup (src/content/docs/index.md) uses them.
+ *
+ * Everything that paints is screen-only, so printing gets Starlight's plain light page. Every
+ * animation stops under prefers-reduced-motion, at the end of this file.
+ *
+ * The ambient loops (twinkle, holographic drift, orbit rings, and the hero button's drift in
+ * components.css) keep looping, with no pause control: the owner accepted the WCAG 2.2.2 (Pause,
+ * Stop, Hide) finding on 2026-10-08, and reduced motion is their off switch. Don't re-raise it
+ * without a new owner decision.
+ */
+
+@keyframes orr-holo-drift {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes orr-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orr-twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes orr-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media screen {
+  /*
+   * Page backdrops. A fixed layer behind everything instead of background-attachment: fixed, which
+   * repaints on every scroll in some engines and is ignored on iOS. z-index -1 puts it under the
+   * page content but over the canvas, which body's background color paints.
+   */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image: var(--nebula-cyan), var(--nebula-violet);
+  }
+
+  /*
+   * The starfield, only behind a page with a hero: the splash, and Starlight's generated 404, which
+   * shares the template. Two static star layers on tiles of 613px and 877px plus a twinkling layer
+   * on 719px: the sizes share no factor, so the repeat never lines up into a visible grid.
+   */
+  html[data-has-hero] body::before {
+    background-color: var(--bg-void);
+    background-image:
+      var(--nebula-cyan),
+      var(--nebula-violet),
+      radial-gradient(1px 1px at 177px 129px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1.2px 1.2px at 202px 461px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+      radial-gradient(1.2px 1.2px at 420px 390px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+      radial-gradient(1.2px 1.2px at 229px 434px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1.2px 1.2px at 419px 287px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1.2px 1.2px at 75px 315px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1.2px 1.2px at 395px 354px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1.2px 1.2px at 228px 206px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1.2px 1.2px at 94px 182px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1px 1px at 575px 342px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1.2px 1.2px at 36px 168px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1px 1px at 258px 118px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+      radial-gradient(1.2px 1.2px at 224px 211px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1px 1px at 316px 101px, oklch(0.97 0.01 280 / 0.45), transparent 70%),
+      radial-gradient(1px 1px at 223px 260px, oklch(0.97 0.01 280 / 0.9), transparent 70%),
+      radial-gradient(1px 1px at 376px 143px, oklch(0.97 0.01 280 / 0.6), transparent 70%),
+      radial-gradient(1.8px 1.8px at 757px 557px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+      radial-gradient(1.8px 1.8px at 443px 604px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+      radial-gradient(1.8px 1.8px at 621px 220px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+      radial-gradient(1.8px 1.8px at 290px 343px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+      radial-gradient(1.8px 1.8px at 97px 718px, oklch(0.97 0.01 280 / 0.8), transparent 70%),
+      radial-gradient(1.5px 1.5px at 135px 68px, oklch(0.92 0.05 298 / 0.75), transparent 70%),
+      radial-gradient(1.8px 1.8px at 555px 127px, oklch(0.93 0.05 210 / 0.85), transparent 70%);
+    background-size:
+      100% 100%,
+      100% 100%,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      613px 613px,
+      877px 877px,
+      877px 877px,
+      877px 877px,
+      877px 877px,
+      877px 877px,
+      877px 877px,
+      877px 877px;
+  }
+
+  html[data-has-hero] body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(2px 2px at 99px 663px, oklch(0.93 0.06 210), transparent 70%),
+      radial-gradient(2.4px 2.4px at 636px 653px, oklch(0.92 0.05 298), transparent 70%),
+      radial-gradient(2.4px 2.4px at 8px 179px, oklch(0.98 0.01 280), transparent 70%),
+      radial-gradient(2px 2px at 444px 166px, oklch(0.98 0.01 280), transparent 70%),
+      radial-gradient(2.4px 2.4px at 494px 171px, oklch(0.93 0.06 210), transparent 70%),
+      radial-gradient(2.4px 2.4px at 269px 643px, oklch(0.98 0.01 280), transparent 70%),
+      radial-gradient(2.8px 2.8px at 2px 656px, oklch(0.95 0.06 85), transparent 70%);
+    background-size: 719px 719px;
+    animation: orr-twinkle var(--dur-twinkle) var(--ease-in-out) infinite;
+  }
+
+  /*
+   * Holographic text: one word per view, the splash title. Upright: it is an <em>, and the display
+   * face (Sora) has no italic.
+   */
+  .orr-holo-text {
+    font-style: normal;
+    background: var(--holo-text);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: orr-holo-drift calc(var(--dur-holo) * 1.6) linear infinite;
+    filter: drop-shadow(0 0 18px oklch(0.8 0.13 250 / 0.28));
+  }
+
+  /*
+   * Orbit rings: the splash's hero picture, decorative and hidden from assistive technology. The
+   * export positions its three rings and the sun with inline styles; here each has a modifier
+   * class, with insets as percentages of the square so the drawing scales with its column.
+   */
+  .orr-orbit {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1;
+    pointer-events: none;
+    opacity: 0.8;
+  }
+
+  .orr-orbit__ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1px solid var(--border-default);
+    animation: orr-spin var(--dur-orbit) linear infinite;
+  }
+
+  .orr-orbit__ring--dashed {
+    border-style: dashed;
+    border-color: var(--border-strong);
+  }
+
+  .orr-orbit__ring--middle {
+    inset: 14%;
+    animation-duration: calc(var(--dur-orbit) * 1.5);
+    animation-direction: reverse;
+  }
+
+  .orr-orbit__ring--inner {
+    inset: 28%;
+    animation-duration: calc(var(--dur-orbit) * 2 / 3);
+  }
+
+  .orr-orbit__planet {
+    --planet: var(--cyan-400);
+    position: absolute;
+    top: -4px;
+    left: 50%;
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    border-radius: 50%;
+    background: var(--planet);
+    box-shadow: 0 0 12px var(--planet);
+  }
+
+  .orr-orbit__planet--violet {
+    --planet: var(--violet-400);
+  }
+
+  .orr-orbit__sun {
+    position: absolute;
+    inset: 44%;
+    border-radius: 50%;
+    background: var(--starlight-400);
+    box-shadow:
+      0 0 40px var(--starlight-400),
+      0 0 120px oklch(0.88 0.09 85 / 0.4);
+  }
+
+  /* Entrance: each page's content rises in once as it loads. */
+  main {
+    animation: orr-rise-in var(--dur-enter) var(--ease-out) backwards;
+  }
+
+  /*
+   * Each orbit ring is a square box with round corners, and a turning square reaches past the
+   * drawing's column at its corners, so the splash would scroll sideways by a width that changes
+   * as the rings spin. Clip at main, not at the hero: the hero ends where the drawing does, which
+   * would cut the outer planet and its glow in half at three o'clock, while main leaves the page
+   * gutter for them. Clip makes no scroll container, and the splash has nothing sticky in main.
+   */
+  html[data-has-hero] main {
+    overflow-x: clip;
+  }
+}
+
+/*
+ * Reduced motion. The tokens already zero the ambient loop durations; this also stops the entrance,
+ * which has no loop token, and removes the loops outright instead of leaving zero-length ones
+ * running, so every layer rests fully visible. Last in the file, so it outranks the rules above.
+ */
+@media (prefers-reduced-motion: reduce) {
+  html[data-has-hero] body::after,
+  .orr-holo-text,
+  .orr-orbit__ring,
+  main {
+    animation: none;
+  }
+}

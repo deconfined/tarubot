@@ -20,7 +20,7 @@ import { PAGE_ACCESS } from "../../src/web/access.js";
 import { FAVICON, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
 import { problemOf } from "../../src/web/http.js";
-import { errorPage, layout, navLinks } from "../../src/web/layout.js";
+import { errorPage, layout, navLinks, serverAvatar } from "../../src/web/layout.js";
 import { definePage, PAGE_PATH, Page, type PageContext } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
 import type { WebNames } from "../../src/web/mentions.js";
@@ -120,6 +120,8 @@ describe("definePage", () => {
     expect(page).toBeInstanceOf(Page);
     expect(page.href(GUILD)).toBe(`/g/${GUILD}/status`);
     expect(page.nav).toBe("Status");
+    expect(page.icon).toBeUndefined();
+    expect(definePage({ ...base, icon: "activity" }).icon).toBe("activity");
     expect(definePage({ ...base, path: "/g/:guild/roles/officer-ranks" }).path).toBe(
       "/g/:guild/roles/officer-ranks",
     );
@@ -178,6 +180,8 @@ describe("definePage", () => {
       [{ nav: "" }, "A page's navigation label must be text."],
       [{ nav: " " }, "A page's navigation label must be text."],
       [{ nav: 1 }, "A page's navigation label must be text."],
+      [{ icon: "rocket" }, "A page's icon must name one of the icons in icons.ts."],
+      [{ icon: 1 }, "A page's icon must name one of the icons in icons.ts."],
     ];
     for (const [override, message] of cases)
       expect(() => Reflect.construct(Page, [{ ...base, ...override }])).toThrow(message);
@@ -224,10 +228,20 @@ describe("the shell and /", () => {
     expect(document.querySelector("h1")?.textContent).toBe("TaruBot");
     expect(document.querySelector('a[href="/login"]')?.textContent).toBe("Sign in with Discord");
     expect(document.querySelectorAll("form, button")).toHaveLength(0);
+    // The design's holographic budget: the sign-in link is the one primary button, and the
+    // login card the one card with the turning edge.
+    expect(
+      [...document.querySelectorAll(".orr-btn--primary")].map((link) => link.getAttribute("href")),
+    ).toEqual(["/login"]);
+    expect(document.querySelectorAll(".orr-holo-edge")).toHaveLength(1);
+    // Its heading is the wordmark, so there is no bar with a second one, and no account menu.
+    expect(document.querySelectorAll(".entry-bar, .account")).toHaveLength(0);
+    expect(document.body.classList.contains("entry-page")).toBe(true);
   });
 
   test("a signed-in user gets both sign-out forms and their servers, names escaped and isolated", async () => {
     const servers = HOSTILE.map((name, index) => ({
+      id: `10000000000000000${index}`,
       name,
       links: [{ href: `/g/10000000000000000${index}/status`, label: "Status", current: false }],
     }));
@@ -248,6 +262,19 @@ describe("the shell and /", () => {
     expect(document.querySelectorAll("main img")).toHaveLength(0);
     expect(isolated(document)).toEqual(HOSTILE);
     expect(document.querySelectorAll('.servers a[href$="/status"]')).toHaveLength(HOSTILE.length);
+    // Each tile's initials: letters and digits only, decorative, outside dir="auto".
+    const initials = [...document.querySelectorAll(".servers .orr-avatar")].map((avatar) => [
+      avatar.getAttribute("aria-hidden"),
+      avatar.textContent,
+    ]);
+    expect(initials).toEqual([
+      ["true", "IS"],
+      ["true", "S"],
+      ["true", "TO"],
+      ["true", "TJ"],
+    ]);
+    // A page link's text is its label alone; the icons beside it add none.
+    expect(document.querySelector('.servers a[href$="/status"]')?.textContent).toBe("Status");
   });
 
   test("a signed-in user with no servers is told so, with who the pages are for", async () => {
@@ -272,13 +299,53 @@ describe("the shell and /", () => {
     const name = HOSTILE[1] ?? "";
     const document = inspect(
       await render(
-        layout({ title: "Status", signedIn: true, guild: { name, nav } }, html`<p>Body</p>`),
+        layout(
+          { title: "Status", signedIn: true, guild: { id: GUILD, name, nav } },
+          html`<p>Body</p>`,
+        ),
       ),
     );
     expect(isolated(document)).toEqual([name]);
     const current = document.querySelector('nav a[aria-current="page"]');
     expect(current?.getAttribute("href")).toBe(`/g/${GUILD}/status`);
+    expect(current?.textContent).toBe("Background work");
+    expect(current?.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
     expect(document.querySelector("nav")?.getAttribute("aria-label")).toBe("Server pages");
+    // The name appears once, in the switcher back to the server list; the top bar repeats only
+    // the page's title, for sight.
+    expect(document.querySelector('.server-switch[href="/"] [dir="auto"]')?.textContent).toBe(name);
+    expect(document.querySelector(".topbar")?.getAttribute("aria-hidden")).toBe("true");
+    expect(document.querySelector(".topbar")?.textContent).toBe("Workspace/Status");
+    expect(document.body.classList.contains("console-page")).toBe(true);
+  });
+
+  test("server initials take letters and digits only, on a hue fixed by the server ID", async () => {
+    const avatar = async (id: string, name: string) =>
+      parseHTML(`<p>${await render(serverAvatar({ id, name }))}</p>`).document.querySelector(
+        ".orr-avatar",
+      );
+    for (const [name, initials] of [
+      ["Example FC", "EF"],
+      ["\u202eevil\u202c FC 2", "EF"],
+      ["ﾀﾙﾀﾙ «SKY»", "ﾀS"],
+      ["7th Heaven", "7H"],
+      ["ｗｉｌｄ west", "ＷW"],
+    ] as const)
+      expect((await avatar(GUILD, name))?.textContent).toBe(initials);
+    // No letter or digit at all: the decorative server icon instead of empty initials.
+    const symbols = await avatar(GUILD, "★ ☆ ★");
+    expect(symbols?.textContent).toBe("");
+    expect(symbols?.querySelector("svg.orr-icon")).not.toBeNull();
+    const hue = async (id: string, name: string) =>
+      [...((await avatar(id, name))?.classList ?? [])].filter((name) =>
+        name.startsWith("orr-avatar--hue-"),
+      );
+    expect(await hue(GUILD, "Example FC")).toEqual(await hue(GUILD, "Renamed"));
+    expect((await hue(GUILD, "Example FC"))[0]).toMatch(/^orr-avatar--hue-[0-7]$/u);
+    const hues = new Set<string>();
+    for (let index = 0; index < 64; index += 1)
+      hues.add((await hue(`1000000000000000${String(index).padStart(2, "0")}`, "x"))[0] ?? "");
+    expect(hues.size).toBe(8);
   });
 
   test("the no-access page explains itself and sets nothing up", async () => {
@@ -466,7 +533,7 @@ describe("Status", () => {
         {
           title: page.title,
           signedIn: true,
-          guild: { name: "Example FC", nav: navLinks([page], actor, page.path) },
+          guild: { id: GUILD, name: "Example FC", nav: navLinks([page], actor, page.path) },
         },
         body,
       ),
@@ -683,5 +750,245 @@ describe("Status", () => {
     expect(waiting.querySelector(".featured")?.querySelectorAll(".check-wait")).toHaveLength(2);
     const off = await statusBody({ effectsMode: "deployment_disabled", runs: [], work: [] });
     expect(off.querySelector(".featured")?.querySelectorAll(".check-off")).toHaveLength(1);
+  });
+
+  test("draws health as the featured card, counts as stats and tables in labelled regions", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    // The one holographic card is process health, named by its heading; readiness leads.
+    const health = document.querySelector(".featured");
+    expect(health?.matches("section.orr-card.orr-card--holo.orr-holo-edge")).toBe(true);
+    expect(document.querySelectorAll(".orr-card--holo, .orr-holo-edge")).toHaveLength(1);
+    expect(health?.getAttribute("aria-labelledby")).toBe("process-health");
+    expect(health?.querySelector("h2#process-health")?.textContent).toBe("Process health");
+    expect(health?.querySelector("li .check-copy")?.textContent).toBe("Ready");
+    // Each count is a stat: the marker badge as its dt, the count as its dd.
+    const stats = [...document.querySelectorAll(".metrics > div")];
+    expect(stats).toHaveLength(6);
+    for (const stat of stats) {
+      expect(stat.matches(".orr-stat")).toBe(true);
+      expect(stat.firstElementChild?.matches("dt.orr-stat__label")).toBe(true);
+      expect(stat.firstElementChild?.querySelectorAll(".marker")).toHaveLength(1);
+      expect(stat.lastElementChild?.matches("dd.orr-stat__value")).toBe(true);
+    }
+    // A table scrolls in its own focusable region, which its caption names; the table points
+    // at the sentence that describes its sample.
+    const regions = [...document.querySelectorAll("main .table-scroll")];
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.getAttribute("role")).toBe("region");
+      expect(region.getAttribute("tabindex")).toBe("0");
+      const table = region.querySelector("table.orr-table");
+      expect(region.getAttribute("aria-labelledby")).toBe(
+        table?.querySelector("caption")?.getAttribute("id") ?? "",
+      );
+      const sample = document.getElementById(table?.getAttribute("aria-describedby") ?? "");
+      expect(sample?.textContent).toContain("for this server");
+      // Every row discloses its details once, named by the row's short ID.
+      for (const row of table?.querySelectorAll("tbody tr") ?? []) {
+        const details = row.querySelectorAll("details");
+        expect(details).toHaveLength(1);
+        expect(details[0]?.querySelector("summary")?.textContent).toMatch(/details [0-9a-f]{8}$/u);
+      }
+    }
+  });
+
+  test("an empty sample says so, says how to start work, and draws no table", async () => {
+    const document = inspect(
+      (await statusPage({ effectsMode: "live", runs: [], work: [] })).markup,
+    );
+    const main = document.querySelector("main");
+    expect(main?.querySelectorAll("table, .table-scroll")).toHaveLength(0);
+    // Each empty state is its statement, then the guidance, in one box.
+    expect(
+      [...(main?.querySelectorAll(".empty-state") ?? [])].map((box) =>
+        [...box.children].map((paragraph) => [paragraph.tagName, paragraph.textContent]),
+      ),
+    ).toEqual([
+      [
+        ["P", "No outstanding work in this limited sample."],
+        ["P", "Request work in Discord, then reload this page to see its progress."],
+      ],
+      [
+        ["P", "No recent refresh runs to display."],
+        ["P", "Request a refresh in Discord to start a new run."],
+      ],
+    ]);
+    expect([...(main?.querySelectorAll(".metrics dd") ?? [])].map((dd) => dd.textContent)).toEqual([
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+    ]);
+  });
+
+  test("every class the view renders has a rule in the stylesheet", async () => {
+    // Hooks no rule needs: .featured is drawn by the card classes beside it, and the neutral
+    // status tokens keep the base .check and .marker look (styles/components.ts).
+    const drawnByOthers = new Set([
+      "featured",
+      "check-off",
+      "marker-queued",
+      "marker-paused",
+      "marker-skipped",
+    ]);
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    const runs = (["queued", "completed", "blocked", "failed"] as const).map((status) => ({
+      ...run,
+      status,
+      work_blocked: 1,
+    }));
+    const views = [
+      parseHTML((await statusPage(view)).main).document,
+      await statusBody({
+        effectsMode: "live",
+        runs: [...runs, { ...run, acquisition_status: "succeeded" }],
+        work: [],
+      }),
+      await statusBody({
+        effectsMode: "deployment_disabled",
+        runs: [
+          { ...run, status: "blocked", acquisition_status: "disabled" },
+          { ...run, acquisition_status: "succeeded", result: { skipped: "Nothing changed" } },
+        ],
+        work: [job({ status: "succeeded", completed_at: at })],
+      }),
+      await statusBody({ effectsMode: "awaiting_activation", runs: [], work: [] }),
+    ];
+    const classes = new Set<string>();
+    for (const document of views)
+      for (const element of document.querySelectorAll("[class]"))
+        for (const name of element.classList) classes.add(name);
+    for (const marker of ["blocked", "failed", "waiting", "queued", "running", "paused", "done"])
+      expect(classes.has(`marker-${marker}`)).toBe(true);
+    for (const state of ["queued", "completed", "blocked", "paused", "failed"])
+      expect(classes.has(`run-outcome--${state}`)).toBe(true);
+    for (const name of classes) {
+      if (drawnByOthers.has(name)) continue;
+      expect({ name, styled: new RegExp(`\\.${name}(?![\\w-])`, "u").test(css) }).toEqual({
+        name,
+        styled: true,
+      });
+    }
+  });
+
+  test("every table part names its role, and a stacked card's labels name their columns", async () => {
+    const document = inspect((await statusPage(view)).markup);
+    const tables = [...document.querySelectorAll("main table")];
+    expect(tables).toHaveLength(2);
+    // A phone's stacked cards change every table element's display, which some browsers take as
+    // the end of the table: explicit roles keep it one, beside the pinned scopes and caption.
+    for (const table of tables) {
+      expect(table.getAttribute("role")).toBe("table");
+      expect(table.closest('.table-scroll[role="region"][tabindex="0"]')).not.toBeNull();
+      expect((table.querySelector("caption")?.textContent ?? "").trim()).not.toBe("");
+      for (const group of table.querySelectorAll("thead, tbody"))
+        expect(group.getAttribute("role")).toBe("rowgroup");
+      for (const row of table.querySelectorAll("tr")) expect(row.getAttribute("role")).toBe("row");
+      for (const heading of table.querySelectorAll("thead th"))
+        expect([heading.getAttribute("role"), heading.getAttribute("scope")]).toEqual([
+          "columnheader",
+          "col",
+        ]);
+      for (const heading of table.querySelectorAll("tbody th"))
+        expect([heading.getAttribute("role"), heading.getAttribute("scope")]).toEqual([
+          "rowheader",
+          "row",
+        ]);
+      for (const cell of table.querySelectorAll("td"))
+        expect(cell.getAttribute("role")).toBe("cell");
+      const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent ?? "");
+      for (const row of table.querySelectorAll("tbody tr")) {
+        // One cell per column: the row header, the state a card puts beside it, and the
+        // disclosure, always in the last cell, closing the card.
+        const cells = [...row.children];
+        expect(cells).toHaveLength(headers.length);
+        expect(cells[0]?.matches('th[scope="row"]')).toBe(true);
+        expect(cells[1]?.matches("td.row-state")).toBe(true);
+        expect(cells.at(-1)?.querySelectorAll("details")).toHaveLength(1);
+        expect(row.querySelectorAll("details")).toHaveLength(1);
+        // A label is its cell's own column name, out of the accessibility tree, which reads the
+        // column header from the roles instead.
+        for (const [index, cell] of cells.entries())
+          for (const label of cell.querySelectorAll(".cell-label")) {
+            expect(label.parentElement === cell).toBe(true);
+            expect(label.getAttribute("aria-hidden")).toBe("true");
+            expect(label.textContent).not.toBe("");
+            expect(headers[index]?.startsWith(label.textContent ?? "")).toBe(true);
+          }
+      }
+    }
+    const work = [...document.querySelectorAll('table[aria-describedby="work-sample"] tbody tr')];
+    const runs = [...document.querySelectorAll('table[aria-describedby="run-sample"] tbody tr')];
+    expect([work.length, runs.length]).toEqual([view.work.length, view.runs.length]);
+    for (const row of work) {
+      expect(row.querySelectorAll(".row-state .marker")).toHaveLength(1);
+      // Work labels itself: its name, marker, attempts, moments and summary each say what they are.
+      expect(row.querySelectorAll(".cell-label")).toHaveLength(0);
+    }
+    for (const row of runs) {
+      expect(row.querySelectorAll(".row-state .run-outcome")).toHaveLength(1);
+      expect([...row.querySelectorAll(".cell-label")].map((label) => label.textContent)).toEqual([
+        "Progress",
+        "Acquisition",
+      ]);
+    }
+    for (const moment of document.querySelectorAll("main .moment"))
+      expect((moment.querySelector(".orr-label")?.textContent ?? "").trim()).not.toBe("");
+  });
+
+  test("the stylesheet stacks rows into cards only on narrow screens and keeps them a table", () => {
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    const query = "@media screen and (max-width: 47.99rem) {";
+    const at = css.indexOf(query);
+    expect(at).toBeGreaterThan(-1);
+    const cards = css.slice(at, css.indexOf("\n}\n", at));
+    const rule = (text: string, selector: string): string => {
+      const start = text.indexOf(`${selector} {`);
+      return start < 0 ? "" : text.slice(start, text.indexOf("}", start));
+    };
+    // Each row becomes a card; the column headers leave the screen but stay for assistive
+    // technology (clipped, never display: none), and only there do the column labels show.
+    expect(rule(cards, ".status-table > tbody > tr")).toContain("display: grid;");
+    expect(rule(cards, ".status-table > thead")).toContain("clip-path: inset(50%);");
+    expect(rule(cards, ".status-table > thead")).not.toContain("display: none");
+    expect(rule(cards, ".status-table td > .cell-label")).toContain("display: block;");
+    expect(rule(css.slice(0, at), ".cell-label")).toContain("display: none;");
+    // A card stack has no sideways scroll to fall back on, and must not clip its cards' edges.
+    expect(rule(cards, ".status-section > .table-scroll")).toContain("overflow: visible;");
+  });
+
+  test("display: contents never lands on a table part, in any layout", async () => {
+    // display: contents drops a table part from the accessibility tree in some browsers. The
+    // populated page has every row and cell shape the stacked cards target, so each selector that
+    // sets it runs against real markup; one the parser can't read throws and fails the test.
+    const document = inspect((await statusPage(view)).markup);
+    expect(document.querySelectorAll("main table")).toHaveLength(2);
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    // A selector list splits at its top-level commas only, so :not(a, b) stays one selector.
+    const selectors = (list: string): string[] => {
+      const parts = [""];
+      let depth = 0;
+      for (const character of list) {
+        if (character === "(") depth += 1;
+        if (character === ")") depth -= 1;
+        if (character === "," && depth === 0) parts.push("");
+        else parts[parts.length - 1] += character;
+      }
+      return parts.map((part) => part.trim());
+    };
+    const found = [...css.matchAll(/([^{}]+)\{[^{}]*display: contents;/gu)].flatMap((match) =>
+      selectors(match[1] ?? ""),
+    );
+    expect(found.length).toBeGreaterThan(0);
+    for (const selector of found) {
+      const parts = [...document.querySelectorAll(selector)]
+        .map((element) => element.tagName.toLowerCase())
+        .filter((tag) => ["table", "caption", "thead", "tbody", "tr", "th", "td"].includes(tag));
+      // A bare table tag at the end is caught even where the page renders no match for it.
+      const bare = /\b(?:table|caption|thead|tbody|tr|th|td)$/u.test(selector);
+      expect({ selector, parts, bare }).toEqual({ selector, parts: [], bare: false });
+    }
   });
 });

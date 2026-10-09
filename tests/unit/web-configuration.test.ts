@@ -6,6 +6,7 @@ import { Service } from "../../src/application/service.js";
 import { CHECK } from "../../src/discord/presenters/style.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { EMPTY_NAMES, type WebNames } from "../../src/web/mentions.js";
+import { STYLESHEET } from "../../src/web/assets.js";
 import { validateConfiguration } from "../../src/web/pages/configuration.page.js";
 import { renderConfiguration } from "../../src/web/views/configuration.js";
 import {
@@ -314,5 +315,136 @@ describe("configuration rendering", () => {
     }
     const open = await documentOf(configReport());
     expect(fact(open.document, "Guest applications").textContent).toContain("Open");
+  });
+
+  test("has one featured card, whose readouts count the checklist's own tokens", async () => {
+    for (const report of [
+      configReport(),
+      configReport({
+        guild: configGuild({ effects_enabled: false, guest_grandfather: "pending" }),
+        capabilities: { member_role_id: "Role is above TaruBot" },
+        fc: fcRow({ fresh: false, last_successful_roster_at: ROSTER_AT }),
+        visibility: null,
+      }),
+    ]) {
+      const { document } = await documentOf(report);
+      // The design's one holographic card per view is the health snapshot.
+      expect(document.querySelectorAll(".featured")).toHaveLength(1);
+      expect(document.querySelectorAll(".orr-holo-edge")).toHaveLength(1);
+      expect(document.querySelector(".orr-holo-edge")?.classList.contains("featured")).toBe(true);
+      const full = document.querySelector('section[aria-labelledby="configuration-checklist"]');
+      const tokens = (check: string) => full?.querySelectorAll(`.check-${check}`).length ?? 0;
+      const readouts = [...document.querySelectorAll(".featured dd")].map((dd) => dd.textContent);
+      expect(readouts).toEqual([
+        String(tokens("ok")),
+        String(tokens("wait")),
+        String(tokens("off")),
+      ]);
+      const attention = tokens("fail") + tokens("warn");
+      expect(document.querySelector(".featured h2")?.textContent).toBe(
+        attention > 0
+          ? `${attention} ${attention === 1 ? "check needs" : "checks need"} attention.`
+          : tokens("wait") > 0
+            ? "Ready, with work waiting."
+            : "All checks passed.",
+      );
+    }
+  });
+
+  test("folds only long groups whose every check passed; anything else stays open", async () => {
+    const healthy = await documentOf(configReport());
+    const folds = healthy.document.querySelectorAll("details.check-group__fold");
+    expect(folds.length).toBeGreaterThan(0);
+    for (const fold of folds) {
+      expect(fold.querySelector("summary")?.textContent?.trim()).toMatch(
+        /^All \d+ checks passed$/u,
+      );
+      const rows = fold.querySelectorAll(".check-row");
+      expect(rows.length).toBeGreaterThanOrEqual(4);
+      expect(fold.querySelectorAll(".check-row .check-ok")).toHaveLength(rows.length);
+    }
+    // Each summary is named by its group's title, then its own words, so no two folds share a
+    // name for assistive technology.
+    const named = [...folds].map((fold) => {
+      const summary = fold.querySelector(":scope > summary");
+      const title = fold.closest(".check-group")?.querySelector(":scope > h3");
+      expect(summary?.getAttribute("aria-labelledby")).toBe(`${title?.id} ${summary?.id}`);
+      return `${title?.textContent} ${summary?.textContent?.trim()}`;
+    });
+    expect(new Set(named).size).toBe(named.length);
+    // One failing role keeps its whole group open, beside the other three that passed.
+    const failing = await documentOf(
+      configReport({ capabilities: { member_role_id: "Role is above TaruBot" } }),
+    );
+    const roles = [...failing.document.querySelectorAll(".check-group")].find(
+      (group) => group.querySelector("h3")?.textContent === "Access roles",
+    );
+    expect(roles?.querySelectorAll(".check-row")).toHaveLength(4);
+    expect(roles?.querySelector("details")).toBeNull();
+    // Across every state, no token but [OK] is ever inside a fold.
+    for (const { document } of [healthy, failing])
+      expect(
+        document.querySelectorAll(
+          "details.check-group__fold :is(.check-fail, .check-warn, .check-wait, .check-off)",
+        ),
+      ).toHaveLength(0);
+  });
+
+  test("defines each fact once, and gives every disclosure a summary", async () => {
+    const { document } = await documentOf(
+      configReport({
+        guild: configGuild({ guest_grandfather: "completed" }),
+        fc: fcRow({ last_attempt_at: ROSTER_AT, last_error: "rate_limited" }),
+      }),
+    );
+    // The state row repeats three labels as a list, never as a second dt for the same term.
+    const labels = [...document.querySelectorAll("dt")].map((dt) => dt.textContent);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      [...document.querySelectorAll('[aria-label="Current configuration state"] li')].map(
+        (item) => item.querySelector(".orr-label")?.textContent,
+      ),
+    ).toEqual(["Discord changes", "Onboarding", "Role layout"]);
+    for (const details of document.querySelectorAll("details"))
+      expect(details.querySelector(":scope > summary")?.textContent?.trim()).not.toBe("");
+    expect(fact(document, "Last roster error").querySelector("pre code")?.textContent).toBe(
+      "rate_limited",
+    );
+  });
+
+  test("every class the view renders has a rule in the stylesheet", async () => {
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    // Hooks drawn entirely by the classes beside them: .featured is the holographic card, and
+    // [OFF] wears the neutral look every .check starts with (components.ts).
+    const hooks = new Set(["featured", "check-off"]);
+    const classes = new Set<string>();
+    for (const report of [
+      configReport(),
+      configReport({
+        guild: configGuild({ fc_id: null, guest_grandfather: "pending" }),
+        effectsMode: "deployment_disabled",
+      }),
+      configReport({
+        capabilities: { member_role_id: `Missing permissions for <@&${ROLE.member}>` },
+        fc: fcRow({ fresh: false, last_successful_roster_at: ROSTER_AT, last_error: "x" }),
+        effectsMode: "awaiting_activation",
+      }),
+    ]) {
+      const names: WebNames = {
+        roles: new Map([[ROLE.member, "Member"]]),
+        channels: new Map([[CHANNEL.ledger, "ledger"]]),
+        users: new Map(),
+      };
+      const { document } = await documentOf(report, names);
+      for (const element of document.querySelectorAll("[class]"))
+        for (const name of element.classList) classes.add(name);
+    }
+    expect(classes.size).toBeGreaterThan(30);
+    for (const name of classes)
+      if (!hooks.has(name))
+        expect({ name, styled: new RegExp(`\\.${name}(?![\\w-])`, "u").test(css) }).toEqual({
+          name,
+          styled: true,
+        });
   });
 });

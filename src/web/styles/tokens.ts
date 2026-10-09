@@ -1,0 +1,346 @@
+/**
+ * The design tokens for the dashboard stylesheet: custom properties only, dark only, and the exact
+ * text of site/src/styles/tokens.css, the token source both web surfaces share. The docs can't
+ * import from src/ (their Pages build runs only on changes under site/, and docs-site.test.ts
+ * scans only site/), so each surface keeps its own copy and tests/unit/web-parity.test.ts fails
+ * when the two differ. Edit the site file, then copy its text here: it holds no backslash,
+ * backtick or "${", so the template literal keeps it byte for byte.
+ */
+export const TOKENS_CSS = `/*
+ * TaruBot's design tokens, shared by the officer dashboard and the documentation site. Ported from
+ * the Orrery design system export (tokens/colors.css, typography.css, spacing.css, effects.css and
+ * motion.css, in that order), dark only. Deliberate changes from the export: the display face is
+ * Sora instead of the export's, with the display scale, weight and tracking retuned for it (see
+ * Typography below); type sizes are in rem; there is no --holo-conic token (see Holographic below)
+ * and no unused --holo-shift property.
+ *
+ * site/src/styles/tokens.css is the source. src/web/styles/tokens.ts carries the same text for the
+ * dashboard, and tests/unit/web-parity.test.ts fails when the two differ: edit the site file, then
+ * copy its text there. No @font-face here: each surface declares its own, as the font URLs differ.
+ */
+
+/* Color. Neutrals are an indigo-tinted "night"; accents share L/C and vary the hue. */
+:root {
+  color-scheme: dark;
+
+  /* Night: base neutrals */
+  --night-975: oklch(0.095 0.024 280);
+  --night-950: oklch(0.12 0.03 280);
+  --night-900: oklch(0.15 0.036 280);
+  --night-850: oklch(0.18 0.042 280);
+  --night-800: oklch(0.215 0.047 280);
+  --night-700: oklch(0.26 0.052 280);
+  --night-600: oklch(0.33 0.05 280);
+  --night-500: oklch(0.43 0.045 280);
+  --night-400: oklch(0.56 0.038 280);
+  --night-300: oklch(0.69 0.03 280);
+  --night-200: oklch(0.82 0.02 280);
+  --night-100: oklch(0.91 0.014 280);
+  --night-50: oklch(0.97 0.008 280);
+
+  /* Accents: L 0.80 / C 0.13 shared, hue varies */
+  --cyan-200: oklch(0.93 0.055 210);
+  --cyan-400: oklch(0.8 0.13 210);
+  --cyan-600: oklch(0.62 0.12 214);
+  --cyan-900: oklch(0.3 0.07 220);
+
+  --violet-200: oklch(0.92 0.05 298);
+  --violet-400: oklch(0.8 0.13 298);
+  --violet-600: oklch(0.6 0.15 296);
+  --violet-900: oklch(0.29 0.09 292);
+
+  /* Rose: a holographic stop only, not a UI accent */
+  --rose-400: oklch(0.8 0.13 350);
+
+  /* Starlight: a warm highlight for stars and rare emphasis */
+  --starlight-400: oklch(0.88 0.09 85);
+
+  /* Semantic hues, from the same L/C family */
+  --green-400: oklch(0.8 0.13 162);
+  --green-900: oklch(0.3 0.06 165);
+  --amber-400: oklch(0.82 0.13 78);
+  --amber-900: oklch(0.31 0.06 70);
+  --red-400: oklch(0.74 0.15 18);
+  --red-900: oklch(0.3 0.08 18);
+
+  /* Semantic aliases */
+  --bg-void: var(--night-975);
+  --bg-app: var(--night-950);
+  --bg-raised: var(--night-900);
+  --surface-1: var(--night-850);
+  --surface-2: var(--night-800);
+  --surface-3: var(--night-700);
+  --surface-hover: oklch(0.8 0.06 280 / 0.06);
+  --surface-active: oklch(0.8 0.08 280 / 0.1);
+  --surface-selected: oklch(0.8 0.13 210 / 0.1);
+  --scrim: oklch(0.08 0.03 280 / 0.72);
+
+  --border-subtle: oklch(0.82 0.05 280 / 0.08);
+  --border-default: oklch(0.82 0.05 280 / 0.14);
+  --border-strong: oklch(0.86 0.06 280 / 0.26);
+  --border-accent: oklch(0.8 0.13 210 / 0.55);
+
+  /* --text-faint is under 4.5:1 on every surface: never use it for text that carries meaning. */
+  --text-primary: var(--night-50);
+  --text-secondary: var(--night-200);
+  --text-muted: var(--night-300);
+  --text-faint: var(--night-400);
+  --text-on-accent: var(--night-975);
+  --text-accent: var(--cyan-400);
+  --text-link: var(--cyan-400);
+  --text-link-hover: var(--cyan-200);
+
+  --accent: var(--cyan-400);
+  --accent-strong: var(--cyan-200);
+  --accent-deep: var(--cyan-900);
+  --accent-2: var(--violet-400);
+  --accent-2-deep: var(--violet-900);
+  --focus-ring: var(--cyan-400);
+
+  --success: var(--green-400);
+  --success-bg: oklch(0.8 0.13 162 / 0.12);
+  --warning: var(--amber-400);
+  --warning-bg: oklch(0.82 0.13 78 / 0.12);
+  --danger: var(--red-400);
+  --danger-bg: oklch(0.74 0.15 18 / 0.13);
+  --info: var(--cyan-400);
+  --info-bg: oklch(0.8 0.13 210 / 0.12);
+
+  /* Presence dots (vocabulary from the design system) */
+  --presence-online: var(--green-400);
+  --presence-idle: var(--amber-400);
+  --presence-dnd: var(--red-400);
+  --presence-offline: var(--night-400);
+}
+
+/*
+ * Typography. The display face (Sora) for titles and the wordmark, sans for the interface, mono for
+ * labels and readouts. Sizes are in rem, so text follows the reader's default font size; the px
+ * equivalents below are at the usual 16px default.
+ */
+:root {
+  --font-display: "Sora", "Manrope", system-ui, sans-serif;
+  --font-sans: "Manrope", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* Size scale: 10, 11, 13, 14, 16, 18 and 22px */
+  --text-2xs: 0.625rem;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.375rem;
+
+  /*
+   * Display scale: 22, 28, 36, 48 and 64px. Sora is wider and heavier than the export's display
+   * face, so each step is about three quarters of the export's (28 to 88px), set at weight 600.
+   */
+  --display-sm: 1.375rem;
+  --display-md: 1.75rem;
+  --display-lg: 2.25rem;
+  --display-xl: 3rem;
+  --display-2xl: 4rem;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.1;
+  --leading-snug: 1.3;
+  --leading-normal: 1.55;
+
+  /* The display face: tight at display sizes, nearly normal for small titles and the wordmark. */
+  --tracking-display: -0.025em;
+  --tracking-title: -0.01em;
+  --tracking-ui: -0.005em;
+  --tracking-label: 0.14em;
+  --tracking-readout: 0.02em;
+
+  /* Semantic type roles (font shorthand) */
+  --type-display-hero: 600 var(--display-2xl) / 1.05 var(--font-display);
+  --type-h1: 600 var(--display-lg) / 1.1 var(--font-display);
+  --type-h2: 600 var(--display-md) / 1.15 var(--font-display);
+  --type-h3: 600 var(--display-sm) / 1.2 var(--font-display);
+  --type-title: 600 var(--text-xl) / 1.3 var(--font-sans);
+  --type-subtitle: 600 var(--text-lg) / 1.35 var(--font-sans);
+  --type-body: 400 var(--text-md) / 1.55 var(--font-sans);
+  --type-body-lg: 400 var(--text-lg) / 1.6 var(--font-sans);
+  --type-ui: 500 var(--text-md) / 1.3 var(--font-sans);
+  --type-ui-sm: 500 var(--text-sm) / 1.3 var(--font-sans);
+  --type-caption: 400 var(--text-sm) / 1.45 var(--font-sans);
+  --type-label: 500 var(--text-xs) / 1.2 var(--font-mono);
+  --type-readout: 500 var(--text-md) / 1.2 var(--font-mono);
+  --type-readout-lg: 400 1.75rem / 1 var(--font-mono);
+  --type-code: 400 var(--text-sm) / 1.5 var(--font-mono);
+}
+
+/* Spacing, sizing and layout. A 4px base and balanced density. */
+:root {
+  --space-0: 0px;
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* Control heights */
+  --control-sm: 30px;
+  --control-md: 36px;
+  --control-lg: 44px;
+
+  /* Radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 28px;
+  --radius-pill: 999px;
+
+  /* Layout */
+  --sidebar-w: 248px;
+  --topbar-h: 60px;
+  --content-max: 1180px;
+  --gutter: var(--space-8);
+  --card-pad: var(--space-5);
+
+  /* Z layers */
+  --z-sticky: 10;
+  --z-dropdown: 40;
+  --z-overlay: 80;
+  --z-toast: 100;
+  --z-tooltip: 120;
+}
+
+/*
+ * Effects: elevation, glow, glass and the holographic gradients. --holo-angle is registered so an
+ * animation interpolates it as an angle (an unregistered property would jump), and inherits so a
+ * pseudo-element reads its host's angle.
+ */
+@property --holo-angle {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+
+:root {
+  /* Elevation: deep and cool, never pure black */
+  --shadow-1: 0 1px 2px oklch(0.05 0.03 280 / 0.5), 0 6px 16px -8px oklch(0.05 0.03 280 / 0.7);
+  --shadow-2: 0 2px 4px oklch(0.05 0.03 280 / 0.5), 0 16px 32px -12px oklch(0.05 0.03 280 / 0.8);
+  --shadow-3: 0 4px 8px oklch(0.05 0.03 280 / 0.5), 0 32px 64px -16px oklch(0.04 0.03 280 / 0.9);
+  --inner-highlight: inset 0 1px 0 0 oklch(1 0 0 / 0.07);
+  --inner-shade: inset 0 -1px 0 0 oklch(0 0 0 / 0.25);
+
+  /* Glows */
+  --glow-cyan-sm: 0 0 10px oklch(0.8 0.13 210 / 0.35);
+  --glow-cyan: 0 0 2px oklch(0.8 0.13 210 / 0.6), 0 0 22px oklch(0.8 0.13 210 / 0.32);
+  --glow-cyan-lg:
+    0 0 3px oklch(0.8 0.13 210 / 0.6), 0 0 40px oklch(0.8 0.13 210 / 0.38),
+    0 0 80px oklch(0.8 0.13 210 / 0.18);
+  --glow-violet-sm: 0 0 10px oklch(0.8 0.13 298 / 0.35);
+  --glow-violet: 0 0 2px oklch(0.8 0.13 298 / 0.6), 0 0 22px oklch(0.8 0.13 298 / 0.32);
+  --glow-holo: 0 0 18px oklch(0.8 0.13 210 / 0.28), 0 0 36px oklch(0.8 0.13 298 / 0.22);
+  --glow-danger: 0 0 2px oklch(0.74 0.15 18 / 0.6), 0 0 20px oklch(0.74 0.15 18 / 0.3);
+  --glow-success: 0 0 10px oklch(0.8 0.13 162 / 0.4);
+  --text-glow: 0 0 16px oklch(0.8 0.13 210 / 0.45);
+  --text-glow-soft: 0 0 24px oklch(0.85 0.08 260 / 0.3);
+  --focus-glow:
+    0 0 0 1px var(--bg-app), 0 0 0 3px oklch(0.8 0.13 210 / 0.75),
+    0 0 18px oklch(0.8 0.13 210 / 0.35);
+
+  /* Glass */
+  --glass-fill: linear-gradient(
+    180deg,
+    oklch(0.3 0.055 280 / 0.46) 0%,
+    oklch(0.2 0.045 280 / 0.34) 100%
+  );
+  --glass-fill-strong: linear-gradient(
+    180deg,
+    oklch(0.27 0.055 280 / 0.82) 0%,
+    oklch(0.19 0.045 280 / 0.78) 100%
+  );
+  --glass-blur: blur(18px) saturate(150%);
+  --glass-border: oklch(0.86 0.06 280 / 0.14);
+  --glass-edge: inset 0 1px 0 0 oklch(1 0 0 / 0.09), inset 0 0 0 1px oklch(0.86 0.06 280 / 0.06);
+
+  /*
+   * Holographic: a pastel iridescence, cyan to violet to rose and back. There is deliberately no
+   * --holo-conic token. A custom property's var() references are resolved on the element that
+   * declares it, so a conic gradient declared here would freeze --holo-angle at its initial 0deg
+   * and the rotating edge would never turn. A rule that draws the edge writes
+   * conic-gradient(from var(--holo-angle, 0deg), var(--holo-stops)) itself; the 0deg fallback
+   * keeps the edge visible in browsers without @property.
+   */
+  --holo-stops:
+    var(--cyan-400), var(--violet-400), var(--rose-400), var(--violet-400), var(--cyan-400);
+  --holo-linear: linear-gradient(110deg, var(--holo-stops));
+  --holo-text: linear-gradient(
+    100deg,
+    var(--cyan-200) 0%,
+    var(--violet-400) 28%,
+    var(--rose-400) 46%,
+    var(--cyan-400) 68%,
+    var(--violet-200) 100%
+  );
+  --holo-sheen: linear-gradient(115deg, transparent 35%, oklch(1 0 0 / 0.22) 48%, transparent 62%);
+  --holo-fill: linear-gradient(
+    110deg,
+    oklch(0.8 0.13 210 / 0.16),
+    oklch(0.8 0.13 298 / 0.16) 50%,
+    oklch(0.8 0.13 350 / 0.12)
+  );
+
+  /* Nebula washes: page backdrops behind glass, used sparingly */
+  --nebula-cyan: radial-gradient(60% 50% at 20% 0%, oklch(0.5 0.12 220 / 0.22), transparent 70%);
+  --nebula-violet: radial-gradient(
+    50% 45% at 85% 10%,
+    oklch(0.45 0.16 298 / 0.22),
+    transparent 70%
+  );
+}
+
+/* Motion. Slow ambient loops (shimmer drifts, stars twinkle, orbits turn); quick feedback. */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  --dur-instant: 80ms;
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+  --dur-slow: 380ms;
+  --dur-enter: 460ms;
+
+  /* Ambient loops */
+  --dur-holo: 9s;
+  --dur-sheen: 6s;
+  --dur-twinkle: 5s;
+  --dur-orbit: 60s;
+  --dur-pulse: 2.8s;
+}
+
+/*
+ * Reduced motion zeroes the ambient loops here. Entrances, hover lift, press scale and sheen are
+ * stopped by each surface's own reduced-motion rules, which these durations can't reach.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-holo: 0s;
+    --dur-sheen: 0s;
+    --dur-twinkle: 0s;
+    --dur-orbit: 0s;
+    --dur-pulse: 0s;
+  }
+}
+`;

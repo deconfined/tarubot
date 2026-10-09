@@ -1,0 +1,153 @@
+/*
+ * Starlight's custom properties, bound to the design tokens in tokens.css. Starlight's components
+ * and Pagefind's search UI (which Starlight themes through the same properties) take their colors,
+ * shadows and type from here, so most of the site follows the design system without a selector.
+ *
+ * This file and the two after it are unlayered, so they win over all of Starlight's own CSS, which
+ * sits in @layer starlight.*. That is why broad element selectors are scoped the way Starlight
+ * scopes its own Markdown styles, and why the colors below are inside @media screen: Starlight's
+ * print.css forces its light palette by redefining these same properties, but it is linked before
+ * this file and is also unlayered, so an unconditional override here would print pale text on
+ * white paper. Fonts and sizes apply in print too.
+ */
+
+@media screen {
+  /* ::backdrop too, as Starlight declares them: the search dialog's backdrop reads them. */
+  :root,
+  ::backdrop {
+    /*
+     * Neutrals, light to dark. gray-3 carries text (the footer, the table of contents, the edit
+     * link), so it is --text-muted: --text-faint would fail 4.5:1. gray-4 only draws rules and
+     * the search results' tree lines.
+     */
+    --sl-color-white: var(--text-primary);
+    --sl-color-gray-1: var(--night-100);
+    --sl-color-gray-2: var(--text-secondary);
+    --sl-color-gray-3: var(--text-muted);
+    --sl-color-gray-4: var(--night-400);
+    --sl-color-gray-5: var(--night-600);
+    --sl-color-gray-6: var(--surface-1);
+    --sl-color-black: var(--bg-app);
+
+    --sl-color-accent-low: var(--accent-deep);
+    --sl-color-accent: var(--accent);
+    --sl-color-accent-high: var(--accent-strong);
+
+    --sl-color-text: var(--text-secondary);
+    --sl-color-text-accent: var(--text-link);
+    --sl-color-text-invert: var(--text-on-accent);
+    --sl-color-bg: var(--bg-app);
+    --sl-color-bg-nav: var(--bg-app);
+    --sl-color-bg-sidebar: var(--bg-app);
+    --sl-color-bg-inline-code: var(--surface-2);
+    --sl-color-bg-accent: var(--accent-strong);
+    --sl-color-hairline-light: var(--border-default);
+    --sl-color-hairline: var(--border-subtle);
+    --sl-color-hairline-shade: var(--border-subtle);
+    --sl-color-backdrop-overlay: var(--scrim);
+
+    /*
+     * Asides use one hue each: -low is the tinted background, the base hue draws the rule, and
+     * -high colors the title and links. Each tone keeps its own color for all three uses, as the
+     * design system's badges do: note is info, tip is the second accent, caution is warning.
+     */
+    --sl-color-blue-low: var(--info-bg);
+    --sl-color-blue: var(--info);
+    --sl-color-blue-high: var(--info);
+    --sl-color-purple-low: color-mix(in oklch, var(--accent-2) 12%, transparent);
+    --sl-color-purple: var(--accent-2);
+    --sl-color-purple-high: var(--accent-2);
+    --sl-color-orange-low: var(--warning-bg);
+    --sl-color-orange: var(--warning);
+    --sl-color-orange-high: var(--warning);
+    --sl-color-red-low: var(--danger-bg);
+    --sl-color-red: var(--danger);
+    --sl-color-red-high: var(--danger);
+    --sl-color-green-low: var(--success-bg);
+    --sl-color-green: var(--success);
+    --sl-color-green-high: var(--success);
+
+    --sl-shadow-sm: var(--shadow-1);
+    --sl-shadow-md: var(--shadow-2);
+    --sl-shadow-lg: var(--shadow-3);
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--accent) 32%, transparent);
+    color: var(--text-primary);
+  }
+}
+
+/*
+ * Type. Prose stays at Starlight's 16px (rem, so it follows the reader's browser setting) with the
+ * design's long-form line height, in Manrope. Headings follow the display scale: h1 and h2 are set
+ * in the display face (Sora) below, h3 and smaller in Manrope.
+ */
+:root {
+  --sl-font: var(--font-sans);
+  /*
+   * JetBrains Mono's latin subset has no box-drawing, arrow or check-mark glyphs (the system
+   * diagram in architecture/overview.md, the documented status markers). The browser takes each
+   * missing glyph from the next family that has it, so the families after it are monospaced faces
+   * with JetBrains Mono's 0.6em advance, which keeps a diagram's columns aligned: Menlo on macOS,
+   * DejaVu Sans Mono and Liberation Mono on Linux, Lucida Console and Courier New on Windows.
+   * Consolas, the usual Windows monospace, is 0.55em wide and would pull the boxes apart.
+   */
+  --sl-font-mono:
+    "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", "Lucida Console", "Courier New",
+    monospace;
+  --sl-line-height: 1.6;
+
+  --sl-text-h1: 1.75rem;
+  --sl-text-h2: 1.375rem;
+  --sl-text-h3: 1.1875rem;
+  --sl-text-h4: 1.0625rem;
+  --sl-text-h5: 1rem;
+}
+
+@media (min-width: 50em) {
+  :root {
+    --sl-text-h1: 2.25rem;
+    --sl-text-h2: 1.5rem;
+    --sl-text-h3: 1.25rem;
+    --sl-text-h4: 1.125rem;
+  }
+}
+
+/*
+ * The display face (Sora): page titles (the splash hero's and every page's h1#_top), Markdown h1
+ * and h2, and the site title, the wordmark. Weight 600, with synthesis off: Sora has no italic,
+ * and nothing may fake one or a weight. Display sizes track tight; the small wordmark nearly
+ * normal.
+ */
+h1#_top,
+.sl-markdown-content :is(h1, h2):not(:where(.not-content *)),
+.site-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-synthesis: none;
+  letter-spacing: var(--tracking-display);
+}
+
+.site-title {
+  letter-spacing: var(--tracking-title);
+}
+
+h1#_top,
+.sl-markdown-content :is(h1, h2):not(:where(.not-content *)) {
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+.sl-markdown-content :is(h3, h4, h5, h6):not(:where(.not-content *)) {
+  letter-spacing: var(--tracking-ui);
+}
+
+/*
+ * The other half of keeping diagrams aligned: some renderers (Chromium on Linux) round the first
+ * font's glyph advances to whole pixels but not a fallback font's, so a row of box-drawing glyphs
+ * drifts against a row of letters. Geometric precision keeps every advance fractional.
+ */
+.expressive-code pre {
+  text-rendering: geometricPrecision;
+}

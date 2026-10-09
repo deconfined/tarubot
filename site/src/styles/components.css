@@ -1,0 +1,845 @@
+/*
+ * Starlight's components in the design system's dress: glass chrome over the page backdrop,
+ * design-system buttons, cards, tables, callouts and labels. Ported from the Orrery export's
+ * styles/components.css onto Starlight's own markup, which the site doesn't otherwise override.
+ *
+ * Like theme.css this is unlayered and beats Starlight's layered CSS whatever the specificity, so
+ * Markdown rules keep Starlight's own scoping (.sl-markdown-content … :not(:where(.not-content *)))
+ * and never reach code blocks, components or Pagefind's search UI. All of it is screen-only:
+ * printing falls back to Starlight's light print styles, which this file would otherwise outrank.
+ * Text sizes are in rem, so they follow the reader's browser setting.
+ */
+
+@media screen {
+  /* ---------- Header: a glass bar the page scrolls under ---------- */
+
+  /* .page > .header is PageFrame's fixed <header>; Header.astro's inner div shares the class. */
+  .page > .header {
+    background: color-mix(in oklch, var(--bg-void) 55%, transparent);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--inner-highlight);
+  }
+
+  /*
+   * The wordmark: the name in the display face (Sora), within the dashboard's 18–20px range: 18px
+   * on a 320px phone, scaling to 20px by about 22rem (356px). It keeps to the width the header
+   * leaves it beside the search and menu buttons, so a large text setting on a phone can't cut it
+   * off.
+   */
+  .site-title {
+    font-size: min(1.25rem, 5.625vw);
+    color: var(--text-primary);
+  }
+
+  /* The search field (from 50rem; a magnifier button below): the design's sunken input. */
+  site-search button[data-open-modal] {
+    color: var(--text-secondary);
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
+  }
+
+  site-search button[data-open-modal]:hover {
+    color: var(--text-primary);
+  }
+
+  /*
+   * Ctrl K, and any <kbd> in a page: the design's key cap. No display here: Starlight shows the
+   * search shortcut only from 50rem, through its own utility classes.
+   */
+  site-search button > kbd,
+  .sl-markdown-content kbd:not(:where(.not-content *)) {
+    align-items: center;
+    gap: 0.25em;
+    min-width: 1.25rem;
+    padding: 0.125rem 0.3125rem;
+    border-radius: var(--radius-xs);
+    font: 500 0.6875rem / 1 var(--font-mono);
+    color: var(--text-muted);
+    background: var(--surface-2);
+    box-shadow:
+      inset 0 0 0 1px var(--border-default),
+      inset 0 -1px 0 var(--border-default);
+  }
+
+  site-search button > kbd kbd {
+    font: inherit;
+  }
+
+  .sl-markdown-content kbd:not(:where(.not-content *)) {
+    display: inline-block;
+  }
+
+  /* The divider after the social links fenced off theme and language pickers this site lacks. */
+  .right-group > .social-icons::after {
+    content: none;
+  }
+
+  .social-icons a {
+    color: var(--text-secondary);
+    transition: color var(--dur-fast) var(--ease-out);
+  }
+
+  .social-icons a:hover {
+    color: var(--text-primary);
+  }
+
+  /* The phone menu button sits on the glass header: solid, never glass on glass. */
+  .sl-menu-button {
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    background-color: var(--surface-2);
+    box-shadow:
+      inset 0 0 0 1px var(--border-default),
+      var(--inner-highlight);
+  }
+
+  .sl-menu-button:has(~ :popover-open) {
+    background-color: var(--surface-active);
+    box-shadow:
+      inset 0 0 0 1px var(--border-accent),
+      var(--inner-highlight);
+  }
+
+  /* ---------- Sidebar: glass beside the content, the full-screen menu on phones ---------- */
+
+  .sidebar-pane {
+    background: var(--glass-fill-strong);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+  }
+
+  /* Group names read as the design's instrument labels: small mono capitals. */
+  .sidebar-content summary .large {
+    font: 500 0.6875rem / 1.2 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .sidebar-content summary .caret {
+    color: var(--text-muted);
+  }
+
+  .sidebar-content a {
+    border-radius: var(--radius-sm);
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
+  }
+
+  .sidebar-content a:hover {
+    color: var(--text-primary);
+    background-color: var(--surface-hover);
+  }
+
+  /*
+   * The current page: a lit fill with an inner ring, as in the design system's navigation. The
+   * ring's accent edge is the cue that reaches 3:1 against the sidebar, as the dashboard's
+   * navigation pill does; the fill and the weight only add to it.
+   */
+  .sidebar-content a[aria-current="page"],
+  .sidebar-content a[aria-current="page"]:hover,
+  .sidebar-content a[aria-current="page"]:focus {
+    font-weight: 600;
+    color: var(--text-primary);
+    background-color: var(--surface-active);
+    box-shadow:
+      inset 0 0 0 1px var(--border-accent),
+      var(--inner-highlight);
+  }
+
+  /* ---------- On this page ---------- */
+
+  .right-sidebar-panel h2 {
+    margin-bottom: 0.75rem;
+    font: 500 0.6875rem / 1.2 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .right-sidebar-panel a {
+    transition: color var(--dur-fast) var(--ease-out);
+  }
+
+  /* Phones and tablets: the contents bar under the header, glass like the header itself. */
+  mobile-starlight-toc nav {
+    background: color-mix(in oklch, var(--bg-void) 55%, transparent);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    border-top-color: var(--border-subtle);
+  }
+
+  mobile-starlight-toc .toggle {
+    border-color: var(--border-default);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-2);
+    color: var(--text-secondary);
+  }
+
+  mobile-starlight-toc details[open] .toggle {
+    border-color: var(--border-accent);
+  }
+
+  mobile-starlight-toc .dropdown {
+    border-color: var(--border-subtle);
+    background-color: var(--surface-1);
+  }
+
+  /* ---------- Page content ---------- */
+
+  /* Links stay underlined, so color is never the only cue: a quiet line that firms up on hover. */
+  .sl-markdown-content a:not(.sl-anchor-link):not(:where(.not-content *)) {
+    text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.2em;
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      text-decoration-color var(--dur-fast) var(--ease-out);
+  }
+
+  .sl-markdown-content a:not(.sl-anchor-link):hover:not(:where(.not-content *)) {
+    text-decoration-color: currentColor;
+  }
+
+  /* Hover lightens body links; a link inside a callout keeps the callout's color. */
+  .sl-markdown-content a:hover:not(:where(.not-content *, .starlight-aside *)) {
+    color: var(--text-link-hover);
+  }
+
+  .sl-markdown-content strong:not(:where(.not-content *)) {
+    color: var(--text-primary);
+  }
+
+  .sl-markdown-content li:not(:where(.not-content *))::marker {
+    color: var(--text-muted);
+  }
+
+  /* A chip that wraps onto another line gets its padding, ring and corners on every line. */
+  .sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
+    border-radius: var(--radius-xs);
+    box-shadow: inset 0 0 0 1px var(--border-subtle);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .sl-markdown-content blockquote:not(:where(.not-content *)) {
+    border-inline-start: 2px solid var(--border-strong);
+    color: var(--text-secondary);
+  }
+
+  /* The design's hairline: a rule that fades out at both ends. */
+  .sl-markdown-content hr:not(:where(.not-content *)) {
+    height: 1px;
+    border: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--border-strong) 20%,
+      var(--border-strong) 80%,
+      transparent
+    );
+  }
+
+  /*
+   * Tables: a solid card with the design's mono capital column heads. The build puts each Markdown
+   * table in a labelled scroll region the keyboard can focus (astro.config.mjs), and the region is
+   * the card: fit-content hugs the table, and a table wider than the column scrolls inside it
+   * rather than widening the page. Starlight makes the table itself the scrolling block; here it
+   * is a table again. A narrow column stacks the rows instead (the @container rule below), so the
+   * column is a container for it.
+   */
+  .sl-markdown-content:has(.table-scroll) {
+    container: markdown / inline-size;
+  }
+
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)) {
+    width: fit-content;
+    max-width: 100%;
+    overflow-x: auto;
+    border-radius: var(--radius-lg);
+    background-color: var(--surface-1);
+    box-shadow:
+      inset 0 0 0 1px var(--border-subtle),
+      var(--inner-highlight);
+  }
+
+  .sl-markdown-content .table-scroll:focus-visible {
+    outline-offset: 2px;
+  }
+
+  .sl-markdown-content table:not(:where(.not-content *)) {
+    display: table;
+    overflow: visible;
+    font-size: 0.9375rem;
+  }
+
+  .sl-markdown-content :is(th, td):not(:where(.not-content *)) {
+    padding: 0.625rem 1rem;
+    border-bottom-color: var(--border-subtle);
+  }
+
+  .sl-markdown-content th:not(:where(.not-content *)) {
+    vertical-align: bottom;
+    font: 500 0.6875rem / 1.3 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .sl-markdown-content tr:last-child > td:not(:where(.not-content *)) {
+    border-bottom: 0;
+  }
+
+  .sl-markdown-content tbody tr:hover:not(:where(.not-content *)) {
+    background-color: var(--surface-hover);
+  }
+
+  /*
+   * Callouts (Starlight's asides): the design's tinted tone panels. A real border rather than an
+   * inset shadow, so the panel keeps its edge in forced colors.
+   */
+  .starlight-aside {
+    padding: 1rem 1.25rem;
+    border: 1px solid color-mix(in oklch, var(--sl-color-asides-border) 30%, transparent);
+    border-inline-start: 3px solid var(--sl-color-asides-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--inner-highlight);
+  }
+
+  /*
+   * A title is text with inline code in it. Starlight lays it out as a flex row, which makes each
+   * run of text a separate item that can't wrap past the next, so a long title overflows a phone.
+   * As a block with a hanging icon it wraps like any line of text.
+   */
+  .starlight-aside__title {
+    display: block;
+    position: relative;
+    padding-inline-start: 1.75rem;
+    font-size: 1rem;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-ui);
+  }
+
+  .starlight-aside__icon {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    font-size: 1.25em;
+  }
+
+  /* ---------- Page footer ---------- */
+
+  /* Previous and next: interactive glass cards, lifted on hover. */
+  .pagination-links a {
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    font: 500 0.6875rem / 1.6 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--glass-fill);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--glass-edge), var(--shadow-1);
+    transition:
+      transform var(--dur-base) var(--ease-out),
+      border-color var(--dur-base) var(--ease-out),
+      box-shadow var(--dur-base) var(--ease-out);
+  }
+
+  .pagination-links a:hover {
+    transform: translateY(-2px);
+    border-color: var(--border-accent);
+    box-shadow: var(--glass-edge), var(--shadow-2), var(--glow-holo);
+  }
+
+  .pagination-links .link-title {
+    font: 600 1.125rem / 1.3 var(--font-sans);
+    letter-spacing: var(--tracking-ui);
+    text-transform: none;
+    color: var(--text-primary);
+  }
+
+  /* ---------- Search dialog ---------- */
+
+  site-search dialog {
+    border-color: var(--glass-border);
+    background: var(--glass-fill-strong);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--glass-edge), var(--shadow-3);
+  }
+
+  /* Pagefind's own properties, beside the ones Starlight sets from the palette. */
+  #starlight__search {
+    --pagefind-ui-border: var(--border-default);
+    --pagefind-ui-border-radius: var(--radius-md);
+  }
+
+  #starlight__search mark {
+    color: var(--text-accent);
+  }
+
+  /* ---------- Buttons: the splash hero's actions, and any link button ---------- */
+
+  .sl-link-button {
+    position: relative;
+    isolation: isolate;
+    min-height: 2.75rem;
+    padding: 0.5rem 1.125rem;
+    border-radius: var(--radius-lg);
+    font: 600 0.9375rem / 1.2 var(--font-sans);
+    letter-spacing: var(--tracking-ui);
+    transition:
+      transform var(--dur-fast) var(--ease-out),
+      box-shadow var(--dur-base) var(--ease-out),
+      color var(--dur-base) var(--ease-out),
+      border-color var(--dur-base) var(--ease-out),
+      background-color var(--dur-base) var(--ease-out);
+  }
+
+  .sl-link-button:active {
+    transform: scale(0.975);
+  }
+
+  .sl-link-button.primary,
+  .sl-link-button.primary:hover {
+    border-color: transparent;
+    color: var(--text-on-accent);
+    background: var(--accent);
+  }
+
+  /*
+   * The holographic fill, on the hero's primary action only: the page's one call to action.
+   * Dark text on it (the design's rule; white would be under 2:1), a slow drift, and a sheen that
+   * sweeps across on hover from a layer under the label.
+   */
+  .hero .sl-link-button.primary {
+    background: var(--holo-linear);
+    background-size: 200% 100%;
+    animation: orr-holo-drift var(--dur-holo) linear infinite;
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 0.45),
+      inset 0 -1px 0 oklch(0.3 0.08 280 / 0.25),
+      var(--glow-holo);
+  }
+
+  .hero .sl-link-button.primary::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--holo-sheen);
+    background-size: 250% 100%;
+    background-position: 130% 0;
+    opacity: 0;
+    transition:
+      opacity var(--dur-base) var(--ease-out),
+      background-position 0s;
+  }
+
+  .hero .sl-link-button.primary:hover {
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 0.5),
+      inset 0 -1px 0 oklch(0.3 0.08 280 / 0.25),
+      var(--glow-cyan-lg);
+  }
+
+  .hero .sl-link-button.primary:hover::after {
+    opacity: 1;
+    background-position: -30% 0;
+    transition:
+      opacity var(--dur-base) var(--ease-out),
+      background-position 900ms var(--ease-out);
+  }
+
+  .sl-link-button.secondary {
+    border-color: var(--glass-border);
+    color: var(--text-primary);
+    background: var(--glass-fill);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--inner-highlight);
+  }
+
+  .sl-link-button.secondary:hover {
+    border-color: var(--border-accent);
+    color: var(--accent-strong);
+    box-shadow: var(--inner-highlight), var(--glow-cyan-sm);
+  }
+
+  .sl-link-button.minimal {
+    padding-inline: 0.875rem;
+    color: var(--text-secondary);
+  }
+
+  .sl-link-button.minimal:hover {
+    color: var(--text-primary);
+    background-color: var(--surface-hover);
+  }
+
+  /* ---------- The splash ---------- */
+
+  /*
+   * A hero page (the splash, the 404) has no sidebar, so its content lines up with the header's
+   * wordmark: Starlight widens the header's gutter from 50rem but the content's only from 72rem.
+   */
+  :root[data-has-hero] {
+    --sl-content-pad-x: var(--sl-nav-pad-x);
+  }
+
+  /*
+   * Hero: the display face (Sora) up to the display scale's top step, the orbit drawing beside it.
+   * Phones get the dashboard sign-in's brand size, capped by the screen's width as there, so a
+   * large text setting can't push the name past the edge.
+   */
+  .hero h1#_top {
+    font-size: clamp(min(2.75rem, 14vw), 1rem + 4.5vw, var(--display-2xl));
+    line-height: 1.05;
+    color: var(--text-primary);
+  }
+
+  .hero .tagline {
+    font-size: 1.125rem;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .hero .actions {
+    gap: 0.75rem;
+  }
+
+  .hero > .hero-html {
+    width: min(55%, 14rem);
+  }
+
+  /* An instrument scale (the design's astrolabe ticks) between the hero and the page's sections. */
+  .hero + .sl-markdown-content:has(> *)::before {
+    content: "";
+    display: block;
+    height: 7px;
+    margin-bottom: 3rem;
+    background:
+      repeating-linear-gradient(90deg, var(--border-strong) 0 1px, transparent 1px 40px) 0 0 / 100%
+      7px no-repeat,
+      repeating-linear-gradient(90deg, var(--border-default) 0 1px, transparent 1px 8px) 0 100% /
+      100% 3px no-repeat;
+    -webkit-mask: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent);
+    mask: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent);
+  }
+
+  /*
+   * The splash's lists ("Who these pages are for", "What TaruBot does") as a grid of glass cards
+   * over the starfield; each item's bold lead becomes its card title.
+   */
+  .hero + .sl-markdown-content > ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+    gap: 1rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .hero + .sl-markdown-content > ul > li {
+    margin: 0;
+    padding: 1.25rem 1.5rem;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    color: var(--text-muted);
+    background: var(--glass-fill);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--glass-edge), var(--shadow-1);
+  }
+
+  .hero + .sl-markdown-content > ul > li > strong:first-child {
+    display: block;
+    margin-bottom: 0.375rem;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  /*
+   * In "Who these pages are for" each lead is a link to its section: the same white title as the
+   * other grid's leads, keeping its underline as the link cue. The link covers its whole card,
+   * which lifts on hover or keyboard focus like the previous and next links.
+   */
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a) {
+    position: relative;
+    transition:
+      transform var(--dur-base) var(--ease-out),
+      border-color var(--dur-base) var(--ease-out),
+      box-shadow var(--dur-base) var(--ease-out);
+  }
+
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a:is(:hover, :focus-visible)) {
+    transform: translateY(-2px);
+    border-color: var(--border-accent);
+    box-shadow: var(--glass-edge), var(--shadow-2), var(--glow-holo);
+  }
+
+  .hero + .sl-markdown-content > ul > li > strong:first-child > a {
+    color: inherit;
+  }
+
+  .hero + .sl-markdown-content > ul > li > strong:first-child > a::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-lg);
+  }
+}
+
+/*
+ * Below 50rem Starlight gives a hero no top padding, as the splash leads with its drawing. A hero
+ * without one (the generated 404) would put its title right under the header, so it takes the
+ * wider screens' padding, capped for a phone.
+ */
+@media screen and (max-width: 49.99rem) {
+  .hero:not(:has(> .hero-html)) {
+    padding-top: clamp(2.5rem, calc(1rem + 10vmin), 5rem);
+  }
+}
+
+@media screen and (min-width: 50rem) {
+  /* Beside the content the sidebar is a darker, quieter pane than the phone menu. */
+  .sidebar-pane {
+    background: color-mix(in oklch, var(--bg-void) 70%, transparent);
+  }
+
+  site-search button[data-open-modal] {
+    height: 2.25rem;
+    border-color: var(--border-default);
+    border-radius: var(--radius-md);
+    background-color: color-mix(in oklch, var(--bg-void) 70%, transparent);
+    box-shadow: inset 0 2px 6px oklch(0 0 0 / 0.25);
+  }
+
+  site-search button[data-open-modal]:hover {
+    border-color: var(--border-strong);
+  }
+
+  site-search dialog {
+    border-radius: var(--radius-xl);
+  }
+
+  /*
+   * The drawing beside the title. Up to 72rem it keeps a fixed 14rem, so the four actions fit one
+   * row from about 900px (narrower, the last wraps); from there it widens with the page, past
+   * Starlight's 7fr 4fr.
+   */
+  .hero {
+    grid-template-columns: 1fr 14rem;
+  }
+
+  .hero > .hero-html {
+    width: min(100%, 28rem);
+  }
+}
+
+@media screen and (min-width: 72rem) {
+  .hero {
+    grid-template-columns: 5fr 3fr;
+  }
+}
+
+/*
+ * A column narrower than 32rem (a phone, or between both sidebars on a small laptop) can't show a
+ * table's columns side by side, and scrolling one sideways hides its prose columns entirely. Each
+ * row stacks instead: the first cell leads on a line of its own, the cells after it follow on the
+ * next, each named by its column (data-label, from the build), and the last starts its own line.
+ * The lead's own line keeps a row with short values from pulling its next cells up beside it, so
+ * a table's rows take the same shape. A two-column table needs no names, since its second cell
+ * explains its first. The header row stays for assistive technology, which still reads the cells
+ * as a table through their explicit roles. Screen only, as the container is.
+ */
+@container markdown (max-width: 32rem) {
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)) {
+    width: auto;
+  }
+
+  .sl-markdown-content .table-scroll :is(table, tbody, td):not(:where(.not-content *)) {
+    display: block;
+  }
+
+  /* As blocks they would take Starlight's 1rem gap between Markdown siblings; table parts don't. */
+  .sl-markdown-content .table-scroll :is(tbody, tr, td):not(:where(.not-content *)) {
+    margin: 0;
+  }
+
+  .sl-markdown-content .table-scroll thead:not(:where(.not-content *)) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .sl-markdown-content .table-scroll tr:not(:where(.not-content *)) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.375rem 1rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .sl-markdown-content .table-scroll tr:last-child:not(:where(.not-content *)) {
+    border-bottom: 0;
+  }
+
+  /* min-width lets a cell shrink below a long URL, which then breaks like the rest of the text. */
+  .sl-markdown-content .table-scroll td:not(:where(.not-content *)) {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .sl-markdown-content .table-scroll td:first-child:not(:where(.not-content *)) {
+    flex-basis: 100%;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .sl-markdown-content .table-scroll td:last-child:not(:first-child, :where(.not-content *)) {
+    flex-basis: 100%;
+  }
+
+  .sl-markdown-content
+    .table-scroll
+    td[data-label]:not(:first-child, :nth-child(2):last-child, :where(.not-content *))::before {
+    content: attr(data-label);
+    margin-inline-end: 0.5rem;
+    font: 500 0.6875rem / 1.3 var(--font-mono);
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  /*
+   * The label repeats the column head, which assistive technology already reads with the cell, and
+   * generated text would join the cell's own with no space between them. An empty alternative text
+   * keeps it out; a browser without alternative text in content reads the label too.
+   */
+  @supports (content: "" / "") {
+    .sl-markdown-content
+      .table-scroll
+      td[data-label]:not(:first-child, :nth-child(2):last-child, :where(.not-content *))::before {
+      content: attr(data-label) / "";
+    }
+  }
+}
+
+/* Every focus ring is an outline in the accent, which forced colors keep. */
+@media screen {
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+  }
+
+  .sl-link-button:focus-visible {
+    outline-offset: 3px;
+  }
+}
+
+/* Glass needs transparency: without it, the same panels in the solid raised surface. */
+@media screen and (prefers-reduced-transparency: reduce) {
+  .page > .header,
+  .sidebar-pane,
+  mobile-starlight-toc nav,
+  site-search dialog,
+  .pagination-links a,
+  .sl-link-button.secondary,
+  .hero + .sl-markdown-content > ul > li {
+    background: var(--bg-raised);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/*
+ * Reduced motion: no drift, sheen, hover lift or press. effects.css stops the rest. Each rule
+ * repeats the selector it undoes, so it wins by coming later rather than by !important.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .hero .sl-link-button.primary {
+    animation: none;
+  }
+
+  .hero .sl-link-button.primary::after {
+    display: none;
+  }
+
+  .sl-link-button,
+  .pagination-links a,
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a) {
+    transition: none;
+  }
+
+  .sl-link-button:active,
+  .pagination-links a:hover,
+  .hero + .sl-markdown-content > ul > li:has(> strong:first-child > a:is(:hover, :focus-visible)) {
+    transform: none;
+  }
+}
+
+/*
+ * Forced colors drop backgrounds and shadows, which draw most of the design's edges and states.
+ * Give the panels and controls a real border, keep the current page marked with the system's
+ * selection colors, and show the holographic word as plain text.
+ */
+@media (forced-colors: active) {
+  .sl-link-button,
+  .sl-menu-button,
+  .pagination-links a,
+  .sl-markdown-content .table-scroll:not(:where(.not-content *)),
+  .hero + .sl-markdown-content > ul > li {
+    border: 1px solid CanvasText;
+  }
+
+  .sidebar-content a[aria-current="page"] {
+    forced-color-adjust: none;
+    color: SelectedItemText;
+    background-color: SelectedItem;
+  }
+
+  .orr-holo-text {
+    color: CanvasText;
+    -webkit-text-fill-color: currentColor;
+    background: none;
+    filter: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
+
+/*
+ * Print. Starlight's print.css lightens the page, but code blocks keep the single dark code theme,
+ * whose pale syntax colors would all but vanish on white paper once the browser drops
+ * backgrounds. Print code as plain dark text in a light frame instead, from print.css's palette.
+ */
+@media print {
+  .expressive-code {
+    --ec-codeBg: transparent;
+    --ec-codeFg: var(--sl-color-white);
+    --ec-brdCol: var(--sl-color-gray-5);
+    --ec-frm-edBg: transparent;
+    --ec-frm-edTabBarBg: transparent;
+    --ec-frm-trmBg: transparent;
+    --ec-frm-trmTtbBg: transparent;
+    --ec-frm-trmTtbFg: var(--sl-color-gray-3);
+    --ec-frm-frameBoxShdCssVal: none;
+  }
+
+  .expressive-code .ec-line span[style^="--"] {
+    color: inherit;
+  }
+}

@@ -11,7 +11,7 @@ TaruBot is a single TypeScript process on [Bun](https://bun.sh), with [discord.j
 
 ```text
                          ┌────────────────────────────┐
-  Discord members ──────▶│  Discord (gateway and API) │
+  Discord members ──────►│  Discord (gateway and API) │
                          └─────────────┬──────────────┘
                                        │ interactions, member and
                                        │ role events; role, nickname

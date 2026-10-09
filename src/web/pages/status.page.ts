@@ -10,6 +10,7 @@ export default definePage({
   access: ["officer"],
   requires: [applicationKey, lifecycleKey, gatewayKey],
   nav: "Background work",
+  icon: "activity",
   async get({ actor, guildId, services }) {
     // syncStatus authorizes the actor again at the application boundary, as REQUIREMENTS.md asks
     // of commands and buttons ("reauthorize the current actor").

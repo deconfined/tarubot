@@ -1,21 +1,21 @@
 {
-  "title": "Session: 2.37.1 Caddy worktree acceptance",
-  "objective": "Verify the signed 2.37.1 release on owner-authorized staging: Caddy must validate its public template from a private worktree without broader container privileges or exposed settings. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.38.0 dashboard and documentation redesign review",
+  "objective": "Review the 2.38.0 redesign in a browser on owner-authorized staging: the dashboard and documentation site are dark only, fonts and icons come from TaruBot itself with no third-party request, and routes, data, access and read-only behavior are unchanged. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest, backups and updated stable deploy entry before authorizing the existing staging target's upgrade; preserve entry ownership, mode and SELinux label.",
-    "Configure the reviewed HTTPS origin and OAuth callback. Confirm bundled Caddy validates the public template in its private release worktree; keep central settings private.",
-    "Accept backend/proxy readiness, sole writer lease, scoped command inventory and backup/restore evidence. Check officer login and ordinary-member denial.",
-    "Use a bot-only rehearsal to check compatibility. Approve production only after its own healthy baseline and acceptance prerequisites are ready."
+    "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; this release adds no migration and changes no setting.",
+    "Sign in as an officer and review the server list, Server configuration and Background work on a phone and a desktop: dark only, the server name once in the switcher, exact check tokens and UTC times.",
+    "In the browser's network panel, confirm every request stays on the dashboard's origin (no Google Fonts, no script) and the footer's Third-party licenses link opens.",
+    "Check ordinary-member denial and both sign-outs, then review the published documentation site, including Thank you and Data and privacy. Approve production only after its own healthy baseline."
   ],
   "assistant": [
-    "Reproduce Caddy denial with a 0600 template in a umask-077 Git worktree, then run the corrected entry against real Caddy without read-override capabilities; check release/startup metadata and host transitions.",
+    "Before release, review the credential-free harness from 320 to 1440 px in every review state (checks warn and fail, activation, deployment disabled, empty, cooling, hostile names) and the built documentation site, including reduced motion, forced colors and print.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Serve dashboard pages from the same bot process only when web is enabled; require Discord sign-in and officer authority, and keep server reads scoped.",
+    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; require Discord sign-in and officer authority, and keep server reads scoped.",
     "Keep acquisition and reconciliation in the declared test guild; dashboard pages change no settings and trigger no Discord retries or decisions.",
-    "Expose database, Discord and writer-lease readiness; report 2.37.1, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.38.0, startup time and effect state without pinging members."
   ]
 }
