@@ -44,7 +44,7 @@ Agents hold no host-access key, state, saved plan or state passphrase, and never
 
 ## Versioning and Git
 
-- Any added or changed application functionality requires a SemVer bump in the same PR: patch for compatible fixes, minor for compatible features, major for incompatible changes. Update `CHANGELOG.md` and the startup plan with the release; versions never decrease. Pure documentation, tests, CI and pipeline maintenance need no bot version bump.
+- Any added or changed application functionality requires a SemVer bump in the same PR: patch for compatible fixes, minor for compatible features, major for incompatible changes. Update `CHANGELOG.md`, the startup plan and `src/domain/release-notes.ts` with the release: a plain-words note when members, guests or officers can notice it (Discord, dashboard or docs site), otherwise a short `NO_RELEASE_NOTE` reason; versions never decrease. Pure documentation, tests, CI and pipeline maintenance need no bot version bump.
 - Regenerate affected lockfiles for dependency changes. Apart from release metadata updates, update `test-plans/current.json` before authorized live development testing, not ordinary documentation or source-only sessions.
 - Use feature branches and PRs. Merge commits require current CI/security checks and the owner's code-owner approval; later pushes dismiss that approval.
 - Make signed local commits for coherent, verified milestones, staging only intended files after reviewing status and diffs. Use configured SSH signing with `~/.ssh/id_git`; signing failure means stop, never commit unsigned.

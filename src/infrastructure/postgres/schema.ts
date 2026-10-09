@@ -104,7 +104,7 @@ export const guilds = pgTable("guilds", {
   /**
    * The newest version this guild was told about: MAJOR.MINOR.PATCH[-pre] (the migration's CHECK).
    * Setting a channel for the first time raises it to the running version, so nothing is posted
-   * until the next release with a member note; a delivered or empty post moves it forward with a
+   * until the next release with a release note; a delivered or empty post moves it forward with a
    * compare-and-set. The bot never lowers it, so restarts and rollbacks never post again.
    */
   changelog_version: text("changelog_version"),

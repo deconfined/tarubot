@@ -1,11 +1,11 @@
 ---
 title: Officer notices and update posts
-description: What TaruBot tells officers about Lodestone trouble, unlinked characters, missing channel overrides and members' status changes, and the update posts it shares with members.
+description: What TaruBot tells officers about Lodestone trouble, unlinked characters, missing channel overrides and members' status changes, and the update posts it shares with everyone.
 sidebar:
   order: 9
 ---
 
-TaruBot posts in two channels besides the ledger: officer notices and member status changes in a staff channel, and, if you choose one, short update posts for members. All are sent with mentions turned off, so they never ping anyone.
+TaruBot posts in two channels besides the ledger: officer notices and member status changes in a staff channel, and, if you choose one, short update posts for everyone who uses TaruBot. All are sent with mentions turned off, so they never ping anyone.
 
 ## Officer notices
 
@@ -105,9 +105,9 @@ Linking an FC to a server whose roles are already set up lists its confirmed mem
 
 ## Update posts
 
-When TaruBot starts on a newer version, it can post what's new for members in a channel you choose: one short message, "TaruBot updated to vX.Y.Z", with a one-sentence note for each release since the last post, newest first. The title links the full changelog, and [`/version`](/tarubot/reference/commands/#version) lists the recent commits.
+When TaruBot starts on a newer version, it can post what's new in a channel you choose: one short message, "TaruBot updated to vX.Y.Z", with a one-sentence note for each release since the last post, newest first. At most ten releases are listed; the footer counts any older ones. The title links the full changelog, and [`/version`](/tarubot/reference/commands/#version) lists the recent commits.
 
-- **Only what members notice.** A release that changes nothing for members has no note and isn't listed, and an update with nothing for members posts nothing.
+- **Every release people can notice.** Each release that changes something members, guests or officers can see or do, in Discord, on the officer dashboard or on this site, gets a note in plain words. A release nobody can notice, such as a change to how TaruBot is deployed, isn't listed, and an update with nothing anyone can notice posts nothing.
 - **No repeats.** A restart, a rollback or another update doesn't repeat releases the channel was already told about. Only a crash in the middle of a post or an operator's restore of an older backup can repeat one; see [Monitoring](/tarubot/deploy/monitoring/#update-posts).
 - **Nothing piles up.** Updates released while no channel is set are never posted later.
 
@@ -121,7 +121,7 @@ Officers choose it with [`/config changelog`](/tarubot/reference/commands/#confi
 
 Pick a normal text channel that members and guests can read, and where TaruBot can post. Announcement channels are refused, like every channel setting.
 
-Setting the channel posts nothing at once: the first post comes with the next update that has something for members. Moving it to another channel keeps its place in the release history, so nothing is posted again. To stop the posts, run `/config changelog unset_channel:true`; the channel and its old posts stay.
+Setting the channel posts nothing at once: the first post comes with the next update that has a note. Moving it to another channel keeps its place in the release history, so nothing is posted again. To stop the posts, run `/config changelog unset_channel:true`; the channel and its old posts stay.
 
 ### Visibility with lobby onboarding
 
@@ -138,4 +138,4 @@ Without onboarding, server admins own every channel's permissions, and TaruBot d
 
 - **`! BLOCKED`** on a `changelog.post` job in `/sync status`: TaruBot can't post in the channel. Fix its permissions there, or choose another channel. Saving a `/config` role or channel, the FC link or `/config guest_applications` retries it at once; otherwise it retries by itself about every 10 minutes.
 - **`‖ PAUSED`**: Discord changes are paused for the server or the deployment. The post goes out once they're back on, as one post covering every release since the last.
-- **Nothing in `/sync status`**: there was nothing to post. The update had nothing for members, the channel was unset before the post went out, or the channel had already been told about this version.
+- **Nothing in `/sync status`**: there was nothing to post. No release in the update had a note, the channel was unset before the post went out, or the channel had already been told about this version.

@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.38.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.38.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.38.1 — Announce every release people can notice
+
+- Write an update-post note for every release that members, guests or officers can notice, in Discord, on the dashboard or on the documentation site, not only for member-facing ones. Until now only 2.25.0 and 2.28.0 had notes, so servers moved past every other release without a post. Every release since 2.25.0 now has a plain-words note (twelve, including 2.38.0's and this release's) or a short recorded reason for having none, and the release-notes test fails until a new release has one of the two. A server's next update post lists the notes of releases after the version it last stored, so one that last stored 2.37.x is told about 2.38.0 and this release; releases it already moved past stay unannounced unless an operator lowers that stored version by hand. The `/config changelog` receipt no longer says the posts are for members.
+- This release adds no database migration and changes no setting.
 
 ## 2.38.0 — Rebuild the dashboard and documentation site on one dark design system
 

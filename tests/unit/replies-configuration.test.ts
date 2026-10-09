@@ -1538,7 +1538,7 @@ describe("/config changelog (2.25.0)", () => {
     expect(embedOf("channel.changelog")).toEqual({
       color: 0x57f287,
       title: "Changelog channel set",
-      description: `From the next update on, TaruBot posts what's new for members in ${mention}. Members and guests need to be able to read this channel.`,
+      description: `From the next update on, TaruBot posts what's new in ${mention}. Members and guests need to be able to read this channel.`,
       footer: { text: "Audited · configuration revision 43" },
       timestamp: NOW.toISOString(),
     });
@@ -1632,7 +1632,7 @@ describe("/config changelog (2.25.0)", () => {
         { tone: "pending", title: "Saved, Discord changes paused", timestamp: false },
       );
       expect(paused.description).toStartWith(
-        `From the next update on, TaruBot posts what's new for members in ${mention}.`,
+        `From the next update on, TaruBot posts what's new in ${mention}.`,
       );
     }
   });

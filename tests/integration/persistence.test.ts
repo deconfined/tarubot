@@ -7763,7 +7763,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       [project.version]: "The running release.",
       "99.0.0": "Not released yet.",
     };
-    /** Run one job through the real dispatcher with `notes` as the member-note map. */
+    /** Run one job through the real dispatcher with `notes` as the release-note map. */
     const perform = async (jobId: string, notes: Readonly<Record<string, string>> = NOTES) =>
       new Queue(db, dispatcher(service, sync, access, undefined, notes), () => {}).perform(
         await leased(jobId),

@@ -45,7 +45,7 @@ hero:
 - **Keeps the gil ledger.** Deposits, withdrawals and corrections are exact, numbered, permanent and posted to a channel.
 - **Can gate channels.** Optional lobby onboarding shows newcomers only a lobby until they link a character or are approved.
 - **Tells officers what changed.** A short post in the officers' channel lists members who gained or lost access, Officer or FC Leader, with the reason, and characters that left the FC.
-- **Shares what's new.** After an update that changes something for members, it can post a short note in a channel the officers choose.
+- **Shares what's new.** After an update that changes something you can notice, in Discord, on the officer dashboard or on this site, it can post a short note in a channel the officers choose.
 
 Every change is saved and audited before TaruBot touches Discord, and the Discord work it owes survives restarts and outages.
 

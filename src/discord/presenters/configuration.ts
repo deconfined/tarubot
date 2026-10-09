@@ -1731,13 +1731,14 @@ function channelChangeReply(
         fields: [held],
         footer,
       });
-    // Setting a channel posts nothing now; the first post comes with the next update that has
-    // something for members (owner decisions 2 and 3). A hidden channel returned above, so the
-    // Visibility field here is only ever the unmanaged one.
+    // Setting a channel posts nothing now; the first post comes with the next update that has a
+    // release note (owner decisions 2 and 3; notes cover every release people can notice since
+    // 2026-10-09). A hidden channel returned above, so the Visibility field here is only ever the
+    // unmanaged one.
     return done("channel.changelog", {
       tone: "success",
       title: "Changelog channel set",
-      description: `From the next update on, TaruBot posts what's new for members in ${channel}. Members and guests need to be able to read this channel.`,
+      description: `From the next update on, TaruBot posts what's new in ${channel}. Members and guests need to be able to read this channel.`,
       fields: [changelogVisibility(change), held],
       footer,
     });

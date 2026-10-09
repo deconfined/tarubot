@@ -18,7 +18,7 @@ import { enqueue, type Job } from "./queue.js";
 
 /**
  * Bind application capabilities once; each invocation revalidates its persisted payload. `notes`
- * is the member-note map update posts read (the compiled RELEASE_NOTES); tests pass their own.
+ * is the release-note map update posts read (the compiled RELEASE_NOTES); tests pass their own.
  */
 export function dispatcher(
   app: Service,
@@ -84,8 +84,9 @@ export function dispatcher(
         : null;
     if (changelog?.kind === "skip") return { skipped: changelog.reason };
     if (changelog?.kind === "advance") {
-      // Nothing for members (owner decision 2): move the baseline without posting. The lease
-      // fence comes first, as before every write.
+      // No release in the range has a note (owner decision 2): move the baseline without posting.
+      // The stored reason keeps its 2.25.0 wording, which job rows and /sync status already show.
+      // The lease fence comes first, as before every write.
       await guard();
       await app.advanceChangelog(guild.id, changelog.from, project.version, null);
       return { skipped: "nothing for members", version: project.version };

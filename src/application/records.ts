@@ -73,7 +73,7 @@ export interface LedgerPostView {
 }
 /**
  * What an update post shows (2.25.0): the running version, the version the guild was last told
- * about, the member notes of the releases in between (newest first), and the CHANGELOG link. Only
+ * about, the release notes of the releases in between (newest first), and the CHANGELOG link. Only
  * values fixed for the running build, so every retry of the post renders byte-identical JSON.
  */
 export interface ChangelogPostView {

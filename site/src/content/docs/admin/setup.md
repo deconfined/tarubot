@@ -48,7 +48,7 @@ Optionally, choose where [update posts](/tarubot/admin/notices-and-updates/#upda
 /config changelog channel:#tarubot-updates
 ```
 
-Setting the channel posts nothing at once; the first post comes with the next update that has something for members.
+Setting the channel posts nothing at once; the first post comes with the next update that has a note.
 
 If some of these channels are private, choose them while TaruBot holds Administrator for the [setup window](/tarubot/admin/add-to-server/#the-setup-window): without it, TaruBot can't see them, and `/config` refuses a channel it can't post in.
 
