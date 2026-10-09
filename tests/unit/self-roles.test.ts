@@ -1726,7 +1726,7 @@ describe("the roles.self stub (2.39.0)", () => {
         message_id: null,
         created_at: new Date("2026-10-09T12:00:00Z"),
         due_at: new Date("2026-10-09T12:00:00Z"),
-        lease_token: "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6",
+        lease_token: "00000000-0000-4000-8000-000000000001",
       },
       async () => {
         guarded++;

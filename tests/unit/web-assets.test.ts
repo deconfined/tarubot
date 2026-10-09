@@ -20,7 +20,7 @@ import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
 import { KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
 
 /** An invented form token for the signed-in shells. */
-const TOKEN = "Zm9ybS10b2tlbi1mb3ItdGVzdHMtMDAwMDAwMDAwMDA";
+const TOKEN = Buffer.from("form-token-for-tests-00000000000").toString("base64url");
 
 /** The markup a template produced. */
 const render = async (value: SafeHtml): Promise<string> => String(await value);

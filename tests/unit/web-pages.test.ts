@@ -60,7 +60,7 @@ const GUILD = "100000000000000001";
 const USER = "200000000000000002";
 const REF = "00000000-0000-4000-8000-000000000000";
 /** An invented form token, as the session middleware derives one. */
-const TOKEN = "Zm9ybS10b2tlbi1mb3ItdGVzdHMtMDAwMDAwMDAwMDA";
+const TOKEN = Buffer.from("form-token-for-tests-00000000000").toString("base64url");
 const fixtures = new URL("../fixtures/web-pages/", import.meta.url);
 
 /** Names a hostile server owner or member could choose. */

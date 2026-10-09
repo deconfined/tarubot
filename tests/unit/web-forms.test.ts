@@ -31,7 +31,7 @@ import {
 import { HOSTILE_INPUT, KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
 
 const ACTION = "/g/100000000000000001/role-menu";
-const TOKEN = "Zm9ybS10b2tlbi1mb3ItdGVzdHMtMDAwMDAwMDAwMDA";
+const TOKEN = Buffer.from("form-token-for-tests-00000000000").toString("base64url");
 
 /** A fragment rendered and parsed as a page body. */
 async function body(value: SafeHtml): Promise<{ markup: string; document: Document }> {
