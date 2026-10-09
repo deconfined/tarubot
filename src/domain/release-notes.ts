@@ -42,6 +42,8 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
     "Officers can now sign in with Discord to a view-only web dashboard of their server's settings, health checks and background work, once whoever hosts TaruBot turns it on.",
   "2.38.0":
     "The officer dashboard and the documentation site have a new look and are now always dark; the dashboard is also easier to use on a phone and no longer contacts Google when you open it.",
+  "2.38.1":
+    "Update posts in this channel now cover every change members, guests or officers can notice, not only new features for members.",
 };
 
 /**
