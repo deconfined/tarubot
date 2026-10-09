@@ -71,6 +71,13 @@
   --border-default: oklch(0.82 0.05 280 / 0.14);
   --border-strong: oklch(0.86 0.06 280 / 0.26);
   --border-accent: oklch(0.8 0.13 210 / 0.55);
+  /*
+   * A form control's frame, its only boundary (WCAG 1.4.11): opaque, about 4.6:1 against a card and
+   * 5:1 against the control's own fill; lighter still on hover. The translucent borders above
+   * stay near 1.1:1 there.
+   */
+  --border-control: oklch(0.6 0.04 280);
+  --border-control-hover: oklch(0.72 0.05 280);
 
   /* --text-faint is under 4.5:1 on every surface: never use it for text that carries meaning. */
   --text-primary: var(--night-50);

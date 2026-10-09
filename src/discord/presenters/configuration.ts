@@ -18,9 +18,9 @@
  * The health checklist uses the approved bracket tokens ([OK] [WARN] [FAIL] [OFF] [WAIT]), which
  * belong to health checks only. Since 2.35.0 (#46) it adds "TaruBot's role" and "Visibility",
  * judged as if Administrator were off (src/domain/visibility.ts), and /config show's health line
- * counts their rows to review. /config show keeps the approved field-per-setting layout, which
- * needs up to 15 fields since the changelog channel (2.25.0): its documented exemption from the
- * ten-field house limit (C3).
+ * counts their rows to review; since 2.39.0 "Role menu" checks the self-service role menu.
+ * /config show keeps the approved field-per-setting layout, which needs up to 15 fields since the
+ * changelog channel (2.25.0): its documented exemption from the ten-field house limit (C3).
  */
 import type { GuildRecord } from "../../application/records.js";
 import type {
@@ -40,6 +40,7 @@ import type {
 } from "../../application/results.js";
 import { GUEST_APPLICATIONS_CLOSED } from "../../domain/guest-application.js";
 import { type PermissionKey, permissionLabel } from "../../domain/permissions.js";
+import type { SelfRoleHealth } from "../../domain/self-roles.js";
 import type { CoreRow, VisibilityReport } from "../../domain/visibility.js";
 import type { Viewer } from "./audience.js";
 import { recheckButton, syncStatusButton } from "./controls.js";
@@ -300,6 +301,7 @@ export type HealthSection =
   | "Onboarding"
   | "TaruBot's role"
   | "Visibility"
+  | "Role menu"
   | "Discord changes"
   | "Role layout"
   | "Guest grandfathering";
@@ -736,6 +738,42 @@ function visibilityRows(report: VisibilityReport, budget: MentionBudget): Row[] 
 }
 
 /**
+ * The "Role menu" section (2.39.0): what members see on the self-service role menu, judged on the
+ * same fresh view as the sections above. It counts the roles outside drafts, in a published or a
+ * Not offered category (never called "published", which the Role menu page counts apart); a
+ * problem is an offered role the rules refuse, or one no longer offered that its holders can't
+ * remove. Counts only: the Role menu page names the roles and their problems. It counts drafts'
+ * problems too, which this check skips, so both rows say "outside drafts" to tell the two apart.
+ */
+function selfRoleRows(health: SelfRoleHealth): Row[] {
+  if (health.unreadableMenu)
+    return [
+      {
+        check: "warn",
+        text: "The saved role menu can't be read by this TaruBot version; open Role menu to reset it",
+      },
+    ];
+  if (health.listed === 0) return [{ check: "off", text: "No roles outside drafts" }];
+  const listed = `${count(health.listed, "role")} outside drafts`;
+  const rows: Row[] = [
+    health.problems === null
+      ? { check: "warn", text: "Couldn't check the menu's roles; try again in a minute" }
+      : health.problems > 0
+        ? {
+            check: "warn",
+            text: `${count(health.problems, "role")} outside drafts ${health.problems === 1 ? "has" : "have"} a problem; open Role menu to see which`,
+          }
+        : { check: "ok", text: `${listed}; all pass` },
+  ];
+  if (health.unreadableChannels > 0)
+    rows.push({
+      check: "warn",
+      text: `TaruBot can't read ${count(health.unreadableChannels, "channel")}, so it can't check menu roles there`,
+    });
+  return rows;
+}
+
+/**
  * ' (N inside a category hidden from TaruBot)' for the channels hidden only through their
  * category's deny (VisibilityReport's hiddenByCategory), or '' for none; /setup overrides' reply
  * uses it too.
@@ -755,6 +793,7 @@ export function hiddenByCategoryClause(n: number): string {
  * - Onboarding: the lobby and officer room, or [OFF] when onboarding is off.
  * - TaruBot's role and Visibility (2.35.0, #46): see roleRows and visibilityRows. Without a
  *   readable view, the role section is left out and Visibility is one [WARN].
+ * - Role menu (2.39.0): see selfRoleRows; [OFF] while no roles are outside drafts.
  * - Discord changes: [OK] Live; [WARN] when disabled for the deployment; awaiting activation is
  *   [WAIT] 'Paused until activation' (configuration#9), except beside problems, where the approved
  *   configuration#8 counts it as the warning 'Paused: this server has not been activated'.
@@ -882,6 +921,9 @@ export function configurationChecks(report: ConfigurationReport): HealthCheck[] 
         },
       ])
     add("Visibility", row.check, row.text);
+  // The self-service role menu (2.39.0); a report without the check (tests' fixtures) shows none.
+  if (report.selfRoles)
+    for (const row of selfRoleRows(report.selfRoles)) add("Role menu", row.check, row.text);
 
   // Wording that differs between the approved problem (#8) and ready (#9) checklists follows the
   // verdict. Fields group rows by section, so this line still lists last among the channels.

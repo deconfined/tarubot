@@ -61,6 +61,11 @@ export function dispatcher(
     // A refresh an older image queued before the upgrade completes without a Lodestone request.
     // A later release can drop this once no such job can remain queued.
     if (job.kind === "profile") return { skipped: "profile refreshes retired" };
+    // 2.40.0's member role choices (self-service roles). An older image that meets one after a
+    // rollback completes it without a Discord call or a delivery_attempts row, and the database
+    // then clears its payload (migration 012's trigger); the member is told to save again. Without
+    // this, a rollback would fail each one as invalid_job and file an issue report.
+    if (job.kind === "roles.self") return { skipped: "needs a newer TaruBot" };
     // Outbound messages use current guild configuration, not a stale channel copied into a job.
     const [guild] = await app.db.orm
       .select()

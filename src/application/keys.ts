@@ -8,6 +8,7 @@ import { ApplicationLifecycle } from "./lifecycle.js";
 import { Service } from "./service.js";
 import { Synchronization } from "./synchronization.js";
 import { RoleAdministration } from "./role-administration.js";
+import { SelfRoles } from "./self-roles.js";
 import { Suggestions } from "./suggestions.js";
 import { VersionInformation } from "./version-information.js";
 
@@ -55,4 +56,9 @@ export const issueReportsKey = new ServiceKey(
 export const suggestionsKey = new ServiceKey(
   "public suggestions",
   (value): value is Suggestions => value instanceof Suggestions,
+);
+/** The self-service role menu (2.39.0): the Role menu page reads and edits it through this. */
+export const selfRolesKey = new ServiceKey(
+  "self-service roles",
+  (value): value is SelfRoles => value instanceof SelfRoles,
 );

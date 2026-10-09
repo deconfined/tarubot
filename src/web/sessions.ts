@@ -6,7 +6,7 @@
  * its absolute expiry. Sessions are created only for admitted users (ADR D17), and sign-in deletes
  * any session the browser already presented before creating a fresh one (rotation).
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { and, eq, gt, lte, or, sql } from "drizzle-orm";
 import type { Database } from "../infrastructure/postgres/database.js";
 import { webSessions } from "../infrastructure/postgres/schema.js";
@@ -70,6 +70,24 @@ export function isSessionToken(value: string): boolean {
 /** The stored key for a token: its SHA-256 as 64 lowercase hex characters. */
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/** HMAC message for formToken; versioned, so a later derivation can't collide with this one. */
+const FORM_TOKEN_CONTEXT = "tarubot web form token v1";
+
+/**
+ * The session's form token (owner decision 2026-10-09; see docs/MODULES.md and THREAT_MODEL),
+ * which every POST form carries as a hidden field and the server compares in constant time
+ * (http.ts's formTokenMatches). It is an HMAC-SHA-256 keyed with the session token, so it needs no
+ * storage and no new secret, and only a holder of the HttpOnly cookie can compute it: a cross-site
+ * page can't read the cookie or a page, so it can't forge one. It is one-way, so a token seen in a
+ * page never reveals the session token, and it differs from hashToken (a keyed MAC, not the plain
+ * hash web_sessions holds), so a database reader can't derive it either. A new sign-in rotates the
+ * session token and with it this one: a form left open from an earlier sign-in is refused. 43
+ * characters of unpadded base64url.
+ */
+export function formToken(sessionToken: string): string {
+  return createHmac("sha256", sessionToken).update(FORM_TOKEN_CONTEXT).digest("base64url");
 }
 
 const s = webSessions;

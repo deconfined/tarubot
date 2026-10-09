@@ -12,6 +12,7 @@ import {
   lifecycleKey,
   synchronizationKey,
   roleAdministrationKey,
+  selfRolesKey,
   suggestionsKey,
   versionInformationKey,
 } from "./application/keys.js";
@@ -20,6 +21,7 @@ import { IssueReports } from "./application/issue-reports.js";
 import { ApplicationLifecycle } from "./application/lifecycle.js";
 import { RecentLogs } from "./application/recent-logs.js";
 import { createReporter, type Reporter } from "./application/reporting.js";
+import { SelfRoles } from "./application/self-roles.js";
 import { Service } from "./application/service.js";
 import { Suggestions, suggestionTarget } from "./application/suggestions.js";
 import { Synchronization } from "./application/synchronization.js";
@@ -157,6 +159,8 @@ const services = new Services()
   .provide(guildEventsKey, new GuildEvents(db))
   .provide(issueReportsKey, reports)
   .provide(suggestionsKey, suggestions)
+  // The Role menu's edits (2.39.0) refuse once shutdown starts and roll back if it starts mid-edit.
+  .provide(selfRolesKey, new SelfRoles(app, () => lifecycle.isStopping()))
   .provide(lifecycleKey, lifecycle);
 const context: BotContext = {
   client: gateway.client,

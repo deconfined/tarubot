@@ -6,7 +6,7 @@
 import type { Actor } from "../domain/policy.js";
 import { authorizeRoleManager } from "../domain/policy.js";
 import { Failure, normalized, note } from "../domain/values.js";
-import { audit, ensureUser, orm } from "../infrastructure/postgres/database.js";
+import { audit, ensureUser, orm, type Orm } from "../infrastructure/postgres/database.js";
 import { and, eq, sql } from "drizzle-orm";
 import * as t from "../infrastructure/postgres/schema.js";
 import type { DiscordPort } from "./records.js";
@@ -15,6 +15,7 @@ import type { GuildAccess } from "./guild-access.js";
 import { NEW_GUILD_ROW } from "./guild-defaults.js";
 import { ChannelOverrides, type OverridesPort, type OverridesResult } from "./overrides.js";
 import type { FcRef, OfficerOverrideResult, OfficerResetResult, SetupResult } from "./results.js";
+import { onMenuForSetup, rolesOnMenu } from "./self-roles.js";
 import { fcLinked, type Service } from "./service.js";
 import {
   addBlocker,
@@ -141,6 +142,12 @@ export class RoleAdministration {
     }
     const duplicate = duplicateRoles(roles);
     if (duplicate) addBlocker(blockers, blockerOf(duplicate));
+    // A role on the self-service menu can't become an access role (2.39.0); setup() refuses it.
+    await this.menuConflicts(
+      guildId,
+      roles.flatMap((role) => (role.id === null ? [] : [{ field: role.field, id: role.id }])),
+      (failure) => addBlocker(blockers, blockerOf(failure)),
+    );
     for (const selected of [channels.lobby, channels.officers])
       if (selected)
         await collected(blockers, () => this.discord.validateChannel(guildId, selected));
@@ -222,6 +229,27 @@ export class RoleAdministration {
     };
   }
 
+  /**
+   * Hand `refuse` the refusal for each role /setup onboarding would bind that is on the
+   * self-service role menu, read through `db` (the pool, or the setup transaction's client).
+   */
+  private async menuConflicts(
+    guildId: string,
+    roles: readonly { readonly field: (typeof SETUP_ROLES)[number][0]; readonly id: string }[],
+    refuse: (failure: Failure) => void,
+    db: Orm = this.app.db.orm,
+  ): Promise<void> {
+    const listed = await rolesOnMenu(
+      db,
+      guildId,
+      roles.map((role) => role.id),
+    );
+    for (const [field, label] of SETUP_ROLES) {
+      const id = roles.find((role) => role.field === field)?.id;
+      if (id !== undefined && listed.includes(id)) refuse(onMenuForSetup(id, label));
+    }
+  }
+
   /** Create/reuse four ordinary roles, optionally link an FC and select its officer rank. */
   async setup(
     actor: Actor,
@@ -272,6 +300,26 @@ export class RoleAdministration {
       const layout = previous?.role_layout_enabled ?? NEW_GUILD_ROW.role_layout_enabled;
       const company =
         fcId && fcId !== previous?.fc_id ? await this.app.lodestone.company(fcId) : null;
+      // Refuse a role on the self-service menu before anything changes in Discord: ensureRole
+      // creates the missing roles and renames a reused one, so this check must come first. The
+      // roles it would reuse are decided read-only, as the dry run decides them; a role it would
+      // create is new, so it can't be on the menu. An ambiguous name is left to ensureRole, which
+      // refuses it the same way. The checks after ensureRole and under the row lock below still
+      // hold the invariant against a menu edit in between.
+      const candidates = await this.access.discord.roleCandidates(actor.guildId);
+      const reused = SETUP_ROLES.flatMap(([field, label]) => {
+        try {
+          const name = prefix ? `${prefix} ${label}` : label;
+          const { id } = roleAction(candidates, name, label, previous?.[field] ?? null);
+          return id === null ? [] : [{ field, id }];
+        } catch (error) {
+          if (error instanceof Failure) return [];
+          throw error;
+        }
+      });
+      await this.menuConflicts(actor.guildId, reused, (failure) => {
+        throw failure;
+      });
       const specifications = [
         ["member_role_id", "Member"],
         ["guest_role_id", "Guest"],
@@ -307,6 +355,12 @@ export class RoleAdministration {
       const [member, guest, staff, leader] = roles;
       if (!member || !guest || !staff || !leader)
         throw new Error("Incomplete setup role selection");
+      // Again over the roles ensureRole returned, in case Discord's roles changed since the read
+      // above, before onboarding writes any channel; the check under the row lock below is the
+      // one that holds the invariant.
+      await this.menuConflicts(actor.guildId, roles, (failure) => {
+        throw failure;
+      });
       for (const selected of [channels.lobby, channels.officers])
         if (selected) await this.discord.validateChannel(actor.guildId, selected);
       const prepared = await this.access.discord.prepare(
@@ -347,6 +401,16 @@ export class RoleAdministration {
             "conflict",
             "Server settings changed during setup, so nothing was saved. Run /setup onboarding confirm:true again; anything already created is reused.",
           );
+        // A self-service menu role is never an access role (2.39.0). Under this FOR UPDATE, which
+        // a menu edit's FOR SHARE waits for, so no menu edit can add one of these in between.
+        await this.menuConflicts(
+          actor.guildId,
+          roles,
+          (failure) => {
+            throw failure;
+          },
+          orm(client),
+        );
         const targetFc = fcId ?? current.fc_id;
         for (const role of roles) {
           const old = current[role.field];

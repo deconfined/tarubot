@@ -44,6 +44,8 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
     "The officer dashboard and the documentation site have a new look and are now always dark; the dashboard is also easier to use on a phone and no longer contacts Google when you open it.",
   "2.38.1":
     "Update posts in this channel now cover every change members, guests or officers can notice, not only new features for members.",
+  "2.39.0":
+    "Officers can now build a menu of roles people choose for themselves, such as pronouns or games, on the dashboard's new Role menu page. Members and guests will pick from it in an upcoming update.",
 };
 
 /**

@@ -45,7 +45,7 @@ When a command can't do what you asked, the card says why and what to try, and i
 
 ## What's new
 
-Your server may have a channel where TaruBot posts what's new after it's updated: one short message, "TaruBot updated to vX.Y.Z", with a sentence for each release since the last post that changed something members, guests or officers can notice, in Discord, on the officer dashboard or on this site. An update that changes nothing anyone can notice isn't posted. The officers choose the channel, so ask them where it is. For the technical detail, [`/version`](/tarubot/reference/commands/#version) lists the recent commits, and each post links the full changelog.
+Your server may have a channel where TaruBot posts what's new after it's updated: one short message, "TaruBot updated to vX.Y.Z", with a sentence for each release since the last post that changed something members, guests or officers can notice, in Discord, on the dashboard or on this site. An update that changes nothing anyone can notice isn't posted. The officers choose the channel, so ask them where it is. For the technical detail, [`/version`](/tarubot/reference/commands/#version) lists the recent commits, and each post links the full changelog.
 
 ## Your data
 

@@ -9,6 +9,7 @@ import {
   type Actor,
 } from "../domain/policy.js";
 import { effectsPaused, WAITING_CODES } from "../domain/failures.js";
+import { ROLE_CHOICE_KIND, ROLE_CHOICE_RETENTION_DAYS } from "../domain/self-roles.js";
 import { type Departure, statusObservation } from "../domain/status.js";
 import { Failure, json, nickname, normalized } from "../domain/values.js";
 import { desiredRankRole, rankAccess, rankDecisive } from "./rank-policy.js";
@@ -1215,6 +1216,19 @@ export class Synchronization {
         Math.random() * 30,
       );
     await db.delete(t.challenges).where(lt(t.challenges.expires_at, sql`now()-interval '7 days'`));
+    // Finished role-choice jobs (who changed their roles and when, never which) go after 30 days
+    // (owner decision Q4 A): the one kind of job history that is pruned (docs/PERSISTENCE.md). No
+    // delivery attempt or sync-run link ever references one. 2.39.0 queues none, but meets them
+    // after a rollback from 2.40.0, and keeps the promise then too.
+    await db
+      .delete(t.jobs)
+      .where(
+        and(
+          eq(t.jobs.kind, ROLE_CHOICE_KIND),
+          inArray(t.jobs.status, ["succeeded", "failed"]),
+          lt(t.jobs.completed_at, sql`now()-${ROLE_CHOICE_RETENTION_DAYS}*interval '1 day'`),
+        ),
+      );
     await db
       .update(t.jobs)
       .set({ status: "queued", due_at: sql`now()+interval '5 minutes'`, attempts: 0 })

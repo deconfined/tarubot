@@ -39,7 +39,21 @@
  * - --state-hostile-names: long, right-to-left, markup-like and emoji names for the servers (three
  *   more of which the officer can open), the FC, its officer rank, the roles, the channels and the
  *   members, within Discord's lengths; one role name carries U+202E RIGHT-TO-LEFT OVERRIDE.
- * Every state is invented, and new IDs follow the harness's own 1000…/2000… pattern.
+ * - --state-menu-problems: the Role menu's server has drifted since officers built the menu.
+ *   TaruBot holds Administrator again; She/Her gained Mention @everyone; They/Them sits above the
+ *   Moderator and Dyno roles; Valheim gained Manage Messages in #valheim; Mahjong night sits above
+ *   TaruBot's role; Halloween 2025 was deleted in Discord; and two channels are hidden from
+ *   TaruBot, so adding roles asks for the confirmation. Server configuration's "Role menu" and
+ *   "TaruBot's role" checks warn about the same drift.
+ * - --state-menu-unreadable: the saved role menu is one this build can't read (as after a rollback
+ *   from a newer release), so the page offers only Reset role menu.
+ * The Role menu's default is a healthy menu (Pronouns and Games published, Content a draft,
+ *   Retired events no longer offered) over an invented server whose roles and channels the real
+ *   rule set (src/domain/self-roles.ts) judges; edits apply to an in-memory copy per server, as
+ *   SelfRoles.edit would, so forms can be tried end to end. Server configuration's "Role menu"
+ *   check reads the same copy.
+ * Every state is invented, and new IDs follow the harness's own 1000…/2000… pattern (roles
+ * 4000…, channels 5000…).
  *
  * The fake authorize page runs on its own port on the same interface and protocol as the web. It
  * redirects only to the redirect URI the harness configured, and echoes no request data: its page
@@ -53,12 +67,18 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import {
   ChannelFlagsBitField,
+  ChannelType,
   Collection,
   PermissionFlagsBits,
   PermissionsBitField,
 } from "discord.js";
 import { type Logger, pino } from "pino";
-import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
+import {
+  applicationKey,
+  gatewayKey,
+  lifecycleKey,
+  selfRolesKey,
+} from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import { createReporter } from "../../src/application/reporting.js";
 import type {
@@ -68,12 +88,38 @@ import type {
   SyncRunRow,
   SyncStatusView,
 } from "../../src/application/results.js";
+import {
+  SelfRoles,
+  type SelfRoleEditOutcome,
+  type SelfRoleEditor,
+} from "../../src/application/self-roles.js";
 import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import { effectsPaused } from "../../src/domain/failures.js";
-import type { Actor } from "../../src/domain/policy.js";
+import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
+import { type Actor, authorize } from "../../src/domain/policy.js";
+import {
+  applyOperation,
+  checkRoles,
+  EMPTY_MENU,
+  holdsAdministrator,
+  type MenuFieldError,
+  menuRoleIds,
+  SELF_ROLE_MESSAGES,
+  type SelfRoleMenu,
+  sameMenu,
+  selfRoleChecker,
+  selfRoleHealth,
+  type SelfRoleSettings,
+  selfRoleSettings,
+  unreadableChannels,
+} from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
-import type { VisibilityReport } from "../../src/domain/visibility.js";
+import type {
+  VisibilityChannel,
+  VisibilityGuild,
+  VisibilityReport,
+} from "../../src/domain/visibility.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { WebGuild } from "../../src/web/access.js";
 import { startWeb, type WebOptions, type WebServer } from "../../src/web/server.js";
@@ -127,6 +173,10 @@ export interface HarnessStates {
   readonly cooling?: boolean;
   /** --state-hostile-names: long, right-to-left, markup-like and emoji names. */
   readonly hostileNames?: boolean;
+  /** --state-menu-problems: the Role menu's roles and channels have drifted into problems. */
+  readonly menuProblems?: boolean;
+  /** --state-menu-unreadable: the saved role menu is one this build can't read. */
+  readonly menuUnreadable?: boolean;
 }
 
 /**
@@ -405,8 +455,8 @@ export function harnessGateway(states: HarnessStates = {}): DiscordGateway {
   const roleNames: Readonly<Record<string, string>> = hostile ? HOSTILE_NAMES.roles : {};
   const channelNames: Readonly<Record<string, string>> = hostile ? HOSTILE_NAMES.channels : {};
   const memberNames: Readonly<Record<string, string>> = hostile ? HOSTILE_NAMES.members : {};
-  const roles = new Collection(
-    Object.entries(ROLE).map(([label, id]) => [
+  const roles = new Collection<string, { id: string; name: string }>([
+    ...Object.entries(ROLE).map(([label, id]): [string, { id: string; name: string }] => [
       id,
       {
         id,
@@ -415,8 +465,24 @@ export function harnessGateway(states: HarnessStates = {}): DiscordGateway {
           (label === "bot" ? "TaruBot" : `${label[0]?.toUpperCase()}${label.slice(1)}`),
       },
     ]),
-  );
-  const channels = new Collection(
+    // The Role menu's invented roles (harnessSnapshot), whose names the page reads from here.
+    ...(Object.keys(MENU_ROLE) as (keyof typeof MENU_ROLE)[]).map(
+      (key): [string, { id: string; name: string }] => [
+        MENU_ROLE[key],
+        { id: MENU_ROLE[key], name: MENU_ROLE_NAMES[key] },
+      ],
+    ),
+  ]);
+  const channels = new Collection<
+    string,
+    {
+      id: string;
+      name: string;
+      flags: ChannelFlagsBitField;
+      isThread: () => boolean;
+      permissionsFor: () => PermissionsBitField;
+    }
+  >(
     Object.entries(CHANNEL).map(([label, id]) => [
       id,
       {
@@ -441,6 +507,18 @@ export function harnessGateway(states: HarnessStates = {}): DiscordGateway {
       },
     ]),
   );
+  // The Role menu's readable channels (harnessSnapshot); the hidden ones never show a name.
+  for (const key of Object.keys(MENU_CHANNEL) as (keyof typeof MENU_CHANNEL)[]) {
+    if (key === "hiddenOne" || key === "hiddenTwo") continue;
+    const id = MENU_CHANNEL[key];
+    channels.set(id, {
+      id,
+      name: MENU_CHANNEL_NAMES[key],
+      flags: new ChannelFlagsBitField(),
+      isThread: () => false,
+      permissionsFor: () => new PermissionsBitField(PermissionFlagsBits.ViewChannel),
+    });
+  }
   const guild = {
     roles: { cache: roles },
     channels: { cache: channels },
@@ -527,9 +605,24 @@ const failingCapabilities = (): Readonly<Record<string, string>> => {
  * by default a live server without onboarding whose roster was read 12 minutes ago (see
  * rosterMinutes). A failed roster attempt is the bare code Synchronization.roster stores.
  */
-function harnessReport(guildId: string, states: HarnessStates): ConfigurationReport {
+export function harnessReport(
+  guildId: string,
+  states: HarnessStates,
+  menus: HarnessMenus = new Map(),
+): ConfigurationReport {
   const cooling = lodestoneCooling(states);
   const failedAttempt = cooling || states.checks !== undefined;
+  // --state-menu-problems' TaruBot holds Administrator (harnessSnapshot), which the Role menu page
+  // warns about; its report says so too, unless a --state-checks view replaces it.
+  const administrator =
+    states.menuProblems && !states.checks
+      ? {
+          visibility: visibilityReport(
+            { administrator: { held: true, roles: [ROLE.bot], shared: [] } },
+            false,
+          ),
+        }
+      : {};
   return configReport({
     guild: configGuild({
       id: guildId,
@@ -556,15 +649,406 @@ function harnessReport(guildId: string, states: HarnessStates): ConfigurationRep
     ...(states.checks && {
       visibility: states.checks === "warn" ? warningView(guildId) : failingView(),
     }),
+    ...administrator,
+    // The "Role menu" check over the menu the Role menu page shows (edits included) and the same
+    // invented server, as Service.validate judges it.
+    selfRoles: selfRoleHealth(
+      savedMenu(guildId, states, menus).menu,
+      harnessSnapshot(guildId, states),
+      HARNESS_MENU_SETTINGS,
+    ),
   });
 }
 
-/** Read-only dashboard services, answered with the existing invented configuration fixtures. */
+// ---------------------------------------------------------------------------------------------
+// The Role menu (2.39.0): an invented server for the rule set, and the officers' saved menu
+
+/** The Role menu's invented roles: on the menu, addable, and refused for each kind of reason. */
+export const MENU_ROLE = {
+  heHim: "400000000000000001",
+  sheHer: "400000000000000002",
+  theyThem: "400000000000000003",
+  askMe: "400000000000000004",
+  valheim: "400000000000000005",
+  minecraft: "400000000000000006",
+  savage: "400000000000000007",
+  maps: "400000000000000008",
+  mahjong: "400000000000000009",
+  halloween: "400000000000000010",
+  healer: "400000000000000011",
+  tank: "400000000000000012",
+  dps: "400000000000000013",
+  moderator: "400000000000000014",
+  announcer: "400000000000000015",
+  council: "400000000000000016",
+  dyno: "400000000000000017",
+  booster: "400000000000000018",
+} as const;
+
+const MENU_ROLE_NAMES: Readonly<Record<keyof typeof MENU_ROLE, string>> = {
+  heHim: "He/Him",
+  sheHer: "She/Her",
+  theyThem: "They/Them",
+  askMe: "Ask my pronouns",
+  valheim: "Valheim",
+  minecraft: "Minecraft",
+  savage: "Savage raiding",
+  maps: "Treasure maps",
+  mahjong: "Mahjong night",
+  halloween: "Halloween 2025",
+  healer: "Healer",
+  tank: "Tank",
+  dps: "DPS",
+  moderator: "Moderator",
+  announcer: "Announcer",
+  council: "Council",
+  dyno: "Dyno",
+  booster: "Server Booster",
+};
+
+/** The Role menu's invented channels; the two hidden ones exist only under --state-menu-problems. */
+export const MENU_CHANNEL = {
+  general: "500000000000000001",
+  announcements: "500000000000000002",
+  valheim: "500000000000000003",
+  valheimVoice: "500000000000000004",
+  minecraft: "500000000000000005",
+  council: "500000000000000006",
+  hiddenOne: "500000000000000007",
+  hiddenTwo: "500000000000000008",
+} as const;
+
+const MENU_CHANNEL_NAMES: Readonly<Record<keyof typeof MENU_CHANNEL, string>> = {
+  general: "general",
+  announcements: "announcements",
+  valheim: "valheim",
+  valheimVoice: "valheim-voice",
+  minecraft: "minecraft",
+  council: "council",
+  hiddenOne: "hidden-one",
+  hiddenTwo: "hidden-two",
+};
+
+/** The menu's category IDs: UUIDs, as the page mints them. */
+export const MENU_CATEGORY = {
+  pronouns: "6f9619ff-8b86-4011-b42d-00c04fc964ff",
+  games: "0b6f3c2e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+  content: "1e2d3c4b-5a69-4788-9a6b-5c4d3e2f1a0b",
+  retired: "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+} as const;
+
+/** The saved menu's revision before any edit in a harness run. */
+export const MENU_REVISION = 7n;
+
+/** The officers' saved menu: two published categories, a draft, and one no longer offered. */
+export const HARNESS_MENU: SelfRoleMenu = {
+  v: 1,
+  categories: [
+    {
+      id: MENU_CATEGORY.pronouns,
+      name: "Pronouns",
+      description: "Shown on your profile, so people know how to refer to you.",
+      max: null,
+      state: "published",
+      options: [
+        { roleId: MENU_ROLE.heHim, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.sheHer, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.theyThem, description: "", removalOnly: false },
+        {
+          roleId: MENU_ROLE.askMe,
+          description: "Replaced by your profile's own pronouns field.",
+          removalOnly: true,
+        },
+      ],
+    },
+    {
+      id: MENU_CATEGORY.games,
+      name: "Games",
+      description: "Each game's role opens its channels.",
+      max: null,
+      state: "published",
+      options: [
+        { roleId: MENU_ROLE.valheim, description: "Our dedicated server.", removalOnly: false },
+        {
+          roleId: MENU_ROLE.minecraft,
+          description: "The FC's survival world.",
+          removalOnly: false,
+        },
+      ],
+    },
+    {
+      id: MENU_CATEGORY.content,
+      name: "Content",
+      description: "What you'd like to be pinged for.",
+      max: 2,
+      state: "draft",
+      options: [
+        { roleId: MENU_ROLE.savage, description: "Weekly static nights.", removalOnly: false },
+        { roleId: MENU_ROLE.maps, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.mahjong, description: "Doman Mahjong on Fridays.", removalOnly: false },
+      ],
+    },
+    {
+      id: MENU_CATEGORY.retired,
+      name: "Retired events",
+      description: "Event roles from past seasons.",
+      max: 1,
+      state: "removal_only",
+      options: [{ roleId: MENU_ROLE.halloween, description: "", removalOnly: false }],
+    },
+  ],
+};
+
+const P = PermissionFlagsBits;
+/** A typical @everyone: view, post, react, embed, attach, read history, join and speak in voice. */
+const EVERYONE_BITS =
+  P.ViewChannel |
+  P.SendMessages |
+  P.AddReactions |
+  P.EmbedLinks |
+  P.AttachFiles |
+  P.ReadMessageHistory |
+  P.UseApplicationCommands |
+  P.Connect |
+  P.Speak |
+  P.CreateInstantInvite |
+  P.ChangeNickname;
+
+/** TaruBot's own role: what onboarding and the role checks need, Administrator only on demand. */
+const botRolePermissions = (administrator: boolean): bigint =>
+  P.ManageRoles |
+  P.ManageChannels |
+  P.ManageNicknames |
+  EVERYONE_BITS |
+  (administrator ? P.Administrator : 0n);
+
+/** A raw role in the snapshot. */
+const apiRole = (
+  id: string,
+  name: string,
+  position: number,
+  permissions = 0n,
+  managed = false,
+): ApiRole => ({ id, name, position, permissions: String(permissions), hoist: false, managed });
+
+/** A raw overwrite on a role (type 0). */
+const roleOverwrite = (id: string, allow = 0n, deny = 0n): ApiOverwrite => ({
+  id,
+  type: 0,
+  allow: String(allow),
+  deny: String(deny),
+});
+
+/**
+ * The Role menu's server as the gateway cache would hold it (src/domain/visibility.ts's
+ * VisibilityGuild), for TaruBot in `guildId`: the configuration fixtures' access roles and
+ * TaruBot's role, the menu's roles below them, and channels each of which shows one rule. Healthy
+ * by default; --state-menu-problems makes the drift its header line describes.
+ */
+export function harnessSnapshot(guildId: string, states: HarnessStates = {}): VisibilityGuild {
+  const problems = states.menuProblems === true;
+  const role = (key: keyof typeof MENU_ROLE, position: number, permissions = 0n, managed = false) =>
+    apiRole(MENU_ROLE[key], MENU_ROLE_NAMES[key], position, permissions, managed);
+  const roles: ApiRole[] = [
+    apiRole(guildId, "@everyone", 0, EVERYONE_BITS),
+    role("heHim", 1),
+    role("sheHer", 2, problems ? P.MentionEveryone : 0n),
+    // Dragged above the moderation roles in Discord: whoever picks it would be out of their reach.
+    role("theyThem", problems ? 19 : 3),
+    role("askMe", 4),
+    role("valheim", 5),
+    role("minecraft", 6),
+    role("savage", 7),
+    role("maps", 8),
+    // Moved above TaruBot's role in Discord, out of TaruBot's reach.
+    role("mahjong", problems ? 40 : 9),
+    // Deleted in Discord: still on the menu, missing here.
+    ...(problems ? [] : [role("halloween", 10)]),
+    role("healer", 11),
+    role("tank", 12),
+    role("dps", 13),
+    role("announcer", 14),
+    role("council", 15),
+    // The moderation roles, which every menu role must sit below, a moderation bot's included.
+    role("moderator", 16, P.KickMembers | P.BanMembers | P.ManageMessages | P.ModerateMembers),
+    role("booster", 17, 0n, true),
+    role(
+      "dyno",
+      18,
+      P.KickMembers | P.BanMembers | P.ModerateMembers | P.ManageRoles | P.ManageMessages,
+      true,
+    ),
+    apiRole(ROLE.guest, "Guest", 20),
+    apiRole(ROLE.member, "Member", 21),
+    apiRole(ROLE.officer, "Officer", 22, P.KickMembers | P.ManageMessages | P.ModerateMembers),
+    apiRole(ROLE.leader, "FC Leader", 23, P.ManageGuild | P.KickMembers | P.BanMembers),
+    apiRole(ROLE.bot, "TaruBot", 30, botRolePermissions(problems), true),
+  ];
+  const channel = (
+    key: keyof typeof MENU_CHANNEL,
+    position: number,
+    overwrites: ApiOverwrite[] = [],
+    type: number = ChannelType.GuildText,
+    obfuscated = false,
+  ): VisibilityChannel => ({
+    id: MENU_CHANNEL[key],
+    type,
+    parentId: null,
+    position,
+    overwrites,
+    obfuscated,
+  });
+  /** @everyone can't see the channel. */
+  const hidden = roleOverwrite(guildId, 0n, P.ViewChannel);
+  const channels: VisibilityChannel[] = [
+    channel("general", 0),
+    // Everyone reads announcements; only staff post. Announcer's Send Messages allow is refused.
+    channel("announcements", 1, [
+      roleOverwrite(guildId, 0n, P.SendMessages),
+      roleOverwrite(MENU_ROLE.announcer, P.SendMessages),
+    ]),
+    // A game role opens its channels, carrying only @everyone's own permissions there.
+    channel("valheim", 2, [
+      hidden,
+      roleOverwrite(MENU_ROLE.valheim, P.ViewChannel | (problems ? P.ManageMessages : 0n)),
+    ]),
+    channel(
+      "valheimVoice",
+      3,
+      [hidden, roleOverwrite(MENU_ROLE.valheim, P.ViewChannel | P.Connect | P.Speak)],
+      ChannelType.GuildVoice,
+    ),
+    channel("minecraft", 4, [hidden, roleOverwrite(MENU_ROLE.minecraft, P.ViewChannel)]),
+    // The officers' room: a role that opens it is refused, as an officer channel.
+    channel("council", 5, [
+      hidden,
+      roleOverwrite(ROLE.officer, P.ViewChannel),
+      roleOverwrite(MENU_ROLE.council, P.ViewChannel),
+    ]),
+    // Channels hidden from TaruBot on purpose (#46): it can't tell what a role does there.
+    ...(problems
+      ? [
+          channel("hiddenOne", 6, [hidden], ChannelType.GuildText, true),
+          channel("hiddenTwo", 7, [hidden], ChannelType.GuildText, true),
+        ]
+      : []),
+  ];
+  return {
+    guildId,
+    bot: { id: HARNESS_CLIENT_ID, roles: [ROLE.bot], botRoleId: ROLE.bot },
+    roles,
+    channels,
+    heldRoles: [],
+  };
+}
+
+/** One server's saved menu: the document (null when this build can't read it) and its revision. */
+export interface HarnessMenu {
+  menu: SelfRoleMenu | null;
+  revision: bigint;
+}
+
+/** Saved menus by server ID; a server not in it starts from the review state's menu. */
+export type HarnessMenus = Map<string, HarnessMenu>;
+
+/** The rules' settings in the harness: the configuration fixtures' four bound roles, nothing else. */
+const HARNESS_MENU_SETTINGS: SelfRoleSettings = selfRoleSettings(
+  configGuild({ officer_channel_id: null }),
+  [],
+  [],
+);
+
+/** One server's saved menu in `menus`, starting from the review state's menu. */
+function savedMenu(guildId: string, states: HarnessStates, menus: HarnessMenus): HarnessMenu {
+  let entry = menus.get(guildId);
+  if (!entry) {
+    entry = { menu: states.menuUnreadable ? null : HARNESS_MENU, revision: MENU_REVISION };
+    menus.set(guildId, entry);
+  }
+  return entry;
+}
+
+/**
+ * The SelfRoles service over invented data: editor() and edit() as src/application/self-roles.ts
+ * has them, with an in-memory menu per server in `menus` instead of PostgreSQL and the invented
+ * snapshot instead of Discord. The order of checks and the outcomes are the real operation's: an
+ * unreadable menu refuses all but a reset, the equal-state rule answers before the revision check,
+ * a reset of a menu that reads fine is a conflict, and an add passes the rule set and the channel
+ * confirmation. Nothing is audited.
+ */
+export function harnessSelfRoles(states: HarnessStates = {}, menus: HarnessMenus = new Map()) {
+  const roles: unknown = Object.create(SelfRoles.prototype);
+  if (!(roles instanceof SelfRoles)) throw new Error("Invalid self-roles fake");
+  const settings = HARNESS_MENU_SETTINGS;
+  const saved = (guildId: string): HarnessMenu => savedMenu(guildId, states, menus);
+  roles.editor = async (actor: Actor): Promise<SelfRoleEditor> => {
+    authorize(actor, actor.guildId, "officer");
+    const { menu, revision } = saved(actor.guildId);
+    const snapshot = harnessSnapshot(actor.guildId, states);
+    return {
+      guildId: actor.guildId,
+      configured: true,
+      revision,
+      menu,
+      roles: checkRoles(snapshot, settings, menu ? menuRoleIds(menu) : []),
+      unreadableChannels: unreadableChannels(snapshot),
+      administrator: holdsAdministrator(snapshot),
+      memberRoleId: ROLE.member,
+      guestRoleId: ROLE.guest,
+      onboarding: false,
+      effectsMode: harnessEffects(states),
+    };
+  };
+  roles.edit = async (actor, request): Promise<SelfRoleEditOutcome> => {
+    authorize(actor, actor.guildId, "officer");
+    const entry = saved(actor.guildId);
+    const { operation } = request;
+    const current = entry.menu;
+    if (!current && operation.op !== "menu.reset")
+      return { status: "conflict", reason: "unreadable" };
+    const applied = applyOperation(current ?? EMPTY_MENU, operation);
+    if (applied.kind === "gone") return { status: "conflict", reason: "changed" };
+    if (applied.kind === "invalid") return { status: "invalid", errors: applied.errors };
+    if (current && sameMenu(applied.menu, current))
+      return { status: "unchanged", revision: entry.revision };
+    if (operation.op === "menu.reset" && current) return { status: "conflict", reason: "changed" };
+    if (entry.revision !== request.revision) return { status: "conflict", reason: "changed" };
+    if (operation.op === "options.add" && current) {
+      const snapshot = harnessSnapshot(actor.guildId, states);
+      const had = new Set(menuRoleIds(current));
+      const check = selfRoleChecker(snapshot, settings);
+      const errors: MenuFieldError[] = [];
+      for (const roleId of menuRoleIds(applied.menu).filter((id) => !had.has(id))) {
+        const [problem] = check(roleId).problems;
+        if (problem)
+          errors.push({
+            field: "roleIds",
+            message: SELF_ROLE_MESSAGES.refusedRole(roleId, problem),
+          });
+      }
+      const unreadable = unreadableChannels(snapshot);
+      if (unreadable > 0 && !operation.unreadableAcknowledged)
+        errors.push({ field: "acknowledged", message: SELF_ROLE_MESSAGES.acknowledge(unreadable) });
+      if (errors.length > 0) return { status: "invalid", errors };
+    }
+    entry.menu = applied.menu;
+    entry.revision += 1n;
+    return { status: "saved", revision: entry.revision };
+  };
+  return roles;
+}
+
+/**
+ * The dashboard's services, answered with the existing invented configuration fixtures, and the
+ * Role menu's in-memory SelfRoles.
+ */
 function harnessServices(states: HarnessStates): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
+  // One saved menu per server for Role menu and the health check on Server configuration.
+  const menus: HarnessMenus = new Map();
   app.syncStatus = async () => syncView(states);
-  app.validate = async (actor) => harnessReport(actor.guildId, states);
+  app.validate = async (actor) => harnessReport(actor.guildId, states, menus);
   const lifecycle: unknown = Object.create(ApplicationLifecycle.prototype);
   if (!(lifecycle instanceof ApplicationLifecycle)) throw new Error("Invalid lifecycle fake");
   // A disconnected gateway also fails readiness, as ApplicationLifecycle.status computes it. The
@@ -599,7 +1083,8 @@ function harnessServices(states: HarnessStates): Services {
   return new Services()
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
-    .provide(gatewayKey, harnessGateway(states));
+    .provide(gatewayKey, harnessGateway(states))
+    .provide(selfRolesKey, harnessSelfRoles(states, menus));
 }
 
 /**
@@ -740,6 +1225,8 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       "state-empty": { type: "boolean", default: false },
       "state-cooling": { type: "boolean", default: false },
       "state-hostile-names": { type: "boolean", default: false },
+      "state-menu-problems": { type: "boolean", default: false },
+      "state-menu-unreadable": { type: "boolean", default: false },
     },
     allowPositionals: false,
   });
@@ -764,6 +1251,8 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       ...(values["state-empty"] && { empty: true }),
       ...(values["state-cooling"] && { cooling: true }),
       ...(values["state-hostile-names"] && { hostileNames: true }),
+      ...(values["state-menu-problems"] && { menuProblems: true }),
+      ...(values["state-menu-unreadable"] && { menuUnreadable: true }),
     },
   };
 }
@@ -783,6 +1272,8 @@ if (import.meta.main) {
     empty: "--state-empty",
     cooling: "--state-cooling",
     hostileNames: "--state-hostile-names",
+    menuProblems: "--state-menu-problems",
+    menuUnreadable: "--state-menu-unreadable",
   } as const satisfies Record<keyof HarnessStates, string>;
   const states = Object.entries(options.states ?? {}).map(([state, value]) => {
     const flag = flags[state as keyof HarnessStates];

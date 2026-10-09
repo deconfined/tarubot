@@ -36,6 +36,7 @@ import {
 import { HOUSE_LIMITS } from "../../../src/discord/presenters/style.js";
 import { guestApplicationsOpen } from "../../../src/domain/guest-application.js";
 import { CORE_PERMISSIONS, type CorePermission } from "../../../src/domain/permissions.js";
+import type { SelfRoleHealth } from "../../../src/domain/self-roles.js";
 import type { VisibilityReport } from "../../../src/domain/visibility.js";
 import { GUILD_ID, NOW, VIEWERS } from "../results.js";
 import type { ReplyCatalog } from "./index.js";
@@ -187,6 +188,11 @@ export function configReport(
     readonly changelogAudience?: ChangelogAudience;
     /** TaruBot's view (2.35.0); a healthy one in the guild's mode unless given, null unreadable. */
     readonly visibility?: VisibilityReport | null;
+    /**
+     * The "Role menu" check (2.39.0); absent unless given, so the approved cards, which predate
+     * it, render without the section.
+     */
+    readonly selfRoles?: SelfRoleHealth;
   } = {},
 ): ConfigurationReport {
   const guild = options.guild ?? configGuild();
@@ -209,8 +215,18 @@ export function configReport(
       options.visibility === undefined
         ? visibilityReport({}, guild.access_policy_enabled)
         : options.visibility,
+    ...(options.selfRoles ? { selfRoles: options.selfRoles } : {}),
   };
 }
+
+/** A "Role menu" check (2.39.0): nothing published unless overridden. */
+export const selfRoleHealth = (overrides: Partial<SelfRoleHealth> = {}): SelfRoleHealth => ({
+  listed: 0,
+  problems: 0,
+  unreadableChannels: 0,
+  unreadableMenu: false,
+  ...overrides,
+});
 
 /** A saved configure() change of `field` to `value` in a live guild, unless overridden. */
 export function configChange(

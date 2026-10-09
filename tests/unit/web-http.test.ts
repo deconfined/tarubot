@@ -24,7 +24,9 @@ import {
   clearCookie,
   cookieOptions,
   FAILURE_STATUS,
+  FORM_TOKEN_FIELD,
   formOnly,
+  formTokenMatches,
   HSTS,
   isSameOrigin,
   LOGIN_COOKIE,
@@ -44,6 +46,7 @@ import {
   writeCookie,
 } from "../../src/web/http.js";
 import { errorPage, layout } from "../../src/web/layout.js";
+import { formToken, hashToken, newSessionToken } from "../../src/web/sessions.js";
 
 const ORIGIN = "https://example.org";
 const REF = "00000000-0000-4000-8000-000000000000";
@@ -81,7 +84,7 @@ function refuse(
   headers?: Readonly<Record<string, string>>,
 ): Response | Promise<Response> {
   const details = problemOf(error, c.get("ref"));
-  return problem(c, details, errorPage(details, false), headers);
+  return problem(c, details, errorPage(details, null), headers);
 }
 
 /** The server.ts pipeline in miniature: headers, ref, the body cap, then routes, E1 on the POST. */
@@ -91,6 +94,7 @@ function app(secure: boolean, origin = ORIGIN): Hono<WebEnv> {
   web.use(async (c, next) => {
     c.set("ref", REF);
     c.set("session", null);
+    c.set("formToken", null);
     await next();
   });
   web.use(bodyLimit({ maxSize: 64 }));
@@ -313,6 +317,48 @@ describe("the form-type check (E1 step 2)", () => {
     checked.onError((error, c) => c.body(null, problemOf(error, "r").status));
     expect((await checked.request("/", { method: "POST" })).status).toBe(415);
     expect((await checked.request("/", { method: "DELETE" })).status).toBe(415);
+  });
+});
+
+describe("the form token", () => {
+  test("is a keyed derivation of the session token: stable, distinct, and unlike its stored hash", () => {
+    const session = newSessionToken();
+    const token = formToken(session);
+    // Unpadded base64url of an HMAC-SHA-256, the same for every request of one session.
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(formToken(session)).toBe(token);
+    // Another session (a new sign-in rotates the token) gets another form token.
+    expect(formToken(newSessionToken())).not.toBe(token);
+    // It is neither the session token nor what web_sessions stores, in any encoding.
+    expect(token).not.toContain(session);
+    expect(token).not.toBe(Buffer.from(hashToken(session), "hex").toString("base64url"));
+  });
+
+  test("matches only the exact token, given as one string field", () => {
+    const token = formToken(newSessionToken());
+    expect(FORM_TOKEN_FIELD).toBe("form_token");
+    expect(formTokenMatches(token, token)).toBe(true);
+    for (const submitted of [
+      null,
+      undefined,
+      "",
+      token.slice(0, -1),
+      `${token}x`,
+      token.toUpperCase(),
+      ` ${token}`,
+      formToken(newSessionToken()),
+      new File([token], "token.txt"),
+      42,
+    ])
+      expect({ submitted, matches: formTokenMatches(token, submitted) }).toEqual({
+        submitted,
+        matches: false,
+      });
+    // As a form arrives: FormData.get gives the first value of a repeated field.
+    const form = new FormData();
+    form.append(FORM_TOKEN_FIELD, "forged");
+    form.append(FORM_TOKEN_FIELD, token);
+    expect(formTokenMatches(token, form.get(FORM_TOKEN_FIELD))).toBe(false);
   });
 });
 

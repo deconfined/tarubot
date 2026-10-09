@@ -2,7 +2,7 @@
 title: Officers
 description: Give officer access by in-game FC rank, by explicit grants, or both, and bind an existing Officer role safely.
 sidebar:
-  order: 5
+  order: 6
 ---
 
 TaruBot officers run its officer commands. Anyone with Discord's Manage Server is always an officer. Everyone else becomes one by holding the server's **Officer role**, which TaruBot gives out from two sources:

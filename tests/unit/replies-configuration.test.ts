@@ -11,6 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { EffectsMode } from "../../src/application/results.js";
+import { ON_MENU } from "../../src/application/self-roles.js";
 import { fcLinked } from "../../src/application/service.js";
 import {
   administratorRemoval,
@@ -53,6 +54,7 @@ import {
   override,
   rankResult,
   ROLE,
+  selfRoleHealth,
   setupResult,
   unlinked,
   visibilityReport,
@@ -509,6 +511,82 @@ describe("/config validate", () => {
     const checks = configurationChecks(R.healthy);
     expect(checks.filter((row) => row.resource)).toHaveLength(9);
     expect(configurationChecks(R.partial).filter((row) => row.resource)).toHaveLength(0);
+  });
+});
+
+describe("Role menu (2.39.0)", () => {
+  /** The Role menu rows of a validate embed, or undefined without the section. */
+  const rows = (health: Parameters<typeof selfRoleHealth>[0] | undefined) =>
+    fieldOf(
+      onlyEmbed(
+        healthReply(
+          configReport(health === undefined ? {} : { selfRoles: selfRoleHealth(health) }),
+          officer,
+          { now },
+        ),
+      ),
+      "Role menu",
+    )?.split("\n");
+
+  test("off while every role is in a draft, OK while every role outside drafts passes", () => {
+    expect(rows(undefined)).toBeUndefined();
+    expect(rows({})).toEqual(["[OFF] No roles outside drafts"]);
+    expect(rows({ listed: 1 })).toEqual(["[OK] 1 role outside drafts; all pass"]);
+    expect(rows({ listed: 12 })).toEqual(["[OK] 12 roles outside drafts; all pass"]);
+  });
+
+  test("problems, an unknown view and unreadable channels warn, counting only", () => {
+    expect(rows({ listed: 5, problems: 1 })).toEqual([
+      "[WARN] 1 role outside drafts has a problem; open Role menu to see which",
+    ]);
+    expect(rows({ listed: 5, problems: 3, unreadableChannels: 2 })).toEqual([
+      "[WARN] 3 roles outside drafts have a problem; open Role menu to see which",
+      "[WARN] TaruBot can't read 2 channels, so it can't check menu roles there",
+    ]);
+    expect(rows({ listed: 5, problems: null })).toEqual([
+      "[WARN] Couldn't check the menu's roles; try again in a minute",
+    ]);
+    expect(rows({ listed: 5, unreadableChannels: 1 })).toEqual([
+      "[OK] 5 roles outside drafts; all pass",
+      "[WARN] TaruBot can't read 1 channel, so it can't check menu roles there",
+    ]);
+    expect(rows({ unreadableMenu: true })).toEqual([
+      "[WARN] The saved role menu can't be read by this TaruBot version; open Role menu to reset it",
+    ]);
+  });
+
+  test("the section counts toward the verdict, sits after Visibility, and keeps ten fields", () => {
+    const healthy = onlyEmbed(
+      healthReply(configReport({ selfRoles: selfRoleHealth({ listed: 2 }) }), officer, { now }),
+    );
+    const before = onlyEmbed(healthReply(R.healthy, officer, { now }));
+    expect(healthy.title).toBe("Configuration health · all checks passed");
+    const passed = (embed: typeof healthy) =>
+      Number(/^(\d+) checks? passed/u.exec(embed.description ?? "")?.[1]);
+    expect(passed(healthy)).toBe(passed(before) + 1);
+    const names = namesOf(healthy);
+    expect(names.indexOf("Role menu")).toBe(names.indexOf("Visibility") + 1);
+    const warned = onlyEmbed(
+      healthReply(
+        configReport({ selfRoles: selfRoleHealth({ listed: 2, problems: 2 }) }),
+        officer,
+        {
+          now,
+        },
+      ),
+    );
+    expect(warned.title).toBe("Configuration health · 1 warning");
+    // Every section at once, Guest grandfathering included: still within the house limit.
+    const crowded = healthReply(
+      configReport({
+        guild: configGuild({ guest_grandfather: "pending", effects_enabled: false }),
+        selfRoles: selfRoleHealth({ listed: 2, problems: 1, unreadableChannels: 3 }),
+      }),
+      officer,
+      { now },
+    );
+    expect(onlyEmbed(crowded).fields?.length).toBeLessThanOrEqual(HOUSE_LIMITS.fields);
+    expect(namesOf(onlyEmbed(crowded))).toContain("Guest grandfathering");
   });
 });
 
@@ -2131,6 +2209,8 @@ describe("configuration failures render as their approved concepts", () => {
         "role",
         "/config roles guest",
       ],
+      // A self-service menu role can't become an access role (2.39.0).
+      [ON_MENU, "role", "/config roles member"],
     ] as const) {
       const embed = expectFailure(
         refusal(failure("input", message, { kind: "option", option }), officer, scope),

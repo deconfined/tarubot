@@ -55,6 +55,45 @@ import * as t from "../infrastructure/postgres/schema.js";
 import { scheduleJob } from "../jobs/queue.js";
 import type { RecentLogs } from "./recent-logs.js";
 
+/** The line that stands in for a failed query's bound values in a report. */
+const PARAMS_MARKER = "params: (left out of reports)";
+
+/**
+ * An error message without a failed query's bound values. Drizzle's DrizzleQueryError reads
+ * "Failed query: <SQL>\nparams: <values>" (drizzle-orm/errors.js). The SQL carries only $n
+ * placeholders, but the values can be anything a person submitted, such as a role choice's role
+ * IDs or a guest application's answers, which must never reach the reports repository. The values
+ * are last in the message and may span lines that look like anything, stack frames included, so
+ * everything from the first line beginning "params:" to the end is replaced by one marker line.
+ */
+export function withoutParams(message: string): string {
+  const lines = message.split("\n");
+  const start = lines.findIndex((line) => line.startsWith("params:"));
+  return start < 0 ? message : [...lines.slice(0, start), PARAMS_MARKER].join("\n");
+}
+
+/**
+ * A stack without a failed query's bound values. A stack repeats the message after its header
+ * ("Error: <message>\n    at …" in Bun and V8), so the message's one occurrence is replaced by
+ * withoutParams(message), leaving the frames as they were: a value line that looks like a frame
+ * stays out with the rest. If the stack doesn't hold the message (it was changed after the stack
+ * was captured), everything from the first "params:" line on is dropped except the lines indented
+ * like a frame, which keeps the real frames and every value line that doesn't look like one.
+ */
+export function stackWithoutParams(stack: string, message: string): string {
+  const cleaned = withoutParams(message);
+  // A function replacement, so "$&" or "$1" in the values is never read as a pattern.
+  if (cleaned !== message && stack.includes(message)) return stack.replace(message, () => cleaned);
+  const lines = stack.split("\n");
+  const start = lines.findIndex((line) => line.startsWith("params:"));
+  if (start < 0) return stack;
+  return [
+    ...lines.slice(0, start),
+    PARAMS_MARKER,
+    ...lines.slice(start + 1).filter((line) => /^\s{4}at\s/u.test(line)),
+  ].join("\n");
+}
+
 /** How often the trouble checks run; the lifecycle ticks every 30 seconds. */
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 /**
@@ -256,11 +295,15 @@ export class IssueReports {
 
   private async errorReport(error: unknown, operation: string, scope?: string): Promise<void> {
     const { code, category, source } = classifyFailure(error);
-    const stack = firstPartyFrames(error instanceof Error ? error.stack : undefined);
+    const stack = firstPartyFrames(
+      error instanceof Error && error.stack !== undefined
+        ? stackWithoutParams(error.stack, error.message)
+        : undefined,
+    );
     const where = scope ?? operation;
     const key = fingerprint("error", code, source, scopeRoot(where), stack[0]);
     if (await this.counted(key)) return;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = withoutParams(error instanceof Error ? error.message : String(error));
     const body = await this.render({
       source: "error",
       what: [

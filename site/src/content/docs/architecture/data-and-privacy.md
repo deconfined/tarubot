@@ -19,6 +19,7 @@ Everything TaruBot knows lives in one PostgreSQL database per deployment, run by
 | Ledger | `ledger_accounts`, `ledger_entries` | One account per server and FC; numbered, immutable entries with their note, amount, resulting balance and who recorded them. |
 | Work | `jobs`, `delivery_attempts`, `sync_runs`, `sync_run_jobs` | The durable queue of Discord effects, their attempts and outcomes, and `/refresh` runs. |
 | Server structure | `retired_roles`, `channel_access_policies` | Roles being cleaned up after a change, and each managed channel's original permissions under onboarding. |
+| Self-service roles | `self_role_menus` | Each server's role menu as its officers set it up: categories with their names, descriptions, limits and states, and the IDs of the roles on offer, each with a description. Never who picked which role: Discord holds that. |
 | Records | `audit`, `imports`, `issue_reports` | The audit trail, imports from a previous bot, and saved issue reports. |
 | Web sessions | `web_sessions` | Hashed session tokens, Discord user IDs, authentication and activity times, and expiry; never the raw browser token or Discord's OAuth token. |
 | Schema | `schema_migrations` | Which migrations were applied, with their checksums. |
@@ -37,7 +38,7 @@ The numbered files in [`migrations/`](https://github.com/deconfined/tarubot/tree
 - Ledger entries are immutable: database triggers refuse updates and deletes, and corrections are new entries that name the entry they correct.
 - Every decision is written with its **audit** record and its queued Discord work (the **outbox**) in one transaction, on one database connection. Either all three commit, or none does, so no decision is ever made without its record or its follow-up.
 
-Expired claim challenges are deleted a week after they expire. Links, grants, rosters, audits, ledger entries, imports and job history are kept; an operator can prune diagnostic history, but should keep financial and access records.
+Expired claim challenges are deleted a week after they expire. Links, grants, rosters, audits, ledger entries, imports and job history are kept, apart from a member's finished role-choice jobs, which TaruBot deletes after 30 days; an operator can prune diagnostic history, but should keep financial and access records.
 
 ## What's stored about a member
 
@@ -49,7 +50,7 @@ It doesn't store Discord messages or online status: Discord sends it no message 
 
 When the dashboard is enabled, Discord sign-in asks only for `identify`. TaruBot uses Discord's token once to learn the user ID, then drops it. An admitted officer receives an opaque browser session; the database stores its hash, user ID and timestamps. Sessions expire after 30 days absolutely or 7 days without activity. **Sign out** ends the current browser's session; **Sign out everywhere** ends all sessions for that user.
 
-The read-only pages show the admitted server's configuration and work. Member, role and channel names come from that server's gateway cache at render time, not a new stored directory. Application request logs use route patterns and reference IDs, not queries, cookies, form values or client addresses.
+Server configuration and Background work show the admitted server's configuration and work, and change nothing. On Role menu, officers change the server's [self-service role menu](/tarubot/admin/self-service-roles/); each change is audited with the menu's identifiers, such as category and role IDs, never the names or descriptions officers typed. Member, role and channel names come from that server's gateway cache at render time, not a new stored directory. On Server configuration and Role menu, officers can see the name of any channel TaruBot can see when a check names it or a menu role opens it, including channels their own Discord roles don't open: each menu role's **Opens:** list is how they check the officer-channel heuristic. Application request logs use route patterns and reference IDs, not queries, cookies, form values or client addresses. The limit on how many forms someone can send is counted in memory by Discord user ID, never by address, and a restart forgets it.
 
 TaruBot serves the dashboard's stylesheet, fonts and icons itself, from the dashboard's own address. The pages' content security policy admits nothing from another site, so the browser makes no requests to Google Fonts or any other third party while showing them. No client scripts are loaded. If fonts cannot load, local system fonts remain usable.
 
@@ -63,7 +64,7 @@ When an operator configures a reports repository, `/issue` and automatic reports
 - for `/issue` and work about one member: the member's Discord username and ID (for `/issue`), links, main character, nickname state, guest and officer standing, recent work and recent audit records;
 - the newest log records.
 
-Before a report is saved, TaruBot removes known secret shapes (Discord and GitHub tokens, authorization headers, passwords in URLs, PEM blocks, heartbeat ping URLs) and the deployment's own secret values. A member's own description goes into the issue as a quoted block, so it can't mention anyone on GitHub. Reports go to the repository the operator chose; the operator should keep it private.
+Before a report is saved, TaruBot removes known secret shapes (Discord and GitHub tokens, authorization headers, passwords in URLs, PEM blocks, heartbeat ping URLs), the deployment's own secret values, and the values a failed database query was given, since they can hold what someone submitted. A member's own description goes into the issue as a quoted block, so it can't mention anyone on GitHub. Reports go to the repository the operator chose; the operator should keep it private.
 
 ## Public suggestions
 

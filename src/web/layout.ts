@@ -23,9 +23,10 @@ import type { Actor } from "../domain/policy.js";
 import { admits } from "./access.js";
 import { FAVICON, NOTICES, STYLESHEET } from "./assets.js";
 import { href, html, type SafeHtml, untrusted } from "./html.js";
-import { PATHS, type Problem } from "./http.js";
+import { type ErrorFrame, PATHS, type Problem } from "./http.js";
 import { type IconName, icon } from "./icons.js";
 import type { Page } from "./page.js";
+import { postForm } from "./views/forms.js";
 
 /** One navigation link; `href` is a page href or a PATHS value. */
 export interface NavLink {
@@ -46,18 +47,33 @@ export interface ServerIdentity {
   readonly name: string;
 }
 
-/** What the shell shows around a page's main content. */
-export interface LayoutModel {
+/** What the shell shows around a page's main content, whoever is viewing it. */
+interface LayoutFrame {
   /** The `<title>` (with " · TaruBot") and the one `<h1>`. */
   readonly title: string;
   /**
-   * Signed in: the account menu offers "Sign out" (POST /logout) and "Sign out everywhere" (POST
-   * /logout/all), as forms.
+   * A form re-rendered with problems (a 409 or 422): the `<title>` starts with "Error: ", which a
+   * screen reader announces first when the page loads, and the tab shows. The `<h1>` is unchanged.
    */
-  readonly signedIn: boolean;
+  readonly error?: boolean;
   /** The current server and the pages in it that admit the viewer: a console page. */
   readonly guild?: ServerIdentity & { readonly nav: readonly NavLink[] };
 }
+
+/**
+ * The shell's model. Signed in, the account menu offers "Sign out" (POST /logout) and "Sign out
+ * everywhere" (POST /logout/all) as forms, which carry the session's form token like every POST
+ * form (sessions.ts's formToken), so a signed-in model must hold it.
+ */
+export type LayoutModel = LayoutFrame &
+  (
+    | { readonly signedIn: false }
+    | {
+        readonly signedIn: true;
+        /** The session's form token (WebVariables.formToken). */
+        readonly formToken: string;
+      }
+  );
 
 /** The product name, in every `<title>` and the header, and the / page's whole title. */
 export const BRAND = "TaruBot";
@@ -129,21 +145,28 @@ const switcher = (guild: ServerIdentity): SafeHtml =>
 
 /**
  * The account menu: a disclosure, so it opens without script. Sign-out is a POST (E1), so each
- * action is a form; the empty form still sends the urlencoded type that formOnly() requires.
- * Sign-in, by contrast, is a link (views/servers.ts).
+ * action is a form, and each carries the session's form token like every other POST form; the
+ * form still sends the urlencoded type that formOnly() requires. Sign-in, by contrast, is a link
+ * (views/servers.ts).
  */
-const ACCOUNT = html`<details class="account">
+const account = (token: string): SafeHtml => html`<details class="account">
 <summary class="account__summary">Account${icon("chevron-down")}</summary>
 <div class="account__menu">
 <p class="orr-label account__caption">Signed-in session</p>
-<form method="post" action="${PATHS.logout}">
-<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out</button>
-</form>
-<form method="post" action="${PATHS.logoutAll}">
-<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out everywhere</button>
-</form>
+${postForm(
+  { action: PATHS.logout, token },
+  html`<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out</button>`,
+)}
+${postForm(
+  { action: PATHS.logoutAll, token },
+  html`<button type="submit" class="orr-btn orr-btn--ghost orr-btn--block account__action">${icon("log-out")}Sign out everywhere</button>`,
+)}
 </div>
 </details>`;
+
+/** The account menu when the model is signed in, else nothing. */
+const accountMenu = (model: LayoutModel): SafeHtml | "" =>
+  model.signedIn ? account(model.formToken) : "";
 
 /**
  * The entry pages' backdrop: the starfield and the orbit rings, fixed behind the page so they take
@@ -180,9 +203,9 @@ ${switcher(guild)}
 <nav class="side-nav" aria-label="Server pages">
 <p class="orr-label side-nav__caption">Workspace</p>
 <ul class="side-nav__list">${guild.nav.map(navItem)}</ul>
-<div class="side-nav__context"><p>Settings and background work</p><p class="side-nav__note">${icon("info")}Changes are managed in Discord.</p></div>
+<div class="side-nav__context"><p>Settings and background work</p><p class="side-nav__note">${icon("info")}Most settings are changed in Discord; the role menu is set here.</p></div>
 </nav>
-${model.signedIn ? ACCOUNT : ""}
+${accountMenu(model)}
 </header>
 <div class="frame">
 <div class="topbar" aria-hidden="true"><p class="orr-label">Workspace<span class="topbar__separator">/</span><span class="topbar__page">${model.title}</span></p></div>
@@ -202,7 +225,7 @@ function entryPage(model: LayoutModel, main: SafeHtml): SafeHtml {
   return html`<body class="entry-page">
 <a class="skip" href="#main">Skip to content</a>
 ${BACKDROP}
-${welcome ? "" : html`<header class="entry-bar">${WORDMARK}${model.signedIn ? ACCOUNT : ""}</header>`}
+${welcome ? "" : html`<header class="entry-bar">${WORDMARK}${accountMenu(model)}</header>`}
 <main id="main" class="${welcome ? "entry entry--welcome" : "entry"} orr-enter">
 ${pageHeader(model.title, welcome)}
 ${main}
@@ -213,7 +236,8 @@ ${FOOTER}
 
 /** The whole document around `main`. Views never render `<h1>`, `<html>` or the sign-out forms. */
 export function layout(model: LayoutModel, main: SafeHtml): SafeHtml {
-  const title = model.title === BRAND ? BRAND : `${model.title} · ${BRAND}`;
+  const named = model.title === BRAND ? BRAND : `${model.title} · ${BRAND}`;
+  const title = model.error ? `Error: ${named}` : named;
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -268,6 +292,16 @@ const ERROR_WORDING: Readonly<Partial<Record<number, ErrorWording>>> = {
   },
 };
 
+/**
+ * Headings for a refusal its status would misname, by its catalog code. A restart answers 429,
+ * whose "Too many requests" would blame the person for something they didn't do; the shutdown
+ * check in server.ts and an application's pre-commit check throw the same refusal, so the heading
+ * goes with the code, not with the route that threw it.
+ */
+const CODE_HEADINGS: Readonly<Partial<Record<string, string>>> = {
+  stopping: "TaruBot is restarting",
+};
+
 /** For a status the table doesn't name; every status the app answers has its own entry. */
 const GENERIC_WORDING: ErrorWording = {
   heading: "Error",
@@ -275,24 +309,44 @@ const GENERIC_WORDING: ErrorWording = {
 };
 
 /**
+ * A Retry-After in words: seconds up to two minutes, then whole minutes, rounded up so the reader
+ * never retries early (a page's POST budget can ask for up to ten minutes).
+ */
+function waitText(seconds: number): string {
+  if (seconds < 120) return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+  return `${Math.ceil(seconds / 60)} minutes`;
+}
+
+/**
  * An error document: a heading by status, then a card with the approved message as escaped text
  * when there is one (a fixed sentence per status otherwise), `Code <code> · Ref <ref>` and a way
  * home. Never the error's own text: Problem.message is already null for anything that isn't an
  * approved Failure. The message stays main's first paragraph, which tests read as the message.
+ * `formToken` is the session's when the request was signed in (the account menu's forms carry
+ * it), null otherwise. `frame` is what the route added (ErrorFrame): another heading, and a link
+ * back to the page a refused form came from, ahead of the start page's.
  */
-export function errorPage(details: Problem, signedIn: boolean): SafeHtml {
+export function errorPage(
+  details: Problem,
+  formToken: string | null,
+  frame: ErrorFrame = {},
+): SafeHtml {
   const wording = ERROR_WORDING[details.status] ?? GENERIC_WORDING;
+  const heading = frame.heading ?? CODE_HEADINGS[details.code] ?? wording.heading;
   const wait =
-    details.retryAfter > 0
-      ? html`<p>Try again in about ${details.retryAfter} ${details.retryAfter === 1 ? "second" : "seconds"}.</p>`
-      : "";
+    details.retryAfter > 0 ? html`<p>Try again in about ${waitText(details.retryAfter)}.</p>` : "";
+  const back = frame.back
+    ? html`<a class="orr-btn orr-btn--secondary" href="${href(frame.back.href)}">Back to ${frame.back.label}</a>`
+    : "";
   return layout(
-    { title: wording.heading, signedIn },
+    formToken === null
+      ? { title: heading, signedIn: false }
+      : { title: heading, signedIn: true, formToken },
     html`<div class="orr-card entry-panel">
 <p class="entry-panel__lead">${details.message ?? wording.sentence}</p>
 ${wait}
 <p class="ref">Code <code>${details.code}</code> · Ref <code>${details.ref}</code></p>
-<p class="entry-panel__actions"><a class="orr-btn orr-btn--secondary" href="${PATHS.home}">Go to the ${BRAND} start page</a></p>
+<p class="entry-panel__actions">${back}<a class="orr-btn orr-btn--secondary" href="${PATHS.home}">Go to the ${BRAND} start page</a></p>
 </div>`,
   );
 }

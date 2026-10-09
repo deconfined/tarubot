@@ -11,21 +11,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Hono } from "hono";
+import { parseHTML } from "linkedom";
 import { pino } from "pino";
 import { z } from "zod";
-import { applicationKey, gatewayKey, lifecycleKey } from "../../src/application/keys.js";
+import {
+  applicationKey,
+  gatewayKey,
+  lifecycleKey,
+  selfRolesKey,
+} from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import type { SyncStatusView } from "../../src/application/results.js";
 import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import type { ReportOptions } from "../../src/domain/failures.js";
 import type { Actor } from "../../src/domain/policy.js";
+import { LIMIT_MESSAGES, SELF_ROLE_MESSAGES } from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
 import { AccessResolver, type WebGuild } from "../../src/web/access.js";
 import { ASSET_CACHE_CONTROL, ASSETS, STYLESHEET } from "../../src/web/assets.js";
 import { html } from "../../src/web/html.js";
-import { securityHeaderRecord, type WebEnv } from "../../src/web/http.js";
+import { FORM_TOKEN_FIELD, securityHeaderRecord, type WebEnv } from "../../src/web/http.js";
 import { icon } from "../../src/web/icons.js";
+import { stoppingRefusal } from "../../src/web/limits.js";
 import { DiscordSignIn } from "../../src/web/oauth.js";
 import { definePage, type Page } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
@@ -36,13 +44,26 @@ import {
   type WebContext,
   type WebServer,
 } from "../../src/web/server.js";
-import { SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
+import { formToken, SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
 import { type WebSettings, webSettings } from "../../src/web/settings.js";
+import { notice, noticeLocation } from "../../src/web/views/forms.js";
 import { type DiscordAccount, discordOAuthError, FakeDiscord } from "../fixtures/discord-oauth.js";
 import { THROWN } from "../fixtures/web-pages/throws/boom.page.js";
-import { HARNESS_GUILDS, harnessGateway, startHarness } from "../fixtures/web-dev.js";
+import {
+  HARNESS_GUILDS,
+  type HarnessMenus,
+  type HarnessStates,
+  harnessGateway,
+  harnessOptions,
+  harnessSelfRoles,
+  MENU_CATEGORY,
+  MENU_REVISION,
+  MENU_ROLE,
+  startHarness,
+} from "../fixtures/web-dev.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
 import { configGuild, configReport } from "../fixtures/replies/configuration.js";
+import { HOSTILE_INPUT, KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
 
 const HTTPS = "https://example.org";
 const DEV = "http://localhost:8080";
@@ -55,6 +76,8 @@ const ABSENT = "100000000000000009";
 const OFFICER = "200000000000000001";
 const MEMBER = "200000000000000002";
 const OUTSIDER = "200000000000000003";
+/** A second officer, for budgets kept per user. */
+const SECOND_OFFICER = "200000000000000004";
 const CLIENT_ID = "300000000000000001";
 const CLIENT_SECRET = "invented-client-secret";
 /** Text that must never reach a page, a log line or stderr. */
@@ -100,6 +123,15 @@ type LogLine = Record<string, unknown> & { level: number; msg: string };
 /** A page with a form, for the POST pipeline and the 422 re-render. */
 const NAME_FORM = z.object({ name: z.string().min(1).max(20) });
 
+/** The kit page's fixed notices; the success redirect names one by its token. */
+const KIT_NOTICES = { saved: "Your changes were saved." } as const;
+
+/** The limited page's budget, small so a test can spend it. */
+const LIMITED_POSTS = 3;
+
+/** A form token's hidden input in a page, as a browser would submit it. */
+const TOKEN_INPUT = new RegExp(`name="${FORM_TOKEN_FIELD}" value="([A-Za-z0-9_-]{43})"`, "gu");
+
 /** Invented sync status for the Status page. */
 const SYNC: SyncStatusView = { effectsMode: "live", runs: [], work: [] };
 
@@ -107,6 +139,8 @@ interface WorldOptions {
   readonly origin?: string;
   /** Replaces syncStatus, to make Status slow or throw. */
   readonly syncStatus?: () => Promise<SyncStatusView>;
+  /** The Role menu's review states (the harness's), none by default. */
+  readonly menuStates?: HarnessStates;
 }
 
 /** Everything a test needs: the app and every fake behind it. */
@@ -120,14 +154,25 @@ interface World {
   readonly reports: Reported[];
   /** Forms the form page received. */
   readonly posts: Record<string, unknown>[];
-  /** Milliseconds; the memo and the session store read it. */
+  /** Milliseconds; the memo, the session store and the POST budgets read it. */
   readonly clock: { now: number };
   readonly lifecycle: { ready: boolean };
+  /** What context.isStopping() answers. */
+  readonly stopping: { now: boolean };
+  /** The Role menu's saved menus by server, as the harness's SelfRoles keeps them. */
+  readonly menus: HarnessMenus;
   readonly logs: () => LogLine[];
 }
 
-/** The services the Status page and /health/ready use, as prototype-backed fakes. */
-function services(world: Pick<World, "lifecycle">, syncStatus: () => Promise<SyncStatusView>) {
+/**
+ * The services the pages and /health/ready use, as prototype-backed fakes: the Role menu's is the
+ * harness's in-memory SelfRoles over `menus`, in the review `states` given.
+ */
+function services(
+  world: Pick<World, "lifecycle" | "menus">,
+  syncStatus: () => Promise<SyncStatusView>,
+  states: HarnessStates = {},
+) {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fixture");
   app.syncStatus = syncStatus;
@@ -163,7 +208,8 @@ function services(world: Pick<World, "lifecycle">, syncStatus: () => Promise<Syn
   return new Services()
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
-    .provide(gatewayKey, harnessGateway());
+    .provide(gatewayKey, harnessGateway())
+    .provide(selfRolesKey, harnessSelfRoles(states, world.menus));
 }
 
 /** The bot's resolver over invented membership: an officer, a member, and Unknown Member. */
@@ -175,7 +221,12 @@ function resolver(resolutions: [string, string][]) {
         kind: "scope",
         scope: "current_member",
       });
-    return { guildId, userId, officer: userId === OFFICER, manageRoles: false };
+    return {
+      guildId,
+      userId,
+      officer: userId === OFFICER || userId === SECOND_OFFICER,
+      manageRoles: false,
+    };
   };
 }
 
@@ -195,6 +246,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const { settings } = parsed;
   const clock = { now: Date.parse("2026-10-04T12:00:00.000Z") };
   const lifecycle = { ready: true };
+  const stopping = { now: false };
   const resolutions: [string, string][] = [];
   const reports: Reported[] = [];
   const posts: Record<string, unknown>[] = [];
@@ -209,8 +261,8 @@ async function world(options: WorldOptions = {}): Promise<World> {
     access: ["officer"],
     requires: [],
     nav: "Form",
-    get: () =>
-      html`<form method="post" action="/g/${GUILD}/form"><label for="name">Name</label><input id="name" name="name"><button type="submit">Save</button></form>`,
+    get: ({ formToken: token }) =>
+      html`<form method="post" action="/g/${GUILD}/form"><input type="hidden" name="${FORM_TOKEN_FIELD}" value="${token}"><label for="name">Name</label><input id="name" name="name"><button type="submit">Save</button></form>`,
     async post(context, form) {
       posts.push(Object.fromEntries(form));
       const parsed = NAME_FORM.safeParse(Object.fromEntries(form));
@@ -218,15 +270,85 @@ async function world(options: WorldOptions = {}): Promise<World> {
       // A page bug returning an off-site target must still end on this origin.
       return { redirect: parsed.data.name === "away" ? "//evil.example/" : context.url.pathname };
     },
+    postLimit: 120,
   });
-  const pages = new Map<string, Page>([...(await loadPages()), [formPage.path, formPage]]);
+  // The write foundation's fixture: the form kit, a success notice, both re-render
+  // statuses, the pre-commit shutdown check, and a page bug's off-list status.
+  const kitPage = definePage({
+    path: "/g/:guild/kit",
+    title: "Kit",
+    access: ["officer"],
+    requires: [],
+    get: ({ url, formToken: token }) =>
+      html`${notice(url, KIT_NOTICES)}${kitForm(url.pathname, token)}`,
+    async post(context, form) {
+      posts.push(Object.fromEntries(form));
+      const action = context.url.pathname;
+      const values = {
+        ...KIT_DEFAULTS,
+        name: String(form.get("name") ?? ""),
+        roles: form.getAll("roles").map(String),
+      };
+      // An application operation's check just before commit, once shutdown has begun.
+      if (form.get("op") === "commit-while-stopping") throw stoppingRefusal();
+      if (form.get("op") === "teapot")
+        return { invalid: html`<p>A page bug's status.</p>`, status: 418 as unknown as 409 };
+      if (form.get("revision") === "stale")
+        return {
+          invalid: kitForm(action, context.formToken, values, [
+            { id: "kit-name", message: "Another officer changed this while you were editing." },
+          ]),
+          status: 409,
+        };
+      if (values.name.length > 40)
+        return { invalid: kitForm(action, context.formToken, values, KIT_ERRORS) };
+      return { redirect: noticeLocation(action, "saved") };
+    },
+    postLimit: 120,
+  });
+  // A small budget to spend.
+  const limitedPage = definePage({
+    path: "/g/:guild/limited",
+    title: "Limited",
+    access: ["officer"],
+    requires: [],
+    get: () => html`<p>Limited</p>`,
+    async post(context, form) {
+      posts.push(Object.fromEntries(form));
+      return { redirect: context.url.pathname };
+    },
+    postLimit: LIMITED_POSTS,
+  });
+  // A page bug: a service it never declared.
+  const undeclaredPage = definePage({
+    path: "/g/:guild/undeclared",
+    title: "Undeclared",
+    access: ["officer"],
+    requires: [],
+    get: ({ services }) => {
+      services.get(applicationKey);
+      return html`<p>Never shown</p>`;
+    },
+  });
+  const pages = new Map<string, Page>([
+    ...(await loadPages()),
+    ...[formPage, kitPage, limitedPage, undeclaredPage].map((fixture): [string, Page] => [
+      fixture.path,
+      fixture,
+    ]),
+  ]);
   const discord = new FakeDiscord(CLIENT_ID, CLIENT_SECRET);
   const sessions = new MemorySessions(() => clock.now);
   const resolve = resolver(resolutions);
+  const menus: HarnessMenus = new Map();
   const context: WebContext = {
-    services: services({ lifecycle }, options.syncStatus ?? (async () => SYNC)),
+    services: services(
+      { lifecycle, menus },
+      options.syncStatus ?? (async () => SYNC),
+      options.menuStates,
+    ),
     allowsGuild: (guildId) => guildId !== UNSERVED,
-    isStopping: () => false,
+    isStopping: () => stopping.now,
     resolveActor: resolve,
     report: (error, operation, reportOptions) =>
       reports.push({ error, operation, options: reportOptions }),
@@ -245,6 +367,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
     }),
     access: new AccessResolver(resolve, { now: () => clock.now }),
     log,
+    now: () => clock.now,
   });
   return {
     app,
@@ -256,6 +379,8 @@ async function world(options: WorldOptions = {}): Promise<World> {
     posts,
     clock,
     lifecycle,
+    stopping,
+    menus,
     logs: () => lines.map((line) => JSON.parse(line) as LogLine),
   };
 }
@@ -293,8 +418,26 @@ class Browser {
     return this.request(path, init);
   }
 
-  /** A same-origin form post, as a browser sends it. */
-  post(path: string, body = "", headers: Record<string, string> = {}): Promise<Response> {
+  /**
+   * The form token this browser's pages carry: derived from its session cookie as the server
+   * does, or null signed out. A test that reads it from a page instead proves the two agree.
+   */
+  get formToken(): string | null {
+    const session = this.jar.get(sessionCookie(this.world));
+    return session === undefined ? null : formToken(session);
+  }
+
+  /**
+   * A same-origin form post, as a browser sends it: with the form token its pages carry, unless
+   * `token` says otherwise (null sends none).
+   */
+  post(
+    path: string,
+    body = "",
+    headers: Record<string, string> = {},
+    token: string | null = this.formToken,
+  ): Promise<Response> {
+    const field = token === null ? "" : `${FORM_TOKEN_FIELD}=${encodeURIComponent(token)}`;
     return this.request(path, {
       method: "POST",
       headers: {
@@ -303,7 +446,7 @@ class Browser {
         "Content-Type": "application/x-www-form-urlencoded",
         ...headers,
       },
-      body,
+      body: [body, field].filter((part) => part !== "").join("&"),
     });
   }
 
@@ -511,7 +654,7 @@ describe("the POST pipeline (E1)", () => {
       officer.request(form, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", ...headers },
-        body: "name=ok",
+        body: `name=ok&${FORM_TOKEN_FIELD}=${officer.formToken}`,
       });
     const origin = w.settings.origin;
     expect((await send({ "Sec-Fetch-Site": "cross-site", Origin: origin })).status).toBe(403);
@@ -573,6 +716,813 @@ describe("the POST pipeline (E1)", () => {
     const away = await officer.post(form, "name=away");
     expect(away.status).toBe(303);
     expect(away.headers.get("location")).toBe("/");
+  });
+});
+
+describe("the write foundation", () => {
+  const form = `/g/${GUILD}/form`;
+  const kit = `/g/${GUILD}/kit`;
+  const limited = `/g/${GUILD}/limited`;
+
+  test("a POST without the session's form token is 403 before it costs anything", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const other = await signedIn(w, SECOND_OFFICER);
+    w.resolutions.length = 0;
+    for (const token of [null, "", "x".repeat(43), other.formToken]) {
+      const response = await officer.post(form, "name=ok", {}, token);
+      expect({ token, status: response.status }).toEqual({ token, status: 403 });
+      const text = await response.text();
+      expect(text).toContain(
+        "This form is out of date or didn&#39;t come from TaruBot&#39;s own pages, so TaruBot ignored it. Open the page again, then redo your change.",
+      );
+      // Reloading this answer would send the same form again, so the page offers a way back to
+      // the form's own page first, under a heading that doesn't call the officer not allowed.
+      const { document } = parseHTML(text);
+      expect(document.querySelector("h1")?.textContent).toBe("Form out of date");
+      expect(
+        [...document.querySelectorAll(".entry-panel__actions a")].map((link) => [
+          link.getAttribute("href"),
+          link.textContent,
+        ]),
+      ).toEqual([
+        [form, "Back to Form"],
+        ["/", "Go to the TaruBot start page"],
+      ]);
+    }
+    // No Discord request and no page code ran.
+    expect(w.resolutions).toEqual([]);
+    expect(w.posts).toEqual([]);
+    // The token the page rendered is the one that passes, and post() never sees the field.
+    const page = await (await officer.get(form)).text();
+    const rendered = [...page.matchAll(TOKEN_INPUT)].map((match) => match[1] ?? "");
+    // The page's form and the account menu's two sign-out forms.
+    const derived = officer.formToken ?? "";
+    expect(rendered).toEqual([derived, derived, derived]);
+    expect((await officer.post(form, "name=ok", {}, rendered[0] ?? null)).status).toBe(303);
+    expect(w.posts).toEqual([{ name: "ok" }]);
+  });
+
+  test("once shutdown begins, a POST is 429 with Retry-After before the budget, the actor or post()", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    w.resolutions.length = 0;
+    w.stopping.now = true;
+    for (let attempt = 0; attempt <= LIMITED_POSTS; attempt++) {
+      const response = await officer.post(limited, "x=1");
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("30");
+      // One wait, from Retry-After.
+      const text = await response.text();
+      expect(text).toContain("TaruBot is restarting, so nothing was saved.");
+      expect(text).toContain("Try again in about 30 seconds.");
+      expect(text).not.toContain("in a minute");
+      expect(text).toContain(`href="${limited}">Back to Limited</a>`);
+      // A restart isn't the person's doing: never "Too many requests" (UX-4).
+      const { document } = parseHTML(text);
+      expect(document.querySelector("h1")?.textContent).toBe("TaruBot is restarting");
+      expect(document.querySelector("title")?.textContent).toStartWith("TaruBot is restarting");
+    }
+    expect(w.resolutions).toEqual([]);
+    expect(w.posts).toEqual([]);
+    // Reading still works while the drain runs.
+    expect((await officer.get(limited)).status).toBe(200);
+    // The refusals spent none of the budget.
+    w.stopping.now = false;
+    for (let attempt = 0; attempt < LIMITED_POSTS; attempt++)
+      expect((await officer.post(limited, "x=1")).status).toBe(303);
+  });
+
+  test("an operation's pre-commit shutdown check answers the same 429", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const response = await officer.post(kit, "op=commit-while-stopping&name=x");
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("30");
+    const text = await response.text();
+    expect(text).toContain("nothing was saved");
+    expect(text).toContain(`href="${kit}">Back to Kit</a>`);
+    const { document } = parseHTML(text);
+    expect(document.querySelector("h1")?.textContent).toBe("TaruBot is restarting");
+    expect(document.querySelector("title")?.textContent).toStartWith("TaruBot is restarting");
+    expect(w.reports).toEqual([]);
+  });
+
+  test("the budget is per page, server and user; over it, 429 with Retry-After and no Discord request", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const second = await signedIn(w, SECOND_OFFICER);
+    w.resolutions.length = 0;
+    // A refused input counts like any POST: the budget bounds what a user can spend.
+    for (let attempt = 0; attempt < LIMITED_POSTS; attempt++)
+      expect((await officer.post(limited, "x=1")).status).toBe(303);
+    const over = await officer.post(limited, "x=1");
+    expect(over.status).toBe(429);
+    expect(over.headers.get("retry-after")).toBe("600");
+    const refusal = await over.text();
+    expect(refusal).toContain("didn&#39;t save this one");
+    expect(refusal).toContain(`href="${limited}">Back to Limited</a>`);
+    // One wait, from Retry-After.
+    expect(refusal).toContain("Try again in about 10 minutes.");
+    expect(refusal).not.toContain("Wait a few minutes");
+    // The refused POST resolved no actor and reached no page code.
+    expect(w.resolutions).toHaveLength(LIMITED_POSTS);
+    expect(w.posts).toHaveLength(LIMITED_POSTS);
+    // Another user, and another page for the same user, have budgets of their own.
+    expect((await second.post(limited, "x=1")).status).toBe(303);
+    expect((await officer.post(form, "name=ok")).status).toBe(303);
+    // The window counts from the first POST; the wait shrinks, then the budget is back.
+    w.clock.now += 599_001;
+    const last = await officer.post(limited, "x=1");
+    expect(last.status).toBe(429);
+    expect(last.headers.get("retry-after")).toBe("1");
+    w.clock.now += 999;
+    expect((await officer.post(limited, "x=1")).status).toBe(303);
+    // Reading costs no budget.
+    for (let attempt = 0; attempt < 10; attempt++)
+      expect((await officer.get(limited)).status).toBe(200);
+  });
+
+  test("a refused input re-renders at 422 with the summary, the values kept and an Error: title", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const name = `${HOSTILE_INPUT}${"x".repeat(40)}`;
+    const response = await officer.post(
+      kit,
+      `op=category.edit&revision=7&name=${encodeURIComponent(name)}&roles=300000000000000001&roles=300000000000000003`,
+    );
+    expect(response.status).toBe(422);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const text = await response.text();
+    expect(text).toContain("<title>Error: Kit · TaruBot</title>");
+    expect(text).toContain('<h1 class="page-header__title">Kit</h1>');
+    expect(text).toContain('<div class="error-summary" role="alert" tabindex="-1" autofocus');
+    expect(text).toContain('<a href="#kit-name">Enter a name of at most 40 characters.</a>');
+    // What was typed comes back escaped in its field, and is never markup.
+    expect(text).toContain(
+      `id="kit-name" name="name" value="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;${"x".repeat(40)}"`,
+    );
+    expect(text).not.toContain("<img src=x");
+    expect(text).toMatch(/value="300000000000000001" checked/u);
+    expect(text).toMatch(/value="300000000000000003" checked/u);
+    // The re-rendered forms carry the token again, so the corrected form can be sent.
+    expect([...text.matchAll(TOKEN_INPUT)].length).toBeGreaterThanOrEqual(3);
+    expect(w.posts[0]).toMatchObject({ op: "category.edit", name });
+    expect(Object.keys(w.posts[0] ?? {})).not.toContain(FORM_TOKEN_FIELD);
+  });
+
+  test("a stale form re-renders at 409 with what was typed; any other page status is a 422", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const stale = await officer.post(kit, "op=category.edit&revision=stale&name=Renamed");
+    expect(stale.status).toBe(409);
+    const text = await stale.text();
+    expect(text).toContain("<title>Error: Kit · TaruBot</title>");
+    expect(text).toContain("Another officer changed this while you were editing.");
+    expect(text).toContain('value="Renamed"');
+    const odd = await officer.post(kit, "op=teapot");
+    expect(odd.status).toBe(422);
+    expect(await odd.text()).toContain("<title>Error: Kit · TaruBot</title>");
+  });
+
+  test("success is a 303 to the page with a notice, which the page shows from its own table only", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const saved = await officer.post(kit, "op=category.edit&revision=7&name=Pronouns");
+    expect(saved.status).toBe(303);
+    const location = saved.headers.get("location") ?? "";
+    expect(location).toBe(`${kit}?notice=saved#status`);
+    const shown = await (await officer.get(location)).text();
+    expect(shown).toContain(
+      '<p class="notice notice--success" id="status" role="status" tabindex="-1">Your changes were saved.</p>',
+    );
+    expect(shown).toContain("<title>Kit · TaruBot</title>");
+    for (const query of ["?notice=unknown", "?notice=%3Cb%3Ehi%3C%2Fb%3E", "?notice=__proto__", ""])
+      expect({
+        query,
+        notice: (await (await officer.get(`${kit}${query}`)).text()).includes("notice--success"),
+      }).toEqual({
+        query,
+        notice: false,
+      });
+  });
+
+  test("a page gets only the services it declared; another is a reported 500", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const response = await officer.get(`/g/${GUILD}/undeclared`);
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain("undeclared service");
+    expect(w.reports).toHaveLength(1);
+    const [reported] = w.reports;
+    const error = reported?.error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error instanceof Error ? error.message : "").toBe(
+      `Page used an undeclared service: ${applicationKey.name}`,
+    );
+    expect(reported?.options).toEqual({ scope: "web:/g/:guild/undeclared", level: "error" });
+    // Declared services still resolve: Status declares the application, lifecycle and gateway.
+    expect((await officer.get(`/g/${GUILD}/status`)).status).toBe(200);
+  });
+
+  test("every form page's POST route answers 405 for other methods, naming POST", async () => {
+    const w = await world();
+    const browser = new Browser(w);
+    for (const path of [form, kit, limited]) {
+      const response = await browser.request(path, { method: "PUT" });
+      expect({ path, status: response.status, allow: response.headers.get("allow") }).toEqual({
+        path,
+        status: 405,
+        allow: "GET, HEAD, POST",
+      });
+    }
+  });
+});
+
+describe("the Role menu (2.39.0)", () => {
+  const path = `/g/${GUILD}/role-menu`;
+  /** A form body as the page's forms send it (the browser adds the form token). */
+  const body = (fields: Record<string, string | readonly string[]>): string => {
+    const params = new URLSearchParams();
+    for (const [name, value] of Object.entries(fields))
+      for (const item of typeof value === "string" ? [value] : value) params.append(name, item);
+    return params.toString();
+  };
+  /** The officer's notice redirect for `token`, shown in `category`'s card when it names one. */
+  const noticed = (token: string, category?: string) =>
+    category === undefined
+      ? `${path}?notice=${token}#status`
+      : `${path}?notice=${token}&category=${category}#status`;
+  /** The saved menu the harness's SelfRoles holds for the server. */
+  const saved = (w: World) => w.menus.get(GUILD);
+  const categoryNamed = (w: World, name: string) =>
+    saved(w)?.menu?.categories.find((category) => category.name === name);
+  /** A new category's ID, as the page mints them. */
+  const NEW_ID = "3c1d2e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+  const create = (overrides: Record<string, string> = {}) =>
+    body({
+      op: "category.create",
+      revision: String(MENU_REVISION),
+      id: NEW_ID,
+      name: "Timezones",
+      description: "Where you play from.",
+      max: "1",
+      ...overrides,
+    });
+
+  test("officers find it in the navigation; GET and HEAD serve it, and other methods are 405 naming POST", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const page = await officer.get(`/g/${GUILD}/status`);
+    expect(await page.text()).toContain(`href="${path}"`);
+    const response = await officer.get(path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const text = await response.text();
+    expect(text).toContain('<h1 class="page-header__title">Role menu</h1>');
+    expect(text).toContain(`href="${path}" aria-current="page"`);
+    expect((await officer.request(path, { method: "HEAD" })).status).toBe(200);
+    for (const method of ["PUT", "DELETE", "PATCH"]) {
+      const refused = await officer.request(path, { method });
+      expect({ method, status: refused.status, allow: refused.headers.get("allow") }).toEqual({
+        method,
+        status: 405,
+        allow: "GET, HEAD, POST",
+      });
+    }
+  });
+
+  test("every form carries op, the menu's revision and the session's form token", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const { document } = parseHTML(await (await officer.get(path)).text());
+    const forms = [...document.querySelectorAll("main form")];
+    expect(forms.length).toBeGreaterThan(20);
+    for (const form of forms) {
+      const value = (name: string) =>
+        form.querySelector(`input[type="hidden"][name="${name}"]`)?.getAttribute("value");
+      expect({
+        action: form.getAttribute("action"),
+        token: value(FORM_TOKEN_FIELD),
+        revision: value("revision"),
+        op: typeof value("op"),
+      }).toEqual({
+        action: path,
+        token: officer.formToken ?? "",
+        revision: String(MENU_REVISION),
+        op: "string",
+      });
+    }
+  });
+
+  test("a member without the officer flag is 403 on GET and POST, and the menu is never read", async () => {
+    const w = await world();
+    const { token } = await w.sessions.create(MEMBER);
+    const cookie = `tarubot=${token}`;
+    expect((await w.app.request(new URL(path, DEV).href, { headers: { cookie } })).status).toBe(
+      403,
+    );
+    const posted = await w.app.request(new URL(path, DEV).href, {
+      method: "POST",
+      headers: {
+        cookie,
+        "Sec-Fetch-Site": "same-origin",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: `${create()}&${FORM_TOKEN_FIELD}=${formToken(token)}`,
+    });
+    expect(posted.status).toBe(403);
+    // Refused for access, so no way back to a page that wouldn't open, and the status's heading.
+    const refusal = parseHTML(await posted.text()).document;
+    expect(refusal.querySelector("h1")?.textContent).toBe("Not allowed");
+    expect(refusal.querySelector(`a[href="${path}"]`)).toBeNull();
+    expect(w.menus.has(GUILD)).toBe(false);
+  });
+
+  test("a create is a 303 to its notice; a double submit lands on the same 303 and writes once", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await officer.post(path, create());
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe(noticed("created", NEW_ID));
+    }
+    expect(saved(w)?.revision).toBe(MENU_REVISION + 1n);
+    expect(categoryNamed(w, "Timezones")).toMatchObject({ id: NEW_ID, state: "draft", max: 1 });
+    const shown = await (await officer.get(noticed("created", NEW_ID))).text();
+    expect(shown).toContain(
+      'id="status" role="status" tabindex="-1">Category added as a draft. Add its roles, then publish it when it&#39;s ready.</p>',
+    );
+    // In the new category's card, ahead of its title, and only there.
+    const card = parseHTML(shown).document.querySelector(`#category-${NEW_ID}`);
+    expect(card?.querySelector("#status")?.nextElementSibling?.className).toBe(
+      "menu-category__meta",
+    );
+    expect(shown.match(/id="status"/gu)).toHaveLength(1);
+    expect(shown).toContain('<span dir="auto">Timezones</span>');
+    // A notice the page's table doesn't hold shows nothing, and is never reflected.
+    const crafted = await (await officer.get(`${path}?notice=%3Cb%3Ehi`)).text();
+    expect(crafted).not.toContain("notice--success");
+    expect(crafted).not.toContain("<b>hi");
+    // A category the menu doesn't hold puts the notice back at the top, and is never shown.
+    for (const category of ["%3Cb%3Ehi", "00000000-0000-4000-8000-000000000000"]) {
+      const top = await (await officer.get(`${path}?notice=saved&category=${category}`)).text();
+      const status = parseHTML(top).document.querySelector("#status");
+      expect({ category, card: status?.closest(".menu-category") ?? null }).toEqual({
+        category,
+        card: null,
+      });
+      expect(status?.textContent).toBe("Category saved.");
+      expect(top).not.toContain("<b>hi");
+      expect(top).not.toContain("00000000-0000-4000-8000-000000000000");
+    }
+  });
+
+  test("a repeated move or state change is the same 303 with no write (the equal-state rule)", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const move = body({
+      op: "category.move",
+      revision: String(MENU_REVISION),
+      category: MENU_CATEGORY.content,
+      to: "0",
+    });
+    for (let attempt = 0; attempt < 2; attempt++)
+      expect((await officer.post(path, move)).headers.get("location")).toBe(
+        noticed("moved", MENU_CATEGORY.content),
+      );
+    expect(saved(w)?.menu?.categories[0]?.id).toBe(MENU_CATEGORY.content);
+    expect(saved(w)?.revision).toBe(MENU_REVISION + 1n);
+    // Publishing what is already published: success, nothing written, whatever the revision.
+    const publish = body({
+      op: "category.setState",
+      revision: "1",
+      category: MENU_CATEGORY.games,
+      state: "published",
+    });
+    expect((await officer.post(path, publish)).headers.get("location")).toBe(
+      noticed("published", MENU_CATEGORY.games),
+    );
+    expect(saved(w)?.revision).toBe(MENU_REVISION + 1n);
+  });
+
+  test("a stale form that would change something is a 409: the menu as it is now, the typed text kept", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const second = await signedIn(w, SECOND_OFFICER);
+    const rename = (category: string, name: string, revision: bigint) =>
+      body({
+        op: "category.edit",
+        revision: String(revision),
+        category,
+        name,
+        description: "",
+        max: "any",
+      });
+    // Another officer renames Games first.
+    expect(
+      (await second.post(path, rename(MENU_CATEGORY.games, "Games we play", MENU_REVISION))).status,
+    ).toBe(303);
+    // This officer's form was rendered before that.
+    const stale = await officer.post(
+      path,
+      rename(MENU_CATEGORY.pronouns, "Your <pronouns>", MENU_REVISION),
+    );
+    expect(stale.status).toBe(409);
+    const text = await stale.text();
+    expect(text).toContain("<title>Error: Role menu · TaruBot</title>");
+    const { document } = parseHTML(text);
+    const summary = document.querySelector(".error-summary");
+    expect(summary?.querySelector("a")?.textContent).toBe(SELF_ROLE_MESSAGES.changed);
+    const target = summary?.querySelector("a")?.getAttribute("href") ?? "";
+    expect(target).toBe(`#category-${MENU_CATEGORY.pronouns}-name`);
+    // What was typed is back in the form used, escaped, inside its open disclosure, at the
+    // current revision: the officer has now seen the menu as it is.
+    const input = document.querySelector(target);
+    expect(input?.getAttribute("value")).toBe("Your <pronouns>");
+    expect(text).not.toContain("Your <pronouns>");
+    expect(input?.closest("details")?.hasAttribute("open")).toBe(true);
+    expect(
+      input?.closest("form")?.querySelector('input[name="revision"]')?.getAttribute("value"),
+    ).toBe(String(MENU_REVISION + 1n));
+    // The other officer's change shows, and nothing of this one was saved.
+    expect(
+      document.querySelector(`#category-${MENU_CATEGORY.games}-title > span[dir="auto"]`)
+        ?.textContent,
+    ).toBe("Games we play");
+    expect(categoryNamed(w, "Pronouns")).toBeDefined();
+    expect(saved(w)?.revision).toBe(MENU_REVISION + 1n);
+  });
+
+  test("after a 409, a resubmit keeps another officer's changes in fields this officer never touched", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const second = await signedIn(w, SECOND_OFFICER);
+    const pronouns = MENU_CATEGORY.pronouns;
+    /** What a rendered form sends, as a browser would; post() adds the token. */
+    const fieldsOf = (form: Element | null | undefined): string => {
+      const params = new URLSearchParams();
+      for (const control of form?.querySelectorAll("input, select") ?? []) {
+        const name = control.getAttribute("name");
+        if (name === null || name === FORM_TOKEN_FIELD) continue;
+        params.append(
+          name,
+          control.tagName === "SELECT"
+            ? (control.querySelector("option[selected]")?.getAttribute("value") ?? "")
+            : (control.getAttribute("value") ?? ""),
+        );
+      }
+      return params.toString();
+    };
+    const formWith = (document: Document, id: string) =>
+      document.querySelector(`#${id}`)?.closest("form");
+    // This officer's page, rendered at the starting revision.
+    const stale = parseHTML(await (await officer.get(path)).text()).document;
+    // The other officer then gives Pronouns a new description and stops offering He/Him.
+    expect(
+      (
+        await second.post(
+          path,
+          body({
+            op: "category.edit",
+            revision: String(MENU_REVISION),
+            category: pronouns,
+            name: "Pronouns",
+            description: "Pick what fits.",
+            max: "any",
+          }),
+        )
+      ).status,
+    ).toBe(303);
+    const rows = [MENU_ROLE.heHim, MENU_ROLE.sheHer, MENU_ROLE.theyThem, MENU_ROLE.askMe];
+    const askMe = "Replaced by your profile's own pronouns field.";
+    expect(
+      (
+        await second.post(
+          path,
+          body({
+            op: "options.edit",
+            revision: String(MENU_REVISION + 1n),
+            category: pronouns,
+            role: rows,
+            ...Object.fromEntries(
+              rows.flatMap((roleId, at) => [
+                [`description:${roleId}`, roleId === MENU_ROLE.askMe ? askMe : ""],
+                [`position:${roleId}`, String(at + 1)],
+                [
+                  `state:${roleId}`,
+                  roleId === MENU_ROLE.heHim || roleId === MENU_ROLE.askMe
+                    ? "removal_only"
+                    : "offered",
+                ],
+              ]),
+            ),
+          }),
+        )
+      ).status,
+    ).toBe(303);
+    const pronounsNow = () => saved(w)?.menu?.categories.find((c) => c.id === pronouns);
+    expect(pronounsNow()?.options[0]).toEqual({
+      roleId: MENU_ROLE.heHim,
+      description: "",
+      removalOnly: true,
+    });
+
+    const value = (form: Element | null | undefined, name: string) =>
+      form?.querySelector(`[name="${name}"]`)?.getAttribute("value");
+    // This officer renames Pronouns on the stale page, first leaving the name blank: the 422 keeps
+    // the stale revision and what the form first showed, so the correction still meets the lock.
+    const blank = formWith(stale, `category-${pronouns}-name`);
+    blank?.querySelector('input[name="name"]')?.setAttribute("value", " ");
+    const invalid = await officer.post(path, fieldsOf(blank));
+    expect(invalid.status).toBe(422);
+    const rename = formWith(parseHTML(await invalid.text()).document, `category-${pronouns}-name`);
+    expect([value(rename, "revision"), value(rename, "was:description")]).toEqual([
+      String(MENU_REVISION),
+      "Shown on your profile, so people know how to refer to you.",
+    ]);
+    // The corrected rename is a 409 showing the other officer's description, not the one the
+    // stale form was filled with, under the current revision.
+    rename?.querySelector('input[name="name"]')?.setAttribute("value", "Your pronouns");
+    const conflict = await officer.post(path, fieldsOf(rename));
+    expect(conflict.status).toBe(409);
+    const shown = parseHTML(await conflict.text()).document;
+    const again = formWith(shown, `category-${pronouns}-name`);
+    expect([value(again, "name"), value(again, "description"), value(again, "revision")]).toEqual([
+      "Your pronouns",
+      "Pick what fits.",
+      String(MENU_REVISION + 2n),
+    ]);
+    // Sending it again saves the rename and keeps the other officer's description.
+    expect((await officer.post(path, fieldsOf(again))).status).toBe(303);
+    expect([pronounsNow()?.name, pronounsNow()?.description]).toEqual([
+      "Your pronouns",
+      "Pick what fits.",
+    ]);
+
+    // The stale Edit roles form changes only She/Her's description: the 409 shows He/Him as the
+    // other officer left it (Not offered), and the resubmit keeps it so.
+    const edit = formWith(stale, `option-${MENU_ROLE.sheHer}-description`);
+    edit
+      ?.querySelector(`input[name="description:${MENU_ROLE.sheHer}"]`)
+      ?.setAttribute("value", "Ask me first.");
+    const optionsConflict = await officer.post(path, fieldsOf(edit));
+    expect(optionsConflict.status).toBe(409);
+    const optionsShown = parseHTML(await optionsConflict.text()).document;
+    const optionsAgain = formWith(optionsShown, `option-${MENU_ROLE.sheHer}-description`);
+    expect(
+      optionsAgain
+        ?.querySelector(`select[name="state:${MENU_ROLE.heHim}"] option[selected]`)
+        ?.getAttribute("value"),
+    ).toBe("removal_only");
+    expect(value(optionsAgain, `description:${MENU_ROLE.sheHer}`)).toBe("Ask me first.");
+    expect((await officer.post(path, fieldsOf(optionsAgain))).status).toBe(303);
+    expect(pronounsNow()?.options.slice(0, 2)).toEqual([
+      { roleId: MENU_ROLE.heHim, description: "", removalOnly: true },
+      { roleId: MENU_ROLE.sheHer, description: "Ask me first.", removalOnly: false },
+    ]);
+  });
+
+  test("a refused input is a 422 whose summary links each field; the form keeps its own revision", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const blank = await officer.post(path, create({ name: "   ", description: "a‮b" }));
+    expect(blank.status).toBe(422);
+    const { document } = parseHTML(await blank.text());
+    expect(document.querySelector("title")?.textContent).toBe("Error: Role menu · TaruBot");
+    expect(
+      [...document.querySelectorAll(".error-summary a")].map((link) => [
+        link.getAttribute("href"),
+        link.textContent,
+      ]),
+    ).toEqual([
+      ["#new-category-name", "Give the category a name."],
+      ["#new-category-description", "Remove hidden formatting characters."],
+    ]);
+    expect(document.querySelector("#new-category-name")?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.querySelector("#new-category-description")?.getAttribute("value")).toBe("a‮b");
+    // The refused create keeps its minted ID and the revision it was sent with.
+    const form = document.querySelector("#new-category-name")?.closest("form");
+    expect(form?.querySelector('input[name="id"]')?.getAttribute("value")).toBe(NEW_ID);
+    expect(form?.querySelector('input[name="revision"]')?.getAttribute("value")).toBe(
+      String(MENU_REVISION),
+    );
+    // An Edit roles row's place: refused at its own field, in the reopened form.
+    const options = await officer.post(
+      path,
+      body({
+        op: "options.edit",
+        revision: String(MENU_REVISION),
+        category: MENU_CATEGORY.games,
+        role: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+        [`description:${MENU_ROLE.valheim}`]: "Our server.",
+        [`position:${MENU_ROLE.valheim}`]: "0",
+        [`state:${MENU_ROLE.valheim}`]: "offered",
+        [`description:${MENU_ROLE.minecraft}`]: "",
+        [`position:${MENU_ROLE.minecraft}`]: "1.5",
+        [`state:${MENU_ROLE.minecraft}`]: "offered",
+      }),
+    );
+    expect(options.status).toBe(422);
+    const refused = parseHTML(await options.text()).document;
+    const link = refused.querySelector(".error-summary a");
+    expect(link?.getAttribute("href")).toBe(`#option-${MENU_ROLE.valheim}-position`);
+    // Each row's message names its role first, in the summary and beside the field, so two rows'
+    // links never read alike and a phone shows the role with the error.
+    expect(
+      [...refused.querySelectorAll(".error-summary a")].map((item) => [
+        item.getAttribute("href"),
+        item.textContent,
+        item.querySelector(".mention")?.textContent,
+      ]),
+    ).toEqual([
+      [`#option-${MENU_ROLE.valheim}-position`, `@Valheim: ${LIMIT_MESSAGES.position}`, "@Valheim"],
+      [
+        `#option-${MENU_ROLE.minecraft}-position`,
+        `@Minecraft: ${LIMIT_MESSAGES.position}`,
+        "@Minecraft",
+      ],
+    ]);
+    expect(refused.querySelector(`#option-${MENU_ROLE.valheim}-position-error`)?.textContent).toBe(
+      `Error: @Valheim: ${LIMIT_MESSAGES.position}`,
+    );
+    const position = refused.querySelector(`#option-${MENU_ROLE.valheim}-position`);
+    expect(position?.getAttribute("value")).toBe("0");
+    expect(position?.closest("details")?.hasAttribute("open")).toBe(true);
+    expect(
+      refused.querySelector(`#option-${MENU_ROLE.valheim}-description`)?.getAttribute("value"),
+    ).toBe("Our server.");
+    expect(saved(w)?.revision).toBe(MENU_REVISION);
+  });
+
+  test("any officer adds roles, with no Discord Manage Roles needed", async () => {
+    const w = await world();
+    // The world's officers are delegated: officer access, manageRoles false.
+    const officer = await signedIn(w, SECOND_OFFICER);
+    const added = await officer.post(
+      path,
+      body({
+        op: "options.add",
+        revision: String(MENU_REVISION),
+        category: MENU_CATEGORY.content,
+        roles: [MENU_ROLE.healer, MENU_ROLE.tank],
+      }),
+    );
+    expect(added.status).toBe(303);
+    expect(added.headers.get("location")).toBe(noticed("added", MENU_CATEGORY.content));
+    expect(categoryNamed(w, "Content")?.options.map((option) => option.roleId)).toEqual([
+      MENU_ROLE.savage,
+      MENU_ROLE.maps,
+      MENU_ROLE.mahjong,
+      MENU_ROLE.healer,
+      MENU_ROLE.tank,
+    ]);
+  });
+
+  test("a role the rule set refuses is a 422 naming it by its cached name", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const refused = await officer.post(
+      path,
+      body({
+        op: "options.add",
+        revision: String(MENU_REVISION),
+        category: MENU_CATEGORY.games,
+        roles: [MENU_ROLE.moderator],
+      }),
+    );
+    expect(refused.status).toBe(422);
+    const { document } = parseHTML(await refused.text());
+    const link = document.querySelector(".error-summary a");
+    expect(link?.getAttribute("href")).toBe(`#category-${MENU_CATEGORY.games}-roles`);
+    expect(link?.querySelector(".mention")?.textContent).toBe("@Moderator");
+    expect(link?.textContent).toContain("can't be added. It has Kick Members");
+    expect(saved(w)?.revision).toBe(MENU_REVISION);
+  });
+
+  test("an add without the unreadable-channel confirmation is a 422; with it, the roles are added", async () => {
+    const w = await world({ menuStates: { menuProblems: true } });
+    const officer = await signedIn(w);
+    const add = (extra: Record<string, string>) =>
+      officer.post(
+        path,
+        body({
+          op: "options.add",
+          revision: String(MENU_REVISION),
+          category: MENU_CATEGORY.games,
+          roles: [MENU_ROLE.healer],
+          ...extra,
+        }),
+      );
+    const unconfirmed = await add({});
+    expect(unconfirmed.status).toBe(422);
+    const { document } = parseHTML(await unconfirmed.text());
+    const link = document.querySelector(".error-summary a");
+    expect(link?.getAttribute("href")).toBe(`#category-${MENU_CATEGORY.games}-acknowledged`);
+    expect(link?.textContent).toBe(SELF_ROLE_MESSAGES.acknowledge(2));
+    // The confirmation covers any permission in those channels, not only opening them, in the
+    // message and in the checkbox the officer ticks.
+    expect(link?.textContent).toBe(
+      "Confirm you've checked that these roles don't open the 2 channels TaruBot can't see or give any permission in them.",
+    );
+    expect(
+      document.querySelector(`#category-${MENU_CATEGORY.games}-acknowledged-error`)?.textContent,
+    ).toBe(`Error: ${SELF_ROLE_MESSAGES.acknowledge(2)}`);
+    expect(
+      document.querySelector(`label[for="category-${MENU_CATEGORY.games}-acknowledged-1"]`)
+        ?.firstChild?.textContent,
+    ).toBe("I've checked that these roles don't open any of them or give any permission in them");
+    // The choice is kept, so only the confirmation is missing.
+    expect(
+      document
+        .querySelector(`#category-${MENU_CATEGORY.games}-roles input[value="${MENU_ROLE.healer}"]`)
+        ?.hasAttribute("checked"),
+    ).toBe(true);
+    const confirmed = await add({ acknowledged: "yes" });
+    expect(confirmed.headers.get("location")).toBe(noticed("added", MENU_CATEGORY.games));
+  });
+
+  test("a saved menu this build can't read refuses every edit (409); any officer may reset it", async () => {
+    const w = await world({ menuStates: { menuUnreadable: true } });
+    const officer = await signedIn(w, SECOND_OFFICER);
+    const page = parseHTML(await (await officer.get(path)).text()).document;
+    // Only Reset role menu, behind its consequence.
+    expect(
+      [...page.querySelectorAll('main input[name="op"]')].map((op) => op.getAttribute("value")),
+    ).toEqual(["menu.reset"]);
+    const refused = await officer.post(path, create());
+    expect(refused.status).toBe(409);
+    const text = await refused.text();
+    expect(text).toContain(SELF_ROLE_MESSAGES.unreadable.replace("can't", "can&#39;t"));
+    expect(saved(w)?.menu).toBeNull();
+    // A delegated officer, without Discord's Manage Roles, resets it.
+    const reset = await officer.post(
+      path,
+      body({ op: "menu.reset", revision: String(MENU_REVISION) }),
+    );
+    expect(reset.headers.get("location")).toBe(noticed("reset"));
+    expect(saved(w)?.menu).toEqual({ v: 1, categories: [] });
+    const after = await (await officer.get(noticed("reset"))).text();
+    expect(after).toContain("Role menu reset. Every category was removed.");
+    expect(after).toContain('<div class="empty-state">');
+  });
+
+  test("a form whose hidden fields the page never rendered is refused whole, before the menu is read", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    for (const fields of [
+      { op: "category.rename", revision: "7" },
+      { op: "menu.publishAll", revision: "07" },
+      { op: "menu.publishAll", revision: "" },
+      { op: "category.delete", revision: "7", category: "not-a-uuid" },
+      { op: "category.move", revision: "7", category: MENU_CATEGORY.games, to: "-1" },
+      { op: "category.setState", revision: "7", category: MENU_CATEGORY.games, state: "hidden" },
+      { op: "category.create", revision: "7", id: "1", name: "x" },
+      {
+        op: "options.edit",
+        revision: "7",
+        category: MENU_CATEGORY.games,
+        role: MENU_ROLE.valheim,
+        [`state:${MENU_ROLE.valheim}`]: "gone",
+      },
+    ]) {
+      const response = await officer.post(path, body(fields));
+      expect({ fields, status: response.status }).toEqual({ fields, status: 400 });
+      const text = await response.text();
+      expect(text).toContain(LIMIT_MESSAGES.form);
+      // Open the page again, which a link offers; reloading would send this form again.
+      expect(LIMIT_MESSAGES.form).toBe(
+        "This form is out of date. Open the page again, then redo your change.",
+      );
+      expect(text).toContain(`href="${path}">Back to Role menu</a>`);
+    }
+    expect(w.menus.has(GUILD)).toBe(false);
+  });
+
+  test("shutdown and the page's budget of 120 each answer 429 before the menu is touched", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const publish = body({ op: "menu.publishAll", revision: String(MENU_REVISION) });
+    w.stopping.now = true;
+    const stopping = await officer.post(path, publish);
+    expect(stopping.status).toBe(429);
+    expect(stopping.headers.get("retry-after")).toBe("30");
+    expect(w.menus.has(GUILD)).toBe(false);
+    w.stopping.now = false;
+    // A move to where Pronouns already is: unchanged, so every POST is a 303 and writes nothing.
+    const still = body({
+      op: "category.move",
+      revision: String(MENU_REVISION),
+      category: MENU_CATEGORY.pronouns,
+      to: "0",
+    });
+    for (let attempt = 0; attempt < 120; attempt++)
+      expect((await officer.post(path, still)).status).toBe(303);
+    const over = await officer.post(path, publish);
+    expect(over.status).toBe(429);
+    expect(over.headers.get("retry-after")).toBe("600");
+    expect(saved(w)?.revision).toBe(MENU_REVISION);
+    expect(saved(w)?.menu?.categories.some((category) => category.state === "draft")).toBe(true);
   });
 });
 
@@ -877,6 +1827,76 @@ describe("sign-out", () => {
     const w = await world();
     const response = await new Browser(w).post("/logout/all");
     expect(response.status).toBe(303);
+    // Without a session there is nothing to protect: a stale form still clears the cookie.
+    const stale = new Browser(w);
+    stale.jar.set("tarubot", "x".repeat(43));
+    const cleared = await stale.post("/logout", "", {}, formToken("y".repeat(43)));
+    expect(cleared.status).toBe(303);
+    expect(stale.jar.has("tarubot")).toBe(false);
+  });
+
+  test("signed in, both sign-outs need the session's form token, and a refusal ends nothing", async () => {
+    const w = await world();
+    const browser = await signedIn(w);
+    const other = await signedIn(w);
+    const page = await (await browser.get(`/g/${GUILD}/status`)).text();
+    // Both forms in the account menu carry this session's token, the one the server derives.
+    const tokens = [...page.matchAll(TOKEN_INPUT)].map((match) => match[1] ?? "");
+    const derived = browser.formToken ?? "";
+    expect(tokens).toEqual([derived, derived]);
+    for (const path of ["/logout", "/logout/all"])
+      for (const token of [null, "", other.formToken, `${browser.formToken}x`]) {
+        const response = await browser.post(path, "", {}, token);
+        expect({ path, token, status: response.status }).toEqual({ path, token, status: 403 });
+        const text = await response.text();
+        // Nothing ended, and the page says so: never "redo your change" (UX-2).
+        expect(text).not.toContain("redo your change");
+        // Sign-out has no page of its own to go back to: only the start page.
+        const { document } = parseHTML(text);
+        expect(document.querySelector(".entry-panel__lead")?.textContent).toBe(
+          "This sign-out form was out of date, so you're still signed in. Use Sign out in the Account menu to end this session.",
+        );
+        expect(document.querySelector("h1")?.textContent).toBe("Still signed in");
+        expect(document.querySelector("title")?.textContent).toStartWith("Still signed in");
+        expect(
+          [...document.querySelectorAll(".entry-panel__actions a")].map((link) =>
+            link.getAttribute("href"),
+          ),
+        ).toEqual(["/"]);
+        expect(w.sessions.rows()).toHaveLength(2);
+        expect(browser.jar.has("tarubot")).toBe(true);
+      }
+    const out = await browser.post("/logout/all", "", {}, tokens[0] ?? null);
+    expect(out.status).toBe(303);
+    expect(w.sessions.rows()).toEqual([]);
+  });
+
+  test("a form from before a sign-in is refused: the new session has a new token", async () => {
+    const w = await world();
+    const browser = await signedIn(w);
+    const before = browser.formToken;
+    await browser.signIn({ id: OFFICER });
+    expect(browser.formToken).not.toBe(before);
+    // Sign out from a tab opened before that sign-in: refused, saying the session goes on.
+    const stale = await browser.post("/logout", "", {}, before);
+    expect(stale.status).toBe(403);
+    const { document } = parseHTML(await stale.text());
+    expect(document.querySelector("h1")?.textContent).toBe("Still signed in");
+    expect(document.querySelector(".entry-panel__lead")?.textContent).toBe(
+      "This sign-out form was out of date, so you're still signed in. Use Sign out in the Account menu to end this session.",
+    );
+    // It is: the session still opens pages, and the error page's own account menu carries the
+    // current token, which signs out.
+    expect((await browser.get(`/g/${GUILD}/status`)).status).toBe(200);
+    expect(w.sessions.rows()).toHaveLength(1);
+    expect(
+      [...document.querySelectorAll(`input[name="form_token"]`)].map((input) =>
+        input.getAttribute("value"),
+      ),
+    ).toEqual([browser.formToken, browser.formToken]);
+    expect((await browser.post(`/g/${GUILD}/form`, "name=ok", {}, before)).status).toBe(403);
+    expect(w.posts).toEqual([]);
+    expect((await browser.post("/logout")).status).toBe(303);
   });
 });
 
@@ -1106,7 +2126,7 @@ describe("startWeb", () => {
     syncStatus: () => Promise<SyncStatusView> = async () => SYNC,
   ): WebContext {
     return {
-      services: services({ lifecycle: { ready: true } }, syncStatus),
+      services: services({ lifecycle: { ready: true }, menus: new Map() }, syncStatus),
       allowsGuild: () => true,
       isStopping: () => false,
       resolveActor: resolver([]),
@@ -1515,19 +2535,59 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
       expect(home).not.toContain("Second");
       const page = await browse(new URL(status, harness.url));
       expect(page.status).toBe(200);
+      // Sign-out is a form with the session's form token, read from the page like a browser.
+      const token = [...(await page.text()).matchAll(TOKEN_INPUT)].map((match) => match[1]);
+      expect(token).toHaveLength(2);
       const out = await browse(new URL("/logout", harness.url), {
         method: "POST",
         headers: {
           "Sec-Fetch-Site": "same-origin",
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: "",
+        body: `${FORM_TOKEN_FIELD}=${token[0]}`,
       });
       expect(out.status).toBe(303);
       expect((await browse(new URL(status, harness.url))).status).toBe(303);
     } finally {
       await harness.stop();
     }
+  });
+
+  test("the Role menu's review states: flags, problems and an unreadable menu, as the officer sees them", async () => {
+    expect(harnessOptions(["--state-menu-problems", "--state-menu-unreadable"]).states).toEqual({
+      menuProblems: true,
+      menuUnreadable: true,
+    });
+    const menu = `/g/${HARNESS_GUILDS.example.id}/role-menu`;
+    const read = async (states: HarnessStates) => {
+      const harness = await startHarness({ states });
+      try {
+        const browse = client();
+        expect((await signIn(browse, harness.url, "officer")).status).toBe(303);
+        const page = await browse(new URL(menu, harness.url));
+        expect(page.status).toBe(200);
+        return parseHTML(await page.text()).document;
+      } finally {
+        await harness.stop();
+      }
+    };
+    const healthy = await read({});
+    expect(healthy.querySelector(".menu-summary__title")?.textContent).toBe(
+      "1 draft isn't published yet.",
+    );
+    expect(healthy.querySelectorAll(".menu-problems, .notice--warning")).toHaveLength(0);
+    const drifted = await read({ menuProblems: true });
+    expect(drifted.querySelector(".menu-summary__title")?.textContent).toBe(
+      "5 roles need attention.",
+    );
+    expect(drifted.querySelectorAll(".menu-problems")).toHaveLength(5);
+    expect(drifted.querySelectorAll('fieldset[id$="-acknowledged"]').length).toBeGreaterThan(0);
+    const unreadable = await read({ menuUnreadable: true });
+    expect(
+      [...unreadable.querySelectorAll('main input[name="op"]')].map((op) =>
+        op.getAttribute("value"),
+      ),
+    ).toEqual(["menu.reset"]);
   });
 
   test("a member, an outsider and a bot are refused; the fake serves only its redirect URI", async () => {

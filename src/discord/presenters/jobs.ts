@@ -39,6 +39,9 @@ export const JOB_KIND: Readonly<Record<string, { readonly label: string; readonl
     "officer.notify": { label: "Officer notice", done: "Officer notice sent" },
     // The member status changes post in the officer notifications channel (2.29.0).
     "officer.status": { label: "Status notice", done: "Status notice posted" },
+    // A member's own picks from the self-service role menu (queued from 2.40.0; 2.39.0 completes a
+    // leftover one as skipped).
+    "roles.self": { label: "Role choices", done: "Role choices applied" },
   };
 
 /** A kind's member-facing label; a kind this release doesn't know falls back to its raw name. */

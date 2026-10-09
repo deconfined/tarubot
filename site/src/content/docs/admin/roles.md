@@ -1,6 +1,6 @@
 ---
 title: Roles and access
-description: How TaruBot decides Member, Guest and FC Leader, how departures work, and the role layout switch.
+description: How TaruBot decides Member, Guest and FC Leader, how departures work, where TaruBot's own role sits, and the role layout switch.
 sidebar:
   order: 4
 ---
@@ -47,6 +47,21 @@ A departure is confirmed only by two complete rosters, read at least 60 seconds 
 TaruBot recognizes the FC's leader from the leader's rank icon on the Lodestone roster, whatever your FC calls that rank. The FC Leader role marks status and, with onboarding on, gives access to staff channels, but it doesn't grant TaruBot's officer commands.
 
 Rank names and leadership are stored with each accepted roster. While a departure is waiting for confirmation, the member keeps their last known rank. Missing or unrecognized rank or leader data keeps what a member already has, but can't grant a new role.
+
+## Where TaruBot's role sits
+
+TaruBot can give and take only roles below its own highest role. Place its role:
+
+- **above** the four roles it manages (Member, Guest, Officer and FC Leader) and every role on the [self-service role menu](/tarubot/admin/self-service-roles/);
+- **below** every role that holds moderation or admin powers TaruBot doesn't manage.
+
+TaruBot can then give anyone any role below it: Officer, FC Leader, the menu roles and any other lower role. So could anyone who stole its bot token. This placement keeps your moderation and admin roles out of that reach, but the roles below still matter. `/config roles` lets Officer and FC Leader carry Kick Members, Ban Members or Manage Messages, so keep those powers on roles above TaruBot where you can.
+
+Keep the menu roles below Officer, FC Leader and every moderation role too. Discord lets a role kick, ban, time out or rename only members whose highest role is lower, so a menu role placed above one of those roles would put everyone who picks it out of that role's reach, a moderation bot's included. The role menu refuses such a role and says which role to move it below; see [what a role must pass](/tarubot/admin/self-service-roles/#what-a-role-must-pass).
+
+## Self-service roles
+
+Roles on the [self-service role menu](/tarubot/admin/self-service-roles/) are kept apart from the four access roles, in both directions. The menu refuses Member, Guest, Officer, FC Leader and any role TaruBot is still cleaning up, and [`/config roles`](/tarubot/reference/commands/#config-roles-member) and [`/setup onboarding`](/tarubot/reference/commands/#setup-onboarding) refuse a role that's on the menu. Reconciliation adds and removes only the four roles and the ones it's cleaning up, so it never gives a menu role to everyone, or takes it from everyone who picked it.
 
 ## Role layout
 

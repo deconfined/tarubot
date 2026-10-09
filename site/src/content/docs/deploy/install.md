@@ -57,7 +57,7 @@ Leave these as the template has them:
 
 Use a **2.37.0 or newer** release for the dashboard and bundled Caddy recipe.
 
-The default is bot-only: leave `COMPOSE_PROFILES`, `WEB_PUBLIC_ORIGIN` and `DISCORD_CLIENT_SECRET` empty. To expose the read-only dashboard through bundled Caddy, first meet the [DNS and firewall requirements](/tarubot/deploy/requirements/#optional-public-dashboard) and [register OAuth](/tarubot/deploy/discord-application/#optional-dashboard-oauth), then add:
+The default is bot-only: leave `COMPOSE_PROFILES`, `WEB_PUBLIC_ORIGIN` and `DISCORD_CLIENT_SECRET` empty. To expose the dashboard through bundled Caddy, first meet the [DNS and firewall requirements](/tarubot/deploy/requirements/#optional-public-dashboard) and [register OAuth](/tarubot/deploy/discord-application/#optional-dashboard-oauth), then add:
 
 ```sh
 COMPOSE_PROFILES=web

@@ -13,13 +13,16 @@ import { routePath } from "hono/route";
 import type { Logger } from "pino";
 import { databaseKey, lifecycleKey } from "../application/keys.js";
 import type { BotContext } from "../bot/context.js";
-import type { ServiceKey } from "../bot/services.js";
+import type { ServiceKey, Services } from "../bot/services.js";
 import { Failure, idSchema } from "../domain/values.js";
 import { AccessResolver, admits, listServers, type WebGuild } from "./access.js";
 import { ASSET_CACHE_CONTROL, ASSETS } from "./assets.js";
 import {
   clearCookie,
+  type ErrorFrame,
+  FORM_TOKEN_FIELD,
   formOnly,
+  formTokenMatches,
   LOGIN_COOKIE,
   LOGIN_COOKIE_MAX_AGE,
   loginLocation,
@@ -39,11 +42,13 @@ import {
   writeCookie,
 } from "./http.js";
 import { BRAND, errorPage, type LayoutModel, layout, navLinks } from "./layout.js";
+import { overBudget, POST_WINDOW_MS, RateLimiter, stoppingRefusal } from "./limits.js";
 import { DiscordSignIn } from "./oauth.js";
-import type { Page, PageContext } from "./page.js";
+import type { Page, PageContext, PageServices } from "./page.js";
 import { loadPages } from "./pages.js";
 import { RETURN_PARAM, safeReturnPath } from "./return-path.js";
 import {
+  formToken,
   PgSessions,
   SESSION_ABSOLUTE_MS,
   SESSION_SWEEP_MS,
@@ -102,6 +107,8 @@ export interface WebAppDependencies {
   readonly access: AccessResolver;
   /** Already the web's child logger (component "web"), with no redact override. */
   readonly log: Logger;
+  /** The POST budgets' clock in milliseconds; defaults to performance.now. Tests pass their own. */
+  readonly now?: () => number;
 }
 
 /** A running web listener. */
@@ -124,6 +131,55 @@ const SESSION_COOKIE_MAX_AGE = Math.floor(SESSION_ABSOLUTE_MS / 1000);
 const GET_ONLY = "GET, HEAD";
 
 /**
+ * A POST whose form token isn't the session's: a form from before the latest sign-in (which
+ * rotated the session, and with it the token), or one that didn't come from TaruBot's pages. Its
+ * advice is to open the page again: the error page answers the POST, so reloading it would send
+ * the same stale form again.
+ */
+const staleForm = (): Failure =>
+  new Failure(
+    "forbidden",
+    "This form is out of date or didn't come from TaruBot's own pages, so TaruBot ignored it. Open the page again, then redo your change.",
+  );
+
+/**
+ * The stale-form refusal's heading. Its message says which 403 it is, and whoever sent it may well
+ * be allowed, so "Not allowed" would misname it.
+ */
+const STALE_FORM: ErrorFrame = { heading: "Form out of date" };
+
+/**
+ * A sign-out form whose token isn't the session's: one from a tab older than the latest sign-in.
+ * It still ends nothing (a forged form must not sign anyone out), so the page says plainly that
+ * this browser is still signed in, and how to sign out: the error page's own account menu carries
+ * the current token. "Redo your change" would leave someone on a shared device thinking they had
+ * signed out.
+ */
+const staleSignOut = (): Failure =>
+  new Failure(
+    "forbidden",
+    "This sign-out form was out of date, so you're still signed in. Use Sign out in the Account menu to end this session.",
+  );
+
+/** The stale sign-out's heading, which says the one thing that matters. */
+const STILL_SIGNED_IN: ErrorFrame = { heading: "Still signed in" };
+
+/**
+ * A page's view of the services: get() for the keys it declared in `requires`, and an error for
+ * any other, which the error handler answers as a 500 and reports as the page bug it
+ * is. startWeb already proved every declared key is provided.
+ */
+function scopedServices(services: Pick<Services, "get">, declared: Page["requires"]): PageServices {
+  const allowed: ReadonlySet<ServiceKey<unknown>> = new Set(declared);
+  return {
+    get<T>(key: ServiceKey<T>): T {
+      if (!allowed.has(key)) throw new Error(`Page used an undeclared service: ${key.name}`);
+      return services.get(key);
+    },
+  };
+}
+
+/**
  * The Hono app: security headers first, then the request reference and log line, the body limit,
  * fixed routes, page routes (the E1 checks on each POST route; a wrong method on a known path is
  * an explicit 405 with Allow), a 404 fallback and an error handler mapping Failure categories to
@@ -133,6 +189,7 @@ const GET_ONLY = "GET, HEAD";
  */
 export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   const { settings, context, pages, sessions, signIn, access, log } = dependencies;
+  const now = dependencies.now ?? (() => performance.now());
   const { secure, origin } = settings;
   const app = new Hono<WebEnv>();
 
@@ -158,26 +215,33 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     const details = problemOf(error, c.get("ref") ?? newRef());
     if (details.status >= 500)
       context.report(error, details.ref, { scope: `web:${pattern(c)}`, level: details.level });
-    return problem(c, details, errorPage(details, Boolean(c.get("session"))));
+    return problem(
+      c,
+      details,
+      errorPage(details, c.get("formToken") ?? null, c.get("errorFrame") ?? {}),
+    );
   };
 
   /** Register the explicit 405 for a known path, after its method handlers. */
   const allow = (path: string, methods: string): void => {
     app.all(path, (c) => {
       const details = problemOf(new HTTPException(405), c.get("ref"));
-      return problem(c, details, errorPage(details, Boolean(c.get("session"))), {
+      return problem(c, details, errorPage(details, c.get("formToken") ?? null), {
         Allow: methods,
       });
     });
   };
 
   /**
-   * The signed-in session, from the session cookie. Attached only to routes that use it, after the
-   * E1 checks, so assets and the readiness probe never query sessions.
+   * The signed-in session, from the session cookie, and its form token, derived from the cookie's
+   * token only once the store has accepted it. Attached only to routes that use it, after the E1
+   * checks, so assets and the readiness probe never query sessions.
    */
   const session: MiddlewareHandler<WebEnv> = async (c, next) => {
     const token = readCookie(c, SESSION_COOKIE, secure);
-    c.set("session", token === undefined ? null : await sessions.get(token));
+    const current = token === undefined ? null : await sessions.get(token);
+    c.set("session", current);
+    c.set("formToken", current && token !== undefined ? formToken(token) : null);
     await next();
   };
 
@@ -190,6 +254,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     const started = performance.now();
     c.set("ref", newRef());
     c.set("session", null);
+    c.set("formToken", null);
+    c.set("errorFrame", null);
     await next();
     const { status } = c.res;
     const fields = {
@@ -252,7 +318,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   // A sign-in link for visitors; the servers a signed-in user may open (D17), memoized like any GET.
   app.get(PATHS.home, session, async (c) => {
     const current = c.get("session");
-    if (!current)
+    const token = c.get("formToken");
+    if (!current || token === null)
       return page(c, layout({ title: BRAND, signedIn: false }, renderHome({ signedIn: false })));
     const servers: ServerLink[] = [];
     for (const entry of await listServers(
@@ -267,7 +334,10 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     }
     return page(
       c,
-      layout({ title: "Your servers", signedIn: true }, renderHome({ signedIn: true, servers })),
+      layout(
+        { title: "Your servers", signedIn: true, formToken: token },
+        renderHome({ signedIn: true, servers }),
+      ),
     );
   });
   allow(PATHS.home, GET_ONLY);
@@ -308,12 +378,22 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
 
   /**
    * Sign out this browser, or every browser of the signed-in user. Both are forms, through E1, and
-   * both answer 303 to / with the cookie cleared, signed in or not.
+   * both answer 303 to / with the cookie cleared, signed in or not. Signed in, the form must carry
+   * the session's form token, or nothing ends (403): a forged form can't sign anyone out. Signed
+   * out there is no session to protect, so a stale form still clears the cookie.
    */
   const signOut =
     (everywhere: boolean) =>
     async (c: RequestContext): Promise<Response> => {
       const current = c.get("session");
+      const expected = c.get("formToken");
+      if (current && expected !== null) {
+        const form = await readForm(c);
+        if (!formTokenMatches(expected, form.get(FORM_TOKEN_FIELD))) {
+          c.set("errorFrame", STILL_SIGNED_IN);
+          throw staleSignOut();
+        }
+      }
       const token = readCookie(c, SESSION_COOKIE, secure);
       let ended = 0;
       if (everywhere && current) ended = await sessions.deleteForUser(current.userId);
@@ -340,24 +420,72 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
    *    servers TaruBot serves.
    * 3. The server must be one the gateway has cached and this deployment serves, else 404, before
    *    any Discord call.
-   * 4. The actor resolves like a slash command's (memoized up to 60 s on GET, fresh on POST); not a
+   * A POST then passes three more, none of which costs a Discord request:
+   * 4. The form must carry the session's form token (403, "Form out of date"); the field is
+   *    removed before post().
+   * 5. Once shutdown has begun, nothing new starts (429 with Retry-After): the drain stops the web
+   *    before the writer lease goes, and this keeps a write from beginning inside that window.
+   * 6. The page's budget for this user in this server (429 with Retry-After), before the fresh
+   *    actor, so a POST over budget costs no Discord REST call.
+   * And every request:
+   * 7. The actor resolves like a slash command's (memoized up to 60 s on GET, fresh on POST); not a
    *    current human member is 404, so responses never reveal membership elsewhere.
-   * 5. A missing access flag is 403.
+   * 8. A missing access flag is 403.
    * The application operations a page calls authorize the actor again, as REQUIREMENTS.md asks of
-   * commands and buttons ("reauthorize the current actor").
+   * commands and buttons ("reauthorize the current actor"), and check for shutdown once more just
+   * before they commit, throwing the domain's stoppingRefusal() (which limits.ts re-exports), so
+   * the write rolls back and its form gets the same 429.
+   *
+   * The error page for a refused POST (steps 4 to 6, and post()'s own refusals, such as a form it
+   * can't use or that pre-commit 429) links back to the page, by its own href for this server:
+   * reloading the answer to a POST would only send the same form again. The actor checks (7 and
+   * 8) refuse without the link, since the page wouldn't open for that user anyway.
+   *
+   * Those error pages don't carry the submitted values, so a form refused at steps 4 to 6, or by
+   * the pre-commit 429, loses what was typed: an accepted, rare loss (a restart during a deploy,
+   * a budget of many saves, a tab older than the latest sign-in), and each message says nothing
+   * was saved. Only a page's own 409 and 422 re-render the form with its values. A stale-token
+   * form must never get them back, since it may not be this user's.
    */
-  const servePage =
-    (definition: Page) =>
-    async (c: RequestContext): Promise<Response> => {
+  const servePage = (definition: Page) => {
+    const services = scopedServices(context.services, definition.requires);
+    const budget =
+      definition.post && definition.postLimit !== undefined
+        ? new RateLimiter(definition.postLimit, POST_WINDOW_MS, now)
+        : undefined;
+    return async (c: RequestContext): Promise<Response> => {
       const guildId = c.req.param("guild") ?? "";
       if (!idSchema.safeParse(guildId).success) throw new HTTPException(404);
       const current = c.get("session");
+      const token = c.get("formToken");
       const requested = new URL(c.req.url);
       const target = `${requested.pathname}${requested.search}`;
-      if (!current) return redirect(c, loginLocation(target));
+      if (!current || token === null) return redirect(c, loginLocation(target));
       const guild = candidates().find((candidate) => candidate.id === guildId);
       if (!guild) throw new HTTPException(404);
-      const post = c.req.method === "POST";
+      const post = c.req.method === "POST" && definition.post !== undefined;
+      // The page's own path in this server: from the definition and the checked ID, never the
+      // request's text.
+      const back: ErrorFrame = {
+        back: { href: definition.href(guildId), label: definition.title },
+      };
+      let form: FormData | undefined;
+      if (post) {
+        c.set("errorFrame", back);
+        form = await readForm(c);
+        if (!formTokenMatches(token, form.get(FORM_TOKEN_FIELD))) {
+          c.set("errorFrame", { ...STALE_FORM, ...back });
+          throw staleForm();
+        }
+        form.delete(FORM_TOKEN_FIELD);
+        if (context.isStopping()) throw stoppingRefusal();
+        // Keyed by page, server and Discord user, never by address. A POST refused by the token,
+        // shutdown or budget check isn't counted; one refused later, by the actor check or the
+        // page, is.
+        const wait = budget?.take(`${definition.path} ${guildId} ${current.userId}`) ?? 0;
+        if (wait > 0) throw overBudget(wait);
+        c.set("errorFrame", null);
+      }
       const actor = await access.actor(guildId, current.userId, post);
       // The resolver answers for this server and user; anything else is a bug, refused as absent.
       if (!actor || actor.guildId !== guildId || actor.userId !== current.userId)
@@ -369,31 +497,43 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         session: current,
         actor,
         guildId,
-        services: context.services,
+        services,
+        formToken: token,
         report: context.report,
         ref: c.get("ref"),
       };
       const model: LayoutModel = {
         title: definition.title,
         signedIn: true,
+        formToken: token,
         guild: {
           id: guildId,
           name: guild.name,
           nav: navLinks(pages.values(), actor, definition.path),
         },
       };
-      if (!post || !definition.post)
+      if (!form || !definition.post)
         return page(c, layout(model, await definition.get(pageContext)));
-      const outcome = await definition.post(pageContext, await readForm(c));
+      c.set("errorFrame", back);
+      const outcome = await definition.post(pageContext, form);
       // Post-redirect-get, to a same-origin path whatever the page returned.
       if ("redirect" in outcome) return redirect(c, safeReturnPath(outcome.redirect));
-      return page(c, layout(model, outcome.invalid), 422);
+      // The page's form again, with what was submitted; any status but 409 (a module is untyped
+      // at runtime) is the input refusal's 422.
+      return page(
+        c,
+        layout({ ...model, error: true }, outcome.invalid),
+        outcome.status === 409 ? 409 : 422,
+      );
     };
+  };
   for (const definition of pages.values()) {
-    app.get(definition.path, session, servePage(definition));
+    // One handler per page, so its GET and POST share one scoped view and one budget.
+    const handler = servePage(definition);
+    app.get(definition.path, session, handler);
     // Every form page's POST goes through E1 first, here in the one loop that registers pages.
     if (definition.post)
-      app.post(definition.path, sameOrigin(origin), formOnly(), session, servePage(definition));
+      app.post(definition.path, sameOrigin(origin), formOnly(), session, handler);
     allow(definition.path, definition.post ? "GET, HEAD, POST" : GET_ONLY);
   }
 
@@ -407,7 +547,10 @@ async function readForm(c: RequestContext): Promise<FormData> {
   try {
     return await c.req.formData();
   } catch {
-    throw new Failure("input", "TaruBot couldn't read that form. Reload the page and try again.");
+    throw new Failure(
+      "input",
+      "TaruBot couldn't read that form. Open the page again, then redo your change.",
+    );
   }
 }
 

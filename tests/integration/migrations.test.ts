@@ -1,8 +1,9 @@
 /**
- * Migration rehearsals (005 through 011) in private PostgreSQL schemas, isolated from
+ * Migration rehearsals (005 through 012) in private PostgreSQL schemas, isolated from
  * persistence.test.ts's public schema: import/activation backfill, the new CHECKs, the
  * guest-application switch, the changelog columns, the status-notice columns, the web sessions
- * table, an empty database, and the real migrate() runner.
+ * table, the self-service role menus with their payload-clearing trigger, an empty database, and
+ * the real migrate() runner.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -707,6 +708,162 @@ describe.skipIf(!url)("migration 011 web sessions", () => {
         )
       ).rows;
       expect(row).toEqual({ same: true, absolute: "30 days" });
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+});
+
+const SELF_ROLES = "012_self_roles.sql";
+
+describe.skipIf(!url)("migration 012 self-service roles", () => {
+  if (!url) return;
+  const db = new Database(url);
+  afterAll(async () => {
+    await db.close();
+  });
+
+  test("an empty menus table, and a trigger that clears every finished roles.self payload", async () => {
+    const client = await db.pool.connect();
+    /** Run a statement that must fail with `code`, inside a savepoint so the rehearsal continues. */
+    const refused = async (statement: string, values: unknown[], code: string) => {
+      await client.query("SAVEPOINT refused");
+      await expect(client.query(statement, values)).rejects.toMatchObject({ code });
+      await client.query("ROLLBACK TO SAVEPOINT refused");
+    };
+    const payloadOf = async (key: string) =>
+      (
+        await client.query<{ payload: unknown }>("SELECT payload FROM jobs WHERE dedupe_key=$1", [
+          key,
+        ])
+      ).rows[0]?.payload;
+    try {
+      await client.query("BEGIN");
+      await client.query("CREATE SCHEMA m012_rehearsal");
+      await client.query("SET LOCAL search_path TO m012_rehearsal");
+      for (const file of (await migrationFiles()).filter((name) => name < SELF_ROLES))
+        await client.query(await migration(file));
+      // A schema-011 guild with a finished job, which the migration must leave alone.
+      const guildId = "666666666666666790";
+      await client.query("INSERT INTO guilds (id) VALUES ($1)", [guildId]);
+      await client.query(
+        "INSERT INTO jobs (kind, dedupe_key, payload, status, guild_id) VALUES ('reconcile.user', 'user:old', '{\"kept\":true}', 'succeeded', $1)",
+        [guildId],
+      );
+      await client.query(await migration(SELF_ROLES));
+      expect(await payloadOf("user:old")).toEqual({ kept: true });
+      expect((await client.query("SELECT 1 FROM self_role_menus")).rows).toEqual([]);
+      expect(
+        (
+          await client.query<{
+            column_name: string;
+            type: string;
+            is_nullable: string;
+            column_default: string | null;
+          }>(
+            `SELECT column_name, coalesce(domain_name, data_type) AS type, is_nullable, column_default
+             FROM information_schema.columns
+             WHERE table_schema='m012_rehearsal' AND table_name='self_role_menus' ORDER BY ordinal_position`,
+          )
+        ).rows,
+      ).toEqual([
+        { column_name: "guild_id", type: "external_id", is_nullable: "NO", column_default: null },
+        {
+          column_name: "menu",
+          type: "jsonb",
+          is_nullable: "NO",
+          column_default: `'{"v": 1, "categories": []}'::jsonb`,
+        },
+        { column_name: "revision", type: "bigint", is_nullable: "NO", column_default: "1" },
+        {
+          column_name: "updated_at",
+          type: "timestamp with time zone",
+          is_nullable: "NO",
+          column_default: "now()",
+        },
+      ]);
+      // The key, the guild foreign key and the two CHECKs (PostgreSQL 18 also lists NOT NULL).
+      expect(
+        (
+          await client.query<{ contype: string; definition: string }>(
+            "SELECT contype, pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='m012_rehearsal.self_role_menus'::regclass AND contype IN ('c', 'f', 'p', 'u', 'x') ORDER BY contype, conname",
+          )
+        ).rows.map((row) => row.contype),
+      ).toEqual(["c", "c", "f", "p"]);
+      // A row takes the empty version-1 menu at revision 1.
+      await client.query("INSERT INTO self_role_menus (guild_id) VALUES ($1)", [guildId]);
+      expect(
+        (
+          await client.query<{ menu: unknown; revision: bigint }>(
+            "SELECT menu, revision FROM self_role_menus",
+          )
+        ).rows,
+      ).toEqual([{ menu: { v: 1, categories: [] }, revision: 1n }]);
+      const update = "UPDATE self_role_menus SET menu=$1::jsonb";
+      for (const shape of ["[]", '"menu"', '{"v":1}', '{"v":1,"categories":{}}'])
+        await refused(update, [shape], "23514");
+      await refused("UPDATE self_role_menus SET revision=0", [], "23514");
+      // Only a server TaruBot has a row for can have a menu.
+      await refused(
+        "INSERT INTO self_role_menus (guild_id) VALUES ($1)",
+        ["666666666666666791"],
+        "23503",
+      );
+
+      // The trigger: a waiting roles.self row keeps its payload; ending it clears the payload,
+      // whichever way it ends; other kinds keep theirs.
+      const choice =
+        '{"chosen":["523456789012345601"],"offered":["523456789012345601"],"savedAt":"2026-10-09T12:00:00Z"}';
+      const job = (key: string, status: string, kind = "roles.self") =>
+        client.query(
+          "INSERT INTO jobs (kind, dedupe_key, payload, status, guild_id, user_id) VALUES ($1, $2, $3::jsonb, $4, $5, '200')",
+          [kind, key, choice, status, guildId],
+        );
+      for (const status of ["queued", "running", "blocked", "disabled"]) {
+        await job(`self-roles:waiting:${status}`, status);
+        expect(await payloadOf(`self-roles:waiting:${status}`)).toEqual(JSON.parse(choice));
+      }
+      await client.query(
+        "UPDATE jobs SET status='succeeded', completed_at=now() WHERE dedupe_key='self-roles:waiting:queued'",
+      );
+      await client.query(
+        "UPDATE jobs SET status='failed', completed_at=now() WHERE dedupe_key='self-roles:waiting:blocked'",
+      );
+      // A generation bump keeps the newest payload while it still waits.
+      await client.query(
+        "UPDATE jobs SET generation=generation+1, payload=$1::jsonb WHERE dedupe_key='self-roles:waiting:running'",
+        [choice],
+      );
+      expect(await payloadOf("self-roles:waiting:queued")).toEqual({});
+      expect(await payloadOf("self-roles:waiting:blocked")).toEqual({});
+      expect(await payloadOf("self-roles:waiting:running")).toEqual(JSON.parse(choice));
+      expect(await payloadOf("self-roles:waiting:disabled")).toEqual(JSON.parse(choice));
+      await job("self-roles:inserted-finished", "succeeded");
+      expect(await payloadOf("self-roles:inserted-finished")).toEqual({});
+      await job("user:other-kind", "succeeded", "reconcile.user");
+      expect(await payloadOf("user:other-kind")).toEqual(JSON.parse(choice));
+      expect(
+        (
+          await client.query<{ tgname: string; enabled: string }>(
+            "SELECT tgname, tgenabled AS enabled FROM pg_trigger WHERE tgrelid='m012_rehearsal.jobs'::regclass AND NOT tgisinternal",
+          )
+        ).rows,
+      ).toEqual([{ tgname: "self_role_choice_forgotten", enabled: "O" }]);
+      // The two partial indexes My roles, the expiry and the retention use (2.40.0).
+      expect(
+        (
+          await client.query<{ indexname: string; indexdef: string }>(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='m012_rehearsal' AND tablename='jobs' AND indexname LIKE 'self_role%' ORDER BY 1",
+          )
+        ).rows.map((index) => [index.indexname, index.indexdef.replace(/^.* USING /u, "")]),
+      ).toEqual([
+        ["self_role_jobs", "btree (dedupe_key, created_at DESC) WHERE (kind = 'roles.self'::text)"],
+        [
+          "self_role_waiting",
+          "btree (created_at) WHERE ((kind = 'roles.self'::text) AND (status = ANY (ARRAY['queued'::text, 'running'::text, 'blocked'::text, 'disabled'::text])))",
+        ],
+      ]);
     } finally {
       await client.query("ROLLBACK");
       client.release();

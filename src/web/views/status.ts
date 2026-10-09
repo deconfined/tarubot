@@ -17,6 +17,7 @@ import type { EffectsMode, SyncRunRow, SyncStatusView } from "../../application/
 import { shortId } from "../../discord/presenters/format.js";
 import { jobLabel, jobMarker } from "../../discord/presenters/jobs.js";
 import { CHECK, type Check, MARKER } from "../../discord/presenters/style.js";
+import { ROLE_CHOICE_KIND } from "../../domain/self-roles.js";
 import { RUN_LABEL, runState, runType } from "../../discord/presenters/synchronization.js";
 import { html, type SafeHtml, untrusted } from "../html.js";
 import { icon } from "../icons.js";
@@ -205,6 +206,15 @@ ${diagnostic(run.last_error, names)}`,
 </tr>`;
 }
 
+/**
+ * Who a job is for. A member's role choices never name the member to anyone else: the service
+ * leaves their user out (Service.syncStatus), and the row says "A member" (owner decision Q4 A).
+ */
+function jobUser(job: SyncStatusView["work"][number], names: WebNames): SafeHtml | string {
+  if (job.user_id !== null) return userName(job.user_id, names);
+  return job.kind === ROLE_CHOICE_KIND ? "A member" : "No user attached";
+}
+
 /** A sampled job, with facts only for timestamps the service actually supplies. */
 function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml {
   const state = jobMarker(job);
@@ -225,7 +235,7 @@ function workRow(job: SyncStatusView["work"][number], names: WebNames): SafeHtml
     job.id,
     html`<dl class="facts">
 <dt>Job ID</dt><dd><code>${untrusted(job.id)}</code></dd>
-<dt>User</dt><dd>${job.user_id === null ? "No user attached" : userName(job.user_id, names)}</dd>
+<dt>User</dt><dd>${jobUser(job, names)}</dd>
 <dt>Stored status</dt><dd><code>${untrusted(job.status)}</code></dd>
 </dl>
 ${state.dmBlocked ? DM_BLOCKED : ""}
