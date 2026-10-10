@@ -70,6 +70,7 @@ ${SIGN_IN}
 <p>${AUDIENCE}</p>
 <p>Signing in asks Discord only who you are. TaruBot checks your server access and keeps no Discord token.</p>
 </details>
+<p class="sign-in__status">${icon("activity")}<span>Is TaruBot up? <a href="${PATHS.status}">Check its status</a> without signing in.</span></p>
 </section>`;
 
 /** One page link on a server tile. */

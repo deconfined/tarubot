@@ -428,3 +428,18 @@ export const selfRoleMenus = pgTable("self_role_menus", {
   revision: money("revision").notNull().default(1n),
   updated_at: instant("updated_at").notNull().defaultNow(),
 });
+/**
+ * The public status page's samples (migration 013, 2.41.0): one row per five-minute bucket while a
+ * process holds the writer lease, with process-wide state only and the version that wrote it.
+ * src/application/public-status.ts writes, prunes (after 90 days) and aggregates them.
+ */
+export const statusSamples = pgTable("status_samples", {
+  /** The bucket's start, on a five-minute boundary (the migration's CHECK). */
+  sampled_at: instant("sampled_at").primaryKey(),
+  ready: boolean("ready").notNull(),
+  discord: boolean("discord").notNull(),
+  database: boolean("database").notNull(),
+  lodestone: text("lodestone", { enum: ["available", "cooling_down", "unreachable"] }).notNull(),
+  changes: text("changes", { enum: ["live", "paused"] }).notNull(),
+  version: text("version").notNull(),
+});

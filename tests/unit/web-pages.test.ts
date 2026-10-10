@@ -66,6 +66,15 @@ import {
   UNCHANGED_WHILE_WAITING,
 } from "../../src/web/views/my-roles.js";
 import { renderStatus } from "../../src/web/views/status.js";
+import { renderPublicStatus, STATUS_TITLE } from "../../src/web/views/public-status.js";
+import type { StatusSnapshot } from "../../src/application/public-status.js";
+import {
+  HISTORY_DAYS,
+  type OverallStatus,
+  type SampleCount,
+  type StatusComponents,
+  uptimeHistory,
+} from "../../src/domain/uptime.js";
 import {
   HARNESS_ACCOUNTS,
   HARNESS_GUILDS,
@@ -552,6 +561,219 @@ describe("the shell and /", () => {
       ["/login", "Sign in again"],
       ["/", "Go to the TaruBot start page"],
     ]);
+  });
+});
+
+describe("the public status page (2.41.0)", () => {
+  const LIVE: StatusComponents = {
+    discord: true,
+    database: true,
+    lodestone: "available",
+    changes: "live",
+  };
+  const latest = new Date("2026-10-09T12:00:00Z");
+  /** 90 days of data: whole days, then three below 100%, one of them with two versions. */
+  const counts: SampleCount[] = [
+    ...Array.from({ length: HISTORY_DAYS }, (_, index) => {
+      const day = new Date(latest.getTime() - (HISTORY_DAYS - 1 - index) * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+      return { day, version: "2.40.0", ready: 288, first: new Date(`${day}T00:00:00Z`) };
+    }).filter((count) => !["2026-08-01", "2026-10-06", "2026-10-09"].includes(count.day)),
+    { day: "2026-08-01", version: "2.38.0", ready: 216, first: new Date("2026-08-01T00:00:00Z") },
+    { day: "2026-10-06", version: "2.40.0", ready: 200, first: new Date("2026-10-06T00:00:00Z") },
+    { day: "2026-10-06", version: "2.41.0", ready: 86, first: new Date("2026-10-06T16:50:00Z") },
+    { day: "2026-10-09", version: "2.41.0", ready: 142, first: new Date("2026-10-09T00:15:00Z") },
+  ];
+  const snapshot = (
+    overall: OverallStatus,
+    components: Partial<StatusComponents> = {},
+    history: StatusSnapshot["history"] = uptimeHistory(counts, new Date("2026-01-01"), latest),
+  ): StatusSnapshot => ({
+    takenAt: new Date("2026-10-09T12:03:27Z"),
+    version: "2.41.0",
+    ready: overall !== "down",
+    overall,
+    components: { ...LIVE, ...components },
+    history,
+  });
+  const page = async (value: StatusSnapshot) =>
+    inspect(
+      await render(layout({ title: STATUS_TITLE, signedIn: false }, renderPublicStatus(value))),
+    );
+
+  test("one h1, the overall word, the components, and no account, form or script", async () => {
+    const document = await page(snapshot("operational"));
+    expect(document.querySelector("title")?.textContent).toBe("Status · TaruBot");
+    expect(document.querySelector("h1")?.textContent).toBe("Status");
+    expect(document.querySelector("#status-overall")?.textContent).toBe("Operational");
+    expect(document.querySelector(".status-overall__text")?.textContent).toBe(
+      "TaruBot is working normally.",
+    );
+    expect(
+      [...document.querySelectorAll(".status-component")].map((tile) => [
+        tile.querySelector("h3")?.textContent,
+        tile.querySelector(".check")?.textContent,
+        tile.querySelector(".status-component__text")?.textContent,
+      ]),
+    ).toEqual([
+      ["Discord connection", "[OK]", "Connected"],
+      ["Database", "[OK]", "Reachable"],
+      ["Lodestone", "[OK]", "Answering"],
+      ["Discord changes", "[OK]", "Live"],
+    ]);
+    // The section's name is "Right now" and the word, so a landmark list says the state too.
+    const overall = document.querySelector(".status-overall");
+    expect(
+      (overall?.getAttribute("aria-labelledby") ?? "")
+        .split(" ")
+        .map((id) => document.getElementById(id)?.textContent)
+        .join(" "),
+    ).toBe("Right now Operational");
+    const updated = document.querySelector(".status-facts time");
+    expect(updated?.getAttribute("datetime")).toBe("2026-10-09T12:03:27.000Z");
+    expect(updated?.textContent).toBe("2026-10-09 12:03 UTC");
+    expect(document.body.textContent).toContain("2.41.0");
+    expect(document.querySelectorAll("form, button, .account, .sidebar")).toHaveLength(0);
+    // Its own one holographic card, and the footer's link back to it.
+    expect(document.querySelectorAll(".orr-holo-edge")).toHaveLength(1);
+    expect(document.querySelector('.site-footer a[href="/status"]')?.textContent).toBe("Status");
+  });
+
+  test("degraded and down say so in words, token by token; paused changes read neutrally", async () => {
+    const degraded = await page(
+      snapshot("degraded", { lodestone: "unreachable", changes: "paused" }),
+    );
+    expect(degraded.querySelector("#status-overall")?.textContent).toBe("Degraded");
+    expect(
+      [...degraded.querySelectorAll(".status-component .check")].map((check) => check.textContent),
+    ).toEqual(["[OK]", "[OK]", "[FAIL]", "[WAIT]"]);
+    expect(degraded.body.textContent).toContain("No answer to the latest request");
+    // A setting, not a fault (overallStatus leaves it out): a plain word on its own tile.
+    const paused = await page(snapshot("operational", { changes: "paused" }));
+    expect(paused.querySelector("#status-overall")?.textContent).toBe("Operational");
+    expect(
+      [...paused.querySelectorAll(".status-component")]
+        .at(-1)
+        ?.querySelector(".status-component__state")?.textContent,
+    ).toBe("[WAIT]Paused by a setting");
+    const down = await page(snapshot("down", { discord: false, lodestone: "cooling_down" }));
+    expect(down.querySelector("#status-overall")?.textContent).toBe("Down");
+    expect(down.body.textContent).toContain("Not connected");
+    expect(down.body.textContent).toContain("Cooling down after too many requests");
+  });
+
+  test("90 bars as one labelled image, a class per band, no style attribute", async () => {
+    const document = await page(snapshot("operational"));
+    const image = document.querySelector(".uptime-bars");
+    expect(image?.getAttribute("role")).toBe("img");
+    const summary = "Uptime over the last 90 days: 99.70%. 3 days below 100%.";
+    expect(document.querySelector(".uptime__summary")?.textContent).toBe(summary);
+    // A short name: the summary just above already reads out the figures.
+    expect(image?.getAttribute("aria-label")).toBe(
+      "Daily uptime bars, oldest first; the table below lists days under 100%.",
+    );
+    expect(
+      [...document.querySelectorAll(".status-facts > div")].map((fact) => [
+        fact.querySelector("dt")?.textContent,
+        fact.querySelector("dd")?.textContent,
+      ]),
+    ).toEqual([
+      ["Updated", "2026-10-09 12:03 UTC"],
+      ["Version", "2.41.0"],
+      ["Uptime, 90 days", "99.70%"],
+    ]);
+    const bars = [...document.querySelectorAll(".uptime-bar")];
+    expect(bars).toHaveLength(HISTORY_DAYS);
+    expect(new Set(bars.map((bar) => bar.getAttribute("class")))).toEqual(
+      new Set([
+        "uptime-bar uptime-bar--full",
+        "uptime-bar uptime-bar--high",
+        "uptime-bar uptime-bar--mid",
+        "uptime-bar uptime-bar--low",
+      ]),
+    );
+    expect(bars.at(-1)?.getAttribute("title")).toBe("2026-10-09: 97.93%");
+    expect(bars.at(-4)?.getAttribute("title")).toBe("2026-10-06: 99.30%");
+    // The legend names every band in words; the axis is decoration.
+    expect(
+      [...document.querySelectorAll(".uptime-legend li")].map((item) => item.textContent),
+    ).toEqual(["100%", "99% or more", "95% or more", "Below 95%", "No data"]);
+    expect(document.querySelector(".uptime-axis")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  test("a disclosure lists each day below 100%, newest first, with its versions", async () => {
+    const document = await page(snapshot("operational"));
+    expect(document.querySelector(".uptime-days > summary")?.textContent).toBe(
+      "Days below 100% (3)",
+    );
+    const region = document.querySelector(".uptime-days .table-scroll");
+    expect(region?.getAttribute("role")).toBe("region");
+    expect(region?.getAttribute("tabindex")).toBe("0");
+    expect(
+      document.getElementById(region?.getAttribute("aria-labelledby") ?? "")?.textContent,
+    ).toBe("Days below 100% uptime, newest first");
+    expect(
+      [...document.querySelectorAll(".uptime-table tbody tr")].map((row) =>
+        [...row.children].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["2026-10-09", "97.93%", "15 min", "2.41.0"],
+      ["2026-10-06", "99.30%", "10 min", "2.40.0, 2.41.0"],
+      ["2026-08-01", "75.00%", "6 h", "2.38.0"],
+    ]);
+  });
+
+  test("a whole history has no disclosure; a new one says since when; none says it will come", async () => {
+    const whole = uptimeHistory(
+      [
+        {
+          day: "2026-10-09",
+          version: "2.41.0",
+          ready: 145,
+          first: new Date("2026-10-09T00:00:00Z"),
+        },
+      ],
+      new Date("2026-10-09T00:00:00Z"),
+      latest,
+    );
+    const fresh = await page(snapshot("operational", {}, whole));
+    expect(fresh.querySelectorAll(".uptime-days")).toHaveLength(0);
+    expect(fresh.querySelector(".uptime__summary")?.textContent).toBe(
+      "Uptime since 2026-10-09 (UTC): 100%. Every day was at 100%.",
+    );
+    expect(fresh.querySelector(".uptime-bars")?.getAttribute("aria-label")).toBe(
+      "Daily uptime bars, oldest first.",
+    );
+    // Under 90 days of data, the card names the same span as the summary, never "90 days".
+    const uptime = [...fresh.querySelectorAll(".status-facts > div")].at(-1);
+    expect(uptime?.querySelector("dt")?.textContent).toBe("Uptime since 2026-10-09");
+    expect(uptime?.querySelector("dd")?.textContent).toBe("100%");
+    expect(fresh.querySelector(".status-facts")?.textContent).not.toContain("90 days");
+    expect(fresh.querySelectorAll(".uptime-bars .uptime-bar--none")).toHaveLength(HISTORY_DAYS - 1);
+    const none = await page(snapshot("operational", {}, null));
+    expect(none.querySelectorAll(".uptime-bar, .uptime-bars")).toHaveLength(0);
+    expect(none.querySelector(".uptime .note")?.textContent).toContain("first check");
+    expect(none.querySelector(".status-facts")?.textContent).not.toContain("Uptime");
+  });
+
+  test("every layout's footer and the sign-in card link the status page", async () => {
+    const welcome = inspect(
+      await render(layout({ title: "TaruBot", signedIn: false }, renderHome({ signedIn: false }))),
+    );
+    expect(welcome.querySelector('.site-footer a[href="/status"]')?.textContent).toBe("Status");
+    expect(welcome.querySelector('.sign-in__status a[href="/status"]')?.textContent).toBe(
+      "Check its status",
+    );
+    const signedIn = inspect(
+      await render(
+        layout(
+          { title: "Your servers", signedIn: true, formToken: TOKEN },
+          renderHome({ signedIn: true, servers: [] }),
+        ),
+      ),
+    );
+    expect(signedIn.querySelector('.site-footer a[href="/status"]')).not.toBeNull();
   });
 });
 

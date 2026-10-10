@@ -5,6 +5,7 @@ import { Database } from "../infrastructure/postgres/database.js";
 import { GuildEvents } from "./guild-events.js";
 import { IssueReports } from "./issue-reports.js";
 import { ApplicationLifecycle } from "./lifecycle.js";
+import { PublicStatus } from "./public-status.js";
 import { Service } from "./service.js";
 import { Synchronization } from "./synchronization.js";
 import { RoleAdministration } from "./role-administration.js";
@@ -61,4 +62,12 @@ export const suggestionsKey = new ServiceKey(
 export const selfRolesKey = new ServiceKey(
   "self-service roles",
   (value): value is SelfRoles => value instanceof SelfRoles,
+);
+/**
+ * The public status page's snapshot (2.41.0): /status reads it from memory, never the database.
+ * src/web/server.ts requires it when the web starts.
+ */
+export const publicStatusKey = new ServiceKey(
+  "public status",
+  (value): value is PublicStatus => value instanceof PublicStatus,
 );

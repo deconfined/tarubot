@@ -29,9 +29,14 @@ Signed published releases pass vulnerability scans for both AMD64 and ARM64 befo
    mkdir -p ops
    curl -fsSL -o ops/Caddyfile "https://raw.githubusercontent.com/deconfined/tarubot/$commit/ops/Caddyfile"
    chmod 644 ops/Caddyfile
+   curl -fsSL "https://codeload.github.com/deconfined/tarubot/tar.gz/$commit" \
+     | tar -xz --strip-components=1 "tarubot-$commit/ops/offline"
+   chmod -R a+rX ops/offline
    curl -fsSL -o .env.example "https://raw.githubusercontent.com/deconfined/tarubot/$commit/.env.example"
    comm -13 <(grep -oE '^[A-Z][A-Z0-9_]*=' .env | sort) <(grep -oE '^[A-Z][A-Z0-9_]*=' .env.example | sort)
    ```
+
+   If `tar` can't write `ops/offline` because Caddy started before the folder existed, Docker created it empty and owned by root: remove it with `sudo rmdir ops/offline` and fetch again.
 
    The image's `org.opencontainers.image.revision` label names the commit it was built from, the same commit as its `sha-<commit>` tag. The `comm` line (bash or zsh) lists settings the new template has and your `.env` doesn't: read their comments in `.env.example` and on [Configuration](/tarubot/deploy/configuration/), and add the ones you need. If you edited your Compose file, `diff docker-compose.yml.previous docker-compose.yml` and carry your changes over.
 
@@ -86,13 +91,15 @@ Managed production/staging targets require owner-reviewed stable deploy and back
 
 For bundled Caddy on managed targets, install the reviewed **2.37.1 or newer deploy entry** before approving delivery. It makes only the public `ops/Caddyfile` readable (`0644`) before validation while central `.env` stays private (`0600`). Older entries can refuse with `/etc/caddy/Caddyfile: permission denied` after a successful image pull; rebuilding the image alone does not update the installed entry.
 
+For 2.41.0, **review and reinstall the deploy entry again before approving its delivery**, as for 2.37.1. The 2.41.0 entry also makes the release's public [offline page](/tarubot/deploy/monitoring/#offline-page) in `ops/offline` readable (`chmod -R a+rX`, only for a real directory, never through a symbolic link); everything else in the release, and `.env`, stays private. An older entry still deploys 2.41.0, but its Caddy then answers the offline page's one-line text fallback while the bot is down. Making the folder readable by hand doesn't last: each delivery checks out a fresh private copy of the release.
+
 ## Rollback
 
 To go back, pin the previous `TARUBOT_IMAGE_TAG`, restore the matching main manifest, shared `docker-compose.web.yml` and `ops/Caddyfile` (from the `.previous` copies or the older image's exact source), and run `docker compose up -d --wait --remove-orphans` again. Going back past a Compose change needs that older source set: newer files may lack services or settings the older release expects.
 
 If the previous release predates the shared web setup, use its original manifest and disable/remove Caddy explicitly as above; that older bot has no dashboard. Retain certificate volumes for a later re-enable instead of grafting new proxy files onto the older source.
 
-That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating: 2.39.0's `012_self_roles.sql`, for example, stops 2.38.1 from starting. Going back from 2.40.0 to 2.39.0 needs no restore: 2.39.0 has no My roles page, and its scheduler, which runs every 30 seconds, closes every waiting role change as skipped without changing any roles, including one parked by a pause or stuck in a server TaruBot left. After the next update, those members are told their last change wasn't applied. While 2.39.0 runs, people a pass leaves with none of the Member, Guest, Officer and FC Leader roles keep their channel-opening menu roles; the next guild pass after returning to 2.40.0 removes them. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
+That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating: 2.39.0's `012_self_roles.sql`, for example, stops 2.38.1 from starting, and 2.41.0's `013_status_samples.sql` stops 2.40.0. Releases before 2.41.0 ignore `ops/offline`, so it can stay. Going back from 2.40.0 to 2.39.0 needs no restore: 2.39.0 has no My roles page, and its scheduler, which runs every 30 seconds, closes every waiting role change as skipped without changing any roles, including one parked by a pause or stuck in a server TaruBot left. After the next update, those members are told their last change wasn't applied. While 2.39.0 runs, people a pass leaves with none of the Member, Guest, Officer and FC Leader roles keep their channel-opening menu roles; the next guild pass after returning to 2.40.0 removes them. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
 
 ## Single database writer
 
@@ -249,6 +256,8 @@ To recover from a broken or lost database:
 
    Members whose change was closed see that it wasn't applied, and save again if they still want it.
 8. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
+
+The [status page](/tarubot/deploy/monitoring/#public-status-page)'s samples need no step: they hold nothing to replay. Those written after the backup are lost, so the page shows that time as down.
 
 Discord work the restored database still owes resumes from its durable jobs, apart from the role changes step 7 closed. A restore never undoes Discord changes the bot already made; the next reconciliation brings Discord in line with the restored decisions.
 

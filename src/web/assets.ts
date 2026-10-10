@@ -17,6 +17,7 @@ import { ENTRY_CSS } from "./styles/entry.js";
 import { FORMS_CSS } from "./styles/forms.js";
 import { MEDIA_CSS } from "./styles/media.js";
 import { MY_ROLES_CSS } from "./styles/my-roles.js";
+import { PUBLIC_STATUS_CSS } from "./styles/public-status.js";
 import { ROLE_MENU_CSS } from "./styles/role-menu.js";
 import { SHELL_CSS } from "./styles/shell.js";
 import { STATUS_CSS } from "./styles/status.js";
@@ -120,6 +121,7 @@ const CSS = [
   STATUS_CSS,
   ROLE_MENU_CSS,
   MY_ROLES_CSS,
+  PUBLIC_STATUS_CSS,
   MEDIA_CSS,
 ].join("\n");
 

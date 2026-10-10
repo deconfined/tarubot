@@ -1,22 +1,21 @@
 {
-  "title": "Session: 2.40.0 My roles review",
-  "objective": "Review the 2.40.0 My roles page on owner-authorized staging: members and guests sign in and pick their own roles from the published role menu, TaruBot applies them in the background, and people who lose every access role lose channel-opening menu roles. No migration. The changelog channel gets this release's update post. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.41.0 public status page review",
+  "objective": "Review the 2.41.0 public status page on owner-authorized staging: anyone opens /status without signing in, it shows live status and a 90-day uptime history from five-minute samples, and bundled Caddy shows a static offline page while the bot is down. Migration 013. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest and backups before authorizing the existing staging target's upgrade; it adds no migration, and going back to 2.39.0 needs no restore.",
-    "Afterwards check the test guild's changelog channel for one 'TaruBot updated to v2.40.0' post with this release's note, or a paused changelog.post in /sync status while effects are off.",
-    "With TaruBot lacking Administrator, publish a throwaway test category, sign in as a test member and a test guest on a phone and a desktop, and save, change and clear picks on My roles; check the banners, Discord's audit-log reason and that Background work shows 'A member'.",
-    "Check a first sign-in by an account that never authorized the application, a timed-out account (view only), a lobby account (refused), and that revoking a test guest removes a channel-opening test role but keeps a cosmetic one. Approve production only after its own healthy baseline."
+    "Review the exact release source/digest and the pre-migration backup before authorizing the staging upgrade; 013_status_samples.sql means going back to 2.40.0 needs that backup.",
+    "Open /status signed out on a phone and a desktop: Operational, with Discord changes 'Paused by a setting' while staging's effects are off; today's bar filling as samples arrive; no cookie set; and the footer link on every dashboard page.",
+    "Reinstall the reviewed 2.41.0 deploy entry before approving the upgrade. Stop the bot for about ten minutes and reload the dashboard: the offline page as a 503 with Retry-After, then the outage in /status once the bot is back. Approve production only after its own healthy baseline."
   ],
   "assistant": [
-    "Before release, review the credential-free harness as officer, member, guest and timed-out member from 320 to 1440 px, including --state-roles=queued|blocked|failed|skipped|expired, and run the full suite with disposable PostgreSQL and the documentation site build.",
+    "Before release, review the credential-free harness from 320 to 1440 px with and without --state-history=incidents|new, the offline page through the pinned Caddy image, and run the full suite with disposable PostgreSQL and the documentation site build.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; admit officers, and Member or Guest holders while TaruBot lacks Administrator; require the session's form token and keep server reads scoped.",
-    "Apply My roles saves as roles.self jobs, one role at a time with an audit-log reason; keep role IDs out of results, logs and officer views, close changes still waiting after 7 days and delete finished ones after 30.",
-    "Queue one update post for each server whose changelog channel stored an older version, listing the notes since then; park it while effects are paused.",
-    "Expose database, Discord and writer-lease readiness; report 2.40.0, startup time and effect state without pinging members."
+    "Refresh the status snapshot every minute from readiness, the Lodestone and the pause state; serve /status from memory with no session, cookie or query, at most 600 requests a minute.",
+    "While holding the writer lease, write one status sample per five-minute bucket, delete samples after 90 days apart from the first, and keep the daily counts in memory.",
+    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; keep role choices private as in 2.40.0.",
+    "Expose database, Discord and writer-lease readiness; report 2.41.0, startup time and effect state without pinging members."
   ]
 }

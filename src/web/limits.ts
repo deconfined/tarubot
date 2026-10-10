@@ -1,11 +1,12 @@
 /**
  * The web's in-memory limits (#43): fixed-window counters per key, the two refusals a page POST
- * can meet before it costs a Discord request (the per-page budget and a shutdown in progress), and
+ * can meet before it costs a Discord request (the per-page budget and a shutdown in progress),
  * from 2.40.0 the sign-in limits: one per Discord user, and D16's gate on the token exchanges every
- * sign-in costs Discord (docs/MODULES.md's web layer). Counting in memory is exact because one
- * process serves the web (W1); a restart forgets the counts, which only ever errs toward letting a
- * request through. Keys are Discord user IDs (with the page and server for POSTs) or one global
- * key for token exchanges, never client addresses, so no address is kept here or anywhere else.
+ * sign-in costs Discord (docs/MODULES.md's web layer), and from 2.41.0 the public status page's
+ * global budget. Counting in memory is exact because one process serves the web (W1); a restart
+ * forgets the counts, which only ever errs toward letting a request through. Keys are Discord user
+ * IDs (with the page and server for POSTs) or one global key for token exchanges and the status
+ * page, never client addresses, so no address is kept here or anywhere else.
  */
 import { Failure } from "../domain/values.js";
 
@@ -90,6 +91,28 @@ export class RateLimiter {
   get size(): number {
     return this.windows.size;
   }
+}
+
+/**
+ * Requests to the public status page per STATUS_WINDOW_MS, across everyone (2.41.0): one global key,
+ * never an address. A visit costs only a cached page, so this bounds a flood's CPU and log volume
+ * rather than any database or Discord work; the page's 30-second Cache-Control keeps browsers that
+ * reload it from counting more than about twice a minute.
+ */
+export const STATUS_LIMIT = 600;
+/** The status budget's window: a minute. */
+export const STATUS_WINDOW_MS = 60_000;
+
+/**
+ * The refusal of a status page request over the budget: a 429 with Retry-After, decided before
+ * anything else the route does. The error page says how long to wait.
+ */
+export function statusBusy(retryAfter: number): Failure {
+  return new Failure(
+    "rate_limited",
+    "Lots of people are checking TaruBot's status right now, so it didn't answer this time.",
+    retryAfter,
+  );
 }
 
 /** Sign-ins one Discord user may finish per SIGN_IN_WINDOW_MS (2.40.0, owner decision Q7). */

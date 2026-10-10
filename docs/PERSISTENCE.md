@@ -71,6 +71,12 @@ UPDATE jobs SET status='succeeded', completed_at=now(), lease_until=NULL, last_e
 
 After any restore, once `check-restore.js` has verified the copy and before the bot starts on it, delete every row (`DELETE FROM web_sessions`): a backup would otherwise revive sessions signed out since it was taken. That signs everyone out, which is always safe. Deleting before the check would fail its exact row comparison. The restore checklist in [deployment](DEPLOYMENT.md#backups-and-restore) and the site's recovery steps carry this step.
 
+### Status samples
+
+`status_samples` (migration 013, 2.41.0) is the public status page's 90-day history, written only by `src/application/public-status.ts`. A row is one five-minute bucket: its start as the key (a CHECK keeps it on the boundary), readiness, the Discord, database, Lodestone and Discord-changes states, and the version that wrote it. Nothing about a server, member or visitor. While a process holds the writer lease, its status timer (every minute) inserts the current bucket's row with `ON CONFLICT DO NOTHING`, so a restart or a second tick inside a bucket adds nothing, then deletes rows older than 90 days, all but the earliest, and recounts per UTC day and version (`to_char(sampled_at AT TIME ZONE 'UTC', ...)`, so the session's zone can't move a day). The earliest row is the first sample ever, which marks where the history starts: without it, an outage at the 90-day window's oldest edge would read as no data instead of down. It's one row of the same process-wide states. The counts live in memory until the next sample, and every snapshot works the days out from them afresh; `/status` never queries the table. A bucket without a row counts as down once it has passed, even while the database is down. The table has no foreign key and isn't member state.
+
+A restore needs no step for it: rows written after the backup are lost, and the page shows those buckets as down. Samples can simply be kept across restores and rehearsals. 2.40.0 refuses to start on this schema head, so going back needs the pre-migration backup.
+
 ## Change the schema
 
 1. Add a new numbered SQL migration. Never edit, rename or delete an applied migration, including its comments: startup validates checksums.

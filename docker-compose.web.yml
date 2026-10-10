@@ -16,6 +16,10 @@ services:
     volumes:
       # Shared read-only source also serves one-off validation on SELinux hosts.
       - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      # The static offline page Caddy shows while the bot can't answer (2.41.0). Its files
+      # must be readable by others: Caddy holds no DAC_OVERRIDE. Missing or unreadable, the
+      # Caddyfile falls back to a one-line text answer.
+      - ./ops/offline:/srv/offline:ro,z
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

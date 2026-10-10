@@ -1,6 +1,8 @@
 /**
- * One design source, two copies: the docs site's files are the originals, and the dashboard
- * carries copies because it serves nothing from disk and the site can't import from src/. The
+ * One design source, three copies: the docs site's files are the originals, the dashboard carries
+ * copies because it serves nothing from disk and the site can't import from src/, and bundled
+ * Caddy's offline page (ops/offline/assets, 2.41.0) carries the files it serves while the bot is
+ * down. The
  * design tokens, the favicon, the third-party notices and the three self-hosted fonts must be
  * identical on both surfaces, and each font must be a whole WOFF2 file, the very file its
  * Fontsource package ships. Fixing a failure here means copying the site file over (tokens.ts,
@@ -114,5 +116,28 @@ describe("the dashboard serves the fonts it was generated from", () => {
       expect(asset.contentType).toBe("font/woff2");
       expect(asset.body).toEqual(Uint8Array.fromBase64(GENERATED[index]?.base64 ?? ""));
     }
+  });
+});
+
+describe("bundled Caddy's offline page carries the docs site's files, byte for byte (2.41.0)", () => {
+  const OFFLINE = "ops/offline/assets";
+  const copies: readonly [string, string][] = [
+    ["tokens.css", "site/src/styles/tokens.css"],
+    ["favicon.svg", "site/public/favicon.svg"],
+    ["third-party-licenses.txt", "site/public/third-party-licenses.txt"],
+    ...["sora", "manrope", "jetbrains-mono"].flatMap((family): [string, string][] => [
+      [`${family}-latin-wght-normal.woff2`, `${FONT_DIRECTORY}/${family}-latin-wght-normal.woff2`],
+      [`${family}-OFL.txt`, `${FONT_DIRECTORY}/${family}-OFL.txt`],
+    ]),
+  ];
+
+  for (const [copy, original] of copies)
+    test(`${copy} equals ${original}`, async () => {
+      expect(await bytes(`${OFFLINE}/${copy}`)).toEqual(await bytes(original));
+    });
+
+  test("each font is the pinned upstream file", async () => {
+    for (const font of GENERATED)
+      expect(sha256(await bytes(`${OFFLINE}/${font.stem}.woff2`))).toBe(UPSTREAM[font.stem] ?? "");
   });
 });

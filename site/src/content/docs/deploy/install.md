@@ -25,11 +25,16 @@ curl -fsSLO "https://raw.githubusercontent.com/deconfined/tarubot/$commit/docker
 mkdir -p ops
 curl -fsSL -o ops/Caddyfile "https://raw.githubusercontent.com/deconfined/tarubot/$commit/ops/Caddyfile"
 chmod 644 ops/Caddyfile
+curl -fsSL "https://codeload.github.com/deconfined/tarubot/tar.gz/$commit" \
+  | tar -xz --strip-components=1 "tarubot-$commit/ops/offline"
+chmod -R a+rX ops/offline
 curl -fsSL -o .env "https://raw.githubusercontent.com/deconfined/tarubot/$commit/.env.example"
 chmod 600 .env
 ```
 
-The image's `org.opencontainers.image.revision` label names the commit it was built from. The image carries the compiled bot, migrations and tools. Keep `docker-compose.web.yml` and `ops/Caddyfile` beside the main manifest in the paths above even for a bot-only install: Compose parses the shared include even when its `web` profile is off. Do not mix these files with a different release or the moving `main` branch.
+The image's `org.opencontainers.image.revision` label names the commit it was built from. The image carries the compiled bot, migrations and tools. Keep `docker-compose.web.yml`, `ops/Caddyfile` and `ops/offline` beside the main manifest in the paths above even for a bot-only install: Compose parses the shared include even when its `web` profile is off. Do not mix these files with a different release or the moving `main` branch.
+
+`ops/offline` (2.41.0 and newer) is the [offline page](/tarubot/deploy/monitoring/#offline-page) bundled Caddy shows while the bot is down. The `tar` line takes just that directory from the same commit's source archive, and `chmod` makes it readable to Caddy, which can't read private files. Without it, Caddy answers a one-line text instead. If Caddy already ran before you fetched it, Docker created an empty `ops/offline` owned by root, which `tar` can't write into: remove it with `sudo rmdir ops/offline` first.
 
 ## 2. Fill in `.env`
 

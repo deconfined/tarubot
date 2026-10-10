@@ -51,6 +51,8 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
   // corrected once it has gone out.
   "2.40.0":
     "Members and guests can pick their own roles, such as pronouns or games, on TaruBot's new My roles page once it's turned on for your server. Roles you already have show up there.",
+  "2.41.0":
+    "TaruBot's dashboard now has a public status page, linked at the bottom of every page: anyone can see whether TaruBot is up and its uptime over 90 days, no sign-in needed. While it restarts, the dashboard says so.",
 };
 
 /**

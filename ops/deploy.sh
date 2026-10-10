@@ -251,10 +251,16 @@ compose run --rm --no-deps --pull never -T tarubot bun -e '
   }
 ' "$WEB_PROFILE"
 if [[ $WEB_PROFILE == true ]]; then
-  # Private worktrees inherit umask 077. This public template must be readable
-  # by Caddy without DAC_OVERRIDE. Central settings and every other release
-  # file retain their private permissions.
+  # Private worktrees inherit umask 077. This public template, and the offline
+  # page shown while the bot can't answer (2.41.0), must be readable by Caddy
+  # without DAC_OVERRIDE. Central settings and every other release file retain
+  # their private permissions.
   chmod 644 "$WORKTREE/ops/Caddyfile"
+  # chmod -R follows a symlinked argument, so only a real directory. An older
+  # release without the page must still deploy under set -e.
+  if [[ -d $WORKTREE/ops/offline && ! -L $WORKTREE/ops/offline ]]; then
+    chmod -R a+rX -- "$WORKTREE/ops/offline"
+  fi
   compose pull caddy
   compose run --rm --no-deps --pull never -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 fi

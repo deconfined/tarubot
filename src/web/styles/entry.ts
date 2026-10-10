@@ -367,6 +367,21 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
   margin-top: var(--space-2);
 }
 
+/* The public status page's link (2.41.0), quiet under the disclosure. */
+.sign-in__status {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font: var(--type-caption);
+}
+
+.sign-in__status > .orr-icon {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--cyan-400);
+}
+
 @media (min-width: 40rem) {
   .entry-bar,
   .entry {

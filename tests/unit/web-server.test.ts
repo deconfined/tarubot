@@ -6,7 +6,7 @@
  * loopback, no database.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import {
   applicationKey,
   gatewayKey,
   lifecycleKey,
+  publicStatusKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
@@ -43,6 +44,8 @@ import {
   ExchangeGate,
   SIGN_IN_LIMIT,
   SIGN_IN_WINDOW_MS,
+  STATUS_LIMIT,
+  STATUS_WINDOW_MS,
   stoppingRefusal,
 } from "../../src/web/limits.js";
 import { DiscordSignIn } from "../../src/web/oauth.js";
@@ -77,6 +80,7 @@ import {
   startHarness,
 } from "../fixtures/web-dev.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
+import { type StatusFixture, statusFixture } from "../fixtures/status-samples.js";
 import { configGuild, configReport } from "../fixtures/replies/configuration.js";
 import { HOSTILE_INPUT, KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
 
@@ -168,6 +172,8 @@ interface WorldOptions {
    * pages exactly (the / redirect).
    */
   readonly fixturesOnly?: boolean;
+  /** Leave the status page's PublicStatus without a snapshot, as before main.ts starts it. */
+  readonly statusUnstarted?: boolean;
 }
 
 /** Everything a test needs: the app and every fake behind it. */
@@ -199,6 +205,8 @@ interface World {
   readonly menus: HarnessMenus;
   /** My roles' held roles and newest changes (2.40.0), on `clock`. */
   readonly people: HarnessPeople;
+  /** The public status page's PublicStatus (2.41.0) on `clock`, ticked once. */
+  readonly status: StatusFixture;
   readonly logs: () => LogLine[];
 }
 
@@ -207,7 +215,7 @@ interface World {
  * harness's in-memory SelfRoles over `menus`, in the review `states` given.
  */
 function services(
-  world: Pick<World, "lifecycle" | "menus" | "people">,
+  world: Pick<World, "lifecycle" | "menus" | "people"> & { readonly status?: StatusFixture },
   syncStatus: () => Promise<SyncStatusView>,
   states: HarnessStates = {},
 ) {
@@ -243,11 +251,13 @@ function services(
     },
     visibility: { missing: 7776, onboardingPending: 7777, checked: 7778, checkedAt: null },
   });
+  const status = world.status ?? statusFixture(() => lifecycle.status());
   return new Services()
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway())
-    .provide(selfRolesKey, harnessSelfRoles(states, world.menus, world.people));
+    .provide(selfRolesKey, harnessSelfRoles(states, world.menus, world.people))
+    .provide(publicStatusKey, status.service);
 }
 
 /**
@@ -404,9 +414,21 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const resolve = resolver(resolutions, modes, botAdministrator);
   const menus: HarnessMenus = new Map();
   const people = harnessPeople(() => clock.now);
+  // The status page's readiness is the lifecycle fake's, through the same flag /health/ready uses.
+  const status = statusFixture(
+    () => ({
+      ready: lifecycle.ready,
+      discord: lifecycle.ready,
+      database: true,
+      writerLease: true,
+      lodestone: { cooldownSeconds: 0 },
+    }),
+    () => new Date(clock.now),
+  );
+  if (!options.statusUnstarted) await status.service.tick();
   const context: WebContext = {
     services: services(
-      { lifecycle, menus, people },
+      { lifecycle, menus, people, status },
       options.syncStatus ?? (async () => SYNC),
       options.menuStates,
     ),
@@ -459,6 +481,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
     stopping,
     menus,
     people,
+    status,
     logs: () => lines.map((line) => JSON.parse(line) as LogLine),
   };
 }
@@ -601,6 +624,7 @@ describe("the header set on every answer", () => {
         ],
         ["invalid form", 422, () => officer.post(`/g/${GUILD}/form`, "name=")],
         ["readiness", 200, () => visitor.get("/health/ready")],
+        ["status page", 200, () => visitor.get("/status")],
         ["asset", 200, () => visitor.get(STYLESHEET.path)],
         ["HEAD", 200, () => visitor.request("/", { method: "HEAD" })],
       ];
@@ -647,6 +671,7 @@ describe("the header set on every answer", () => {
       ["GET", "/logout/all", "POST"],
       ["PUT", "/health/ready", "GET, HEAD"],
       ["POST", "/health/ready", "GET, HEAD"],
+      ["POST", "/status", "GET, HEAD"],
     ];
     for (const [method, path, allow] of allowed) {
       const response =
@@ -2715,6 +2740,107 @@ describe("scanner traffic", () => {
   });
 });
 
+describe("the public status page (2.41.0)", () => {
+  test("anyone gets the snapshot: no session, database, Discord or source read, and no cookie", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const visitor = new Browser(w);
+    const reads = { ...w.status.reads };
+    const calls = { ...w.status.samples.calls };
+    const resolutions = w.resolutions.length;
+    const discord = w.discord.requests.length;
+    const sessionReads = spyOn(w.sessions, "get");
+    try {
+      const pages: string[] = [];
+      for (const [browser, path] of [
+        [visitor, "/status"],
+        [officer, "/status"],
+        [visitor, "/status?refresh=1&to=%2F%2Fevil.example"],
+      ] as const) {
+        const response = await browser.get(path);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toBe("text/html; charset=UTF-8");
+        expect(response.headers.get("cache-control")).toBe("public, max-age=30");
+        expect(response.headers.getSetCookie()).toEqual([]);
+        expectSecurityHeaders(response, false);
+        pages.push(await response.text());
+      }
+      // The signed-in browser's cookie changed nothing: one page for everyone, query ignored.
+      expect(new Set(pages).size).toBe(1);
+      expect(pages[0]).toContain("Operational");
+      expect(pages[0]).not.toContain("Sign out");
+      expect(pages[0]).not.toContain("evil.example");
+      const head = await visitor.request("/status", { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+      expect(sessionReads).not.toHaveBeenCalled();
+    } finally {
+      sessionReads.mockRestore();
+    }
+    expect(w.status.reads).toEqual(reads);
+    expect(w.status.samples.calls).toEqual(calls);
+    expect(w.resolutions).toHaveLength(resolutions);
+    expect(w.discord.requests).toHaveLength(discord);
+    expect(w.reports).toEqual([]);
+  });
+
+  test("the page follows the snapshot: the same body until the timer takes a new one", async () => {
+    const w = await world();
+    const visitor = new Browser(w);
+    const first = await (await visitor.get("/status")).text();
+    expect(await (await visitor.get("/status")).text()).toBe(first);
+    w.status.state.lodestoneFailing = true;
+    w.status.state.changesPaused = true;
+    expect(await (await visitor.get("/status")).text()).toBe(first);
+    await w.status.service.tick();
+    const next = await (await visitor.get("/status")).text();
+    expect(next).toContain("Degraded");
+    expect(next).toContain("No answer to the latest request");
+    expect(next).toContain("Paused by a setting");
+  });
+
+  test("over the global budget: a 429 with Retry-After, logged once at info, until the window ends", async () => {
+    const w = await world();
+    const visitor = new Browser(w);
+    for (let index = 0; index < STATUS_LIMIT; index++)
+      expect((await visitor.get("/status")).status).toBe(200);
+    const refused = await visitor.get("/status");
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe(String(STATUS_WINDOW_MS / 1000));
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    expect(refused.headers.getSetCookie()).toEqual([]);
+    expectSecurityHeaders(refused, false);
+    expect(await refused.text()).toContain("Lots of people are checking TaruBot&#39;s status");
+    expect((await visitor.get("/status")).status).toBe(429);
+    // Nothing personal keys the budget: another browser is refused alike.
+    expect((await new Browser(w).get("/status")).status).toBe(429);
+    const lines = w.logs();
+    expect(
+      lines.filter((line) => line.msg === "Status page budget spent; refusing for now"),
+    ).toEqual([expect.objectContaining({ level: 30, retryAfter: STATUS_WINDOW_MS / 1000 })]);
+    // The refusals themselves stay at debug, out of the capped production log.
+    expect(
+      lines
+        .filter((line) => line.msg === "Web request" && line.status === 429)
+        .map((line) => line.level),
+    ).toEqual([20, 20, 20]);
+    w.clock.now += STATUS_WINDOW_MS;
+    expect((await visitor.get("/status")).status).toBe(200);
+    expect(w.reports).toEqual([]);
+  });
+
+  test("before the first snapshot: a 503 with Retry-After at warn, never an issue report", async () => {
+    const w = await world({ statusUnstarted: true });
+    const response = await new Browser(w).get("/status");
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("60");
+    expect(await response.text()).toContain("status isn&#39;t ready yet.</p>");
+    expect(
+      w.reports.map(({ operation, options }) => [operation.length > 0, options?.level]),
+    ).toEqual([[true, "warn"]]);
+  });
+});
+
 describe("readiness and assets", () => {
   test("/health/ready answers the readiness boolean only, never cached", async () => {
     const w = await world();
@@ -3327,7 +3453,7 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
     }
   });
   test.skipIf(!process.env.CADDY_FIXTURE_IMAGE)(
-    "an accepted trailing-slash origin serves protected routes and OAuth through native Caddy",
+    "an accepted trailing-slash origin serves protected routes and OAuth through native Caddy, and the offline page once the bot stops",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "tarubot-caddy-"));
       const project = `tarubot-caddy-${crypto.randomUUID()}`;
@@ -3378,6 +3504,18 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
         return stdout.trim();
       };
       try {
+        // The repository's Caddyfile and offline page (2.41.0), copied readable for others: Caddy
+        // holds no DAC_OVERRIDE, and a checkout under umask 077 would otherwise hide them from it.
+        await cp(join(repository, "ops/Caddyfile"), join(directory, "TaruBot.Caddyfile"));
+        await cp(join(repository, "ops/offline"), join(directory, "offline"), { recursive: true });
+        await chmod(join(directory, "TaruBot.Caddyfile"), 0o644);
+        for (const path of ["offline", "offline/assets"]) await chmod(join(directory, path), 0o755);
+        await chmod(join(directory, "offline/index.html"), 0o644);
+        for (const file of await readdir(join(directory, "offline/assets")))
+          await chmod(join(directory, "offline/assets", file), 0o644);
+        // A dotfile planted beside the page's files, readable: Caddy must still not serve it.
+        await writeFile(join(directory, "offline/assets/.planted"), "not public\n");
+        await chmod(join(directory, "offline/assets/.planted"), 0o644);
         // Host networking reaches only the loopback fixture. No fixed host ports,
         // public ACME, bot/database credentials, or real Discord are involved.
         await writeFile(
@@ -3394,6 +3532,7 @@ describe.skipIf(!ipv6Loopback)("the development harness, end to end over loopbac
         import /etc/caddy/TaruBot.Caddyfile
         `,
         );
+        await chmod(join(directory, "Caddyfile"), 0o644);
         await writeFile(
           join(directory, "override.yml"),
           `
@@ -3411,8 +3550,9 @@ services:
       retries: 10
       start_period: 0s
     volumes: !override
-      - ${JSON.stringify(`${repository}/ops/Caddyfile:/etc/caddy/TaruBot.Caddyfile:ro,z`)}
+      - ${JSON.stringify(`${directory}/TaruBot.Caddyfile:/etc/caddy/TaruBot.Caddyfile:ro,z`)}
       - ${JSON.stringify(`${directory}/Caddyfile:/etc/caddy/Caddyfile:ro,z`)}
+      - ${JSON.stringify(`${directory}/offline:/srv/offline:ro,z`)}
       - caddy_data:/data
       - caddy_config:/config
 `,
@@ -3460,6 +3600,66 @@ services:
         );
         expect(page.status).toBe(200);
         expect(await page.text()).toContain("Example FC");
+        // The public status page passes through like any page.
+        expect((await browse(new URL("/status", harness.url))).status).toBe(200);
+        // The bot stops: Caddy answers the offline page instead of its own empty 502.
+        await harness.stop();
+        for (const path of ["/", "/status", `/g/${HARNESS_GUILDS.example.id}/configuration`]) {
+          const offline = await browse(new URL(path, harness.url));
+          expect({ path, status: offline.status }).toEqual({ path, status: 503 });
+          expect(offline.headers.get("cache-control")).toBe("no-store");
+          expect(offline.headers.get("retry-after")).toBe("60");
+          expect(offline.headers.get("content-security-policy")).toStartWith(
+            "default-src 'none'; style-src 'self'; font-src 'self'",
+          );
+          expect(await offline.text()).toContain(
+            '<h1 class="title" id="offline-title">TaruBot is offline right now</h1>',
+          );
+        }
+        // Any method gets the page; HEAD its headers alone.
+        const whole = await (await browse(new URL("/", harness.url))).text();
+        const posted = await browse(new URL("/status", harness.url), {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "field=value",
+        });
+        expect(posted.status).toBe(503);
+        expect(posted.headers.get("cache-control")).toBe("no-store");
+        expect(await posted.text()).toBe(whole);
+        const head = await browse(new URL("/", harness.url), { method: "HEAD" });
+        expect(head.status).toBe(503);
+        expect(head.headers.get("retry-after")).toBe("60");
+        expect(head.headers.get("content-type")).toStartWith("text/html");
+        expect(await head.text()).toBe("");
+        // Conditional and range requests still get the whole page, never an empty or partial body.
+        const tag = (await browse(new URL("/", harness.url))).headers.get("etag") ?? '"none"';
+        for (const headers of [
+          { "if-none-match": tag },
+          { "if-modified-since": "Fri, 01 Jan 2100 00:00:00 GMT" },
+          { "if-match": '"another"' },
+          { "if-unmodified-since": "Sat, 01 Jan 2000 00:00:00 GMT" },
+          { range: "bytes=0-9" },
+          { range: "bytes=0-9", "if-range": tag },
+        ]) {
+          const answer = await browse(new URL("/", harness.url), { headers });
+          expect({
+            headers,
+            status: answer.status,
+            partial: answer.headers.get("content-range"),
+          }).toEqual({
+            headers,
+            status: 503,
+            partial: null,
+          });
+          expect(await answer.text()).toBe(whole);
+        }
+        const style = await browse(new URL("/_offline/offline.css", harness.url));
+        expect(style.status).toBe(200);
+        expect(style.headers.get("content-type")).toStartWith("text/css");
+        expect(
+          (await browse(new URL("/_offline/sora-latin-wght-normal.woff2", harness.url))).status,
+        ).toBe(200);
+        expect((await browse(new URL("/_offline/.planted", harness.url))).status).toBe(404);
       } finally {
         await harness.stop();
         try {

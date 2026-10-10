@@ -483,6 +483,37 @@ describe("the stylesheet", () => {
     );
   });
 
+  test("the status page's bands differ in height as well as color, and forced colors keep them apart", () => {
+    // The bars stand on one line, so their heights compare like a chart's.
+    expect(ruleFor(".uptime-bars")).toContain("align-items: end;");
+    expect(ruleFor(".uptime-bar")).toContain("height: calc(var(--band-height, 1) * 100%);");
+    expect(ruleFor(".uptime-swatch")).toContain("height: calc(var(--band-height, 1) * 12px);");
+    expect(
+      ["full", "high", "mid", "low", "none"].map(
+        (band) => /--band-height: ([\d.]+);/u.exec(ruleFor(`.uptime-bar--${band}`))?.[1],
+      ),
+    ).toEqual(["1", "0.8", "0.55", "0.3", "1"]);
+    // No data is an empty outline, not a faint fill a dark card swallows.
+    expect(ruleFor(".uptime-bar--none")).toContain("background: transparent;");
+    expect(ruleFor(".uptime-bar--none")).toContain("inset 0 0 0 1px var(--border-strong)");
+    // Forced colors: the system's colors, never the bands' own, which the user's theme can't read.
+    expect(css).not.toContain("forced-color-adjust: none");
+    expect(declaring("(forced-colors: active)", "background-color: CanvasText;")).toEqual([
+      ".uptime-bar",
+      ".uptime-swatch",
+    ]);
+    expect(declaring("(forced-colors: active)", "background-color: Canvas;")).toEqual([
+      ".uptime-bar--none",
+    ]);
+    expect(declaring("(forced-colors: active)", "border: 1px solid CanvasText;")).toContain(
+      ".uptime-bar--none",
+    );
+    // The components: two across at most, one above the other where two tiles of 10rem don't fit.
+    expect(ruleFor(".status-components__grid")).toContain(
+      "minmax(max(min(100%, 10rem), calc((100% - var(--space-3)) / 2)), 1fr)",
+    );
+  });
+
   test("reduced transparency, forced colors and print each have their fallback", () => {
     expect(declaring("(prefers-reduced-transparency: reduce)", "backdrop-filter: none;")).toEqual(
       expect.arrayContaining([".orr-card", ".sidebar", ".topbar", ".orr-btn--secondary"]),

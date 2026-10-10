@@ -1,5 +1,62 @@
 # The same canonical origin drives OAuth callbacks and the TLS virtual host.
 # No access log: callback query strings contain short-lived authorization codes.
 {$WEB_PUBLIC_ORIGIN} {
-	reverse_proxy tarubot:{$WEB_PORT:8080}
+	# The offline page's own files (2.41.0), from the read-only ops/offline mount. TaruBot
+	# serves nothing under /_offline/, so every other request still goes to the bot. Caddy
+	# serves whatever the folder holds and follows symlinks, so it holds regular files only
+	# (tests/unit/offline-page.test.ts), and dotfiles stay hidden all the same.
+	handle_path /_offline/* {
+		root * /srv/offline/assets
+		header {
+			Content-Security-Policy "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+			X-Content-Type-Options nosniff
+			X-Robots-Tag noindex
+			Cache-Control "public, max-age=300"
+		}
+		file_server {
+			hide .*
+		}
+	}
+
+	handle {
+		reverse_proxy tarubot:{$WEB_PORT:8080}
+	}
+
+	# When Caddy gets no complete answer from the bot (stopped, restarting, crashed, or the
+	# connection dropped, as for a request body over 64 KiB), Caddy's own 502, 503 or 504
+	# becomes the static offline page: 503, never cached, Retry-After, and no upstream detail.
+	# The bot's own answers, its 503 pages included, are responses, not errors, and pass
+	# unchanged. Any method gets the page, always whole: file_server would answer a conditional
+	# or range request with an empty or partial body, so those headers go first. Without
+	# readable offline files (a stock install that didn't fetch them, or a release worktree its
+	# deploy entry left private), a one-line text answer instead.
+	handle_errors 502 503 504 {
+		root * /srv/offline
+		header {
+			Content-Security-Policy "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+			X-Content-Type-Options nosniff
+			X-Frame-Options DENY
+			X-Robots-Tag noindex
+			Referrer-Policy same-origin
+			Cache-Control no-store
+			Retry-After 60
+		}
+		@page file /index.html
+		handle @page {
+			request_header -If-Match
+			request_header -If-None-Match
+			request_header -If-Modified-Since
+			request_header -If-Unmodified-Since
+			request_header -If-Range
+			request_header -Range
+			rewrite * /index.html
+			file_server {
+				status 503
+				hide .*
+			}
+		}
+		handle {
+			respond "TaruBot is offline right now. Try again in a few minutes." 503
+		}
+	}
 }
