@@ -1879,6 +1879,44 @@ describe("Role menu (2.39.0)", () => {
     }
   });
 
+  test("every editor's panel is anchored to its own button: one pair of classes by the card's place and the editor", async () => {
+    for (const states of [{}, { menuProblems: true }] satisfies HarnessStates[]) {
+      const document = await rolePage(await editor(states));
+      const cards = [...document.querySelectorAll(".menu-categories > .menu-category")];
+      expect(cards.length).toBeGreaterThan(2);
+      expect(cards.length).toBeLessThanOrEqual(MENU_LIMITS.categories);
+      const names: string[] = [];
+      for (const [at, card] of cards.entries()) {
+        const tools = [...card.querySelectorAll(".menu-toolbar > .menu-tool")];
+        expect(tools.length).toBeGreaterThan(2);
+        for (const tool of tools) {
+          const [button, panel] = [...tool.children];
+          // The editor, as the panel's id names it after the card's (Edit roles: "edit-roles").
+          const editorName = (panel?.id ?? "").slice(card.id.length + 1);
+          expect(["edit-roles", "add-roles", "edit-category", "delete"]).toContain(editorName);
+          const name = `c${at}-${editorName}`;
+          // The button names itself an anchor, once; its panel points at that name and is placed
+          // beside it. Nothing else in the tool carries an anchor class.
+          expect([...(button?.classList ?? [])].filter((item) => item.includes("anchor"))).toEqual([
+            `anchor-${name}`,
+          ]);
+          expect([...(panel?.classList ?? [])].filter((item) => item.includes("anchor"))).toEqual([
+            "overlay--anchored",
+            `anchored-${name}`,
+          ]);
+          expect(tool.querySelectorAll("[class*='anchor']")).toHaveLength(2);
+          names.push(name);
+        }
+      }
+      // Each name once on the page (anchor names are global), one per dialog, and no other element
+      // names or points at an anchor.
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toHaveLength(document.querySelectorAll("dialog").length);
+      expect(document.querySelectorAll("[class*='anchor-c']")).toHaveLength(names.length);
+      expect(document.querySelectorAll("[class*='anchored-c']")).toHaveLength(names.length);
+    }
+  });
+
   test("fieldsets have legends, every control a label, and every button visible text", async () => {
     const document = await rolePage(await editor({ menuProblems: true }));
     const fieldsets = [...document.querySelectorAll("main fieldset")];
@@ -2454,6 +2492,10 @@ describe("Role menu (2.39.0)", () => {
       expect(main?.lastElementChild).toBe(panel ?? null);
       expect(panel?.previousElementSibling?.className).toBe("overlay-backdrop");
       expect(panel?.closest(".menu-category")).toBeNull();
+      // Centred, as before anchoring: the page loads at its top, where the button may be off the
+      // screen, so the panel points at no anchor, and the link standing in for its button names
+      // none.
+      expect([...(panel?.classList ?? [])].filter((item) => item.includes("anchor"))).toEqual([]);
       const blocks = [...(main?.children ?? [])];
       expect(blocks.slice(-2)).toEqual([
         panel?.previousElementSibling as Element,
@@ -2493,6 +2535,9 @@ describe("Role menu (2.39.0)", () => {
       // editors stay closed dialogs, and no id is on the page twice.
       const tools = card(document, categoryId)?.querySelector(".menu-toolbar");
       expect(tools?.querySelector(`a.menu-opener[href="#${id}-title"]`)).not.toBeNull();
+      expect(
+        tools?.querySelector(`a.menu-opener[href="#${id}-title"]`)?.getAttribute("class"),
+      ).not.toContain("anchor");
       expect(
         document.querySelectorAll(`[commandfor="${id}"], [popovertarget="${id}"]`),
       ).toHaveLength(0);

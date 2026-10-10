@@ -17,13 +17,15 @@
  *
  * The editors open on top of the page, so nothing on it moves when one opens (the owner's ask): a
  * modal <dialog> each, opened by its toolbar button's invoker command (commandfor, command
- * "show-modal"; no script), in the top layer, a panel near the top of a wide screen and a bottom
- * sheet on a phone. While it is open the dimmed page under it takes neither focus nor clicks, so
- * Tab stays in the panel and a click outside only closes it. Escape, a click outside or its Close
- * button closes it, and focus goes back to the button that opened it. Each panel sits right after
- * its button in the markup. A browser without invoker commands opens the same element as a popover
- * instead (its popover and popovertarget attributes): the stylesheet still keeps clicks off the
- * page, but the popover isn't modal, so Tab can leave it; that is accepted.
+ * "show-modal"; no script), in the top layer: on a wide screen a panel beside its button, just
+ * under it or above it (CSS anchor positioning, anchorClasses; near the top of the screen where
+ * the browser has none), and a bottom sheet on a phone. While it is open the dimmed page under it
+ * takes neither focus nor clicks, so Tab stays in the panel and a click outside only closes it.
+ * Escape, a click outside or its Close button closes it, and focus goes back to the button that
+ * opened it. Each panel sits right after its button in the markup. A browser without invoker
+ * commands opens the same element as a popover instead (its popover and popovertarget
+ * attributes): the stylesheet still keeps clicks off the page, but the popover isn't modal, so Tab
+ * can leave it; that is accepted.
  *
  * Accessibility: every control has a visible label, and controls that repeat per category or role
  * carry a visually hidden suffix naming what they act on (forms.ts's context()), so each name is
@@ -408,6 +410,21 @@ const editorTitleId = (categoryId: string, kind: EditorKind): string =>
 /** The note that says what a panel is about, which describes the dialog (aria-describedby). */
 const editorNoteId = (categoryId: string, kind: EditorKind): string =>
   `${editorId(categoryId, kind)}-note`;
+
+/**
+ * The classes that open an editor's panel beside its button on a wide screen, by CSS anchor
+ * positioning (styles/role-menu.ts's ANCHOR_PAIRS): the button's anchor-c<place>-<editor> names it
+ * as an anchor, and the panel's anchored-c<place>-<editor> points at that name, with
+ * overlay--anchored placing it there. Anchor names are global to the page, so each pair is the
+ * card's place (`at`, from 0) and the editor, unique on the page. The stylesheet has a pair for
+ * every place a menu can hold (MENU_LIMITS.categories); a card past them (never, as the schema caps
+ * the menu) gets none, and its panels open centred as without anchor positioning.
+ */
+function anchorClasses(at: number, kind: EditorKind): { button: string; panel: string } {
+  if (at >= MENU_LIMITS.categories) return { button: "", panel: "" };
+  const name = `c${at}-${EDITOR_IDS[kind]}`;
+  return { button: ` anchor-${name}`, panel: ` overlay--anchored anchored-${name}` };
+}
 
 /** The form an editor holds: Delete category's is the card's buttons' own ("action"). */
 const editorForm = (category: SelfRoleCategory, kind: EditorKind): RoleMenuForm =>
@@ -993,17 +1010,20 @@ const closes = (id: string): SafeHtml =>
  * error summary first in its body, and Close is a link that loads the page afresh at the card's
  * heading, dropping what was typed. The link names the category in its query (NOTICE_CATEGORY,
  * with no notice, so it shows nothing): one that differed from this POST's address only in its
- * fragment would just scroll this page, panel and all.
+ * fragment would just scroll this page, panel and all. In its card it takes `anchored`, the
+ * classes that open it beside its button (anchorClasses); drawn open it takes none and stays
+ * centred, since that page loads at its top, where the button may be off the screen.
  */
 function panel(
   view: RoleMenuView,
   category: SelfRoleCategory,
   editor: Editor,
   open: boolean,
+  anchored = "",
 ): SafeHtml {
   const id = editorId(category.id, editor.kind);
   const title = editorTitleId(category.id, editor.kind);
-  const className = `overlay${open ? " overlay--open" : ""}${editor.size ? ` overlay--${editor.size}` : ""}`;
+  const className = `overlay${open ? " overlay--open" : anchored}${editor.size ? ` overlay--${editor.size}` : ""}`;
   // The name shows under the action; the hidden ": " keeps the dialog's name one phrase. Never in
   // capitals by CSS (as an .orr-label eyebrow would be): Chromium names the dialog in them too.
   const words = html`${editor.label}<span class="overlay__subject"><span class="visually-hidden">: </span>${untrusted(category.name)}</span>`;
@@ -1038,23 +1058,31 @@ function panel(
  * stays lit while the editor holds a refused form (holdsRefused). While the editor is drawn open
  * at the page's end instead, a lit link to the open panel's title takes the button's place,
  * marking under the backdrop which editor is open (a button there would name a panel that is no
- * dialog, and do nothing).
+ * dialog, and do nothing). The button and its closed panel carry the card's place (`at`) in their
+ * anchor classes (anchorClasses); the link stands in for no anchor.
  */
-function tool(view: RoleMenuView, category: SelfRoleCategory, editor: Editor | ""): SafeHtml | "" {
+function tool(
+  view: RoleMenuView,
+  category: SelfRoleCategory,
+  at: number,
+  editor: Editor | "",
+): SafeHtml | "" {
   if (editor === "") return "";
   const id = editorId(category.id, editor.kind);
   const className = `orr-btn orr-btn--secondary menu-opener${editor.kind === "delete" ? " menu-opener--danger" : ""}${
     holdsRefused(view, category, editor.kind) ? " menu-opener--kept" : ""
   }`;
   const label = html`${editor.label}${named(category)}`;
-  return isOpen(view, category, editor.kind)
-    ? html`<div class="menu-tool"><a class="${className}" href="#${editorTitleId(category.id, editor.kind)}">${label}</a></div>`
-    : html`<div class="menu-tool"><button type="button" class="${className}" commandfor="${id}" command="show-modal" popovertarget="${id}" aria-haspopup="dialog">${label}</button>${panel(
-        view,
-        category,
-        editor,
-        false,
-      )}</div>`;
+  if (isOpen(view, category, editor.kind))
+    return html`<div class="menu-tool"><a class="${className}" href="#${editorTitleId(category.id, editor.kind)}">${label}</a></div>`;
+  const anchor = anchorClasses(at, editor.kind);
+  return html`<div class="menu-tool"><button type="button" class="${className}${anchor.button}" commandfor="${id}" command="show-modal" popovertarget="${id}" aria-haspopup="dialog">${label}</button>${panel(
+    view,
+    category,
+    editor,
+    false,
+    anchor.panel,
+  )}</div>`;
 }
 
 /** Move up and Move down: absolute places, so a repeat changes nothing. */
@@ -1425,12 +1453,12 @@ ${options}
 ${formErrors(view, { kind: "action", categoryId: category.id }, actionsId(category.id))}
 ${stateLine(category)}
 <div class="menu-toolbar">
-${tool(view, category, editOptions(view, category))}
-${tool(view, category, addRoles(view, menu, category))}
-${tool(view, category, editCategory(view, category))}
+${tool(view, category, at, editOptions(view, category))}
+${tool(view, category, at, addRoles(view, menu, category))}
+${tool(view, category, at, editCategory(view, category))}
 ${stateActions(view, category)}
 <div class="menu-moves">${moves(view, category, at, menu.categories.length - 1)}</div>
-${tool(view, category, deleteCategory(view, category))}
+${tool(view, category, at, deleteCategory(view, category))}
 </div>
 </div>
 </li>`;
