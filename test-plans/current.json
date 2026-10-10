@@ -1,13 +1,13 @@
 {
-  "title": "Session: 2.41.0 public status page review",
-  "objective": "Review the 2.41.0 public status page on owner-authorized staging: anyone opens /status without signing in, it shows live status and a 90-day uptime history from five-minute samples, and bundled Caddy shows a static offline page while the bot is down. Migration 013. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.41.1 Role menu editors beside their buttons review",
+  "objective": "Review 2.41.1 on owner-authorized staging: on the dashboard's Role menu, each category's editors open right next to the button that opened them (just below it, or above it near the bottom of the window), phones keep the bottom sheet and the page behind never moves. No new migration; a target still on 2.40.x also takes 2.41.0's 013. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest and the pre-migration backup before authorizing the staging upgrade; 013_status_samples.sql means going back to 2.40.0 needs that backup.",
-    "Open /status signed out on a phone and a desktop: Operational, with Discord changes 'Paused by a setting' while staging's effects are off; today's bar filling as samples arrive; no cookie set; and the footer link on every dashboard page.",
-    "Reinstall the reviewed 2.41.0 deploy entry before approving the upgrade. Stop the bot for about ten minutes and reload the dashboard: the offline page as a 503 with Retry-After, then the outage in /status once the bot is back. Approve production only after its own healthy baseline."
+    "Review the exact release source/digest and backups before authorizing the staging upgrade; 2.41.1 adds no migration and changes no setting. A target still on 2.40.x also takes 2.41.0's 013_status_samples.sql (going back needs the pre-migration backup) and its reviewed deploy entry, reinstalled before approving.",
+    "Sign in as an officer and open Role menu in a desktop browser (Chrome, Safari or Firefox). Scroll a card's buttons near the top, the middle and the bottom of the window and open Edit roles, Add roles, Edit category and Delete category: each opens just under its button, or just above it near the bottom, wholly on screen, and the page behind doesn't move.",
+    "Check that Escape and Close put focus back on the button, that an Add roles with nothing ticked comes back centred, and that a phone still opens each editor as a sheet from the bottom. Approve production only after its own healthy baseline."
   ],
   "assistant": [
-    "Before release, review the credential-free harness from 320 to 1440 px with and without --state-history=incidents|new, the offline page through the pinned Caddy image, and run the full suite with disposable PostgreSQL and the documentation site build.",
+    "Before release, check the credential-free harness in Chromium, Firefox and WebKit at 768, 1280 and 1440 px (each editor on the first, a middle and the last card, scrolled near the top, middle and bottom), the 390 px sheet and the centred fallback without anchor positioning, and run the full suite with disposable PostgreSQL.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
@@ -16,6 +16,6 @@
     "Refresh the status snapshot every minute from readiness, the Lodestone and the pause state; serve /status from memory with no session, cookie or query, at most 600 requests a minute.",
     "While holding the writer lease, write one status sample per five-minute bucket, delete samples after 90 days apart from the first, and keep the daily counts in memory.",
     "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; keep role choices private as in 2.40.0.",
-    "Expose database, Discord and writer-lease readiness; report 2.41.0, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.41.1, startup time and effect state without pinging members."
   ]
 }

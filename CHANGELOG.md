@@ -1,6 +1,11 @@
 # Version history
 
-The current application version is **2.41.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.41.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.41.1 — Open Role menu editors next to their button
+
+- On the dashboard's Role menu, open each category's editors (Edit roles, Add roles, Edit category and Delete category's confirmation) right next to the button that opened them, rather than near the top of the screen: just below it, starting where the button starts, or above it when there isn't room below, moved sideways only as far as it takes to stay on the screen and clear of the sidebar. An editor taller than the room on either side fills the side with more room and scrolls inside. The page behind still dims and never moves, and focus, Escape and Close work as before. This needs a browser with CSS anchor positioning and a screen at least 40rem wide and 30rem tall; elsewhere editors open as before, as a sheet from the bottom on a phone and near the top of the screen otherwise. An editor that comes back with a problem to fix stays centred, since that page loads at its top. It's all done in the stylesheet, with no script.
+- This release adds no database migration and changes no setting.
 
 ## 2.41.0 — Show everyone whether TaruBot is up
 

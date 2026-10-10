@@ -15,11 +15,13 @@
  * The editors (Edit roles, Add roles, Edit category, and Delete category's confirmation) open on
  * top of the page, so nothing on it moves or changes its spacing when one opens (the owner's ask,
  * 2026-10-09): a modal dialog in the top layer (a popover where the browser has no invoker
- * commands), a glass panel near the top of the dimmed, lightly blurred page, which neither scrolls
- * nor takes clicks under it, or a sheet from the bottom edge on a phone. Its body scrolls under its
- * head, so Close stays in view, and its button row is its foot. A refused editor comes back drawn
- * the same way (.overlay--open), fixed over a backdrop of its own. The cards lay out the same
- * whether or not an editor is open.
+ * commands), a glass panel over the dimmed, lightly blurred page, which neither scrolls nor takes
+ * clicks under it. On a wide screen it opens beside the button that opened it, just under it or
+ * above it (the owner's ask, 2026-10-10; anchor positioning, below), or near the top of the screen
+ * where the browser can't anchor it; on a phone it is a sheet from the bottom edge. Its body
+ * scrolls under its head, so Close stays in view, and its button row is its foot. A refused editor
+ * comes back drawn the same way (.overlay--open), centred, fixed over a backdrop of its own. The
+ * cards lay out the same whether or not an editor is open.
  *
  * Forms inside a panel or the Add a category card are laid out by its own width (container
  * queries): fields go side by side where there is room, each hint and error under its control so
@@ -34,6 +36,36 @@
  * panel, a role that needs attention) gets its own forced-colors border, and every control keeps
  * base.ts's focus outline.
  */
+import { MENU_LIMITS } from "../../domain/self-roles.js";
+
+/**
+ * The editors a card's toolbar opens, as views/role-menu.ts names them after the category's key
+ * (EDITOR_IDS), and so in their anchor classes.
+ */
+const ANCHORED_EDITORS = ["edit-roles", "add-roles", "edit-category", "delete"] as const;
+
+/**
+ * One static rule pair per card place and editor, which ties a panel to its button with no style
+ * attribute or script (the CSP allows neither): `.anchor-c3-add-roles` names the fourth card's Add
+ * roles button `--c3-add-roles`, and `.anchored-c3-add-roles` points that button's panel at it.
+ * Anchor names are global to the page, so each takes the card's place as well as the editor;
+ * views/role-menu.ts gives the classes by both. A menu holds at most MENU_LIMITS.categories cards,
+ * so these cover every one.
+ */
+const ANCHOR_PAIRS = Array.from({ length: MENU_LIMITS.categories }, (_, at) =>
+  ANCHORED_EDITORS.map(
+    (editor) => `    .anchor-c${at}-${editor} {
+      anchor-name: --c${at}-${editor};
+    }
+
+    .anchored-c${at}-${editor} {
+      position-anchor: --c${at}-${editor};
+    }`,
+  ),
+)
+  .flat()
+  .join("\n\n");
+
 export const ROLE_MENU_CSS = `/* Role menu */
 
 /*
@@ -635,9 +667,10 @@ export const ROLE_MENU_CSS = `/* Role menu */
  * drawn open, fixed over its backdrop. As wide as its form needs, its top a fixed way down the
  * screen, so a panel whose content grows (Add roles' list of the roles it can't add) grows
  * downward only and its title stays where it was; at most the screen's height less that margin
- * twice. The body scrolls under the head, so Close and the title stay in view. Glass over the
- * dimmed page (it sits on no other glass). :is() keeps the rule working in a browser without
- * :popover-open, which would otherwise drop it whole.
+ * twice. That is where a panel opens when it isn't anchored to its button (below). The body
+ * scrolls under the head, so Close and the title stay in view. Glass over the dimmed page (it sits
+ * on no other glass). :is() keeps the rule working in a browser without :popover-open, which would
+ * otherwise drop it whole.
  */
 :is(.overlay--open, .overlay:popover-open, .overlay:modal) {
   position: fixed;
@@ -1028,6 +1061,90 @@ main.orr-enter:has(.overlay--open) {
     flex-wrap: wrap;
     align-items: baseline;
     column-gap: var(--space-2);
+  }
+}
+
+/*
+ * Beside its button (the owner's ask, 2026-10-10: bring the panel closer to the button that opened
+ * it), where the browser has anchor positioning and the screen has room: from 40rem wide and 30rem
+ * tall. A phone keeps its sheet and a short screen its near-full panel (above), and so does a
+ * browser without anchor positioning, which keeps the centred panel. A refused editor drawn open
+ * (.overlay--open) stays centred too: its page loads at the top, where the button may be off the
+ * screen, so views/role-menu.ts gives it no anchor class, and these rules name only open dialogs and
+ * popovers. They override the centred rules above at the same specificity, so they stay after them.
+ *
+ * Each editor's button is an anchor and its panel points at it (ANCHOR_PAIRS). The panel opens just
+ * under the button, a small gap between them, its start edge at the button's, as wide as before; it
+ * moves back toward the start only as far as it takes to stay on the screen, clear of the sidebar
+ * from 64rem. The area spans the screen's whole width and the start is clamped, rather than an
+ * area beside the button that flips to its other side: a panel wider than the room on either side
+ * (Edit roles at 48rem on a 768px screen) would then overflow every option, and the browser would
+ * fall back to the first one, off the bottom of the screen.
+ *
+ * When its content doesn't fit under the button it opens above it (flip-block). When it fits on
+ * neither side it fills the side with more room, its body scrolling: the capped options' floor,
+ * half the screen less 4rem, is what the larger side always holds (for a button up to 5rem tall)
+ * and the smaller one only when the two are about equal, so the first is skipped when below is the
+ * smaller; the content is taller than that floor by then, so it never adds an empty band. The page
+ * still never moves: the panel is in the top layer, and the anchor only reads where the button is.
+ * A modal panel never hides itself, even where the browser would judge its button clipped
+ * (position-visibility).
+ */
+@supports (anchor-name: --a) {
+  @position-try --overlay-below {
+    position-area: block-end span-all;
+    margin: var(--overlay-gap) 0 var(--overlay-edge);
+    min-height: calc(50dvh - 4rem);
+    max-height: calc(100% - var(--overlay-gap) - var(--overlay-edge));
+  }
+
+  @position-try --overlay-above {
+    position-area: block-start span-all;
+    margin: var(--overlay-edge) 0 var(--overlay-gap);
+    min-height: calc(50dvh - 4rem);
+    max-height: calc(100% - var(--overlay-gap) - var(--overlay-edge));
+  }
+
+  @media (min-width: 40rem) and (min-height: 30rem) {
+${ANCHOR_PAIRS}
+
+    .overlay--anchored:is(:popover-open, :modal) {
+      --overlay-gap: var(--space-2);
+      --overlay-edge: var(--space-4);
+      --overlay-start: var(--overlay-edge);
+      --overlay-fit: min(100% - var(--overlay-start) - var(--overlay-edge), var(--overlay-width));
+      position-area: block-end span-all;
+      position-try-fallbacks: flip-block, --overlay-below, --overlay-above;
+      position-visibility: always;
+      inset-block: 0;
+      inset-inline: clamp(
+          var(--overlay-start),
+          anchor(start, var(--overlay-start)),
+          100% - var(--overlay-edge) - var(--overlay-fit)
+        )
+        0;
+      justify-self: start;
+      width: var(--overlay-fit);
+      max-height: calc(100dvh - 2 * var(--overlay-edge));
+      margin: var(--overlay-gap) 0 var(--overlay-edge);
+    }
+
+    /*
+     * While one is open the page is locked, so the root's scroll padding (shell.ts's, which keeps
+     * focus clear of the sticky bars, and forms.ts's) has nothing to do. WebKit would still scroll
+     * the page under the panel to keep its focused title clear of it, by as much as the title sits
+     * inside it near the top of the screen, though scrolling can't move a fixed panel. Two classes
+     * outrank the shell's rule for an open account menu.
+     */
+    :root:has(.overlay.overlay--anchored:is(:popover-open, :modal)) {
+      scroll-padding: 0;
+    }
+  }
+
+  @media (min-width: 64rem) and (min-height: 30rem) {
+    .overlay--anchored:is(:popover-open, :modal) {
+      --overlay-start: calc(var(--sidebar-w) + var(--overlay-edge));
+    }
   }
 }
 

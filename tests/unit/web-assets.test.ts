@@ -483,6 +483,112 @@ describe("the stylesheet", () => {
     );
   });
 
+  test("an editor's panel opens beside its button by anchor positioning, inside one @supports block, on a wide screen only", () => {
+    // Every anchoring declaration is in one @supports (anchor-name: --a) block, so a browser
+    // without anchor positioning keeps the centred panel; nothing outside it anchors anything.
+    const supports = "@supports (anchor-name: --a) {";
+    const start = css.indexOf(supports);
+    expect(start).toBeGreaterThan(0);
+    expect(css.indexOf(supports, start + 1)).toBe(-1);
+    const end = css.indexOf("\n}\n", start);
+    // The block's body, after its condition (which itself names anchor-name).
+    const block = css.slice(start + supports.length, end);
+    const outside = `${css.slice(0, start)}${css.slice(end)}`;
+    for (const property of [
+      "anchor-name:",
+      "position-anchor:",
+      "position-area:",
+      "position-try",
+      "position-visibility:",
+      "anchor(",
+      "overlay--anchored",
+    ])
+      expect({ property, outside: outside.includes(property) }).toEqual({
+        property,
+        outside: false,
+      });
+    // Exactly the 40 static pairs (10 card places, 4 editors), each button named after its place
+    // and editor, and its panel pointing at that name, so no style attribute or script is needed.
+    const editors = ["edit-roles", "add-roles", "edit-category", "delete"];
+    const pairs = Array.from({ length: 10 }, (_, at) =>
+      editors.map((editor) => `c${at}-${editor}`),
+    ).flat();
+    expect(pairs).toHaveLength(40);
+    const named = [
+      ...block.matchAll(/\.anchor-(c\d+-[a-z-]+) \{\s*anchor-name: --([\w-]+);\s*\}/gu),
+    ];
+    const pointed = [
+      ...block.matchAll(/\.anchored-(c\d+-[a-z-]+) \{\s*position-anchor: --([\w-]+);\s*\}/gu),
+    ];
+    expect(named.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
+    expect(pointed.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
+    expect(block.match(/anchor-name:/gu)).toHaveLength(40);
+    expect(block.match(/position-anchor:/gu)).toHaveLength(40);
+    // From 40rem wide and 30rem tall only: a phone keeps its sheet (the overlay test above pins
+    // it), a short screen its near-full panel; nothing here names the phone's or short screen's
+    // queries.
+    const queries = [...block.matchAll(/@media ([^{]+) \{/gu)].map((match) => match[1]);
+    expect(queries).toEqual([
+      "(min-width: 40rem) and (min-height: 30rem)",
+      "(min-width: 64rem) and (min-height: 30rem)",
+    ]);
+    const wide = block.slice(block.indexOf("@media (min-width: 40rem) and (min-height: 30rem) {"));
+    expect(wide.indexOf(".anchor-c0-edit-roles {")).toBeGreaterThan(0);
+    expect(wide.indexOf(".anchored-c9-delete {")).toBeGreaterThan(0);
+    // An open dialog or popover marked as anchored opens just under its button (a small gap), its
+    // start at the button's, clamped onto the screen, then above it, then filling the side with
+    // more room. A refused editor drawn open (.overlay--open) is never named here: it stays centred.
+    const placed = ".overlay--anchored:is(:popover-open, :modal)";
+    const rule = ruleFor(placed);
+    for (const declaration of [
+      "--overlay-gap: var(--space-2);",
+      "position-area: block-end span-all;",
+      "position-try-fallbacks: flip-block, --overlay-below, --overlay-above;",
+      "position-visibility: always;",
+      "anchor(start, var(--overlay-start))",
+      "justify-self: start;",
+      "width: var(--overlay-fit);",
+      "margin: var(--overlay-gap) 0 var(--overlay-edge);",
+    ])
+      expect({ declaration, found: rule.includes(declaration) }).toEqual({
+        declaration,
+        found: true,
+      });
+    // While one is open, the root's scroll padding is dropped: WebKit would otherwise scroll the
+    // locked page to keep the panel's focused title clear of the sticky bars' padding.
+    const unpadded = ":root:has(.overlay.overlay--anchored:is(:popover-open, :modal))";
+    expect(ruleFor(unpadded)).toContain("scroll-padding: 0;");
+    expect(
+      rules(block)
+        .flatMap((entry) => entry.selectors)
+        .filter(Boolean),
+    ).toEqual([
+      ...pairs.flatMap((pair) => [`.anchor-${pair}`, `.anchored-${pair}`]),
+      placed,
+      unpadded,
+      placed,
+    ]);
+    expect(block).not.toContain("overlay--open");
+    // The capped options fill one side, the body scrolling; their floor skips the smaller side.
+    for (const [name, area] of [
+      ["--overlay-below", "block-end span-all"],
+      ["--overlay-above", "block-start span-all"],
+    ] as const) {
+      const at = block.indexOf(`@position-try ${name} {`);
+      const option = block.slice(at, block.indexOf("}", at));
+      for (const declaration of [
+        `position-area: ${area};`,
+        "min-height: calc(50dvh - 4rem);",
+        "max-height: calc(100% - var(--overlay-gap) - var(--overlay-edge));",
+      ])
+        expect({ name, declaration, found: option.includes(declaration) }).toEqual({
+          name,
+          declaration,
+          found: true,
+        });
+    }
+  });
+
   test("the status page's bands differ in height as well as color, and forced colors keep them apart", () => {
     // The bars stand on one line, so their heights compare like a chart's.
     expect(ruleFor(".uptime-bars")).toContain("align-items: end;");
