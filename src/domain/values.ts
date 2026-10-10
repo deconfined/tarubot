@@ -37,6 +37,27 @@ export class Failure extends Error {
   }
 }
 
+/**
+ * Seconds a client is asked to wait after a shutdown refusal: long enough for the restart to bring
+ * the web back, short enough that a retry soon after lands.
+ */
+export const STOPPING_RETRY_AFTER = 30;
+
+/**
+ * The refusal of a write once shutdown has begun (a 429 with Retry-After on the web). The web
+ * answers it before a POST costs anything (src/web/limits.ts re-exports it), and an application
+ * operation that commits a page's write throws the same failure from its pre-commit check, so a
+ * write that started just before shutdown rolls back and its form gets the same answer. The error
+ * page says how long to wait, from Retry-After, so the message doesn't.
+ */
+export function stoppingRefusal(): Failure {
+  return new Failure(
+    "stopping",
+    "TaruBot is restarting, so nothing was saved.",
+    STOPPING_RETRY_AFTER,
+  );
+}
+
 /** The input failure's option detail, which lets the reply show that option's example. */
 const option = (name: string): FailureDetail => ({ kind: "option", option: name });
 

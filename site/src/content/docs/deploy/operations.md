@@ -92,7 +92,7 @@ To go back, pin the previous `TARUBOT_IMAGE_TAG`, restore the matching main mani
 
 If the previous release predates the shared web setup, use its original manifest and disable/remove Caddy explicitly as above; that older bot has no dashboard. Retain certificate volumes for a later re-enable instead of grafting new proxy files onto the older source.
 
-That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
+That only works when no migration lies between the two releases: an older release refuses to start on a newer schema. After a migration, the way back is a fix release, or restoring the backup you took before migrating: 2.39.0's `012_self_roles.sql`, for example, stops 2.38.1 from starting. The status-post migration, `010_status_notices.sql`, also has a [manual reversal](/tarubot/deploy/monitoring/#status-notices).
 
 ## Single database writer
 
@@ -221,7 +221,7 @@ To recover from a broken or lost database:
    docker compose exec -T postgres rm /tmp/restore.dump
    ```
 
-   Decisions acknowledged after that backup, such as new links, ledger entries and guest decisions, must be recorded again: a restore can't know about them.
+   Decisions acknowledged after that backup, such as new links, ledger entries, guest decisions and role menu changes, must be recorded again: a restore can't know about them.
 4. If the backup is from an older release, run `migrate.js` as in an update.
 5. If the backup predates an [update post](/tarubot/deploy/monitoring/#update-posts) that went out, raise that server's `changelog_version` to the version it announced, or the post goes out again when the bot starts:
 
@@ -230,7 +230,14 @@ To recover from a broken or lost database:
      -c "SELECT id, changelog_channel_id, changelog_version FROM guilds WHERE changelog_channel_id IS NOT NULL"
    ```
 
-6. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
+6. Sign everyone out of the dashboard, so the backup can't revive a session that was signed out after it was taken:
+
+   ```sh
+   docker compose exec -T postgres psql -U tarubot -d tarubot -c "DELETE FROM web_sessions"
+   ```
+
+   Everyone has to sign in again; nothing else is lost.
+7. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
 
 Discord work the restored database still owes resumes from its durable jobs. A restore never undoes Discord changes the bot already made; the next reconciliation brings Discord in line with the restored decisions.
 

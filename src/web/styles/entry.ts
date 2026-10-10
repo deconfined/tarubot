@@ -117,7 +117,11 @@ export const ENTRY_CSS = `/* Entry pages: after the Orrery website kit */
   color: var(--text-secondary);
 }
 
+/* Its links: back to the page a refused form came from, when there is one, then home. */
 .entry-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
   margin-top: var(--space-2);
 }
 

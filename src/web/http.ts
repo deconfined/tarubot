@@ -5,7 +5,7 @@
  * by throwing Hono's HTTPException with a bare status; server.ts's error handler renders every
  * refusal through the same error page, so no response leaves without the headers.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
@@ -28,6 +28,28 @@ export interface WebVariables {
   ref: string;
   /** The signed-in session, or null when the request carries no valid session cookie. */
   session: Session | null;
+  /**
+   * The session's form token (sessions.ts's formToken), set with `session` and null exactly when it
+   * is: the value every POST form a signed-in page renders carries in FORM_TOKEN_FIELD.
+   */
+  formToken: string | null;
+  /** How an error page answering this request differs from its status's own (ErrorFrame). */
+  errorFrame: ErrorFrame | null;
+}
+
+/**
+ * What a route knows about a refusal that the status alone doesn't say: set just before the
+ * refusal is thrown, and read by the error handler for the error page (layout.ts's errorPage).
+ */
+export interface ErrorFrame {
+  /** A heading in place of the status's own, where that would misname the refusal. */
+  readonly heading?: string;
+  /**
+   * The page a refused form came from: its own path (server-chosen, never from the request) and
+   * title. The error page offers it before the start page, since reloading the answer to a POST
+   * would only send the same form again.
+   */
+  readonly back?: { readonly href: string; readonly label: string };
 }
 
 /** The Hono environment of the web app. */
@@ -179,6 +201,30 @@ export function sameOrigin(origin: string): MiddlewareHandler<WebEnv> {
     if (!isSameOrigin(c.req.method, c.req.raw.headers, origin)) throw new HTTPException(403);
     await next();
   };
+}
+
+/**
+ * The hidden field that carries the session's form token in every POST form (owner decision
+ * 2026-10-09; see docs/MODULES.md and THREAT_MODEL): the page forms (views/forms.ts's postForm)
+ * and the account menu's two sign-out forms (layout.ts). server.ts compares it before anything a
+ * POST costs, and removes it from the form a page's post() receives, so page schemas never see it.
+ */
+export const FORM_TOKEN_FIELD = "form_token";
+
+/** A fixed-length digest, so the comparison below takes the same time whatever was submitted. */
+const tokenDigest = (value: string): Buffer => createHash("sha256").update(value).digest();
+
+/**
+ * Whether a submitted form token is the session's, compared in constant time: both sides are
+ * hashed to 32 bytes first, so neither the length nor the first differing character of a guess
+ * changes the time taken. A missing field or a file never matches; with a repeated field only the
+ * first copy (FormData.get) is compared. Defense in depth behind E1: the same-origin check already refuses a
+ * cross-site form, so this matters only if that check is ever bypassed (a browser or proxy that
+ * sends wrong Fetch Metadata or Origin); a forged form still can't know the token.
+ */
+export function formTokenMatches(expected: string, submitted: unknown): boolean {
+  if (typeof submitted !== "string") return false;
+  return timingSafeEqual(tokenDigest(expected), tokenDigest(submitted));
 }
 
 /** The only body the web accepts: what an HTML form without file inputs sends. */

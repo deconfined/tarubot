@@ -64,13 +64,16 @@ import {
   secureGuildChannels,
 } from "../jobs/queue.js";
 import { managedRoleOrder } from "../domain/role-layout.js";
+import { ROLE_CHOICE_KIND } from "../domain/self-roles.js";
 import {
   analyseVisibility,
+  type VisibilityGuild,
   type VisibilityReport,
   visibilitySettings,
 } from "../domain/visibility.js";
 import { NEW_GUILD_ROW } from "./guild-defaults.js";
 import type { DiscordPort, GuildRecord } from "./records.js";
+import { assertNotOnMenu, selfRolesHealth } from "./self-roles.js";
 import { dropWaiting } from "./status-notices.js";
 import { loadVisibilityRecords } from "./visibility-records.js";
 import type {
@@ -433,7 +436,19 @@ export class Service {
           result: t.jobs.result,
         })
         .from(t.jobs)
-        .where(and(eq(t.jobs.guild_id, actor.guildId), eq(t.jobs.user_id, owner)))
+        .where(
+          and(
+            eq(t.jobs.guild_id, actor.guildId),
+            eq(t.jobs.user_id, owner),
+            // Never a member's role choices (roles.self), for anyone, here (owner decision Q4 A):
+            // officers may open any member's record, delegated officers included, and these rows
+            // would give them a timeline of when that member changed their roles, in the card and
+            // in its Full details. The member sees their own on My roles and in /sync status, and
+            // their own record reads only reconcile.user. Filtered in SQL, so frequent saves can't
+            // push the rows this record does read out of its 10-row window either.
+            not(eq(t.jobs.kind, ROLE_CHOICE_KIND)),
+          ),
+        )
         .orderBy(desc(t.jobs.created_at))
         .limit(10),
       verifiedGuestEligible: registrationEligible(facts),
@@ -578,7 +593,15 @@ export class Service {
         ...row,
         completed_at: row.status === "completed" ? finished : null,
       })),
-      work,
+      // A member's role choices (roles.self) never name the member to anyone else (owner decision
+      // Q4 A): officers see "a member" (ROLE_CHOICE_KIND). Delegated officers may lack Discord's
+      // View Audit Log, and these rows would otherwise give them a timeline of who changed their
+      // roles. 2.39.0 queues none, but meets them after a rollback from 2.40.0.
+      work: work.map((job) =>
+        job.kind === ROLE_CHOICE_KIND && job.user_id !== actor.userId
+          ? { ...job, user_id: null }
+          : job,
+      ),
       effectsMode: this.effectsMode(guild),
     };
   }
@@ -622,8 +645,9 @@ export class Service {
     // so /config show, /config validate and the Re-check button keep working; without one it
     // propagates, so nothing is ever swallowed silently.
     let visibility: VisibilityReport | null = null;
+    let snapshot: VisibilityGuild | null = null;
     try {
-      const snapshot = (await this.discord.visibility?.(guild.id, true)) ?? null;
+      snapshot = (await this.discord.visibility?.(guild.id, true)) ?? null;
       visibility = snapshot
         ? analyseVisibility(
             snapshot,
@@ -634,10 +658,15 @@ export class Service {
       if (!report) throw error;
       report(error);
       visibility = null;
+      snapshot = null;
     }
+    // The "Role menu" check (2.39.0): the menu members see, judged on the same fresh view, which
+    // is why this costs no extra Discord request. Without a view its problems read as unknown.
+    const selfRoles = await selfRolesHealth(this.db.orm, guild, snapshot);
     return {
       ...(changelogAudience ? { changelogAudience } : {}),
       visibility,
+      selfRoles,
       configuration: guild,
       effectsGloballyEnabled: this.config.ENABLE_EFFECTS,
       effectsMode: this.effectsMode(guild),
@@ -912,6 +941,10 @@ export class Service {
         ] as const;
         if (value && other.some((key) => key !== field && saved[key] === value))
           throw new Failure("input", DISTINCT_ROLES, 0, { kind: "option", option: "role" });
+        // A self-service menu role is never an access role (2.39.0): reconciliation would add or
+        // strip it from everyone who picked it. Checked under this row lock, which a menu edit's
+        // FOR SHARE waits for, so neither change can slip in between.
+        if (value) await assertNotOnMenu(client, actor.guildId, [value]);
         if (old && old !== value)
           await db
             .insert(t.retiredRoles)

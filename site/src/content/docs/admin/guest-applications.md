@@ -2,7 +2,7 @@
 title: Guest applications
 description: Open and close guest applications, choose the review channel, decide applications, and grant or revoke Guest directly.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Guest applications let a visitor ask for the Guest role without linking a character. They answer two short questions with `/apply`; officers read the answers in a staff channel and approve or deny.

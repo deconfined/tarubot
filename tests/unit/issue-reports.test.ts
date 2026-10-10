@@ -3,7 +3,12 @@
  * trouble, stacks keep first-party frames, and bodies stay within GitHub's limits and Markdown.
  */
 import { describe, expect, test } from "bun:test";
-import { IssueReports } from "../../src/application/issue-reports.js";
+import { DrizzleQueryError } from "drizzle-orm/errors";
+import {
+  IssueReports,
+  stackWithoutParams,
+  withoutParams,
+} from "../../src/application/issue-reports.js";
 import { RecentLogs } from "../../src/application/recent-logs.js";
 import { configuration } from "../../src/config/env.js";
 import {
@@ -180,4 +185,106 @@ test("the recent-log buffer keeps useful records through a long quiet stretch (2
   for (let index = 0; index < 240; index++)
     logs.write(`{"level":30,"time":${1790305700000 + index * 30000},"msg":"Capability status"}`);
   expect(logs.recent()).toEqual(['{"level":40,"time":1790305690000,"msg":"Retrying"}']);
+});
+
+test("a failed query's bound values never reach a report, only its SQL (2.39.0)", () => {
+  // A self-service role choice's payload: role IDs that can reveal pronouns or gender identity.
+  const params = [
+    '{"chosen":["523456789012345601"],"offered":["523456789012345601"]}',
+    "roles.self",
+  ];
+  const error = new DrizzleQueryError(
+    'insert into "jobs" ("payload", "kind") values ($1, $2)',
+    params,
+    new Error("connection terminated"),
+  );
+  const message = withoutParams(error.message);
+  expect(message).toBe(
+    'Failed query: insert into "jobs" ("payload", "kind") values ($1, $2)\nparams: (left out of reports)',
+  );
+  expect(message).not.toContain("523456789012345601");
+  // The stack repeats the message before its frames: the frames stay, the values go.
+  const stack = stackWithoutParams(error.stack ?? "", error.message);
+  expect(stack).not.toContain("523456789012345601");
+  expect(stack).toContain("params: (left out of reports)");
+  expect(stack.split("\n").some((line) => /^\s+at\s/u.test(line))).toBeTrue();
+  // A value that spans lines is removed whole.
+  expect(withoutParams("Failed query: select $1\nparams: a\nb")).toBe(
+    "Failed query: select $1\nparams: (left out of reports)",
+  );
+  // A stack that no longer holds its message keeps only the lines indented like frames.
+  expect(
+    stackWithoutParams(
+      "Failed query: select $1\nparams: a\nb\n    at run (src/x.ts:1:1)",
+      "changed since",
+    ),
+  ).toBe("Failed query: select $1\nparams: (left out of reports)\n    at run (src/x.ts:1:1)");
+  // Text without parameters is unchanged.
+  expect(withoutParams("TypeError: boom")).toBe("TypeError: boom");
+  expect(stackWithoutParams("TypeError: boom\n    at run (src/x.ts:1:1)", "TypeError: boom")).toBe(
+    "TypeError: boom\n    at run (src/x.ts:1:1)",
+  );
+});
+
+test("a bound value that looks like a stack frame reaches neither the message nor the stack (2.39.0)", () => {
+  // Typed text, as /suggest, /issue and guest answers bind it: a line shaped like a real frame.
+  const error = new DrizzleQueryError(
+    'insert into "suggestions" ("text") values ($1)',
+    ["x\n    at y (/src/z.ts:1:1)\nsecret"],
+    new Error("connection terminated"),
+  );
+  const message = withoutParams(error.message);
+  expect(message).toBe(
+    'Failed query: insert into "suggestions" ("text") values ($1)\nparams: (left out of reports)',
+  );
+  const stack = stackWithoutParams(error.stack ?? "", error.message);
+  for (const text of [message, stack, ...firstPartyFrames(stack)]) {
+    expect(text).not.toContain("secret");
+    expect(text).not.toContain("z.ts");
+  }
+  // The real frames are still there.
+  expect(stack).toMatch(/^\s{4}at .*issue-reports\.test\.ts/mu);
+  // A "$&" in a value is text, never a replacement pattern.
+  const dollar = new DrizzleQueryError("select $1", ["$&$`$'"], new Error("x"));
+  expect(stackWithoutParams(dollar.stack ?? "", dollar.message)).not.toContain("$&");
+});
+
+test("an automatic report of a member's failed role choices never names the member (2.39.0)", async () => {
+  const reports = new IssueReports(
+    configuration({
+      DATABASE_URL: "postgresql://tarubot:invented-password@db.example:5432/tarubot",
+      DISCORD_TOKEN: "invented-discord-token-value",
+      DISCORD_APPLICATION_ID: "1400000000000000001",
+    }),
+    // jobFailed reaches the database only through render and saveAndQueue, both replaced below.
+    null as unknown as Database,
+    null as unknown as Lodestone,
+    new RecentLogs(),
+    null,
+  );
+  /** What each report would be built from: render adds a member section only with a user. */
+  const scopes: { guildId: string | null | undefined; userId: string | null | undefined }[] = [];
+  Object.assign(reports, {
+    render: async (input: { guildId?: string | null; userId?: string | null }) => {
+      scopes.push({ guildId: input.guildId, userId: input.userId });
+      return "body";
+    },
+    saveAndQueue: async () => {},
+  });
+  const job = (kind: string) => ({
+    id: "00000000-0000-0000-0000-000000000000",
+    kind,
+    attempts: 8,
+    guild_id: "1000000000000000001",
+    user_id: "2000000000000000001",
+  });
+  const outcome = { code: "blocked", diagnostic: "blocked: invented", source: "Failure" };
+  await reports.jobFailed(job("roles.self"), outcome);
+  await reports.jobFailed(job("reconcile.user"), outcome);
+  expect(scopes).toEqual([
+    // The server stays, so the failure can still be looked into; who changed their roles doesn't.
+    { guildId: "1000000000000000001", userId: null },
+    // Every other kind keeps its member.
+    { guildId: "1000000000000000001", userId: "2000000000000000001" },
+  ]);
 });

@@ -26,6 +26,7 @@ import {
   plan,
   postingWrite,
   productionPlan,
+  roleId,
   SETUP_CASES,
   SETUP_PLANS,
 } from "../fixtures/replies/setup.js";
@@ -360,6 +361,18 @@ describe("/setup onboarding's dry run", () => {
       ),
     );
     expect(embed.fields?.[0]?.value).toBe(`• ${message}`);
+  });
+
+  test("a role on the self-service role menu is a blocker naming the role and the fix (2.39.0)", () => {
+    const presented = setupPlanReply(SETUP_PLANS.onMenu, VIEWERS.manager, { now: NOW });
+    const embed = expectHouseStyle(presented, {
+      tone: "warning",
+      title: "Server setup · dry run · 1 blocker",
+    });
+    expect(embed.fields?.[0]).toMatchObject({
+      name: "Blockers",
+      value: `• <@&${roleId(11)}> is on the self-service role menu, so /setup onboarding can't use it as the Member role. Remove it on the Role menu page first, rename it in Discord, or choose the access role with /config roles first.`,
+    });
   });
 
   test("a clean plan says what confirm:true would create, reuse and change", () => {

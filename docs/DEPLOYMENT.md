@@ -152,8 +152,9 @@ Owner restore checklist:
 2. Choose an isolated new target or the managed production restore database permitted by the tool profile. Revoke PUBLIC CONNECT/TEMPORARY as appropriate, preserve provider monitoring access and prevent unrelated clients from connecting.
 3. Fetch/decrypt privately. Restore with verified TLS and `pg_restore --no-owner --no-privileges --exit-on-error`. Keep plaintext scratch artifacts restricted and remove them after acceptance.
 4. Use the matching release's `check-restore.js`. Source/copy schema must match; before migration use the deployed image or explicitly select the old schema head. Exact row comparison needs a stopped-writer dump and no later source writes.
-5. Rehearse pending migration only in the isolated permitted target. Verify recovered data/schema, credentials/access and the matching image before starting one bot.
-6. Account for Discord effects already sent: restore cannot undo them; update-post baselines may need owner reconciliation to avoid repeat announcements. Verify readiness, command inventory and data; retain the source until acceptance.
+5. Once `check-restore.js` has passed, and before any bot starts on the restored database, sign everyone out of the dashboard with `DELETE FROM web_sessions`: the backup would otherwise revive sessions ended since it was taken ([persistence](PERSISTENCE.md#web-sessions)). Deleting earlier would fail the exact row comparison; a backup older than migration 011 has no such table yet.
+6. Rehearse pending migration only in the isolated permitted target. Verify recovered data/schema, credentials/access and the matching image before starting one bot.
+7. Account for Discord effects already sent: restore cannot undo them; update-post baselines may need owner reconciliation to avoid repeat announcements. Verify readiness, command inventory and data; retain the source until acceptance.
 
 Managed PITR, where configured and proven, is another recovery source, not a substitute for independent encrypted dumps. A timestamp alone does not prove usable PITR. A provider restore/new cluster needs fresh address, CA and access checks.
 

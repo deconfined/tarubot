@@ -22,20 +22,20 @@ Numbered SQL files in `migrations/` are the schema authority. `src/infrastructur
 
 Returned JSON is already decoded: do not parse a scalar string again. A JavaScript `null` parameter means SQL NULL; use ``sql`'null'::jsonb` `` for intentional JSON null in a required payload. Audit/queue helpers handle that distinction.
 
-Expose only catalog `Failure` diagnostics, never driver messages or bound parameters. Constraint tests inspect Drizzle's driver `cause`, including SQLSTATE.
+Expose only catalog `Failure` diagnostics, never driver messages or bound parameters. A failed Drizzle query's message and stack end with a `params:` line holding the bound values, which can be anything a person submitted; issue reports replace it with a marker (`withoutParams` in `src/application/issue-reports.ts`). Constraint tests inspect Drizzle's driver `cause`, including SQLSTATE.
 
 ## Durable-work invariants
 
 - The writer lease holds one dedicated PostgreSQL session for the bot's lifetime. Pending migrations take the same gate; stop the bot before migrating. See [single-writer operations](../site/src/content/docs/deploy/operations.md#single-database-writer).
 - Queue claims use a typed CTE, `FOR UPDATE OF jobs SKIP LOCKED` and one `UPDATE … RETURNING`. Preserve lease tokens, expiry, generation and configuration guards.
 - Active-job upserts use the literal partial-index predicate so prepared plans can infer it. `scheduleJob` never changes an active job's generation/due time; `enqueue` may pull work forward.
-- Do not prune job history. Officer notices rely on `officer.notify` rows matched by `dedupe_key`, status, timestamps and message ID, not payload text. Any future retention design must preserve pending rows and those finished within 24 hours or newer than the FC's last accepted roster.
+- Do not prune job history, apart from finished `roles.self` rows after 30 days ([self-service role menus](#self-service-role-menus)). Officer notices rely on `officer.notify` rows matched by `dedupe_key`, status, timestamps and message ID, not payload text. Any future retention design must preserve pending rows and those finished within 24 hours or newer than the FC's last accepted roster.
 - New guild inserts use `NEW_GUILD_ROW`: role layout off even though the existing SQL column default is on. The importer keeps its explicit off value.
 - Guest resets end grants rather than delete history. First-activation grandfathering counts ended grants as existing grants, so it cannot undo an earlier reset.
 
 ### Lock order and officer status
 
-Lock the guild row, then `guild_users` in `(guild_id, user_id)` order (`COLLATE "C"`), then jobs. Member rows use `FOR NO KEY UPDATE`, so foreign-key checks can proceed. Reconciliation/status freeze/mark/drop and `sync.guild` take the guild `FOR SHARE`; configuration, onboarding and activation take it `FOR UPDATE`. Roster departure recording takes these locks before character rows, preserving the unlink order.
+Lock the guild row, then `guild_users` in `(guild_id, user_id)` order (`COLLATE "C"`), then jobs. Member rows use `FOR NO KEY UPDATE`, so foreign-key checks can proceed. Reconciliation/status freeze/mark/drop, `sync.guild` and role menu edits take the guild `FOR SHARE`; configuration, onboarding and activation take it `FOR UPDATE`. A role menu edit then takes its `self_role_menus` row `FOR UPDATE`. Roster departure recording takes these locks before character rows, preserving the unlink order.
 
 Invalid officer status becomes a silent baseline; retry batches remain durable. Unsetting the officer channel drops pending/frozen state under the same locks, including departed members. A later channel must not resurrect old changes.
 
@@ -43,11 +43,21 @@ Update posts similarly persist `guilds.changelog_version`: a channel's first con
 
 Visibility overrides retain before/after masks, deliberately hidden channels, propagated writes and uncertain/incomplete outcomes in audit. They share onboarding's setup lock, leave the configuration revision unchanged and requeue held work transactionally. Alert transitions lock per guild and retain audit history; new episodes withdraw unstarted recovery notices.
 
+### Self-service role menus
+
+`self_role_menus` (migration 012) holds each server's self-service role menu as one JSON document, written only by `src/application/self-roles.ts`. The document carries its own version, `v`, and `src/domain/self-roles.ts` validates it strictly on every read and before every write: the caps, one place on the menu per role, and stored text trimmed, in NFC and free of control and bidi characters. Those are zod rules, not SQL constraints; the table's CHECK only requires an object with a `categories` array. A document this build can't parse, such as one a newer release wrote before a rollback, is never overwritten by an edit: only an audited reset replaces it, and nothing on it counts as offered or listed. A server without a row has the empty menu at revision 1, and its first edit inserts the row.
+
+`revision` is the officers' optimistic lock and has nothing to do with `guilds.revision`, the reconciliation fence, which menu edits never bump. An edit runs in one transaction: the guild row `FOR SHARE`; the menu row, inserted if missing, `FOR UPDATE`; then parse, apply the operation (its field refusals and `gone`), the equal-state rule, the reset and revision checks, the invariant checks, the schema check, the update with `revision + 1`, its audit row (`action = 'self_roles'`, the operation as `target`, identifiers only in `details`) and a last shutdown check that rolls everything back. So a stale form with a refused field gets its 422 before the revision check's 409. Menu edits queue no work and don't requeue parked or blocked jobs: changing the menu changes nobody's roles.
+
+A menu role is never one of the four bound access roles or a retired role. `configure()` and `/setup onboarding` check that under their guild row `FOR UPDATE`, which a menu edit's `FOR SHARE` waits for, so the two can't interleave; a menu that doesn't parse is scanned for role IDs instead, failing closed.
+
+Members' picks are never stored; Discord holds them. While a member's change waits, its `roles.self` job holds the role IDs involved, and migration 012's trigger `self_role_choice_forgotten` clears the payload to `{}` whenever such a job is inserted or updated as `succeeded` or `failed`, whatever path ends it, an operator's SQL included. The partial indexes `self_role_jobs` and `self_role_waiting` serve a member's newest choice and the waiting rows. Nothing queues a `roles.self` job yet. After a rollback from 2.40.0, the dispatcher completes any it claims as `{"skipped":"needs a newer TaruBot"}` without a Discord call, and every `Synchronization.schedule()` pass closes the rest the same way: each row `queued`, `blocked` or `disabled`, or `running` with a lapsed or missing lease, in any server, so none keeps its role IDs while 2.39.0 runs. A running row with a live lease is left to its worker. The trigger clears each. The pass also deletes `roles.self` rows that finished (`succeeded` or `failed`) more than 30 days ago, closed ones included (owner decision Q4 A): the one kind of job history that is pruned. No delivery attempt or sync-run link ever references such a row, and the deletion never touches a waiting one.
+
 ### Web sessions
 
 `web_sessions` (migration 011, #43) is the server side of a signed-in browser, written only by `src/web/sessions.ts`. A row holds the SHA-256 of the cookie token, the Discord user ID and timestamps: never the token, an IP address, a user agent or a Discord token. Sessions end after seven idle days or thirty days in all, judged on the database clock; `get` reads and touches `last_seen_at` (at most every ten minutes) in one statement, and the web's hourly sweep deletes expired rows. The table has no foreign key and isn't member state.
 
-After any restore, once `check-restore.js` has verified the copy and before the bot starts on it, delete every row (`DELETE FROM web_sessions`): a backup would otherwise revive sessions signed out since it was taken. That signs everyone out, which is always safe. Deleting before the check would fail its exact row comparison. The restore checklist in [deployment](DEPLOYMENT.md) needs this step, after its restore check.
+After any restore, once `check-restore.js` has verified the copy and before the bot starts on it, delete every row (`DELETE FROM web_sessions`): a backup would otherwise revive sessions signed out since it was taken. That signs everyone out, which is always safe. Deleting before the check would fail its exact row comparison. The restore checklist in [deployment](DEPLOYMENT.md#backups-and-restore) and the site's recovery steps carry this step.
 
 ## Change the schema
 

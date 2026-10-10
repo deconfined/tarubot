@@ -13,9 +13,14 @@ import { parseHTML } from "linkedom";
 import { ASSETS, FONT_FACES, FONTS, NOTICES, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
 import { ICON_NAMES, icon } from "../../src/web/icons.js";
-import { errorPage, layout } from "../../src/web/layout.js";
+import { errorPage, type LayoutModel, layout } from "../../src/web/layout.js";
 import { TOKENS_CSS } from "../../src/web/styles/tokens.js";
+import { notice } from "../../src/web/views/forms.js";
 import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
+import { KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
+
+/** An invented form token for the signed-in shells. */
+const TOKEN = Buffer.from("form-token-for-tests-00000000000").toString("base64url");
 
 /** The markup a template produced. */
 const render = async (value: SafeHtml): Promise<string> => String(await value);
@@ -128,11 +133,12 @@ describe("icons", () => {
 });
 
 describe("the shell", () => {
-  const models = [
+  const models: LayoutModel[] = [
     { title: "TaruBot", signedIn: false },
     {
       title: "Background work",
       signedIn: true,
+      formToken: TOKEN,
       guild: { id: "100000000000000001", name: "Example FC", nav: [] },
     },
   ];
@@ -271,6 +277,50 @@ describe("the stylesheet", () => {
     );
   });
 
+  test("form fields have a real border frame and native checks, so forced colors keep both", () => {
+    // The frame is a border, never only the export's inset box-shadow, which forced colors drop.
+    const input = ruleFor(".orr-input");
+    expect(input).toContain("border: 1px solid var(--border-control);");
+    // That frame is the only sign of where to type, so it is opaque (WCAG 1.4.11's 3:1), and
+    // hover lightens it rather than fading it to a translucent border.
+    expect(css).toContain("--border-control: oklch(0.6 0.04 280);");
+    expect(css).toContain("--border-control-hover: oklch(0.72 0.05 280);");
+    expect(ruleFor(".orr-input:hover:not(:disabled)")).toContain(
+      "border-color: var(--border-control-hover);",
+    );
+    expect(input).not.toMatch(/box-shadow:[^;]*inset 0 0 0 1px/u);
+    // The control keeps base.ts's focus outline: nothing turns it off (the stylesheet test above
+    // pins "outline: none" absent), and the glow only adds to it.
+    expect(ruleFor(".orr-input:focus-visible")).not.toContain("outline");
+    // Checkboxes and radios are the real inputs, tinted, never hidden under a drawn box.
+    expect(ruleFor(".orr-check__input")).toContain("accent-color: var(--accent);");
+    expect(css).not.toContain(".orr-check__box");
+    expect(css).not.toMatch(/\.orr-check[^{]*\{[^}]*opacity: 0;/u);
+    expect(css).not.toMatch(/appearance: none/u);
+    // An invalid field shows it in the border too, not by color of the text alone.
+    expect(css).toContain('.orr-input[aria-invalid="true"]');
+    // Phones zoom into fields under 16px, so the controls' text is 1rem.
+    expect(input).toContain("font-size: 1rem;");
+    // The fieldset's own frame is reset for choice groups.
+    expect(ruleFor(".choice-group")).toContain("border: 0;");
+    expect(declaring("(forced-colors: active)", "border: 1px solid CanvasText;")).toEqual(
+      expect.arrayContaining([".orr-input", ".error-summary"]),
+    );
+    expect(declaring("print", "border: 1px solid #888;")).toEqual(
+      expect.arrayContaining([".orr-input", ".error-summary"]),
+    );
+    // On phones tall enough to spare the room, the buttons stick in reach, clear of the home
+    // indicator, and focus scrolls clear of them (WCAG 2.4.11); on paper they don't stick.
+    const phone = "(max-width: 63.99rem) and (min-height: 30rem)";
+    expect(declaring(phone, "position: sticky;")).toContain(".form-actions");
+    expect(declaring(phone, "env(safe-area-inset-bottom)")).toEqual(
+      expect.arrayContaining([".form-actions", "html:has(.form-actions)"]),
+    );
+    expect(declaring(phone, "scroll-padding-bottom:")).toContain("html:has(.form-actions)");
+    expect(css).not.toMatch(/@media \(max-width: 63\.99rem\) \{[^@]*\.form-actions \{[^}]*sticky/u);
+    expect(declaring("print", "position: static;")).toContain(".form-actions");
+  });
+
   test("reduced transparency, forced colors and print each have their fallback", () => {
     expect(declaring("(prefers-reduced-transparency: reduce)", "backdrop-filter: none;")).toEqual(
       expect.arrayContaining([".orr-card", ".sidebar", ".topbar", ".orr-btn--secondary"]),
@@ -288,7 +338,7 @@ describe("the stylesheet", () => {
     const pages = [
       layout({ title: "TaruBot", signedIn: false }, renderHome({ signedIn: false })),
       layout(
-        { title: "Your servers", signedIn: true },
+        { title: "Your servers", signedIn: true, formToken: TOKEN },
         renderHome({
           signedIn: true,
           servers: [
@@ -301,18 +351,19 @@ describe("the stylesheet", () => {
         }),
       ),
       layout(
-        { title: "Your servers", signedIn: true },
+        { title: "Your servers", signedIn: true, formToken: TOKEN },
         renderHome({ signedIn: true, servers: [] }),
       ),
       layout({ title: "No access", signedIn: false }, renderNoAccess()),
       errorPage(
         { status: 404, code: "not_found", ref: "r", message: null, retryAfter: 0, level: "info" },
-        true,
+        TOKEN,
       ),
       layout(
         {
           title: "Background work",
           signedIn: true,
+          formToken: TOKEN,
           guild: {
             id: "100000000000000001",
             name: "Example FC",
@@ -327,6 +378,18 @@ describe("the stylesheet", () => {
           },
         },
         html`<p>Body</p>`,
+      ),
+      // A form page: every piece of the form kit, refused (the summary and field errors) and
+      // after a save (the notice).
+      layout(
+        {
+          title: "Role menu",
+          signedIn: true,
+          formToken: TOKEN,
+          error: true,
+          guild: { id: "100000000000000001", name: "Example FC", nav: [] },
+        },
+        html`${notice(new URL("https://example.org/g/1/x?notice=saved"), { saved: "Saved." })}${kitForm("/g/100000000000000001/role-menu", TOKEN, KIT_DEFAULTS, KIT_ERRORS)}`,
       ),
     ];
     const classes = new Set<string>();

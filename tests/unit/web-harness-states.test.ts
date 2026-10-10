@@ -8,11 +8,15 @@
  */
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
+import { configurationChecks } from "../../src/discord/presenters/configuration.js";
 import {
   HARNESS_GUILDS,
+  HARNESS_MENU,
   type HarnessStates,
   HOSTILE_NAMES,
   harnessOptions,
+  harnessReport,
+  MENU_REVISION,
   startHarness,
 } from "../fixtures/web-dev.js";
 
@@ -65,6 +69,38 @@ describe("harnessOptions", () => {
     );
     expect(() => harnessOptions(["--state-cooldown"])).toThrow();
     expect(() => harnessOptions(["--cert", "cert.pem"])).toThrow("Pass --cert and --key together.");
+  });
+});
+
+describe("the harness's Role menu health check (UX-12)", () => {
+  const rows = (menu: typeof HARNESS_MENU | null, states: HarnessStates = {}) =>
+    configurationChecks(
+      harnessReport(
+        HARNESS_GUILDS.example.id,
+        states,
+        new Map([[HARNESS_GUILDS.example.id, { menu, revision: MENU_REVISION }]]),
+      ),
+    )
+      .filter((row) => row.section === "Role menu")
+      .map((row) => `${row.check} ${row.text}`);
+
+  test("OFF while every category is a draft, OK when all pass, WARN for drift or an unreadable menu", () => {
+    const drafts = {
+      ...HARNESS_MENU,
+      categories: HARNESS_MENU.categories.map((category) => ({
+        ...category,
+        state: "draft" as const,
+      })),
+    };
+    expect(rows(drafts)).toEqual(["off No roles outside drafts"]);
+    expect(rows(HARNESS_MENU)).toEqual(["ok 7 roles outside drafts; all pass"]);
+    expect(rows(HARNESS_MENU, { menuProblems: true })).toEqual([
+      "warn 4 roles outside drafts have a problem; open Role menu to see which",
+      "warn TaruBot can't read 2 channels, so it can't check menu roles there",
+    ]);
+    expect(rows(null)).toEqual([
+      "warn The saved role menu can't be read by this TaruBot version; open Role menu to reset it",
+    ]);
   });
 });
 
@@ -132,11 +168,21 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
     }
   }
 
+  /** The rows of the checklist's "Role menu" section (2.39.0), as text. */
+  const menuRows = (document: Page) =>
+    [
+      ...([...(checklist(document)?.querySelectorAll(".check-group") ?? [])]
+        .find((group) => group.querySelector("h3")?.textContent === "Role menu")
+        ?.querySelectorAll(".check-row") ?? []),
+    ].map((row) => row.textContent);
+
   test("without a state, the pages keep the healthy, live defaults", async () => {
     const page = await officerPages({}, [configuration, status]);
     expect(
       checklist(page(configuration))?.querySelectorAll(".check-fail, .check-warn"),
     ).toHaveLength(0);
+    // The Role menu's health check, over the same saved menu the Role menu page shows (UX-12).
+    expect(menuRows(page(configuration))).toEqual(["[OK]7 roles outside drafts; all pass"]);
     expect(fact(page(configuration), "Discord changes")?.querySelector("code")?.textContent).toBe(
       "live",
     );
@@ -146,6 +192,17 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
       expect(work?.querySelectorAll(`.marker-${marker}`)).toHaveLength(1);
     expect(work?.querySelectorAll(".marker-waiting, .marker-paused")).toHaveLength(0);
     expect(isolated(page("/"))).toEqual([HARNESS_GUILDS.example.name]);
+  });
+
+  test("--state-menu-problems: Server configuration warns about the Role menu and Administrator too", async () => {
+    const page = await officerPages({ menuProblems: true }, [configuration]);
+    expect(menuRows(page(configuration))).toEqual([
+      "[WARN]4 roles outside drafts have a problem; open Role menu to see which",
+      "[WARN]TaruBot can't read 2 channels, so it can't check menu roles there",
+    ]);
+    // TaruBot holds Administrator there, as the Role menu page's banner says.
+    expect(checklist(page(configuration))?.textContent).toContain("Administrator");
+    expect(health(page(configuration))?.textContent).not.toContain("All checks passed");
   });
 
   test("--state-checks=warn: configuration warnings without failures, a waiting Lodestone", async () => {

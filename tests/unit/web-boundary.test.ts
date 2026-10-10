@@ -3,6 +3,9 @@
  * - views (src/web/views/**) import application, infrastructure, Drizzle and src/jobs as types
  *   only, like the Discord presenters (reply-guard.test.ts): a page's get() loads through
  *   services, and the view only formats what it was given;
+ * - pages (src/web/pages/**) import at runtime only the domain, application/keys.js, the web
+ *   layer and zod: state is reached through the services a page declares, which
+ *   server.ts scopes to its `requires`, never by importing a store, the queue or Drizzle;
  * - the unescaped bypass (`raw(`) is called only in allow-listed constant files, and only those
  *   (plus html.ts, which re-exports it) may import it, so stored text can't reach a page unescaped;
  * - Hono's template helpers are reached only through src/web/html.ts, and the Hono pieces the
@@ -12,6 +15,7 @@
  *   guild-default rules, which glob *.ts) keep covering the web.
  */
 import { expect, test } from "bun:test";
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -83,6 +87,66 @@ test("views import application, infrastructure, Drizzle and jobs as types only (
       path,
       forbidden: runtimeSpecifiers(text).filter((from) => STATEFUL.test(from)),
     }).toEqual({ path, forbidden: [] });
+});
+
+/** Packages a page may import at runtime: zod, to validate its forms. */
+const PAGE_PACKAGES: ReadonlySet<string> = new Set(["zod"]);
+
+/**
+ * Whether a page at `path` may import `from` at runtime: a module under src/domain/ or src/web/,
+ * application/keys.js (the service keys a page declares), or a PAGE_PACKAGES package.
+ */
+function pageMayImport(path: string, from: string): boolean {
+  if (!from.startsWith(".")) return PAGE_PACKAGES.has(from);
+  const target = posix.normalize(posix.join(posix.dirname(path), from));
+  return (
+    target.startsWith("src/domain/") ||
+    target.startsWith("src/web/") ||
+    target === "src/application/keys.js"
+  );
+}
+
+test("the page import rule refuses stores, jobs and Drizzle, and allows what pages need", () => {
+  const page = "src/web/pages/example.page.ts";
+  for (const from of [
+    "../../domain/policy.js",
+    "../../application/keys.js",
+    "../page.js",
+    "../views/forms.js",
+    "./helper.js",
+    "zod",
+  ])
+    expect({ from, allowed: pageMayImport(page, from) }).toEqual({ from, allowed: true });
+  for (const from of [
+    "../../application/service.js",
+    "../../application/self-roles.js",
+    "../../infrastructure/postgres/database.js",
+    "../../jobs/queue.js",
+    "../../discord/gateway.js",
+    "../../bot/services.js",
+    "../../domain/../application/service.js",
+    "drizzle-orm",
+    "hono",
+    "node:fs",
+  ])
+    expect({ from, allowed: pageMayImport(page, from) }).toEqual({ from, allowed: false });
+});
+
+test("pages import only the domain, application/keys.js, the web layer and zod at runtime", async () => {
+  const pages = await sources("src/web/pages");
+  // The scan must reach the pages, or it would pass by finding nothing.
+  expect([...pages.keys()]).toEqual(
+    expect.arrayContaining(["src/web/pages/configuration.page.ts", "src/web/pages/status.page.ts"]),
+  );
+  // Configuration does know an application type; the rule is about how it imports it.
+  expect(pages.get("src/web/pages/configuration.page.ts")).toMatch(
+    /^import type \{[^}]*\} from "\.\.\/\.\.\/application\/service\.js";/mu,
+  );
+  for (const [path, text] of pages)
+    expect({
+      path,
+      refused: runtimeSpecifiers(text).filter((from) => !pageMayImport(path, from)),
+    }).toEqual({ path, refused: [] });
 });
 
 test("raw( appears only in allow-listed constant files", async () => {

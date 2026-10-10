@@ -8,7 +8,7 @@ This summary preserves product invariants and confirmed live-operation boundarie
 - Accept an FC roster only after identity, pagination, uniqueness and counts establish completeness. An outage, malformed response or partial crawl is never an empty roster and never evidence for removing access.
 - Reconciliation computes desired access from durable facts. Configuration revisions, job generations, leases and idempotent delivery fence stale work. Only the database writer may run the bot; one Discord application must never run in two places.
 - Money and counters use exact bigint arithmetic. The gil ledger is immutable; state, audit and outbox effects commit together. Identifiers stay decimal strings.
-- Commands and buttons reauthorize the current actor. Members do not see private diagnostics or other members' records. User text is escaped, bounded and never allowed to ping through a reply.
+- Commands, buttons and web forms reauthorize the current actor. Members do not see private diagnostics or other members' records. User text is escaped, bounded and never allowed to ping through a reply.
 - The gateway uses Guilds and GuildMembers only. Message intents stay prohibited. Visibility analysis must not let Administrator mask missing permissions; never write channel policy from obfuscated placeholder data.
 - Onboarding is opt-in. New/imported guilds start with role layout off; legacy activation uses a checksum-confirmed, once-only grandfathering plan. Production onboarding is not authorized by the import; `/setup overrides` is the separately approved least-privilege path.
 - The bot fetches and parses Lodestone in process with its own bounded workers. Selectors follow upstream HEAD live, validated before activation; the bundled set is the fallback.

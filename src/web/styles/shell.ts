@@ -477,6 +477,26 @@ html {
   }
 }
 
+/*
+ * The phone tab strip: each tab at least as wide as its longest word, so a label wraps only
+ * between words (body's overflow-wrap: anywhere would split "configuration" mid-word and grow the
+ * sticky bar), and the strip scrolls sideways when even that doesn't fit, as with a large text
+ * setting on a narrow phone, rather than widen the page. A scroll box clips at its edges, so the
+ * padding keeps the focus outline (2px, offset 2px) inside it, and the negative margin keeps the
+ * tabs where they were.
+ */
+@media (max-width: 39.99rem) {
+  .side-nav__list {
+    grid-auto-columns: minmax(min-content, 1fr);
+    margin: -4px;
+    padding: 4px;
+    overflow-x: auto;
+  }
+  .nav-item {
+    overflow-wrap: normal;
+  }
+}
+
 @media (max-width: 22.49rem) {
   .nav-item .orr-icon {
     display: none;

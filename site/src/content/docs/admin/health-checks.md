@@ -2,7 +2,7 @@
 title: Health checks
 description: Check the server's setup with /config show and /config validate, follow background work, and fix what they report.
 sidebar:
-  order: 10
+  order: 11
 ---
 
 ## Settings and checks
@@ -12,7 +12,7 @@ sidebar:
 [`/config validate`](/tarubot/reference/commands/#config-validate) checks the setup without changing anything, and lists each check with a token:
 
 - `[OK]` passed; `[WARN]` works but needs attention; `[FAIL]` stops a feature; `[OFF]` switched off; `[WAIT]` waiting for something, such as a first roster.
-- It covers whether each role and channel exists, TaruBot's permissions and role position, its own role and channel view as if Administrator were off ([below](#tarubots-role-and-channel-view)), the linked FC and how fresh its roster is, onboarding, changes in Discord, the role layout, and whether Discord changes are paused. With onboarding on, it also warns when members and guests may not be able to read the [changelog channel](/tarubot/admin/notices-and-updates/#visibility-with-lobby-onboarding).
+- It covers whether each role and channel exists, TaruBot's permissions and role position, its own role and channel view as if Administrator were off ([below](#tarubots-role-and-channel-view)), the linked FC and how fresh its roster is, onboarding, the [role menu](#role-menu), changes in Discord, the role layout, and whether Discord changes are paused. With onboarding on, it also warns when members and guests may not be able to read the [changelog channel](/tarubot/admin/notices-and-updates/#visibility-with-lobby-onboarding).
 - The title gives the verdict: problems, warnings, or all checks passed.
 
 **Run health check** on `/config show`, and **Re-check** on `/config validate`, run the checks again in place. Fix what a `[FAIL]` line names, then re-check. [Replies and error codes](/tarubot/reference/replies/#health-check-tokens) explains each token.
@@ -49,6 +49,17 @@ Two sections of `/config validate` judge TaruBot's own access **as if Administra
 
 **A refusal after `/setup overrides`.** Choosing a channel for a setting where TaruBot's own entry denies Read Message History, or turning onboarding on without Administrator where the entry denies Manage Permissions and Manage Channels (or Connect in a voice or stage channel), is refused with a card that says which permissions TaruBot's own entry denies and how to fix it: remove the deny from TaruBot's own entry (the member, not its role), or turn Administrator on for the step. A role permission can't lift a member entry's deny, so "give the TaruBot role…" wouldn't help.
 
+### Role menu
+
+The **Role menu** section checks the [self-service role menu](/tarubot/admin/self-service-roles/) the way members and guests will see it: every role in a published or Not offered category, judged on the same fresh view of the server as the sections above. It needs a **2.39.0 or newer** release.
+
+- `[OFF] No roles outside drafts`: every category is still a draft, or the menu is empty.
+- `[OK] N roles outside drafts; all pass`: the roles in published and Not offered categories.
+- `[WARN] N roles outside drafts have a problem; open Role menu to see which`: an offered role now breaks [the rules](/tarubot/admin/self-service-roles/#what-a-role-must-pass), usually because someone changed it in Discord after it was added, or a role that's no longer offered can't be removed from the people who have it any more (for example, it was moved above TaruBot's role, now restricts the people who have it, or was deleted). The Role menu page names each role and its problem. It also counts problems in drafts, which this check skips, so its number can be higher.
+- `[WARN] TaruBot can't read N channels, so it can't check menu roles there`: see [channels TaruBot can't see](/tarubot/admin/self-service-roles/#channels-tarubot-cant-see).
+- `[WARN] Couldn't check the menu's roles; try again in a minute`: TaruBot's view of the server isn't ready yet, as with the Visibility section.
+- `[WARN] The saved role menu can't be read by this TaruBot version; open Role menu to reset it`: see [a menu TaruBot can't read](/tarubot/admin/self-service-roles/#a-menu-tarubot-cant-read).
+
 ## Background work
 
 Officers get the server-wide view of [`/sync status`](/tarubot/reference/commands/#sync-status): recent runs, outstanding work, what runs next, and what needs attention. Each job line shows the raw job kind (such as `reconcile.user`), the first 8 characters of its ID, the attempt, when it runs next, and its stored diagnostic. **Full details (JSON)** attaches the complete view. `/sync status run_id:<id>` shows one run.
@@ -64,18 +75,19 @@ What to do with each [status marker](/tarubot/reference/replies/#status-markers)
 
 Members see only their own requests and work, in plain words.
 
-## Read-only dashboard
+## Dashboard
 
-The dashboard requires a **2.37.0 or newer** release.
+The dashboard requires a **2.37.0 or newer** release, and Role menu **2.39.0 or newer**.
 
-When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same officer authority as the bot. Ordinary members and guests cannot open these pages.
+When your deployment enables the dashboard, open the address its operator provides and sign in with Discord. TaruBot lists only servers whose pages admit you, using the same officer authority as the bot. Ordinary members and guests can't open these pages yet.
 
 - **Server configuration** groups the FC and roster, access roles, channels, officer access, onboarding and Discord automation into cards, including guest-application availability and configuration revision. The health snapshot says how many checks need attention, counts those that passed, are waiting or are off, and links to the full checklist, using the same checks as `/config validate`. A checklist group of four or more checks that all passed is folded; open it to see each one. A group with anything else is always shown in full. The check's time is shown in UTC; successful checks are reused for up to 30 seconds, so reloading within that window does not run a new check.
 - **Background work** shows process health, up to 10 recent refresh runs and up to 25 outstanding jobs for this server. Counts describe only those displayed jobs, not the whole server or deployment. Open a job's or run's details to read its full ID and diagnostic. A failed decision DM does not undo the guest decision.
+- **Role menu** is where officers build the [self-service role menu](/tarubot/admin/self-service-roles/). It's the only page that changes anything.
 
-The dashboard changes no settings and offers no retries or guest decisions. Use the Discord commands for those actions. Names come from TaruBot's cache; an uncached name shows an ID, and a hidden channel shows that TaruBot cannot see it. Times are UTC throughout. The layout works on phones, where Background work shows each job and run as a card, and the pages are dark only.
+Server configuration and Background work are read-only: the dashboard offers no retries or guest decisions, and every other setting is still changed with the Discord commands. Names come from TaruBot's cache; an uncached name shows an ID, and a hidden channel shows that TaruBot cannot see it. Times are UTC throughout. The layout works on phones, where Background work shows each job and run as a card, and the pages are dark only.
 
-The **Account** menu offers **Sign out** for this browser and **Sign out everywhere** for all your sessions. See [dashboard sessions and fonts](/tarubot/architecture/data-and-privacy/#dashboard-sessions-and-fonts).
+The **Account** menu offers **Sign out** for this browser and **Sign out everywhere** for all your sessions. See [dashboard sessions and fonts](/tarubot/architecture/data-and-privacy/#dashboard-sessions-and-fonts). Every form on the dashboard, sign-out included, carries a code tied to your current sign-in, so a form left open from before you last signed in is refused as out of date: open the page again, then redo your change. A sign-out refused that way says **Still signed in**, because nothing ended: use **Sign out** in the **Account** menu on that page. A form refused as out of date, over the limit or while TaruBot restarts doesn't keep what you typed, and nothing from it was saved.
 
 ## Repeats and unsetting
 

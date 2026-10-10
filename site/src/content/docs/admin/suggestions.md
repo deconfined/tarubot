@@ -2,7 +2,7 @@
 title: Feature suggestions
 description: What /suggest lets members post publicly, where it works, how suggestions are moderated, and who can switch it off.
 sidebar:
-  order: 11
+  order: 12
 ---
 
 [`/suggest`](/tarubot/reference/commands/#suggest) lets members and guests send ideas for TaruBot. Each one is posted at once as a public issue in [TaruBot's GitHub repository](https://github.com/deconfined/tarubot/issues), with only the cleaned idea and TaruBot's version. Members' side of it is on [Suggest a feature](/tarubot/use/suggest-a-feature/).

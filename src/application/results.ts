@@ -4,6 +4,7 @@
  * is read from existing columns or aggregates (no schema change), and fields added in 2.14.0 are
  * additive, so the officer JSON details keep every earlier key.
  */
+import type { SelfRoleHealth } from "../domain/self-roles.js";
 import type { VisibilityReport } from "../domain/visibility.js";
 import type { ApplicationRecord, EntryRecord, GuildRecord } from "./records.js";
 
@@ -330,6 +331,11 @@ export interface ConfigurationReport {
    * role" and "Visibility" sections; null when TaruBot's view couldn't be read.
    */
   readonly visibility: VisibilityReport | null;
+  /**
+   * The "Role menu" check (2.39.0): what members see on the self-service role menu, checked
+   * against the same view. Service.validate always sets it; a report without it shows no section.
+   */
+  readonly selfRoles?: SelfRoleHealth;
 }
 
 /** Holders an Officer-role binding adopted as manual officer grants. */

@@ -2,7 +2,7 @@
 title: Managing members' characters
 description: Assign and remove character links for members, look up a member's links, and resolve conflicts.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 Members normally link their own characters with a Lodestone token. Officers can also link a character for a member, remove a wrong link, and look up anyone's links. Every such change needs a reason and is audited.

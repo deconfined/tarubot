@@ -7,10 +7,12 @@
  *   looping otherwise (the owner accepted the WCAG 2.2.2 finding on 2026-10-08, see effects.ts);
  * - reduced transparency swaps every glass surface for a solid one;
  * - forced colors (Windows contrast themes) drop the box-shadows the design draws every edge
- *   with, so cards, status badges, buttons and the current page get real borders. Focus is
- *   already an outline (base.ts), which forced colors keep.
+ *   with, so cards, status badges, buttons, the error summary and the current page get real
+ *   borders, and form fields a CanvasText one. Focus is already an outline (base.ts), which forced
+ *   colors keep; checkboxes and radios are native, so the theme draws them itself.
  * - print is dark text on white without the shell, the backdrops, glass, glow or motion; a
- *   dark-only page would otherwise print pale text that browsers strip of its background.
+ *   dark-only page would otherwise print pale text that browsers strip of its background. A
+ *   form's button row stays in its place on paper rather than stick to a page's foot.
  *
  * `!important` appears only where a preference must beat every component rule at once.
  */
@@ -65,7 +67,9 @@ export const MEDIA_CSS = `/* Preferences and print */
   .feature,
   .server-switch,
   .account__summary,
-  .account__menu {
+  .account__menu,
+  .orr-input,
+  .error-summary {
     border: 1px solid CanvasText;
   }
   .orr-btn {
@@ -135,8 +139,14 @@ export const MEDIA_CSS = `/* Preferences and print */
   .marker,
   .notice,
   .empty-state,
-  .feature {
+  .feature,
+  .orr-input,
+  .error-summary {
     border: 1px solid #888;
+  }
+  .form-actions {
+    position: static;
+    border: 0;
   }
   .orr-card,
   .feature,

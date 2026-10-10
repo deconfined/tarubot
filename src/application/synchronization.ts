@@ -9,6 +9,7 @@ import {
   type Actor,
 } from "../domain/policy.js";
 import { effectsPaused, WAITING_CODES } from "../domain/failures.js";
+import { ROLE_CHOICE_KIND, ROLE_CHOICE_RETENTION_DAYS } from "../domain/self-roles.js";
 import { type Departure, statusObservation } from "../domain/status.js";
 import { Failure, json, nickname, normalized } from "../domain/values.js";
 import { desiredRankRole, rankAccess, rankDecisive } from "./rank-policy.js";
@@ -1215,6 +1216,51 @@ export class Synchronization {
         Math.random() * 30,
       );
     await db.delete(t.challenges).where(lt(t.challenges.expires_at, sql`now()-interval '7 days'`));
+    // 2.39.0 never runs a member's role change (roles.self, queued from 2.40.0), so after a rollback
+    // every waiting one is closed here at once, as the dispatcher closes one it claims, and the
+    // trigger clears its payload as the row ends (owner decision Q4 A): the payload holds role IDs
+    // that can reveal pronouns or gender identity. The dispatcher alone would leave some for as
+    // long as 2.39.0 runs: Queue.claim() takes only rows in an active server, a change parked as
+    // disabled waits for a restart or /config change to requeue it, and a running one whose lease
+    // is null is never reclaimed. A running one with a live lease is left: a worker is completing
+    // it, or a stopped 2.40.0 worker held it and its lease runs out within 45 seconds, after which
+    // the next pass closes it. Closed rows leave the waiting states, so a repeat changes nothing,
+    // and the self_role_waiting index keeps this to the waiting rows. 2.40.0, which runs these
+    // jobs, replaces this with its 7-day expiry. Closed rows then go after 30 days, as below.
+    await db
+      .update(t.jobs)
+      .set({
+        status: "succeeded",
+        completed_at: sql`now()`,
+        lease_until: null,
+        last_error: null,
+        result: { skipped: "needs a newer TaruBot" },
+      })
+      .where(
+        and(
+          eq(t.jobs.kind, ROLE_CHOICE_KIND),
+          or(
+            inArray(t.jobs.status, ["queued", "blocked", "disabled"]),
+            and(
+              eq(t.jobs.status, "running"),
+              or(isNull(t.jobs.lease_until), lt(t.jobs.lease_until, sql`now()`)),
+            ),
+          ),
+        ),
+      );
+    // Finished role-choice jobs (who changed their roles and when, never which) go after 30 days
+    // (owner decision Q4 A): the one kind of job history that is pruned (docs/PERSISTENCE.md). No
+    // delivery attempt or sync-run link ever references one. 2.39.0 queues none, but meets them
+    // after a rollback from 2.40.0, and keeps the promise then too.
+    await db
+      .delete(t.jobs)
+      .where(
+        and(
+          eq(t.jobs.kind, ROLE_CHOICE_KIND),
+          inArray(t.jobs.status, ["succeeded", "failed"]),
+          lt(t.jobs.completed_at, sql`now()-${ROLE_CHOICE_RETENTION_DAYS}*interval '1 day'`),
+        ),
+      );
     await db
       .update(t.jobs)
       .set({ status: "queued", due_at: sql`now()+interval '5 minutes'`, attempts: 0 })

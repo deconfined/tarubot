@@ -2,7 +2,7 @@
 title: The ledger
 description: Set up the FC gil ledger, record the opening balance, withdrawals and corrections, and follow the channel posts.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 The ledger is an exact, permanent record of the FC chest's gil, kept by people. Members record deposits; officers record everything else. Each Free Company linked to the server has its own ledger account, and each entry is numbered in order.

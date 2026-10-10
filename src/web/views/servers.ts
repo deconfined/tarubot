@@ -54,7 +54,7 @@ const WELCOME = html`<section class="welcome-copy" aria-labelledby="welcome-desc
 <p class="sign-in__text">Sign in to find the servers you have access to.</p>
 ${SIGN_IN}
 <div class="orr-hairline"></div>
-<p class="note">The dashboard is currently read-only. Changes stay in Discord.</p>
+<p class="note">Most settings are changed in Discord; officers set the role menu here.</p>
 <details class="disclosure"><summary>Who can use the dashboard?</summary>
 <p>${AUDIENCE}</p>
 <p>Signing in asks Discord only who you are. TaruBot checks your server access and keeps no Discord token.</p>

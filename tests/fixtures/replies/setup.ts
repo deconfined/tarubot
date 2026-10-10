@@ -5,7 +5,8 @@
  * replies-setup.test can vary them. IDs are invented.
  */
 import type { OverridesResult, OverridesWrite } from "../../../src/application/overrides.js";
-import type { SetupPlan } from "../../../src/application/setup-plan.js";
+import { onMenuForSetup } from "../../../src/application/self-roles.js";
+import { blockerOf, type SetupPlan } from "../../../src/application/setup-plan.js";
 import {
   overridesReply,
   type SetupReplyKind,
@@ -256,6 +257,29 @@ export const SETUP_PLANS = {
         },
       },
     ],
+    effectsMode: "live",
+  } satisfies SetupPlan,
+  /**
+   * The Member role setup would reuse is on the self-service role menu (2.39.0), which no access
+   * role may be: the only blocker.
+   */
+  onMenu: {
+    roles: [
+      { field: "member_role_id", name: "Member", action: "reuse", id: roleId(11) },
+      { field: "guest_role_id", name: "Guest", action: "create", id: null },
+      { field: "officer_role_id", name: "Officer", action: "create", id: null },
+      { field: "leader_role_id", name: "FC Leader", action: "create", id: null },
+    ],
+    lobby: { action: "create", id: null },
+    officerRoom: { action: "create", id: null },
+    onboarding: { alreadyOn: false, channels: 3, sample: [], everyoneLosesView: false },
+    guestApplications: { switchesOn: true, channel: null },
+    officerNotifications: { channel: null, defaulted: true },
+    adopt: 0,
+    fc: { id: null, company: null },
+    officerRank: null,
+    roleLayout: false,
+    blockers: [blockerOf(onMenuForSetup(roleId(11), "Member"))],
     effectsMode: "live",
   } satisfies SetupPlan,
 } as const;

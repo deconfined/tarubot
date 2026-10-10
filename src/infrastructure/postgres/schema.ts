@@ -416,3 +416,15 @@ export const webSessions = pgTable("web_sessions", {
   /** The absolute expiry, set at sign-in. */
   expires_at: instant("expires_at").notNull(),
 });
+/**
+ * Self-service role menus (migration 012, 2.39.0): one row per server holding the officers' whole
+ * menu as a versioned JSON document, validated by src/domain/self-roles.ts on every read and write.
+ * Members' picks are never stored: Discord holds them. `revision` is the officers' optimistic lock,
+ * separate from guilds.revision; src/application/self-roles.ts writes the table.
+ */
+export const selfRoleMenus = pgTable("self_role_menus", {
+  guild_id: externalId("guild_id").primaryKey(),
+  menu: payload("menu").notNull().default(sql`'{"v":1,"categories":[]}'::jsonb`),
+  revision: money("revision").notNull().default(1n),
+  updated_at: instant("updated_at").notNull().defaultNow(),
+});

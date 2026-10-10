@@ -14,7 +14,9 @@ import { COMPONENTS_CSS } from "./styles/components.js";
 import { CONFIGURATION_CSS } from "./styles/configuration.js";
 import { EFFECTS_CSS } from "./styles/effects.js";
 import { ENTRY_CSS } from "./styles/entry.js";
+import { FORMS_CSS } from "./styles/forms.js";
 import { MEDIA_CSS } from "./styles/media.js";
+import { ROLE_MENU_CSS } from "./styles/role-menu.js";
 import { SHELL_CSS } from "./styles/shell.js";
 import { STATUS_CSS } from "./styles/status.js";
 import { TOKENS_CSS } from "./styles/tokens.js";
@@ -101,19 +103,21 @@ export const FONT_FACES = `/* Fonts: SIL Open Font License 1.1, notices at ${NOT
 
 /**
  * The dashboard's stylesheet: the design tokens shared with the docs site, then the Orrery design
- * system's base, effects and components as ported in styles/, the console and entry frames, each
- * page's own rules, and last the viewer's preferences and print, which must win. One file at one
- * hashed path; STYLESHEET puts the font faces before it.
+ * system's base, effects, components and form controls as ported in styles/, the console and entry
+ * frames, each page's own rules, and last the viewer's preferences and print, which must win. One
+ * file at one hashed path; STYLESHEET puts the font faces before it.
  */
 const CSS = [
   TOKENS_CSS,
   BASE_CSS,
   EFFECTS_CSS,
   COMPONENTS_CSS,
+  FORMS_CSS,
   SHELL_CSS,
   ENTRY_CSS,
   CONFIGURATION_CSS,
   STATUS_CSS,
+  ROLE_MENU_CSS,
   MEDIA_CSS,
 ].join("\n");
 

@@ -2,7 +2,7 @@
 title: Officer notices and update posts
 description: What TaruBot tells officers about Lodestone trouble, unlinked characters, missing channel overrides and members' status changes, and the update posts it shares with everyone.
 sidebar:
-  order: 9
+  order: 10
 ---
 
 TaruBot posts in two channels besides the ledger: officer notices and member status changes in a staff channel, and, if you choose one, short update posts for everyone who uses TaruBot. All are sent with mentions turned off, so they never ping anyone.
@@ -107,7 +107,7 @@ Linking an FC to a server whose roles are already set up lists its confirmed mem
 
 When TaruBot starts on a newer version, it can post what's new in a channel you choose: one short message, "TaruBot updated to vX.Y.Z", with a one-sentence note for each release since the last post, newest first. At most ten releases are listed; the footer counts any older ones. The title links the full changelog, and [`/version`](/tarubot/reference/commands/#version) lists the recent commits.
 
-- **Every release people can notice.** Each release that changes something members, guests or officers can see or do, in Discord, on the officer dashboard or on this site, gets a note in plain words. A release nobody can notice, such as a change to how TaruBot is deployed, isn't listed, and an update with nothing anyone can notice posts nothing.
+- **Every release people can notice.** Each release that changes something members, guests or officers can see or do, in Discord, on the dashboard or on this site, gets a note in plain words. A release nobody can notice, such as a change to how TaruBot is deployed, isn't listed, and an update with nothing anyone can notice posts nothing.
 - **No repeats.** A restart, a rollback or another update doesn't repeat releases the channel was already told about. Only a crash in the middle of a post or an operator's restore of an older backup can repeat one; see [Monitoring](/tarubot/deploy/monitoring/#update-posts).
 - **Nothing piles up.** Updates released while no channel is set are never posted later.
 

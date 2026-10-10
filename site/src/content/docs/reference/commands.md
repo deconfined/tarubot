@@ -185,7 +185,7 @@ Choose the Member role, which TaruBot gives to confirmed FC members and removes 
 | `role` | Role | No | The role to manage. |
 | `unset_role` | True or false | No | Stop managing the role. It stays in Discord. |
 
-Give exactly one of `role` or `unset_role:true`. Once onboarding is on, the four access roles can be replaced but not unset.
+Give exactly one of `role` or `unset_role:true`. Once onboarding is on, the four access roles can be replaced but not unset. None of the four can be a role that's on the [self-service role menu](/tarubot/admin/self-service-roles/): TaruBot refuses it until an officer removes it on the Role menu page.
 
 ```text
 /config roles member role:@Member
@@ -202,6 +202,8 @@ Choose the Guest role, which TaruBot gives to registered visitors, approved appl
 | --- | --- | --- | --- |
 | `role` | Role | No | The role to manage. |
 | `unset_role` | True or false | No | Stop managing the role. It stays in Discord. |
+
+A role on the [role menu](/tarubot/admin/self-service-roles/) is refused, as for `/config roles member`.
 
 ```text
 /config roles guest role:@Guest
@@ -220,6 +222,8 @@ Choose the Officer role. TaruBot gives it to members whose linked character hold
 | `unset_role` | True or false | No | Stop managing the role. It stays in Discord. |
 | `adopt_holders` | True or false | No | Default `true`: the role's current human holders get recorded officer grants. `false` binds the role without granting anyone, so officer access comes only from the in-game rank and `/officer grant`. |
 
+A role on the [role menu](/tarubot/admin/self-service-roles/) is refused, as for `/config roles member`.
+
 ```text
 /config roles officer role:@Officer adopt_holders:false
 /config roles officer unset_role:true
@@ -235,6 +239,8 @@ Choose the FC Leader role, which TaruBot gives to the owner of the FC's leader c
 | --- | --- | --- | --- |
 | `role` | Role | No | The role to manage. |
 | `unset_role` | True or false | No | Stop managing the role. It stays in Discord. |
+
+A role on the [role menu](/tarubot/admin/self-service-roles/) is refused, as for `/config roles member`.
 
 ```text
 /config roles leader role:@FC Leader
@@ -348,7 +354,7 @@ This command has no options.
 
 ### /config validate
 
-Check the setup without changing anything: roles, channels, permissions, the linked FC and its roster, onboarding and the role layout, and TaruBot's own role and channel view, as if Administrator were off. See [Health checks](/tarubot/admin/health-checks/).
+Check the setup without changing anything: roles, channels, permissions, the linked FC and its roster, onboarding, the self-service role menu and the role layout, and TaruBot's own role and channel view, as if Administrator were off. See [Health checks](/tarubot/admin/health-checks/).
 
 **Who can use it:** officers.
 
@@ -402,6 +408,8 @@ Remove a member's grant or revocation, so the in-game rank decides again.
 ### /setup onboarding
 
 Create or reuse the Member, Guest, Officer and FC Leader roles, a lobby and an officer room, and turn on lobby onboarding. Without `confirm:true` it is a dry run: it lists what it would create, reuse and change, and anything that would stop it, and changes nothing. Read [Setting up a server](/tarubot/admin/setup/) first: no command undoes `confirm:true`.
+
+A role it would reuse that's on the [self-service role menu](/tarubot/admin/self-service-roles/) stops it: the dry run lists it as a blocker, and `confirm:true` refuses before changing anything. Remove the role on the Role menu page first, rename it in Discord, or choose the access role with [`/config roles`](#config-roles-member) first. A different `prefix` doesn't help: setup reuses a role named Member, Guest, Officer or FC Leader whatever the prefix.
 
 **Who can use it:** server managers who also have Manage Channels. Discord hides it from other members by default.
 

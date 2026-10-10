@@ -258,6 +258,34 @@ describe("job markers and lines", () => {
     );
   });
 
+  test("member role choices (2.39.0) read as 'Role choices' for members, raw for officers", () => {
+    expect(jobLabel("roles.self")).toBe("Role choices");
+    const choice = (overrides: Parameters<typeof job>[0]) =>
+      jobLine(job({ kind: "roles.self", ...overrides }), VIEWERS.member);
+    expect(choice({ status: "succeeded", completed_at: NOW })).toBe(
+      "`✓ DONE` Role choices applied <t:1790169000:R>",
+    );
+    // What 2.39.0's dispatcher does with one 2.40.0 queued before a rollback.
+    expect(
+      choice({
+        status: "succeeded",
+        completed_at: NOW,
+        result: { skipped: "needs a newer TaruBot" },
+      }),
+    ).toBe("`– SKIPPED` Role choices: nothing to do");
+    expect(
+      jobLine(
+        job({
+          kind: "roles.self",
+          status: "succeeded",
+          completed_at: NOW,
+          result: { skipped: "needs a newer TaruBot" },
+        }),
+        VIEWERS.officer,
+      ),
+    ).toBe("`– SKIPPED` roles.self `1a2b3c4d` · <t:1790169000:R>\n> needs a newer TaruBot");
+  });
+
   test("paused work names the deployment switch when effects are off for the deployment", () => {
     expect(
       jobLine(job({ status: "disabled" }), VIEWERS.member, { effectsMode: "deployment_disabled" }),
