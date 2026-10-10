@@ -93,6 +93,23 @@ For bundled Caddy on managed targets, install the reviewed **2.37.1 or newer dep
 
 For 2.41.0, **review and reinstall the deploy entry again before approving its delivery**, as for 2.37.1. The 2.41.0 entry also makes the release's public [offline page](/tarubot/deploy/monitoring/#offline-page) in `ops/offline` readable (`chmod -R a+rX`, only for a real directory, never through a symbolic link); everything else in the release, and `.env`, stays private. An older entry still deploys 2.41.0, but its Caddy then answers the offline page's one-line text fallback while the bot is down. Making the folder readable by hand doesn't last: each delivery checks out a fresh private copy of the release.
 
+## Managed deploy entry
+
+Install the managed deploy entry from a verified Git object, never by copying text from a web page. Write the reviewed commit's file to a new file beside the entry, check it, then rename it over the old one:
+
+```sh
+commit=<reviewed full commit on main>
+git -C "$HOME/tarubot" fetch --no-tags origin main
+git -C "$HOME/tarubot" merge-base --is-ancestor "$commit" FETCH_HEAD
+git -C "$HOME/tarubot" show "$commit:ops/deploy.sh" > "$HOME/.local/libexec/tarubot-deploy.new"
+sha256sum "$HOME/.local/libexec/tarubot-deploy.new"   # must equal your reviewed copy's
+bash -n "$HOME/.local/libexec/tarubot-deploy.new"
+chmod 700 "$HOME/.local/libexec/tarubot-deploy.new"
+mv "$HOME/.local/libexec/tarubot-deploy.new" "$HOME/.local/libexec/tarubot-deploy"
+```
+
+Bash reads a script while it runs, so copying over the installed entry in place during a delivery can make that delivery fail part-way; the rename can't. The entry from 2026-10-10 on parses its own file before doing anything and refuses if it can't, reports its sha256 (the Deploy log shows it as the host's claim, and warns when it isn't the workflow commit's `ops/deploy.sh`, which an older reviewed entry may legitimately be), and says why a delivery failed in fixed-shape `reason` lines with a plain-words likely cause. See [reading a failed delivery](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#reading-a-failed-delivery); reinstall the entry to get them.
+
 ## Rollback
 
 To go back, pin the previous `TARUBOT_IMAGE_TAG`, restore the matching main manifest, shared `docker-compose.web.yml` and `ops/Caddyfile` (from the `.previous` copies or the older image's exact source), and run `docker compose up -d --wait --remove-orphans` again. Going back past a Compose change needs that older source set: newer files may lack services or settings the older release expects.

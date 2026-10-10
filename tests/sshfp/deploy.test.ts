@@ -73,8 +73,10 @@ type Report = { scenario: Scenario; target: Target; sudoUid: number; runs: Run[]
 const image = process.env.SSHFP_FIXTURE_IMAGE;
 const helper = fileURLToPath(new URL("../../ops/deploy-ssh.sh", import.meta.url));
 const ownedContainers = new Set<string>();
+// The transport also relays the entry's strictly shaped `reason` lines under one heading and
+// compares the entry's identity (2026-10-10); the lab's stand-in entry sends neither.
 const publicLine =
-  /^(?:step (?:preflight|fetch|pull|stop|backup|migrate|register|start|observe|record)|result (?:deployed|already-live|refused|needs-owner)|::error::.*)$/;
+  /^(?:step (?:preflight|fetch|pull|stop|backup|migrate|register|start|observe|record)|result (?:deployed|already-live|refused|needs-owner)|Host diagnostics \(reported by the host entry; .*\):| {2}reason [a-z][a-z-]*(?: [A-Za-z][A-Za-z0-9_-]*=(?:"[A-Za-z0-9 _.,:;!?()/+=<>'-]*"|[A-Za-z0-9._-]+))*|The host(?:'s deploy entry| reports its deploy entry's sha256) [^:%]*|::warning::The host reports its deploy entry's sha256 .*|::error::.*)$/;
 
 async function docker(arguments_: string[], timeout = 90_000) {
   const child = Bun.spawn(["docker", ...arguments_], {

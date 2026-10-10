@@ -37,7 +37,9 @@ docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixt
 SSHFP_FIXTURE_IMAGE=tarubot-sshfp-test bun test tests/sshfp
 ```
 
-It runs native BIND, Unbound and OpenSSH in isolated containers with `NET_ADMIN`, no published ports and only the runner helper mounted read-only. The explicit image variable enables these tests; ordinary unit/contract checks do not build or download the image. CI builds the fixture and enables it for the full suite.
+It runs native BIND, Unbound and OpenSSH in isolated containers with `NET_ADMIN`, no published ports and only the runner helper mounted read-only. The explicit image variable enables these tests; ordinary unit/contract checks do not build or download the image. CI builds the fixture and enables it for the full suite. The lab's non-root users must be able to read the build context and the helper, as Git's `0644`/`0755` modes allow: in a checkout made under `umask 077`, build from and mount copies with those modes.
+
+The deploy entry's and transport's public failure reasons (`reason` lines) run in the ordinary unit checks: `tests/unit/deploy-script.test.ts` drives `ops/deploy.sh` against the fake-Docker host runtime in `tests/fixtures/host-runtime`, whose observation runs the entry's real probe against invented schema and readiness state, and `tests/unit/deploy-transport.test.ts` drives `ops/deploy-ssh.sh` with privilege, package and SSH stand-ins that never touch the resolver or a network.
 
 CI also runs `tests/fixtures/sshfp/host-profile-smoke.py` natively on Ubuntu 24.04 under the stock enforcing Unbound AppArmor profile. It requires root in private network and mount namespaces, launches the transport as the unprivileged runner, holds SSH at a local unauthenticated TCP peer, and verifies private resolver readiness and TERM cleanup. Private bind mounts isolate resolver/hosts/state changes; it creates no access key and uses no public network. The container fixture does not substitute for this host-profile check.
 

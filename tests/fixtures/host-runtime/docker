@@ -7,13 +7,17 @@ case $1 in
   ps)
     file=$SIM/container.json
     if [[ $* == *'service=caddy'* ]]; then file=$SIM/proxy.json; fi
+    # The bot container vanishes once observation has begun.
+    if [[ -e $SIM/fail-gone && -e $SIM/observed && $file == "$SIM/container.json" ]]; then exit 0; fi
     if [[ -f $file ]] && { [[ $2 == -aq ]] || jq -e '.[0].State.Running' "$file" >/dev/null; }; then
       jq -r '.[0].Id' "$file"
     fi
     ;;
   inspect)
     if [[ -f $SIM/proxy.json && $2 == $(jq -r '.[0].Id' "$SIM/proxy.json") ]]; then
-      cat "$SIM/proxy.json"
+      if [[ -e $SIM/fail-proxy-health && -e $SIM/observed ]]; then
+        jq '.[0].State.Health.Status = "unhealthy"' "$SIM/proxy.json"
+      else cat "$SIM/proxy.json"; fi
       exit 0
     fi
     if [[ -e $SIM/fail-inspect && -e $SIM/started ]]; then exit 1; fi
@@ -69,8 +73,25 @@ case $1 in
       record observe
       touch "$SIM/observed"
       [[ ${*: -2:1} == $(jq -r .target.version "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
+      # fail-probe: the exec itself fails without a word, as a crashed container would.
       fail probe
+      # Otherwise run the entry's actual probe against invented package, schema and readiness
+      # state (observe.json); the probe's own JSON line is the public diagnostic's input.
+      runtime=$SIM/observe-runtime
+      jq -n --slurpfile config "$SIM/config.json" --argjson scenario "$(cat "$SIM/observe.json" 2>/dev/null || echo '{}')" \
+        '{version: ($scenario.version // $config[0].target.version)}' >"$runtime/package.json"
+      cd "$runtime"
+      exec "$BUN_REAL" --no-env-file --preload "$OBSERVE_FIXTURE" -e "$5" "$6" "$7"
     fi
+    ;;
+  logs)
+    [[ $2 == --tail ]]
+    # hold-logs: block here, inside the entry's diagnosis, until the test removes the file.
+    if [[ -e $SIM/hold-logs ]]; then
+      touch "$SIM/logs-held"
+      while [[ -e $SIM/hold-logs ]]; do /bin/sleep 0.05; done
+    fi
+    if [[ -f $SIM/bot.log ]]; then cat "$SIM/bot.log"; fi
     ;;
   compose)
     shift
@@ -135,6 +156,7 @@ case $1 in
           *migrate.js)
             [[ $* == *'--pull never'* ]]
             record migrate
+            if [[ -e $SIM/fail-migrate && -f $SIM/migrate-output ]]; then cat "$SIM/migrate-output" >&2; fi
             fail migrate
             printf '%s\n' 'Schema ready.'
             ;;
@@ -173,6 +195,11 @@ case $1 in
         fi
         record start
         jq --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" '[.target | {Id:"c0ffee000002",Image:.id,RestartCount:0,HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}},Config:{Image:("ghcr.io/deconfined/tarubot@"+.digest),Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit,"com.docker.compose.project":"tarubot","com.docker.compose.oneoff":"False"}}}]' "$SIM/config.json" >"$SIM/container.json"
+        # after-start.jq: what became of the new container while Compose waited for it.
+        if [[ -f $SIM/after-start.jq ]]; then
+          jq -f "$SIM/after-start.jq" "$SIM/container.json" >"$SIM/next.json"
+          mv "$SIM/next.json" "$SIM/container.json"
+        fi
         touch "$SIM/started"
         fail start
         ;;
