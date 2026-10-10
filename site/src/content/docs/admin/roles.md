@@ -61,7 +61,7 @@ Keep the menu roles below Officer, FC Leader and every moderation role too. Disc
 
 ## Self-service roles
 
-Roles on the [self-service role menu](/tarubot/admin/self-service-roles/) are kept apart from the four access roles, in both directions. The menu refuses Member, Guest, Officer, FC Leader and any role TaruBot is still cleaning up, and [`/config roles`](/tarubot/reference/commands/#config-roles-member) and [`/setup onboarding`](/tarubot/reference/commands/#setup-onboarding) refuse a role that's on the menu. Reconciliation adds and removes only the four roles and the ones it's cleaning up, so it never gives a menu role to everyone, or takes it from everyone who picked it.
+Roles on the [self-service role menu](/tarubot/admin/self-service-roles/) are kept apart from the four access roles, in both directions. The menu refuses Member, Guest, Officer, FC Leader and any role TaruBot is still cleaning up, and [`/config roles`](/tarubot/reference/commands/#config-roles-member) and [`/setup onboarding`](/tarubot/reference/commands/#setup-onboarding) refuse a role that's on the menu. Reconciliation adds and removes only the four roles and the ones it's cleaning up, so it never gives a menu role to everyone, or takes it from everyone who picked it. One narrow exception: someone it leaves with none of the four roles loses the menu roles they hold that open channels, so those channels stay behind Member or Guest; roles that open nothing, such as pronouns, stay ([opt-in channels](/tarubot/admin/self-service-roles/#opt-in-channels)).
 
 ## Role layout
 

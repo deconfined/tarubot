@@ -11,20 +11,23 @@ import {
   OverwriteType,
   PermissionFlagsBits,
 } from "discord.js";
-import type { Collection, GuildMember, Role } from "discord.js";
+import type { Collection, Guild, GuildMember, Role } from "discord.js";
 import { permissionKeys, permissionLabel, POSTING_PERMISSIONS } from "../domain/permissions.js";
 import { Failure, normalized } from "../domain/values.js";
 import type { VisibilityGuild } from "../domain/visibility.js";
-import type { Actor } from "../domain/policy.js";
+import type { Actor, ActorResolution } from "../domain/policy.js";
 import type {
   ApplicationRecord,
   DirectMessage,
   DiscordPort,
   MemberView,
   PostMessage,
+  SelfRoleReason,
+  SelfRoleWrite,
 } from "../application/records.js";
 import { roleLayoutPlan, rolePositionChanges, type RoleLayoutPlan } from "../domain/role-layout.js";
 import { existingRoleId } from "../domain/role-selection.js";
+import { NO_MANAGE_ROLES } from "../domain/self-roles.js";
 import { cachedAsHidden, MISSING_ACCESS, UNKNOWN_CHANNEL } from "./obfuscation.js";
 import { changelogPost } from "./presenters/changelog.js";
 import { decisionDm, guestReviewPost } from "./presenters/guests.js";
@@ -75,10 +78,25 @@ export class DiscordGateway implements DiscordPort {
       owner: member.guild.ownerId === member.id,
     };
   }
-  /** Refresh role definitions and membership so cached permissions cannot authorize a new action. */
-  async actor(guildId: string, userId: string): Promise<Actor> {
-    const guild = await this.client.guilds.fetch({ guild: guildId, force: true });
-    await guild.roles.fetch();
+  /**
+   * The current actor. `full` (the default, and every command's) refreshes the guild and its role
+   * definitions so cached permissions cannot authorize a new action; `light` (web GETs and sign-in
+   * admission, ActorResolution) reads them from the gateway cache, which the Guilds intent keeps
+   * current, and falls back to `full` for a guild that isn't cached and available. Both force-fetch
+   * the member, so a departure, a new role or a time-out is never read from a cache.
+   *
+   * `botAdministrator` reads TaruBot's own cached member (the GuildMembers intent keeps its roles
+   * current) against the role definitions just used; a missing member counts as holding
+   * Administrator, so the web's A2 gate fails closed.
+   */
+  async actor(guildId: string, userId: string, mode: ActorResolution = "full"): Promise<Actor> {
+    const cached = mode === "light" ? this.client.guilds.cache.get(guildId) : undefined;
+    let guild: Guild;
+    if (cached?.available) guild = cached;
+    else {
+      guild = await this.client.guilds.fetch({ guild: guildId, force: true });
+      await guild.roles.fetch();
+    }
     const member = await guild.members.fetch({ user: userId, force: true });
     if (member.user.bot)
       throw new Failure(
@@ -87,6 +105,7 @@ export class DiscordGateway implements DiscordPort {
         0,
         { kind: "scope", scope: "human" },
       );
+    const me = guild.members.me;
     return {
       guildId,
       userId,
@@ -94,6 +113,8 @@ export class DiscordGateway implements DiscordPort {
       manageRoles: member.permissions.has(PermissionFlagsBits.ManageRoles),
       serverManager: member.permissions.has(PermissionFlagsBits.ManageGuild),
       roleIds: [...member.roles.cache.keys()],
+      botAdministrator: me ? me.permissions.has(PermissionFlagsBits.Administrator) : true,
+      timedOut: member.isCommunicationDisabled(),
     };
   }
   /** Only explicit unknown-member/user responses mean departure; network failures propagate. */
@@ -449,6 +470,66 @@ export class DiscordGateway implements DiscordPort {
       await this.validateRole(guildId, roleId);
       await member.roles.add(roleId, "TaruBot access reconciliation");
     }
+  }
+  /**
+   * Self-service menu roles (2.40.0): one REST call per role through the member manager, so no
+   * member fetch is needed and every other role is left alone; removes first, then adds. The
+   * "chosen" caller (the roles.self job) checked each role against a fresh snapshot just before;
+   * the "access" caller (reconciliation's removals for someone with no access role, owner decision
+   * Q3 B) judged TaruBot's cached view, and only ever removes, which escalates nothing. Either way
+   * there is no validateRole here (its messages name roles, and a member's choices must never
+   * reach a diagnostic). A per-role refusal doesn't fail the write: 10011 Unknown Role (deleted
+   * since the check) is skipped; 50013 Missing Permissions re-reads TaruBot's member (1 request),
+   * and without Manage Roles the whole write waits as blocked with a role-free message (the
+   * roles.self job's own check, NO_MANAGE_ROLES), otherwise the role moved above TaruBot and is
+   * skipped. Only counts come back.
+   */
+  async selfRoles(
+    guildId: string,
+    userId: string,
+    add: readonly string[],
+    remove: readonly string[],
+    reason: SelfRoleReason,
+  ): Promise<SelfRoleWrite> {
+    const written = { added: 0, removed: 0, skipped: 0 };
+    if (!add.length && !remove.length) return written;
+    const guild = await this.client.guilds.fetch(guildId);
+    const why =
+      reason === "chosen"
+        ? "Chosen by the member on TaruBot's My roles page"
+        : "TaruBot access reconciliation: no Member or Guest role, and this self-service role opens channels";
+    /** One role's write: true when Discord applied it, false when it was skipped. */
+    const write = async (roleId: string, adding: boolean): Promise<boolean> => {
+      try {
+        const options = { user: userId, role: roleId, reason: why };
+        if (adding) await guild.members.addRole(options);
+        else await guild.members.removeRole(options);
+        return true;
+      } catch (error) {
+        if (!(error instanceof DiscordAPIError)) throw error;
+        if (Number(error.code) === 10011) return false;
+        if (Number(error.code) !== 50013) throw error;
+        const bot = await guild.members.fetchMe({ force: true });
+        if (!bot.permissions.has(PermissionFlagsBits.ManageRoles))
+          throw new Failure("blocked", NO_MANAGE_ROLES);
+        return false;
+      }
+    };
+    for (const roleId of remove)
+      if (await write(roleId, false)) written.removed++;
+      else written.skipped++;
+    for (const roleId of add)
+      if (await write(roleId, true)) written.added++;
+      else written.skipped++;
+    return written;
+  }
+  /**
+   * A member's roles from the gateway's member cache (no request), which GuildMemberUpdate keeps
+   * current; null when the server or the member isn't cached.
+   */
+  cachedRoles(guildId: string, userId: string): readonly string[] | null {
+    const member = this.client.guilds.cache.get(guildId)?.members.cache.get(userId);
+    return member ? [...member.roles.cache.keys()] : null;
   }
   /** Recheck the expected nickname immediately before writing to respect intervening manual edits. */
   async nickname(

@@ -14,8 +14,10 @@
  *   the approved sentence (a stale form, or a saved menu this build can't read). Only the fields
  *   whose value differs from what the form showed (its `was:` companions) are kept; the others
  *   show the current menu, so a resubmit at the current revision can't quietly put back another
- *   officer's change in a field this officer never touched;
- * - invalid: 422, the same re-render with every typed value and each refused field marked.
+ *   officer's change in a field this officer never touched. An editor isn't drawn open for it,
+ *   so the officer sees the menu as it is now first (RefusedEdit.conflict);
+ * - invalid: 422, the same re-render with every typed value and each refused field marked, a
+ *   refused editor drawn open over the page with the shell inert (PostOutcome.modal).
  * A form whose hidden fields this page never renders (an unknown op, a malformed ID or revision)
  * is refused whole, as out of date, before anything is read. Any officer may make every change,
  * with no check of their own Discord permissions (owner decision, 2026-10-09); what may be added
@@ -35,16 +37,19 @@ import {
 } from "../../domain/self-roles.js";
 import { Failure } from "../../domain/values.js";
 import { guildNames } from "../mentions.js";
-import { definePage, type PageContext } from "../page.js";
+import { definePage, type PageContext, type PostOutcome } from "../page.js";
 import { noticeLocation } from "../views/forms.js";
+import { ROLE_MENU_PATH } from "../views/my-roles.js";
 import {
   ANY_NUMBER,
+  drawsEditorOpen,
   NOTICE_CATEGORY,
   noticeCategory,
   noticeFor,
   OPTION_STATES,
   type RefusedEdit,
   type RoleMenuForm,
+  type RoleMenuView,
   renderRoleMenu,
   type ShownValues,
   type SubmittedRow,
@@ -272,9 +277,9 @@ function parseEdit(form: FormData): ParsedEdit {
   }
 }
 
-/** The page's main content over `editor`, with a refused form when re-rendering one. */
-function render(context: PageContext, editor: SelfRoleEditor, refused?: RefusedEdit) {
-  return renderRoleMenu({
+/** The page's view over `editor`, with a refused form when re-rendering one. */
+function viewOf(context: PageContext, editor: SelfRoleEditor, refused?: RefusedEdit): RoleMenuView {
+  return {
     editor,
     names: guildNames(context.services.get(gatewayKey), context.guildId),
     action: context.url.pathname,
@@ -283,11 +288,25 @@ function render(context: PageContext, editor: SelfRoleEditor, refused?: RefusedE
     // Add a category's ID, minted per render: a repeated submit of one form names the same ID.
     newCategoryId: crypto.randomUUID(),
     ...(refused && { refused }),
-  });
+  };
+}
+
+/**
+ * A refused form's re-render at `status`. When it draws an editor open over the page, the layout
+ * makes the shell around it inert too, so the panel is the one thing focus can reach.
+ */
+function refusal(
+  context: PageContext,
+  editor: SelfRoleEditor,
+  refused: RefusedEdit,
+  status: 409 | 422,
+): PostOutcome {
+  const view = viewOf(context, editor, refused);
+  return { invalid: renderRoleMenu(view), status, modal: drawsEditorOpen(view) };
 }
 
 export default definePage({
-  path: "/g/:guild/role-menu",
+  path: ROLE_MENU_PATH,
   title: "Role menu",
   access: ["officer"],
   requires: [selfRolesKey, gatewayKey],
@@ -296,7 +315,9 @@ export default definePage({
   async get(context) {
     // editor() authorizes the actor again, as REQUIREMENTS.md asks ("reauthorize the current
     // actor"), and reads the database and the gateway cache only: no Discord request.
-    return render(context, await context.services.get(selfRolesKey).editor(context.actor));
+    return renderRoleMenu(
+      viewOf(context, await context.services.get(selfRolesKey).editor(context.actor)),
+    );
   },
   async post(context, form) {
     const parsed = parseEdit(form);
@@ -317,27 +338,32 @@ export default definePage({
     // Refused: the menu as it is now, with the refused form's typed values kept.
     const editor = await roles.editor(context.actor);
     if (outcome.status === "conflict")
-      return {
-        invalid: render(context, editor, {
+      return refusal(
+        context,
+        editor,
+        {
           form: parsed.form,
           // Only what this officer changed: the rest shows the menu as it is now.
           values: parsed.changed,
           // The officer has now seen the current menu, so a resubmit may deliberately replace it.
           revision: editor.revision,
           errors: [{ field: "form", message: SELF_ROLE_MESSAGES[outcome.reason] }],
-        }),
-        status: 409,
-      };
-    return {
-      invalid: render(context, editor, {
+          conflict: true,
+        },
+        409,
+      );
+    return refusal(
+      context,
+      editor,
+      {
         form: parsed.form,
         values: parsed.values,
         // Still the submitted revision: a corrected resubmit of a stale form meets the lock.
         revision: parsed.request.revision,
         errors: outcome.errors,
-      }),
-      status: 422,
-    };
+      },
+      422,
+    );
   },
   postLimit: ROLE_MENU_POSTS,
 });

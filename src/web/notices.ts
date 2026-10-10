@@ -16,7 +16,7 @@
  */
 export const THIRD_PARTY_NOTICES = `Third-party licenses
 
-TaruBot's officer dashboard and documentation site use the third-party
+TaruBot's web dashboard and documentation site use the third-party
 components below. TaruBot itself is free software under the GNU Affero General
 Public License, version 3 only (AGPL-3.0-only); its source code and license are
 at https://github.com/deconfined/tarubot.

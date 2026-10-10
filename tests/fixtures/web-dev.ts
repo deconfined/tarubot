@@ -47,11 +47,23 @@
  *   "TaruBot's role" checks warn about the same drift.
  * - --state-menu-unreadable: the saved role menu is one this build can't read (as after a rollback
  *   from a newer release), so the page offers only Reset role menu.
+ * - --state-roles=queued|blocked|failed|skipped|expired: everyone's newest role change on My roles
+ *   is in that state, so its banner shows: queued (a change waiting to be applied; with
+ *   --state-activation or --state-deploy-disabled it is parked, and the banner says role changes
+ *   are paused), blocked (TaruBot can't change roles there right now), failed, skipped (applied a
+ *   few minutes ago, with 2 choices left out) or expired (dropped after 7 days). A waiting one asks
+ *   for Minecraft instead of Valheim, so the form shows that ticked. Saving again replaces it as a
+ *   real save would; under blocked the new change blocks too.
  * The Role menu's default is a healthy menu (Pronouns and Games published, Content a draft,
  *   Retired events no longer offered) over an invented server whose roles and channels the real
  *   rule set (src/domain/self-roles.ts) judges; edits apply to an in-memory copy per server, as
  *   SelfRoles.edit would, so forms can be tried end to end. Server configuration's "Role menu"
- *   check reads the same copy.
+ *   check reads the same copy. Second FC, where nobody is an officer, has a menu of its own with a
+ *   pick-one category (Main role), whose radios the member sees with two of its roles held.
+ * My roles (2.40.0) reads the same menus. Each account holds a few invented menu roles (HELD), and
+ *   a save runs the real rules (SelfRoles.choose's), then a fake worker applies it about two
+ *   seconds later, as the roles.self job would (planSelfRoles, every role checked again), so a
+ *   reload shows "Your roles were updated". Without a review state nobody has a change on record.
  * Every state is invented, and new IDs follow the harness's own 1000…/2000… pattern (roles
  * 4000…, channels 5000…).
  *
@@ -89,6 +101,11 @@ import type {
   SyncStatusView,
 } from "../../src/application/results.js";
 import {
+  type MyRoles,
+  menuRoleNames,
+  offersRoles,
+  type RoleChoiceOutcome,
+  type RoleChoiceStatus,
   SelfRoles,
   type SelfRoleEditOutcome,
   type SelfRoleEditor,
@@ -97,16 +114,27 @@ import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import { effectsPaused } from "../../src/domain/failures.js";
 import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
-import { type Actor, authorize } from "../../src/domain/policy.js";
+import { type Actor, authorize, selfServiceAccess } from "../../src/domain/policy.js";
 import {
   applyOperation,
+  botManagesRoles,
+  CHOICE_MESSAGES,
+  changedCategories,
   checkRoles,
+  choiceHeld,
+  choiceMenu,
   EMPTY_MENU,
   holdsAdministrator,
   type MenuFieldError,
+  mergeChoice,
   menuRoleIds,
+  planSelfRoles,
+  type RoleChoicePayload,
+  removableBy,
+  roleChoicePayload,
   SELF_ROLE_MESSAGES,
   type SelfRoleMenu,
+  sameChoice,
   sameMenu,
   selfRoleChecker,
   selfRoleHealth,
@@ -145,12 +173,27 @@ export const HARNESS_GUILDS = {
   second: { id: "100000000000000002", name: "Second <FC> & Friends" },
 } as const satisfies Record<string, WebGuild>;
 
-/** The invented accounts the fake authorize page offers, and what each one shows. */
+/**
+ * The invented accounts the fake authorize page offers, and what each one shows (2.40.0: members
+ * and guests sign in to My roles). Each holds the configuration fixtures' bound roles (ROLE), and
+ * TaruBot's Administrator follows the Role menu's snapshot, so --state-menu-problems, which gives
+ * TaruBot Administrator again, refuses the member, the guest and the timed-out member (A2) while
+ * the officer still gets in.
+ */
 export const HARNESS_ACCOUNTS = {
-  /** An officer of Example FC and a plain member of Second FC: lists Example FC only. */
+  /**
+   * An officer of Example FC who holds Member in both servers: lists Example FC and Second FC
+   * (only My roles there).
+   */
   officer: { id: "200000000000000001", label: "An officer of Example FC" },
-  /** A member of both servers and an officer of neither: "no access", and no session. */
-  member: { id: "200000000000000002", label: "A member who isn't an officer" },
+  /** Holds Member in both servers and is an officer of neither: My roles in each. */
+  member: { id: "200000000000000002", label: "A member of both servers" },
+  /** Holds Guest in Example FC and isn't in Second FC: My roles there. */
+  guest: { id: "200000000000000005", label: "A guest of Example FC" },
+  /** A member of Example FC in a Discord time-out: opens My roles, but can't save there. */
+  timedOut: { id: "200000000000000007", label: "A member of Example FC in a time-out" },
+  /** In Example FC with neither Member nor Guest (a lobby newcomer): "no access", no session. */
+  lobby: { id: "200000000000000006", label: "A newcomer in Example FC's lobby" },
   /** In neither server (Discord's Unknown Member): "no access" too. */
   outsider: { id: "200000000000000003", label: "Someone in neither server" },
   /** A bot account: refused at sign-in. */
@@ -177,7 +220,13 @@ export interface HarnessStates {
   readonly menuProblems?: boolean;
   /** --state-menu-unreadable: the saved role menu is one this build can't read. */
   readonly menuUnreadable?: boolean;
+  /** --state-roles: everyone's newest role change on My roles is in this state. */
+  readonly roles?: HarnessRolesState;
 }
+
+/** --state-roles' values, each a banner My roles shows. */
+export const HARNESS_ROLES_STATES = ["queued", "blocked", "failed", "skipped", "expired"] as const;
+export type HarnessRolesState = (typeof HARNESS_ROLES_STATES)[number];
 
 /**
  * --state-hostile-names' invented names, each within Discord's length for its kind (100 for
@@ -270,31 +319,59 @@ export interface Harness {
   stop(): Promise<void>;
 }
 
-/** Each account's actor in each server, or undefined where Discord would answer Unknown Member. */
-function harnessActor(
-  guildId: string,
-  userId: string,
-  officerOf: ReadonlySet<string>,
-): Actor | undefined {
-  const officer = userId === HARNESS_ACCOUNTS.officer.id && officerOf.has(guildId);
-  const member =
-    userId === HARNESS_ACCOUNTS.officer.id ||
-    userId === HARNESS_ACCOUNTS.member.id ||
-    userId === HARNESS_ACCOUNTS.bot.id;
-  if (!member) return undefined;
-  return { guildId, userId, officer, manageRoles: false, serverManager: false };
+/**
+ * Each account's actor in each server, as gateway.actor and enrichActor would make it, or undefined
+ * where Discord would answer Unknown Member. The guest, the timed-out member and the lobby
+ * newcomer are only in Example FC (under any name --state-hostile-names gives it).
+ */
+function harnessActor(guildId: string, userId: string, states: HarnessStates): Actor | undefined {
+  const accounts = HARNESS_ACCOUNTS;
+  const everywhere: readonly string[] = [accounts.officer.id, accounts.member.id, accounts.bot.id];
+  const exampleOnly: readonly string[] = [
+    accounts.guest.id,
+    accounts.timedOut.id,
+    accounts.lobby.id,
+  ];
+  const present =
+    everywhere.includes(userId) ||
+    (exampleOnly.includes(userId) && guildId === HARNESS_GUILDS.example.id);
+  if (!present) return undefined;
+  const officer = userId === accounts.officer.id && officerGuilds(states).has(guildId);
+  const holdsMember: readonly string[] = [
+    accounts.officer.id,
+    accounts.member.id,
+    accounts.timedOut.id,
+  ];
+  const member = holdsMember.includes(userId);
+  const guest = userId === accounts.guest.id;
+  return {
+    guildId,
+    userId,
+    officer,
+    manageRoles: false,
+    serverManager: false,
+    roleIds: [
+      ...(officer ? [ROLE.officer] : []),
+      ...(member ? [ROLE.member] : []),
+      ...(guest ? [ROLE.guest] : []),
+    ],
+    member,
+    guest,
+    // The same snapshot Role menu reads, so its Administrator banner and this refusal agree.
+    botAdministrator: holdsAdministrator(harnessSnapshot(guildId, states)),
+    timedOut: userId === accounts.timedOut.id,
+  };
 }
 
 /** The resolver main.ts builds from gateway.actor and enrichActor, answered from invented data. */
 function actorResolver(states: HarnessStates) {
-  const officerOf = officerGuilds(states);
   return async (guildId: string, userId: string): Promise<Actor> => {
     if (userId === HARNESS_ACCOUNTS.bot.id)
       throw new Failure("forbidden", "Bot accounts can't use TaruBot.", 0, {
         kind: "scope",
         scope: "human",
       });
-    const actor = harnessActor(guildId, userId, officerOf);
+    const actor = harnessActor(guildId, userId, states);
     if (!actor)
       throw new Failure("forbidden", "That member isn't in this server.", 0, {
         kind: "scope",
@@ -799,6 +876,46 @@ export const HARNESS_MENU: SelfRoleMenu = {
   ],
 };
 
+/** Second FC's menu's category IDs, visibly invented. */
+export const SECOND_CATEGORY = {
+  mainRole: "00000000-0000-4000-8000-000000000201",
+  pronouns: "00000000-0000-4000-8000-000000000202",
+} as const;
+
+/**
+ * Second FC's own menu (2.40.0), where nobody is an officer, so only My roles reads it: a pick-one
+ * category, whose radios start with "No role from this category", and pronouns.
+ */
+export const SECOND_MENU: SelfRoleMenu = {
+  v: 1,
+  categories: [
+    {
+      id: SECOND_CATEGORY.mainRole,
+      name: "Main role",
+      description: "What you usually play in duties.",
+      max: 1,
+      state: "published",
+      options: [
+        { roleId: MENU_ROLE.healer, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.tank, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.dps, description: "Melee, ranged or caster.", removalOnly: false },
+      ],
+    },
+    {
+      id: SECOND_CATEGORY.pronouns,
+      name: "Pronouns",
+      description: "",
+      max: null,
+      state: "published",
+      options: [
+        { roleId: MENU_ROLE.heHim, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.sheHer, description: "", removalOnly: false },
+        { roleId: MENU_ROLE.theyThem, description: "", removalOnly: false },
+      ],
+    },
+  ],
+};
+
 const P = PermissionFlagsBits;
 /** A typical @everyone: view, post, react, embed, attach, read history, join and speak in voice. */
 const EVERYONE_BITS =
@@ -958,14 +1075,171 @@ const HARNESS_MENU_SETTINGS: SelfRoleSettings = selfRoleSettings(
   [],
 );
 
-/** One server's saved menu in `menus`, starting from the review state's menu. */
+/**
+ * One server's saved menu in `menus`, starting from the review state's menu: the officer's servers
+ * have HARNESS_MENU, and Second FC, where nobody is an officer, SECOND_MENU.
+ */
 function savedMenu(guildId: string, states: HarnessStates, menus: HarnessMenus): HarnessMenu {
   let entry = menus.get(guildId);
   if (!entry) {
-    entry = { menu: states.menuUnreadable ? null : HARNESS_MENU, revision: MENU_REVISION };
+    const menu = officerGuilds(states).has(guildId) ? HARNESS_MENU : SECOND_MENU;
+    entry = { menu: states.menuUnreadable ? null : menu, revision: MENU_REVISION };
     menus.set(guildId, entry);
   }
   return entry;
+}
+
+// ---------------------------------------------------------------------------------------------
+// My roles (2.40.0): the menu roles each account holds, and each person's newest change
+
+/**
+ * The invented menu roles each account holds in Discord, by server ID then user ID. Each shows
+ * something: in Example FC the member holds a role no longer offered (Ask my pronouns) and one
+ * in a category no longer offered (Halloween 2025), and the officer one in the Content draft; in
+ * Second FC the member holds two roles of the pick-one Main role (Dyno leftovers).
+ */
+export const HELD: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  [HARNESS_GUILDS.example.id]: {
+    [HARNESS_ACCOUNTS.officer.id]: [MENU_ROLE.theyThem, MENU_ROLE.valheim, MENU_ROLE.savage],
+    [HARNESS_ACCOUNTS.member.id]: [
+      MENU_ROLE.sheHer,
+      MENU_ROLE.askMe,
+      MENU_ROLE.valheim,
+      MENU_ROLE.halloween,
+    ],
+    [HARNESS_ACCOUNTS.guest.id]: [MENU_ROLE.heHim, MENU_ROLE.minecraft],
+    [HARNESS_ACCOUNTS.timedOut.id]: [MENU_ROLE.sheHer, MENU_ROLE.valheim],
+  },
+  [HARNESS_GUILDS.second.id]: {
+    [HARNESS_ACCOUNTS.officer.id]: [MENU_ROLE.heHim],
+    [HARNESS_ACCOUNTS.member.id]: [MENU_ROLE.healer, MENU_ROLE.tank, MENU_ROLE.sheHer],
+  },
+};
+
+/** A person's newest roles.self job, as the harness keeps it (the jobs row's parts My roles reads). */
+export interface HarnessJob {
+  status: "queued" | "blocked" | "disabled" | "succeeded" | "failed";
+  /** The change's role IDs, only while it waits: migration 012's trigger clears them at the end. */
+  payload: RoleChoicePayload | null;
+  /** Counts and fixed reasons only, as RoleChoiceJob.apply and the expiry write them. */
+  result:
+    | {
+        readonly status: "applied";
+        readonly added: number;
+        readonly removed: number;
+        readonly skipped: number;
+      }
+    | { readonly skipped: string }
+    | null;
+  /** The latest save and the end, on the harness clock (milliseconds). */
+  savedAt: number;
+  completedAt: number | null;
+  /** A --state-roles sample, which the fake worker leaves as it is. */
+  readonly sample: boolean;
+}
+
+/** My roles' side of the harness: who holds which menu roles now, and each person's newest change. */
+export interface HarnessPeople {
+  /** Menu roles held, by `<guild>:<user>`; a person not in it starts from HELD. */
+  readonly held: Map<string, Set<string>>;
+  /** Each person's newest change, by `<guild>:<user>`. */
+  readonly jobs: Map<string, HarnessJob>;
+  /** The harness clock, in milliseconds. */
+  readonly now: () => number;
+}
+
+/** A fresh HarnessPeople on `now` (the wall clock by default). */
+export const harnessPeople = (now: () => number = Date.now): HarnessPeople => ({
+  held: new Map(),
+  jobs: new Map(),
+  now,
+});
+
+/** How long after a save the fake worker applies it: long enough to see "Saved…" first. */
+export const HARNESS_APPLY_MS = 2_000;
+
+/** A finished change still counts as recent this long (SelfRoles.view's 10 minutes). */
+const RECENT_MS = 10 * 60_000;
+
+/** The states a change waits in (SelfRoles' WAITING_STATES; nothing runs here, so no "running"). */
+const WAITING: ReadonlySet<HarnessJob["status"]> = new Set(["queued", "blocked", "disabled"]);
+
+/**
+ * --state-roles' sample change for one person: a waiting change that asks for Minecraft instead of
+ * Valheim (parked while Discord changes are paused, as the dispatcher's effects gate parks it), or
+ * a finished one as each end writes it.
+ */
+function sampleJob(state: HarnessRolesState, states: HarnessStates, now: number): HarnessJob {
+  const savedAt = now - 5 * 60_000;
+  const waiting: RoleChoicePayload = {
+    chosen: [MENU_ROLE.minecraft],
+    offered: [MENU_ROLE.valheim, MENU_ROLE.minecraft],
+    savedAt: new Date(savedAt).toISOString(),
+  };
+  const job = { savedAt, completedAt: null, result: null, payload: null, sample: true };
+  switch (state) {
+    case "queued":
+      return {
+        ...job,
+        status: harnessEffects(states) === "live" ? "queued" : "disabled",
+        payload: waiting,
+      };
+    case "blocked":
+      return { ...job, status: "blocked", payload: waiting };
+    case "failed":
+      return { ...job, status: "failed", completedAt: now - 20 * 60_000 };
+    case "skipped":
+      return {
+        ...job,
+        status: "succeeded",
+        completedAt: now - 2 * 60_000,
+        result: { status: "applied", added: 1, removed: 0, skipped: 2 },
+      };
+    case "expired":
+      return {
+        ...job,
+        savedAt: now - 8 * 24 * 60 * 60_000,
+        status: "succeeded",
+        completedAt: now - 24 * 60 * 60_000,
+        result: { skipped: "expired" },
+      };
+  }
+}
+
+/** The banner state SelfRoles.view derives from a job row (its choiceStatus). */
+function jobStatus(job: HarnessJob | undefined, now: number): RoleChoiceStatus | null {
+  if (!job) return null;
+  const recent = job.completedAt !== null && now - job.completedAt < RECENT_MS;
+  const completedAt = job.completedAt === null ? null : new Date(job.completedAt);
+  const waiting = { skipped: 0, changed: false, recent: false, completedAt: null };
+  switch (job.status) {
+    case "queued":
+      return { state: "waiting", ...waiting };
+    case "disabled":
+      return { state: "paused", ...waiting };
+    case "blocked":
+      return { state: "blocked", ...waiting };
+    case "failed":
+      return { state: "failed", skipped: 0, changed: false, recent, completedAt };
+    case "succeeded": {
+      const result = job.result;
+      if (result && "status" in result)
+        return {
+          state: "applied",
+          skipped: result.skipped,
+          changed: result.added + result.removed > 0,
+          recent,
+          completedAt,
+        };
+      return {
+        state: result?.skipped === "expired" ? "expired" : "dropped",
+        skipped: 0,
+        changed: false,
+        recent,
+        completedAt,
+      };
+    }
+  }
 }
 
 /**
@@ -975,8 +1249,20 @@ function savedMenu(guildId: string, states: HarnessStates, menus: HarnessMenus):
  * unreadable menu refuses all but a reset, the equal-state rule answers before the revision check,
  * a reset of a menu that reads fine is a conflict, and an add passes the rule set and the channel
  * confirmation. Nothing is audited.
+ *
+ * view() and choose() (2.40.0) over `people`: the real domain rules in the real order (access, a
+ * time-out, Discord changes paused, changedCategories, the merge into a waiting change and the
+ * equal-state rules), with the person's held menu roles from `people` (HELD at first) in place of
+ * Discord. A saved change waits HARNESS_APPLY_MS on `people.now`, then the next read applies it as
+ * the roles.self job would: planSelfRoles over the menu as it is then, each role checked again on
+ * the snapshot, results in counts. Under --state-roles=blocked it blocks instead, and while
+ * Discord changes are paused it parks.
  */
-export function harnessSelfRoles(states: HarnessStates = {}, menus: HarnessMenus = new Map()) {
+export function harnessSelfRoles(
+  states: HarnessStates = {},
+  menus: HarnessMenus = new Map(),
+  people: HarnessPeople = harnessPeople(),
+) {
   const roles: unknown = Object.create(SelfRoles.prototype);
   if (!(roles instanceof SelfRoles)) throw new Error("Invalid self-roles fake");
   const settings = HARNESS_MENU_SETTINGS;
@@ -1035,17 +1321,158 @@ export function harnessSelfRoles(states: HarnessStates = {}, menus: HarnessMenus
     entry.revision += 1n;
     return { status: "saved", revision: entry.revision };
   };
+
+  const key = (guildId: string, userId: string): string => `${guildId}:${userId}`;
+  /** The menu roles a person holds now, starting from HELD. */
+  const heldBy = (guildId: string, userId: string): Set<string> => {
+    const at = key(guildId, userId);
+    let held = people.held.get(at);
+    if (!held) {
+      held = new Set(HELD[guildId]?.[userId] ?? []);
+      people.held.set(at, held);
+    }
+    return held;
+  };
+  /** The roles.self job for a change due now: RoleChoiceJob.apply's plan, checks and counts. */
+  const work = (guildId: string, userId: string, job: HarnessJob): void => {
+    if (harnessEffects(states) !== "live") {
+      job.status = "disabled";
+      return;
+    }
+    if (states.roles === "blocked") {
+      job.status = "blocked";
+      return;
+    }
+    const held = heldBy(guildId, userId);
+    const bound = Object.values(settings.boundRoles).filter((id): id is string => id !== null);
+    const plan = job.payload
+      ? planSelfRoles(
+          job.payload,
+          saved(guildId).menu,
+          [...held],
+          new Set([...bound, ...settings.retiredRoles]),
+        )
+      : { add: [], remove: [], skipped: 0 };
+    const snapshot = harnessSnapshot(guildId, states);
+    // As RoleChoiceJob.apply: without Manage Roles the whole change waits as blocked.
+    if ((plan.add.length > 0 || plan.remove.length > 0) && !botManagesRoles(snapshot)) {
+      job.status = "blocked";
+      return;
+    }
+    const check = selfRoleChecker(snapshot, settings);
+    const add = plan.add.filter((roleId) => check(roleId).problems.length === 0);
+    const remove = plan.remove.filter((roleId) => removableBy(check(roleId)));
+    for (const roleId of add) held.add(roleId);
+    for (const roleId of remove) held.delete(roleId);
+    job.status = "succeeded";
+    job.payload = null;
+    job.completedAt = people.now();
+    job.result = {
+      status: "applied",
+      added: add.length,
+      removed: remove.length,
+      skipped: plan.skipped + plan.add.length - add.length + plan.remove.length - remove.length,
+    };
+  };
+  /** The person's newest change, after the fake worker had its turn (and the sample, if any). */
+  const newest = (guildId: string, userId: string): HarnessJob | undefined => {
+    const at = key(guildId, userId);
+    let job = people.jobs.get(at);
+    if (!job && states.roles) {
+      job = sampleJob(states.roles, states, people.now());
+      people.jobs.set(at, job);
+    }
+    if (
+      job &&
+      !job.sample &&
+      job.status === "queued" &&
+      people.now() >= job.savedAt + HARNESS_APPLY_MS
+    )
+      work(guildId, userId, job);
+    return job;
+  };
+  /** SelfRoles' refusal for anyone without self-service access. */
+  const admitted = (actor: Actor): void => {
+    authorize(actor, actor.guildId, "user");
+    if (!selfServiceAccess(actor)) throw new Failure("forbidden", CHOICE_MESSAGES.noAccess);
+  };
+  roles.view = async (actor: Actor): Promise<MyRoles> => {
+    admitted(actor);
+    const { menu } = saved(actor.guildId);
+    const snapshot = harnessSnapshot(actor.guildId, states);
+    const job = newest(actor.guildId, actor.userId);
+    const effectsMode = harnessEffects(states);
+    const timedOut = actor.timedOut === true;
+    return {
+      guildId: actor.guildId,
+      configured: true,
+      unreadableMenu: menu === null,
+      available: true,
+      offers: offersRoles(menu),
+      categories: menu
+        ? choiceMenu(menu, {
+            held: [...heldBy(actor.guildId, actor.userId)],
+            waiting: job && WAITING.has(job.status) ? job.payload : null,
+            check: selfRoleChecker(snapshot, settings),
+            officer: actor.officer,
+          })
+        : [],
+      status: jobStatus(job, people.now()),
+      effectsMode,
+      timedOut,
+      canSave: effectsMode === "live" && !timedOut,
+      administrator: actor.officer ? holdsAdministrator(snapshot) : null,
+      roleNames: menuRoleNames(menu, snapshot),
+    };
+  };
+  roles.choose = async (actor, request): Promise<RoleChoiceOutcome> => {
+    admitted(actor);
+    if (actor.timedOut === true) throw new Failure("forbidden", CHOICE_MESSAGES.timedOut);
+    if (harnessEffects(states) !== "live") throw new Failure("disabled", CHOICE_MESSAGES.paused);
+    const { menu } = saved(actor.guildId);
+    const held = [...heldBy(actor.guildId, actor.userId)];
+    const change = changedCategories(
+      menu ?? EMPTY_MENU,
+      held,
+      selfRoleChecker(harnessSnapshot(actor.guildId, states), settings),
+      request.categories,
+    );
+    if (change.kind === "conflict") return { status: "conflict" };
+    if (change.kind === "invalid") return { status: "invalid", errors: change.errors };
+    if (change.choice.offered.length === 0) return { status: "unchanged" };
+    const job = newest(actor.guildId, actor.userId);
+    const row = job && WAITING.has(job.status) ? job : undefined;
+    const waiting = row?.payload ?? null;
+    const merged = mergeChoice(waiting, change.choice, menu);
+    if (waiting && sameChoice(merged, waiting)) return { status: "saved" };
+    if (!row && choiceHeld(merged, held)) return { status: "unchanged" };
+    const now = people.now();
+    people.jobs.set(key(actor.guildId, actor.userId), {
+      status: "queued",
+      payload: roleChoicePayload.parse({
+        chosen: merged.chosen,
+        offered: merged.offered,
+        savedAt: new Date(now).toISOString(),
+      }),
+      result: null,
+      savedAt: now,
+      completedAt: null,
+      sample: false,
+    });
+    return { status: "saved" };
+  };
   return roles;
 }
 
 /**
  * The dashboard's services, answered with the existing invented configuration fixtures, and the
- * Role menu's in-memory SelfRoles.
+ * in-memory SelfRoles of Role menu and My roles.
  */
 function harnessServices(states: HarnessStates): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
-  // One saved menu per server for Role menu and the health check on Server configuration.
+  // One saved menu per server for Role menu, My roles and the health check on Server
+  // configuration.
   const menus: HarnessMenus = new Map();
   app.syncStatus = async () => syncView(states);
   app.validate = async (actor) => harnessReport(actor.guildId, states, menus);
@@ -1084,7 +1511,7 @@ function harnessServices(states: HarnessStates): Services {
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway(states))
-    .provide(selfRolesKey, harnessSelfRoles(states, menus));
+    .provide(selfRolesKey, harnessSelfRoles(states, menus, harnessPeople()));
 }
 
 /**
@@ -1227,6 +1654,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       "state-hostile-names": { type: "boolean", default: false },
       "state-menu-problems": { type: "boolean", default: false },
       "state-menu-unreadable": { type: "boolean", default: false },
+      "state-roles": { type: "string" },
     },
     allowPositionals: false,
   });
@@ -1235,6 +1663,10 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
   const checks = values["state-checks"];
   if (checks !== undefined && checks !== "warn" && checks !== "fail")
     throw new Error("Pass --state-checks=warn or --state-checks=fail.");
+  const roles = values["state-roles"];
+  const rolesState = HARNESS_ROLES_STATES.find((state) => state === roles);
+  if (roles !== undefined && rolesState === undefined)
+    throw new Error("Pass --state-roles=queued, blocked, failed, skipped or expired.");
   const tls =
     values.cert && values.key
       ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
@@ -1253,6 +1685,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       ...(values["state-hostile-names"] && { hostileNames: true }),
       ...(values["state-menu-problems"] && { menuProblems: true }),
       ...(values["state-menu-unreadable"] && { menuUnreadable: true }),
+      ...(rolesState && { roles: rolesState }),
     },
   };
 }
@@ -1274,6 +1707,7 @@ if (import.meta.main) {
     hostileNames: "--state-hostile-names",
     menuProblems: "--state-menu-problems",
     menuUnreadable: "--state-menu-unreadable",
+    roles: "--state-roles",
   } as const satisfies Record<keyof HarnessStates, string>;
   const states = Object.entries(options.states ?? {}).map(([state, value]) => {
     const flag = flags[state as keyof HarnessStates];

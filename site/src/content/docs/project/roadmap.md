@@ -13,7 +13,7 @@ TaruBot's major versions are planned outcomes, not release numbers: their featur
 | **v5: Planned** | ModMail | Bring ModMail functionality into TaruBot. |
 | **v6: Planned** | Expanded Lodestone profiles | Add richer Lodestone profile features, comparable to Kupo Bot or Ser Aymeric. |
 
-The officers' role menu, released in 2.39.0, is the first officer action on the web; others come later, and their version isn't decided yet.
+Self-service roles shipped in two releases: the officers' role menu in 2.39.0, the first officer action on the web, and members' and guests' My roles page in 2.40.0, the first member action. Other officer actions come later, and their version isn't decided yet.
 
 **Sequence:** stable bot with an officer view → member self-service → private support → expanded character features.
 

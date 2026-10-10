@@ -860,6 +860,23 @@ export function holdsAdministrator(guild: VisibilityGuild): boolean {
   );
 }
 
+/**
+ * Whether TaruBot holds Manage Roles server-wide in the snapshot (through any of its roles or
+ * @everyone, Administrator included), as Discord judges any role write. Without it every role
+ * fails with `bot_cannot_manage`, so it can be neither given nor taken away.
+ */
+export function botManagesRoles(guild: VisibilityGuild): boolean {
+  return (guildPermissions(guild.guildId, guild.roles, guild.bot.roles) & P.ManageRoles) !== 0n;
+}
+
+/**
+ * The role-free diagnostic of a self-service role write TaruBot can't make anywhere in the server
+ * because it lacks Manage Roles: a `blocked` Failure's message, from the roles.self job's own check
+ * and from the gateway's 50013 re-read alike, so the work waits (and retries) as blocked.
+ */
+export const NO_MANAGE_ROLES =
+  "TaruBot needs Manage Roles to change roles in this server. Check its role with /config validate.";
+
 /** "<#a> (Send Messages), <#b> (…) and 2 more channels". */
 function channelList(entries: readonly { id: string; bits?: bigint }[]): string {
   const shown = entries
@@ -950,7 +967,7 @@ export function selfRoleChecker(
   const rank = new Map(ascendingRoles(guild.roles).map((role, at) => [role.id, at]));
   // TaruBot's real roles, as Discord's hierarchy and validateRole judge them today.
   const botTop = Math.max(rank.get(g) ?? -1, ...guild.bot.roles.map((id) => rank.get(id) ?? -1));
-  const botManages = (guildPermissions(g, guild.roles, guild.bot.roles) & P.ManageRoles) !== 0n;
+  const botManages = botManagesRoles(guild);
   const bound = settings.boundRoles;
   const accessRoles = new Map(
     (Object.keys(ACCESS_LABELS) as (keyof typeof ACCESS_LABELS)[]).flatMap((key) => {
@@ -1274,22 +1291,6 @@ export function removable(
   return removableBy(selfRoleChecker(guild, settings)(roleId));
 }
 
-/**
- * Listed menu roles that open at least one channel. From 2.40.0 reconciliation removes these,
- * never cosmetic ones, from people who hold no access role (owner decision, 2026-10-09), so an
- * opt-in channel stays behind Member or Guest as well as the role.
- */
-export function channelOpeningRoles(
-  menu: SelfRoleMenu,
-  guild: VisibilityGuild,
-  settings: SelfRoleSettings,
-): string[] {
-  const check = selfRoleChecker(guild, settings);
-  return menuRoleIds(menu).filter(
-    (roleId) => listed(menu, roleId) && check(roleId).opens.length > 0,
-  );
-}
-
 /** The "Role menu" health check (/config validate, its Re-check and the Configuration page). */
 export interface SelfRoleHealth {
   /** Roles in published or Not offered categories: what members and guests see. */
@@ -1327,6 +1328,498 @@ export function selfRoleHealth(
     unreadableMenu: false,
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Members' choices (2.40.0): My roles and the roles.self job
+//
+// A member's save is a desired state over the roles of the categories they changed, never the
+// whole menu, so a stale tab, Dyno or an officer's hand edit is never undone in a category the
+// member didn't touch. "Changed" compares what came back with what the form showed ticked, not
+// with what the member holds now: someone else's change since the page rendered is left alone
+// unless the member changed that category too. The roles.self job then re-derives what it may do
+// from the menu as it is when it runs, and checks every role again just before the write.
+
+/** A waiting change is closed this long after the member's last save (owner decision Q4 A). */
+export const ROLE_CHOICE_EXPIRY_DAYS = 7;
+
+/** The dedupe key of a member's role choices in a server: saves coalesce into one active job. */
+export const roleChoiceKey = (guildId: string, userId: string): string =>
+  `self-roles:${guildId}:${userId}`;
+
+/** A desired state over `offered`: the roles in `chosen` wanted, every other one not. */
+export interface RoleChoice {
+  readonly chosen: readonly string[];
+  readonly offered: readonly string[];
+}
+
+/** Roles as a set; every comparison here ignores order and repeats. */
+const setOf = (ids: readonly string[]): Set<string> => new Set(ids);
+const sameSet = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean =>
+  left.size === right.size && [...left].every((id) => right.has(id));
+const unique = (ids: readonly string[]): boolean => new Set(ids).size === ids.length;
+
+/**
+ * A roles.self job's payload (payload_version 1). `offered` is what the member could change in the
+ * categories they changed, `chosen` the part of it they want, and `savedAt` the database clock at
+ * their latest save, which the 7-day expiry reads (created_at stays at the first save, since
+ * enqueue()'s conflict update never moves it). Role IDs only, never names (D19), and only while
+ * the job waits: migration 012's trigger clears the payload whenever the job ends.
+ */
+export const roleChoicePayload = z
+  .strictObject({
+    chosen: z.array(idSchema).max(MENU_LIMITS.options),
+    offered: z.array(idSchema).max(MENU_LIMITS.options),
+    savedAt: z.iso.datetime({ offset: true }),
+  })
+  .refine(
+    (payload) =>
+      unique(payload.chosen) &&
+      unique(payload.offered) &&
+      payload.chosen.every((roleId) => payload.offered.includes(roleId)),
+  );
+export type RoleChoicePayload = z.infer<typeof roleChoicePayload>;
+
+/** A stored payload, or null when it isn't one (the trigger's cleared `{}` among them). */
+export function readRoleChoice(value: unknown): RoleChoicePayload | null {
+  const parsed = roleChoicePayload.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** One role's verdict over the snapshot the caller read (selfRoleChecker's). */
+export type RoleChecker = (roleId: string) => RoleCheck;
+
+/**
+ * Whether the person may tick or untick a role on My roles now, which the page and the save share:
+ * it is offered and passes every rule now, or they hold it, it is listed, and it can still be taken
+ * away (removableBy). Without TaruBot's view of the server (`check` null) nothing is changeable.
+ */
+export function changeable(
+  menu: SelfRoleMenu,
+  roleId: string,
+  held: boolean,
+  check: RoleChecker | null,
+): boolean {
+  if (!check) return false;
+  const verdict = check(roleId);
+  if (addable(menu, roleId) && verdict.problems.length === 0) return true;
+  return held && listed(menu, roleId) && removableBy(verdict);
+}
+
+/** A role as My roles shows it to one person. */
+export interface ChoiceOption {
+  readonly roleId: string;
+  readonly description: string;
+  /** They hold it in Discord now. */
+  readonly held: boolean;
+  /** Ticked when the form renders: held, overlaid with their waiting change. */
+  readonly ticked: boolean;
+  /**
+   * An input they may tick or untick (changeable). False: a held role shown as a line of text
+   * ("You have @X; it can't be changed here right now."), or any row of a draft category.
+   */
+  readonly changeable: boolean;
+  /** No longer offered (Not offered, or Stop offering): holders may remove it; nobody may add it. */
+  readonly notOffered: boolean;
+  /**
+   * It may be added now: offered (addable) and passing every rule. A held, changeable row that
+   * isn't (one that failed a rule since, say moved above a moderation role) can still be unticked,
+   * but not picked again once it's gone, so the page warns before that one-way removal. False for
+   * every row of a draft, and without TaruBot's view of the server.
+   */
+  readonly addable: boolean;
+}
+
+/** A category as My roles shows it to one person. */
+export interface ChoiceCategory {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly max: number | null;
+  /** A draft reaches officers only, as a disabled preview that is never submitted. */
+  readonly state: CategoryState;
+  /**
+   * "one": radios starting with "No role from this category" (a published pick-one category);
+   * "many": checkboxes (everything else, Stop offering categories included).
+   */
+  readonly input: "one" | "many";
+  /** The rows to show, in menu order: changeable roles, and held ones as text. Never empty. */
+  readonly options: readonly ChoiceOption[];
+  /**
+   * How many changeable roles are ticked. Over 1 in a pick-one category (Dyno leftovers), no
+   * radio is preselected and the page says to pick one; over `max`, the page says the limit was
+   * lowered. Either way the category counts as unchanged until the person changes it.
+   */
+  readonly ticked: number;
+}
+
+/** What My roles needs to know about one person, beyond the menu. */
+export interface ChoiceContext {
+  /** The roles they hold in Discord now. */
+  readonly held: readonly string[];
+  /** Their newest waiting change, if any: its `offered` roles show as it asks. */
+  readonly waiting: RoleChoice | null;
+  /** The rule set over TaruBot's view of the server; null when that view can't be read. */
+  readonly check: RoleChecker | null;
+  /** Officers also see drafts, disabled, with their own roles ticked (owner decision Q6). */
+  readonly officer: boolean;
+}
+
+/**
+ * The menu as one person sees it on My roles, in menu order:
+ * - a published category, with each role they may change and each listed role they hold but
+ *   can't change (as text); an option no longer offered shows only to its holders;
+ * - a Stop offering category, only when they can remove one of its roles;
+ * - a draft, for officers only, with every option, nothing changeable.
+ * A category with nothing to show is left out. Tick marks follow the waiting change, so a second
+ * save builds on the first instead of undoing it.
+ */
+export function choiceMenu(menu: SelfRoleMenu, context: ChoiceContext): ChoiceCategory[] {
+  const holds = setOf(context.held);
+  const waitingOn = setOf(context.waiting?.offered ?? []);
+  const wanted = setOf(context.waiting?.chosen ?? []);
+  const categories: ChoiceCategory[] = [];
+  for (const category of menu.categories) {
+    if (category.state === "draft" && !context.officer) continue;
+    const options: ChoiceOption[] = [];
+    for (const option of category.options) {
+      const held = holds.has(option.roleId);
+      const notOffered = category.state === "removal_only" || option.removalOnly;
+      const can =
+        category.state !== "draft" && changeable(menu, option.roleId, held, context.check);
+      // A draft shows every option; otherwise a role shows when it can be changed, or when it is
+      // held (as text). A role neither held nor addable now (it fails a rule) isn't shown.
+      if (category.state !== "draft" && !can && !held) continue;
+      const ticked = can && waitingOn.has(option.roleId) ? wanted.has(option.roleId) : held;
+      options.push({
+        roleId: option.roleId,
+        description: option.description,
+        held,
+        ticked,
+        changeable: can,
+        notOffered,
+        addable:
+          context.check !== null &&
+          addable(menu, option.roleId) &&
+          context.check(option.roleId).problems.length === 0,
+      });
+    }
+    if (options.length === 0) continue;
+    if (category.state === "removal_only" && !options.some((option) => option.changeable)) continue;
+    categories.push({
+      id: category.id,
+      name: category.name,
+      description: category.description,
+      max: category.max,
+      state: category.state,
+      input: category.state === "published" && category.max === 1 ? "one" : "many",
+      options,
+      ticked: options.filter((option) => option.changeable && option.ticked).length,
+    });
+  }
+  return categories;
+}
+
+/**
+ * One category of a My roles submission. The form renders `seen` from what it showed ticked and
+ * `picked` from what came back, both as values: a role ID, or "" for the "No role from this
+ * category" radio. A pick-one category in the multiple-roles odd state shows nothing ticked, so
+ * its `seen` is empty, and so is `picked` when the person leaves it alone (a browser sends nothing
+ * for a radio group with nothing selected).
+ */
+export interface CategoryChoice {
+  readonly categoryId: string;
+  readonly seen: readonly string[];
+  readonly picked: readonly string[];
+}
+
+/**
+ * A refused category: `roleId` when one role is the problem, `max` when more were picked than the
+ * category allows (CHOICE_MESSAGES.max), so the page's error summary can name the category with
+ * the limit. Messages never quote typed text.
+ */
+export interface ChoiceError {
+  readonly categoryId: string;
+  readonly roleId?: string;
+  readonly max?: number;
+  readonly message: string;
+}
+
+/**
+ * What a submission asks:
+ * - choice: the desired state over the roles of the categories the person changed (both empty
+ *   when they changed nothing);
+ * - conflict (409): the form names a role, or a "None", the menu no longer lets this person pick
+ *   there (officers changed the menu, or the form was tampered with): re-render with the current
+ *   state;
+ * - invalid (422): too many picked in a changed category, or a role being added that fails a rule
+ *   now.
+ */
+export type ChoiceChange =
+  | { readonly kind: "choice"; readonly choice: RoleChoice }
+  | { readonly kind: "conflict" }
+  | { readonly kind: "invalid"; readonly errors: readonly ChoiceError[] };
+
+/**
+ * Which categories a submission changes, and to what (see ChoiceChange). Per category:
+ * - every picked role must be one of the category's options that the menu offers, or that the
+ *   person holds and the menu lists; "" only in a pick-one category. Anything else is a conflict;
+ * - a held role that can't be changed now is ignored: keeping it ticked changes nothing;
+ * - the category is unchanged when what came back equals what the form showed ticked, both taken
+ *   over the roles the person may change now (and "" in a pick-one category);
+ * - otherwise it changed: a role being added must pass every rule now, and a published category
+ *   allows at most `max` (a Stop offering category only ever loses roles, so it has no limit
+ *   here). The limit counts what they picked plus the listed roles they hold there that can't be
+ *   changed now (above TaruBot, say): those stay whatever the save says, so without them a
+ *   pick-one category could end with two. `offered` gains every role the person may change in
+ *   it, `chosen` what they picked.
+ * An unchanged category is never refused for its limit, as for a lowered one: it is left as it
+ * is. `held` is what the person holds in Discord now, and `check` the rule set over the snapshot
+ * the save reads (a save without one is refused before this runs).
+ */
+export function changedCategories(
+  menu: SelfRoleMenu,
+  held: readonly string[],
+  check: RoleChecker,
+  submitted: readonly CategoryChoice[],
+): ChoiceChange {
+  const holds = setOf(held);
+  const ids = submitted.map((entry) => entry.categoryId);
+  if (!unique(ids)) return { kind: "conflict" };
+  const offered: string[] = [];
+  const chosen: string[] = [];
+  const errors: ChoiceError[] = [];
+  for (const entry of submitted) {
+    const category = menu.categories.find((candidate) => candidate.id === entry.categoryId);
+    const pickOne = category?.state === "published" && category.max === 1;
+    const roles = (category?.options ?? []).map((option) => option.roleId);
+    // What the person may pick here at all, and what they may change now (the page's inputs).
+    const accepted = setOf(
+      roles.filter((id) => addable(menu, id) || (holds.has(id) && listed(menu, id))),
+    );
+    const can = setOf(roles.filter((id) => changeable(menu, id, holds.has(id), check)));
+    if (pickOne) can.add("");
+    for (const value of entry.picked)
+      if (value === "" ? !pickOne : !accepted.has(value)) return { kind: "conflict" };
+    // Roles being added that fail a rule now: kept in the comparison, so they count as a change.
+    const failing = [...setOf(entry.picked)].filter(
+      (id) => id !== "" && !can.has(id) && !holds.has(id),
+    );
+    const now = new Set([...entry.picked.filter((value) => can.has(value)), ...failing]);
+    const before = setOf(entry.seen.filter((value) => can.has(value)));
+    if (!category || sameSet(now, before)) continue;
+    for (const roleId of failing)
+      errors.push({
+        categoryId: category.id,
+        roleId,
+        message: CHOICE_MESSAGES.unavailableRole(roleId),
+      });
+    const picks = roles.filter((id) => now.has(id) && can.has(id));
+    // Held, listed roles the person can't change now: they keep them, so they count too.
+    const fixed = roles.filter((id) => holds.has(id) && listed(menu, id) && !can.has(id));
+    if (category.state === "published" && category.max !== null) {
+      if (picks.length > category.max)
+        errors.push({
+          categoryId: category.id,
+          max: category.max,
+          message: CHOICE_MESSAGES.max(category.max),
+        });
+      else if (picks.length + fixed.length > category.max)
+        errors.push({
+          categoryId: category.id,
+          message: CHOICE_MESSAGES.fixedMax(fixed, category.max),
+        });
+    }
+    offered.push(...roles.filter((id) => can.has(id)));
+    chosen.push(...picks);
+  }
+  if (errors.length > 0) return { kind: "invalid", errors };
+  return { kind: "choice", choice: { chosen, offered } };
+}
+
+/**
+ * A new save merged into the change still waiting, category by category: every category the new
+ * save changed replaces everything the waiting change asked in that category, and the rest of it
+ * stands, so a second save builds on the first. The changed categories are those of `next.offered`
+ * (changedCategories puts every changeable role of a changed category there, so none is missed).
+ *
+ * Replacing by category, not by role, matters when a role the waiting change names has become
+ * unchangeable since (Stop offering, or it now fails a rule): the page hid it, or showed it as text,
+ * so the person couldn't untick it, and keeping it beside their new pick could put two picks in a
+ * pick-one category, which the job then skips whole. A category the form showed but the person
+ * left alone isn't in `next.offered`: its rows were ticked from the waiting change, so what that
+ * change asked there stands. Roles the waiting change named that are no longer on the menu at all
+ * are dropped (the job would skip them anyway), which also keeps a merged payload within the
+ * menu's 50-role cap.
+ */
+export function mergeChoice(
+  waiting: RoleChoice | null,
+  next: RoleChoice,
+  menu: SelfRoleMenu | null,
+): RoleChoice {
+  const categoryOf = (roleId: string): string | undefined =>
+    menu ? findOption(menu, roleId)?.category.id : undefined;
+  const changed = new Set(next.offered.map(categoryOf));
+  const kept = (waiting?.offered ?? []).filter((id) => {
+    const category = categoryOf(id);
+    return category !== undefined && !changed.has(category);
+  });
+  const keep = setOf(kept);
+  return {
+    chosen: [...(waiting?.chosen ?? []).filter((id) => keep.has(id)), ...next.chosen],
+    offered: [...kept, ...next.offered],
+  };
+}
+
+/** The same desired state (the equal-state rule for a repeated save). */
+export const sameChoice = (left: RoleChoice, right: RoleChoice): boolean =>
+  sameSet(setOf(left.chosen), setOf(right.chosen)) &&
+  sameSet(setOf(left.offered), setOf(right.offered));
+
+/** The person already holds exactly what the choice asks over its roles: nothing to do. */
+export function choiceHeld(choice: RoleChoice, held: readonly string[]): boolean {
+  const holds = setOf(held);
+  const wanted = setOf(choice.chosen);
+  return choice.offered.every((roleId) => wanted.has(roleId) === holds.has(roleId));
+}
+
+/** What the roles.self job will do, before its per-role checks. Counts only ever leave it. */
+export interface SelfRolePlan {
+  readonly add: readonly string[];
+  readonly remove: readonly string[];
+  /**
+   * Roles in `offered` whose wanted state differs from the held one that this plan leaves alone:
+   * no longer listed, no longer offered (for an add), in a category now over its limit, or an
+   * access role. The job adds its own per-role refusals, so the member is never told "updated"
+   * when a choice was dropped.
+   */
+  readonly skipped: number;
+}
+
+/**
+ * The roles.self job's plan from the choice, the menu as it is now (null: unreadable, so nothing is
+ * listed and nothing changes) and the member's roles now:
+ * - only roles in `offered` that the menu lists now are touched, so a role added to the menu after
+ *   the save, a draft and a category the member didn't change are never touched;
+ * - a wanted role is added only while it is offered; an unwanted held role is removed while it is
+ *   listed (Stop offering keeps removal);
+ * - a published category whose roles would exceed its limit is skipped whole: the chosen roles in
+ *   it, plus the roles the member holds there that the choice doesn't cover (outside `offered`,
+ *   so this job never touches them: ones that couldn't be changed at the save, as changedCategories
+ *   counts them). That is conservative for a role officers added to the category after the save,
+ *   which also counts and so can skip the category; the member saves again. A category the member
+ *   didn't change has no role in `offered`, so skipping it changes nothing;
+ * - the bound and retired access roles (`untouchable`) are never touched, whatever the menu says.
+ * Everything else that differs is counted in `skipped`.
+ */
+export function planSelfRoles(
+  choice: RoleChoice,
+  menu: SelfRoleMenu | null,
+  held: readonly string[],
+  untouchable: ReadonlySet<string>,
+): SelfRolePlan {
+  const holds = setOf(held);
+  const wanted = setOf(choice.chosen);
+  const targets = setOf(choice.offered);
+  const differs = [...targets].filter((id) => wanted.has(id) !== holds.has(id));
+  const add: string[] = [];
+  const remove: string[] = [];
+  if (menu) {
+    // What the member would hold in each category afterwards, at most: what they chose, and what
+    // they hold there that this job leaves alone.
+    const after = (category: SelfRoleCategory) =>
+      category.options.filter(
+        (option) =>
+          wanted.has(option.roleId) || (holds.has(option.roleId) && !targets.has(option.roleId)),
+      ).length;
+    const overLimit = setOf(
+      menu.categories
+        .filter(
+          (category) =>
+            category.state === "published" &&
+            category.max !== null &&
+            after(category) > category.max,
+        )
+        .map((category) => category.id),
+    );
+    for (const roleId of differs) {
+      const found = findOption(menu, roleId);
+      if (!found || untouchable.has(roleId) || !listed(menu, roleId)) continue;
+      if (overLimit.has(found.category.id)) continue;
+      if (!wanted.has(roleId)) remove.push(roleId);
+      else if (addable(menu, roleId)) add.push(roleId);
+    }
+  }
+  return { add, remove, skipped: differs.length - add.length - remove.length };
+}
+
+/**
+ * The listed menu roles reconciliation takes from someone left with none of TaruBot's access roles
+ * (owner decision Q3 B, 2026-10-09): those they hold that open a channel (the editor's "Opens:"
+ * test) and that TaruBot can still take away. Discord adds up role grants, so without this an
+ * opt-in channel would stay open to someone who lost Member and Guest; with it, the channel stays
+ * behind Member or Guest as well as the role. Purely cosmetic roles (pronouns, identity, anything
+ * that opens nothing) are kept, drafts are never acted on (only published and Stop offering
+ * categories list a role), and a role TaruBot can't remove (above it, say) is left alone, so it
+ * can never block the access change it accompanies. Only held, listed roles are checked, so
+ * someone holding no menu role costs no rule check.
+ */
+export function accessLossRemovals(
+  menu: SelfRoleMenu,
+  guild: VisibilityGuild,
+  settings: SelfRoleSettings,
+  held: readonly string[],
+): string[] {
+  const holds = setOf(held);
+  const candidates = menuRoleIds(menu).filter((id) => holds.has(id) && listed(menu, id));
+  if (candidates.length === 0) return [];
+  const check = selfRoleChecker(guild, settings);
+  return candidates.filter((roleId) => {
+    const verdict = check(roleId);
+    return verdict.opens.length > 0 && removableBy(verdict);
+  });
+}
+
+/** My roles' approved sentences that the application layer returns or throws. */
+export const CHOICE_MESSAGES = {
+  /** A form naming a role or a "None" the menu no longer offers this person there (409). */
+  conflict:
+    "Officers changed the roles on offer while you were choosing. Check your choices and save again.",
+  /** Too many picked in a changed category (422); the page shows it on the category. */
+  max: (max: number) =>
+    max === 1 ? "Pick only one role here." : `Pick at most ${max} roles here.`,
+  /**
+   * Too many in a changed category once the roles the person holds there that can't be changed
+   * now are counted (422). It names those roles with Discord's mention grammar, as
+   * unavailableRole does: they already show on the person's own page, and nowhere else.
+   */
+  fixedMax: (roleIds: readonly string[], max: number) => {
+    const mentions = roleIds.map((roleId) => `<@&${roleId}>`);
+    const named =
+      mentions.length === 1
+        ? (mentions[0] ?? "")
+        : `${mentions.slice(0, -1).join(", ")} and ${mentions.at(-1) ?? ""}`;
+    const counts = mentions.length === 1 ? "counts" : "count";
+    const limit = max === 1 ? "one role" : `${max} roles`;
+    const room = max - roleIds.length;
+    const next =
+      room > 0
+        ? `pick at most ${room} other ${room === 1 ? "role" : "roles"} here`
+        : "you can't pick another role here";
+    return `${named} can't be changed here right now and ${counts} toward this category's limit of ${limit}, so ${next}.`;
+  },
+  /** A role being added that fails a rule now (422), named with Discord's mention grammar. */
+  unavailableRole: (roleId: string) =>
+    `<@&${roleId}> can't be picked right now. Choose something else, then save again.`,
+  /** A save while Discord changes are paused here (503); the page shows the form disabled. */
+  paused: "Role changes are paused in this server right now. Try again later.",
+  /** A save during a Discord time-out (403); the page shows the form disabled. */
+  timedOut: "You can change your roles here when your Discord time-out ends.",
+  /** A save without TaruBot's view of the server's roles (503). */
+  unavailable: "TaruBot can't read this server's roles right now. Try again in a minute.",
+  /** Someone neither an officer nor holding Member or Guest, or TaruBot has Administrator (403). */
+  noAccess:
+    "My roles is for people with this server's Member or Guest role while TaruBot doesn't have Administrator here.",
+} as const;
 
 // ---------------------------------------------------------------------------------------------
 // Approved wording the application layer and the Role menu page share

@@ -23,7 +23,7 @@ import type { Actor } from "../domain/policy.js";
 import { admits } from "./access.js";
 import { FAVICON, NOTICES, STYLESHEET } from "./assets.js";
 import { href, html, type SafeHtml, untrusted } from "./html.js";
-import { type ErrorFrame, PATHS, type Problem } from "./http.js";
+import { type ErrorFrame, PATHS, type Problem, SERVER_LIST } from "./http.js";
 import { type IconName, icon } from "./icons.js";
 import type { Page } from "./page.js";
 import { postForm } from "./views/forms.js";
@@ -56,9 +56,38 @@ interface LayoutFrame {
    * screen reader announces first when the page loads, and the tab shows. The `<h1>` is unchanged.
    */
   readonly error?: boolean;
+  /**
+   * The main content draws a refused form open on top of the page, with its own blocks inert under
+   * it (Role menu's editors, PostOutcome.modal): the skip link, the navigation, the page's header
+   * and the footer are inert too, so the form is the one thing Tab and a screen reader reach, as in
+   * a modal dialog, and none of what lies under its backdrop can take focus (WCAG 2.4.11).
+   */
+  readonly modal?: boolean;
   /** The current server and the pages in it that admit the viewer: a console page. */
-  readonly guild?: ServerIdentity & { readonly nav: readonly NavLink[] };
+  readonly guild?: ServerIdentity & {
+    readonly nav: readonly NavLink[];
+    /**
+     * Who is viewing, for the side navigation's note (server.ts sets it from actor.officer):
+     * officers configure, members and guests pick their roles. Omitted, the officers' note.
+     */
+    readonly audience?: Audience;
+  };
 }
+
+/** Who a console page is shown to: an officer, or a member or guest (who share every page). */
+export type Audience = "officer" | "member";
+
+/** The side navigation's caption and note per audience; constant wording. */
+const SIDE_NOTE: Readonly<Record<Audience, { readonly caption: string; readonly note: string }>> = {
+  officer: {
+    caption: "Settings and background work",
+    note: "Most settings are changed in Discord; the role menu is set here.",
+  },
+  member: {
+    caption: "Your roles",
+    note: "Pick your roles here. Everything else is in Discord.",
+  },
+};
 
 /**
  * The shell's model. Signed in, the account menu offers "Sign out" (POST /logout) and "Sign out
@@ -138,10 +167,11 @@ const navItem = (link: NavLink): SafeHtml => {
 /**
  * The server switcher: a link to the server list, styled as the design's switcher. It is the one
  * place a server page shows the server's name; the shell knows no member count or other server
- * data, so it shows none.
+ * data, so it shows none. It links to the list itself (SERVER_LIST), never plain /, which sends
+ * someone with one server and one page straight back to that page.
  */
 const switcher = (guild: ServerIdentity): SafeHtml =>
-  html`<a class="server-switch" href="${PATHS.home}">${serverAvatar(guild)}<span class="server-switch__text"><span class="server-switch__name">${untrusted(guild.name)}</span> <span class="server-switch__hint">Switch server</span></span>${icon("chevron-right")}</a>`;
+  html`<a class="server-switch" href="${SERVER_LIST}">${serverAvatar(guild)}<span class="server-switch__text"><span class="server-switch__name">${untrusted(guild.name)}</span> <span class="server-switch__hint">Switch server</span></span>${icon("chevron-right")}</a>`;
 
 /**
  * The account menu: a disclosure, so it opens without script. Sign-out is a POST (E1), so each
@@ -174,18 +204,25 @@ const accountMenu = (model: LayoutModel): SafeHtml | "" =>
  */
 const BACKDROP = html`<div class="orr-starfield entry-backdrop" aria-hidden="true"><div class="orr-orbit entry-orbit"><div class="orr-orbit__ring"><span class="orr-orbit__planet orr-orbit__planet--violet"></span></div><div class="orr-orbit__ring orr-orbit__ring--dashed orr-orbit__ring--middle"></div><div class="orr-orbit__ring orr-orbit__ring--inner"><span class="orr-orbit__planet"></span></div></div></div>`;
 
-const FOOTER = html`<footer class="site-footer">
+/** ` inert` on the shell's own parts while the main content draws a form open (LayoutFrame.modal). */
+const shut = (model: LayoutModel): SafeHtml | "" => (model.modal ? html` inert` : "");
+
+const footer = (model: LayoutModel): SafeHtml => html`<footer class="site-footer"${shut(model)}>
 <p>${BRAND} ${project.version} · <a href="${href(project.url)}">Source code</a> · <a href="${href(`${project.url}/blob/${project.branch}/LICENSE`)}">License (${project.license})</a> · <a href="${NOTICES.path}">Third-party licenses</a></p>
 </footer>`;
+
+/** The skip link, first in the body. */
+const skip = (model: LayoutModel): SafeHtml =>
+  html`<a class="skip" href="#main"${shut(model)}>Skip to content</a>`;
 
 /**
  * The page header: the one `<h1>`, after an eyebrow on server pages and the sign-in page. Error
  * pages never get the eyebrow, because their message must be main's first paragraph.
  */
-const pageHeader = (title: string, eyebrow: boolean): SafeHtml =>
-  html`<header class="page-header">
+const pageHeader = (model: LayoutModel, eyebrow: boolean): SafeHtml =>
+  html`<header class="page-header"${shut(model)}>
 ${eyebrow ? html`<p class="orr-label page-header__eyebrow">Free Company workspace</p>` : ""}
-<h1 class="page-header__title">${title}</h1>
+<h1 class="page-header__title">${model.title}</h1>
 </header>`;
 
 /** A server page: the sidebar, the top bar with the page's label, then the page. */
@@ -194,26 +231,27 @@ function consolePage(
   guild: NonNullable<LayoutModel["guild"]>,
   main: SafeHtml,
 ): SafeHtml {
+  const side = SIDE_NOTE[guild.audience ?? "officer"];
   return html`<body class="console-page">
-<a class="skip" href="#main">Skip to content</a>
+${skip(model)}
 <div class="app">
-<header class="sidebar">
+<header class="sidebar"${shut(model)}>
 ${WORDMARK}
 ${switcher(guild)}
 <nav class="side-nav" aria-label="Server pages">
 <p class="orr-label side-nav__caption">Workspace</p>
 <ul class="side-nav__list">${guild.nav.map(navItem)}</ul>
-<div class="side-nav__context"><p>Settings and background work</p><p class="side-nav__note">${icon("info")}Most settings are changed in Discord; the role menu is set here.</p></div>
+<div class="side-nav__context"><p>${side.caption}</p><p class="side-nav__note">${icon("info")}${side.note}</p></div>
 </nav>
 ${accountMenu(model)}
 </header>
 <div class="frame">
 <div class="topbar" aria-hidden="true"><p class="orr-label">Workspace<span class="topbar__separator">/</span><span class="topbar__page">${model.title}</span></p></div>
 <main id="main" class="main orr-enter">
-${pageHeader(model.title, true)}
+${pageHeader(model, true)}
 ${main}
 </main>
-${FOOTER}
+${footer(model)}
 </div>
 </div>
 </body>`;
@@ -223,14 +261,14 @@ ${FOOTER}
 function entryPage(model: LayoutModel, main: SafeHtml): SafeHtml {
   const welcome = model.title === BRAND;
   return html`<body class="entry-page">
-<a class="skip" href="#main">Skip to content</a>
+${skip(model)}
 ${BACKDROP}
-${welcome ? "" : html`<header class="entry-bar">${WORDMARK}${accountMenu(model)}</header>`}
+${welcome ? "" : html`<header class="entry-bar"${shut(model)}>${WORDMARK}${accountMenu(model)}</header>`}
 <main id="main" class="${welcome ? "entry entry--welcome" : "entry"} orr-enter">
-${pageHeader(model.title, welcome)}
+${pageHeader(model, welcome)}
 ${main}
 </main>
-${FOOTER}
+${footer(model)}
 </body>`;
 }
 
@@ -261,7 +299,9 @@ interface ErrorWording {
 
 /**
  * Fixed wording per status. A 404 never says whether a server exists or uses TaruBot, and a 403
- * covers both a missing page flag and a refused cross-site form, so neither leaks which it was.
+ * covers both a missing page flag and a refused cross-site form, so neither leaks which it was. A
+ * page refusing a GET for access says so in its own words instead (server.ts's notOpen): a GET
+ * is never a form, so there is nothing to leak.
  */
 const ERROR_WORDING: Readonly<Partial<Record<number, ErrorWording>>> = {
   400: { heading: "Request not valid", sentence: "TaruBot couldn't use that request." },

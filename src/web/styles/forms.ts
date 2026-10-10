@@ -133,6 +133,16 @@ input.orr-input[type="number"] {
   max-width: 8rem;
 }
 
+/*
+ * Phones zoom into a field whose text is under 16px, so the controls' text is 1rem; only where a
+ * mouse is used on a wide screen does it match the 14px buttons and the kit's dense pages.
+ */
+@media (min-width: 64rem) and (pointer: fine) {
+  .orr-input {
+    font-size: 0.875rem;
+  }
+}
+
 /* Browsers give a select its own line height; without block padding it matches the inputs. */
 select.orr-input {
   padding-block: 0;
@@ -245,7 +255,7 @@ select.orr-input option {
 .error-summary {
   display: grid;
   gap: var(--space-2);
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-lg);
   background: var(--danger-bg);
   box-shadow: inset 0 0 0 1px oklch(0.74 0.15 18 / 0.45);
@@ -281,8 +291,8 @@ main .error-summary__title {
 /* A disclosure's contents: an editor, or a confirmation's consequence and its button. */
 .disclosure__body {
   display: grid;
-  gap: var(--space-4);
-  padding-top: var(--space-3);
+  gap: var(--space-3);
+  padding-top: var(--space-2);
 }
 
 /* The notice after a successful save, shown once on the page the form redirected to. */
@@ -308,7 +318,8 @@ main.orr-enter:has(#status) {
  * scroll padding keeps a focused field from scrolling in under the row (WCAG 2.4.11), as the
  * shell's does for its top bar. A short viewport (a phone in landscape, or 400% zoom) can't spare
  * the room, so there the row stays in its place, like the shell's bar. In a card, the row reaches
- * the card's edges, like a card's foot, rather than sitting in it as a dark inset band.
+ * the card's edges, like a card's foot, rather than sitting in it as a dark inset band. It is slim
+ * (8px above and below the button), so it takes as little of a phone's screen as it can.
  */
 @media (max-width: 63.99rem) and (min-height: 30rem) {
   html:has(.form-actions) {
@@ -318,7 +329,7 @@ main.orr-enter:has(#status) {
     position: sticky;
     bottom: 0;
     z-index: var(--z-sticky);
-    padding-block: var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+    padding-block: var(--space-2) calc(var(--space-2) + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border-subtle);
     background: var(--surface-1);
   }

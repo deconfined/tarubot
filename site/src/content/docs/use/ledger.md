@@ -2,7 +2,7 @@
 title: The FC ledger
 description: Record deposits to the FC chest and read the balance and history.
 sidebar:
-  order: 5
+  order: 6
 ---
 
 TaruBot keeps an exact record of the gil in the Free Company chest. People record what they put in and take out; TaruBot doesn't read the chest itself. Every entry is permanent and numbered, and each one is posted to the server's ledger channel.

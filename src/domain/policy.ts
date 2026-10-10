@@ -1,7 +1,13 @@
 /** Pure authorization and access policy; these functions require no Discord or database I/O. */
 import { Failure } from "./values.js";
 
-/** Permissions are resolved against the invoking guild, not inferred from managed roles. */
+/**
+ * Permissions are resolved against the invoking guild, not inferred from managed roles. The four
+ * optional facts below (2.40.0) are set by actor resolution (gateway.actor, then
+ * Service.enrichActor) and read only by the web's admission and member self-service; an actor
+ * built without them (a command fixture, an autocomplete payload) admits nobody as a member or
+ * guest, because every reader requires an explicit true or false.
+ */
 export interface Actor {
   guildId: string;
   userId: string;
@@ -10,7 +16,46 @@ export interface Actor {
   /** Keep server-manager authority distinct from delegated, bot-only officer authority. */
   serverManager?: boolean;
   roleIds?: readonly string[];
+  /**
+   * Holds the server's bound Member role (guilds.member_role_id) at resolution time. False when no
+   * Member role is bound or there is no active guild row (TaruBot isn't set up there).
+   */
+  member?: boolean;
+  /** Holds the server's bound Guest role (guilds.guest_role_id) at resolution time, likewise. */
+  guest?: boolean;
+  /**
+   * TaruBot holds Administrator in this server, or its own member isn't cached so that can't be
+   * told (fails closed: true). Members and guests are refused while it is anything but false
+   * (owner decision A2): a leaked token in a server where TaruBot is Administrator must not also
+   * be reachable through pages every member can open. Officers are unaffected.
+   */
+  botAdministrator?: boolean;
+  /** In a Discord time-out: may view their own roles, but self-service saves refuse (Q6). */
+  timedOut?: boolean;
 }
+
+/**
+ * How an actor is resolved (#43's "actor cache for member GETs"; docs/MODULES.md, "Add a page",
+ * says which web requests use each). Both read the member from Discord with a forced fetch, so a
+ * departure or a role change is never missed:
+ * - `full`: the guild and its role definitions are fetched as well (3 REST calls). Slash commands
+ *   and every web POST use it, so no write is ever authorized from a cache.
+ * - `light`: the guild and its roles come from the gateway cache, which the Guilds intent keeps
+ *   current, and only the member is fetched (1 REST call). Web GETs on a memo miss and sign-in
+ *   admission use it; a guild that isn't cached and available falls back to `full`.
+ */
+export type ActorResolution = "light" | "full";
+
+/**
+ * Who may use member self-service in a server (owner decision Q6 A): an officer, or someone holding
+ * the bound Member or Guest role while TaruBot holds no Administrator there (A2; unknown counts as
+ * holding it). Guests count as members. A time-out doesn't change this (the person may still view
+ * their roles); SelfRoles refuses the save itself. Shared by the web's `member` and `guest` page
+ * flags and the application operation that reauthorizes the save, so the two can't disagree.
+ */
+export const selfServiceAccess = (actor: Actor): boolean =>
+  actor.officer ||
+  ((actor.member === true || actor.guest === true) && actor.botAdministrator === false);
 
 /**
  * Sensitive authority configuration cannot be delegated through the Officer role itself. The

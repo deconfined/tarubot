@@ -891,9 +891,11 @@ export class IssueReports {
         and(
           eq(t.jobs.guild_id, guildId),
           eq(t.jobs.user_id, userId),
-          // Never their role choices (roles.self), as in /guest status (owner decision Q4 A): a
-          // report outlives the 30 days those rows are kept, and these would say when the member
-          // changed their roles. Filtered in SQL, so frequent saves can't push out other work.
+          // Never their role choices (roles.self), as in /guest status, and not even in the
+          // member's own /issue (owner decision Q4 A): a report outlives the 30 days those rows
+          // are kept, and these would say when the member changed their roles. The queue tables
+          // show such work by kind only. Filtered in SQL, so frequent saves can't push out other
+          // work.
           not(eq(t.jobs.kind, ROLE_CHOICE_KIND)),
         ),
       )

@@ -109,6 +109,22 @@ export interface DirectMessage {
   readonly application: ApplicationRecord;
   readonly cooldownSeconds: number;
 }
+/**
+ * What a self-service role write did: counts only, never which roles (owner decision Q4 A), so a
+ * job result built from it can't reveal anyone's choices.
+ */
+export interface SelfRoleWrite {
+  readonly added: number;
+  readonly removed: number;
+  /** Roles Discord refused one at a time: deleted meanwhile (10011) or moved above TaruBot. */
+  readonly skipped: number;
+}
+/**
+ * Why TaruBot changes a self-service role, for Discord's audit log: the member chose it on My
+ * roles, or reconciliation takes a channel-opening menu role from someone a reconciliation pass
+ * leaves with none of Member, Guest, Officer and FC Leader (owner decision Q3 B).
+ */
+export type SelfRoleReason = "chosen" | "access";
 /** Effect boundary implemented by DiscordGateway and controlled integration-test fixtures. */
 export interface DiscordPort {
   /** Null is an observed departure; transport failures reject instead of implying absence. */
@@ -147,4 +163,28 @@ export interface DiscordPort {
    * fakes may omit it (callers then report the view as unknown).
    */
   visibility?(guild: string, fresh: boolean): Promise<VisibilityGuild | null>;
+  /**
+   * Self-service menu roles, one REST call per role (2.40.0): removes, then adds, each leaving
+   * every other role alone. There is no validateRole, whose messages name roles: the "chosen"
+   * caller (the roles.self job) checked each role against a fresh snapshot just before, and the
+   * "access" caller (reconciliation, owner decision Q3 B) judged TaruBot's cached view and only
+   * ever removes, which escalates nothing. Per-role refusals don't fail the whole write: a role
+   * deleted meanwhile (10011) is skipped, and so is one that moved above TaruBot (50013 while
+   * TaruBot still has Manage Roles); without Manage Roles it throws a role-free `blocked`
+   * Failure, a server-wide problem the job waits on. Optional, so test fakes may omit it: without
+   * it reconciliation skips the removals, and the roles.self job fails as `configuration`.
+   */
+  selfRoles?(
+    guild: string,
+    user: string,
+    add: readonly string[],
+    remove: readonly string[],
+    reason: SelfRoleReason,
+  ): Promise<SelfRoleWrite>;
+  /**
+   * The member's roles from the gateway's member cache, which GuildMemberUpdate keeps current, so
+   * My roles reflects a job's change at once without a Discord request; null when the member isn't
+   * cached (the caller falls back to the actor's roles). Optional, like visibility.
+   */
+  cachedRoles?(guild: string, user: string): readonly string[] | null;
 }

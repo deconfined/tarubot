@@ -189,10 +189,26 @@ describe("the stylesheet", () => {
     readonly body: string;
   }
 
+  /** A selector list's entries: split at its own commas, not those inside :is() or :where(). */
+  const entries = (list: string): string[] => {
+    const out: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (const [at, character] of [...list].entries()) {
+      if (character === "(") depth += 1;
+      else if (character === ")") depth -= 1;
+      else if (character === "," && depth === 0) {
+        out.push(list.slice(start, at));
+        start = at + 1;
+      }
+    }
+    return [...out, list.slice(start)].map((selector) => selector.trim());
+  };
+
   /** The style rules in `text`, nested ones included; at-rule preludes are left out. */
   const rules = (text: string): Rule[] =>
     [...text.replace(/@[^{;]*\{/gu, "{").matchAll(/([^{}]+)\{([^{}]*)\}/gu)].map((match) => ({
-      selectors: (match[1] ?? "").split(",").map((selector) => selector.trim()),
+      selectors: entries(match[1] ?? ""),
       body: match[2] ?? "",
     }));
 
@@ -299,8 +315,12 @@ describe("the stylesheet", () => {
     expect(css).not.toMatch(/appearance: none/u);
     // An invalid field shows it in the border too, not by color of the text alone.
     expect(css).toContain('.orr-input[aria-invalid="true"]');
-    // Phones zoom into fields under 16px, so the controls' text is 1rem.
+    // Phones zoom into fields under 16px, so the controls' text is 1rem; only a mouse on a wide
+    // screen gets the kit's dense 14px.
     expect(input).toContain("font-size: 1rem;");
+    expect(declaring("(min-width: 64rem) and (pointer: fine)", "font-size:")).toEqual([
+      ".orr-input",
+    ]);
     // The fieldset's own frame is reset for choice groups.
     expect(ruleFor(".choice-group")).toContain("border: 0;");
     expect(declaring("(forced-colors: active)", "border: 1px solid CanvasText;")).toEqual(
@@ -319,6 +339,148 @@ describe("the stylesheet", () => {
     expect(declaring(phone, "scroll-padding-bottom:")).toContain("html:has(.form-actions)");
     expect(css).not.toMatch(/@media \(max-width: 63\.99rem\) \{[^@]*\.form-actions \{[^}]*sticky/u);
     expect(declaring("print", "position: static;")).toContain(".form-actions");
+  });
+
+  test("My roles' pills keep a 44px touch target, and the Save hint joins its row only off phones", () => {
+    // Every pill is the label's to tap; only a mouse on a wider screen gets the denser 36px.
+    expect(ruleFor(".my-category .orr-check")).toContain("min-height: 2.75rem;");
+    expect(declaring("(min-width: 40rem) and (pointer: fine)", "min-height:")).toEqual([
+      ".my-category .orr-check",
+    ]);
+    // The button and its hint share a row only from 64rem, where the Save row no longer sticks.
+    expect(declaring("(min-width: 64rem)", "order: 1;")).toEqual([
+      ".my-roles-form > .form-actions",
+    ]);
+    expect(declaring("(min-width: 64rem)", "order: 2;")).toEqual([
+      ".my-roles-form > .my-roles-form__hint",
+    ]);
+  });
+
+  test("Role menu's editors open on top of the page, so nothing in a card changes; targets 32px", () => {
+    // No editor opens in place any more: no rule draws an open disclosure in a card's toolbar, or
+    // changes the cards' grid while one is open (the owner's ask: nothing on the page moves).
+    expect(css).not.toContain("::details-content");
+    expect(css).not.toMatch(/\.menu-[\w-]+[^{}]*details/u);
+    expect(css).not.toContain(".menu-categories:has(");
+    expect(ruleFor(".menu-categories")).not.toContain("align-items");
+    expect(css).not.toMatch(/\.menu-(?:tool|toolbar|states|moves)[^{]*\{[^}]*\border:/u);
+    // The toolbar: a wrapper keeps each button with its panel, the button one of the row's items;
+    // the state buttons and the moves each wrap as a unit, never a pair split across rows.
+    expect(ruleFor(".menu-tool")).toContain("display: contents;");
+    expect(ruleFor(".menu-moves")).toContain("display: flex;");
+    expect(css).toContain(".menu-states,\n.menu-moves {");
+    // A closed dialog stays display: none (the browser's rule): no rule for a panel that isn't
+    // open sets its display. The base rules replace the browser's dialog and popover look.
+    const panelRules = rules(css).filter((rule) =>
+      rule.selectors.some((selector) =>
+        /(?:^|[\s>])\.overlay(?:--(?:wide|narrow))?$/u.test(selector),
+      ),
+    );
+    expect(panelRules.length).toBeGreaterThan(0);
+    for (const rule of panelRules)
+      expect({ selectors: rule.selectors, display: rule.body.includes("display:") }).toEqual({
+        selectors: rule.selectors,
+        display: false,
+      });
+    for (const declaration of ["max-width: none;", "padding: 0;", "border: 0;"])
+      expect(ruleFor(".overlay")).toContain(declaration);
+    // Open (a modal dialog or a popover in the top layer, or a refused editor drawn open), it is
+    // fixed over the page, its top a fixed way down so it only ever grows downward, its body
+    // scrolling under its head; centred over the page's column beside the fixed sidebar.
+    const open = ":is(.overlay--open, .overlay:popover-open, .overlay:modal)";
+    for (const declaration of [
+      "position: fixed;",
+      "margin: min(12dvh, 6rem) auto auto;",
+      "max-height: calc(100dvh - 2 * min(12dvh, 6rem));",
+      "width: min(100% - 2 * var(--space-4), var(--overlay-width));",
+      "backdrop-filter: var(--glass-blur);",
+    ])
+      expect(ruleFor(open)).toContain(declaration);
+    expect(ruleFor(`${open} > .overlay__body`)).toContain("overflow: auto;");
+    expect(ruleFor(".overlay--wide")).toContain("--overlay-width: 48rem;");
+    expect(declaring("(min-width: 64rem)", "inset-inline-start: var(--sidebar-w);")).toEqual([
+      open,
+    ]);
+    // While it is open the page under it neither scrolls nor, under a popover (no invoker
+    // commands), takes the click that closes it; the scrollbar's gutter stays, so nothing moves.
+    expect(ruleFor(":root:has(.overlay:popover-open) .app")).toContain("pointer-events: none;");
+    expect(ruleFor(".overlay")).toContain("pointer-events: auto;");
+    expect(ruleFor(":root:has(.overlay)")).toContain("scrollbar-gutter: stable;");
+    expect(ruleFor(`:root:has(${open})`)).toContain("overflow: hidden;");
+    // On a phone, a sheet from the bottom edge, as tall as its content (the owner finds empty
+    // bands hard to read): no fixed height, only a ceiling. A short screen gives the panel nearly
+    // its height.
+    expect(declaring("(max-width: 39.99rem)", "inset: auto 0 0;")).toEqual([open]);
+    expect(declaring("(max-width: 39.99rem)", "env(safe-area-inset-bottom)")).toEqual([open]);
+    expect(declaring("(max-width: 39.99rem)", "max-height: 85dvh;")).toEqual([open]);
+    expect(
+      rules(mediaBlock("(max-width: 39.99rem)")).filter((rule) =>
+        /(?:^|\s)height: 85dvh;/u.test(rule.body),
+      ),
+    ).toEqual([]);
+    expect(declaring("(max-width: 39.99rem)", "margin-top: auto;")).toEqual([]);
+    expect(declaring("(max-height: 29.99rem)", "max-height: calc(100dvh - 1rem);")).toEqual([open]);
+    // Its button row is its foot at every width where there is room: stuck to the panel's own
+    // bottom edge, flush with it whether or not the body scrolls.
+    for (const declaration of [
+      "position: sticky;",
+      "bottom: calc(-1 * var(--overlay-foot));",
+      "margin: 0 calc(1px - var(--card-pad)) calc(-1 * var(--overlay-foot));",
+    ])
+      expect(declaring("(min-height: 30rem)", declaration)).toEqual([`${open} .form-actions`]);
+    expect(css).not.toContain(".menu-tool > .overlay");
+    // A form's own message (a 409's, in the editor holding it) stays at the form's top: Edit
+    // category's side-by-side layout reorders each field's hint and error within the field only.
+    expect(ruleFor(".menu-form .orr-field > .orr-field__hint--error")).toContain("order: 1;");
+    expect(css).not.toMatch(/\.menu-form \.orr-field__hint/u);
+    // The page under it dims and blurs a little, fading in; a refused editor's backdrop is an
+    // element.
+    expect(ruleFor(".overlay::backdrop")).toContain("backdrop-filter: blur(2px);");
+    expect(ruleFor(".overlay::backdrop")).toContain("transition: opacity");
+    expect(ruleFor(":is(.overlay:popover-open, .overlay:modal)::backdrop")).toContain(
+      "opacity: 0;",
+    );
+    expect(ruleFor(".overlay-backdrop")).toContain("position: fixed;");
+    expect(ruleFor(".overlay-backdrop")).toContain("inset: 0;");
+    // Its button is lit while it is open, or while it holds a refused form.
+    expect(
+      ruleFor(
+        ".menu-toolbar .menu-opener:is(a, .menu-opener--kept, :has(+ :is(.overlay:modal, .overlay:popover-open)))",
+      ),
+    ).toContain("color: var(--accent-strong);");
+    // The page entrance would make main the fixed panel's frame while it plays.
+    expect(ruleFor("main.orr-enter:has(.overlay--open)")).toContain("animation: none;");
+    // Each preference has its fallback: no rise or fade, solid surfaces, real borders and no
+    // blur under forced colors, nothing on paper.
+    expect(declaring("(prefers-reduced-motion: reduce)", "transition: none;")).toEqual(
+      expect.arrayContaining([":is(.overlay:popover-open, .overlay:modal)", ".overlay::backdrop"]),
+    );
+    expect(declaring("(prefers-reduced-transparency: reduce)", "backdrop-filter: none;")).toEqual(
+      expect.arrayContaining([open, ".overlay::backdrop", ".overlay-backdrop"]),
+    );
+    expect(declaring("(forced-colors: active)", "border: 1px solid CanvasText;")).toContain(
+      ".overlay",
+    );
+    expect(declaring("(forced-colors: active)", "background: Canvas;")).toEqual([open]);
+    expect(declaring("(forced-colors: active)", "backdrop-filter: none;")).toEqual(
+      expect.arrayContaining([open, ".overlay::backdrop", ".overlay-backdrop"]),
+    );
+    expect(declaring("print", "display: none;")).toEqual(
+      expect.arrayContaining([".overlay-backdrop", ".overlay--open"]),
+    );
+    // The toolbar's buttons: 32px tall, 40px for a finger. Add roles' rows: the label covers each
+    // row, at least 32px tall, 44px for a finger.
+    expect(ruleFor(".menu-states .orr-btn,\n.menu-moves .orr-btn,\n.menu-opener")).toContain(
+      "min-height: 2rem;",
+    );
+    expect(declaring("(pointer: coarse)", "min-height: 2.5rem;")).toEqual(
+      expect.arrayContaining([".menu-opener", ".overlay__close"]),
+    );
+    expect(ruleFor(".menu-add .orr-check")).toContain("min-height: 2rem;");
+    expect(ruleFor(".menu-add .orr-check__label::after")).toContain("inset: 0;");
+    expect(declaring("(pointer: coarse)", "min-height: 2.75rem;")).toContain(
+      ".menu-add .orr-check",
+    );
   });
 
   test("reduced transparency, forced colors and print each have their fallback", () => {

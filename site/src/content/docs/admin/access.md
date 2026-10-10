@@ -1,6 +1,6 @@
 ---
 title: Who can do what
-description: TaruBot's three levels of access, how officers are recognized, and which commands need a server manager.
+description: TaruBot's three levels of access, how officers are recognized, which commands need a server manager, and who can use the dashboard.
 sidebar:
   order: 2
 ---
@@ -9,7 +9,7 @@ TaruBot checks who may run a command every time it runs, against the member's cu
 
 ## Anyone
 
-Every human member can link their own characters, choose a main and a nickname setting, check their own guest status and background work, report a problem, and use the utilities. Confirmed FC members can also record deposits and read the ledger. Holders of the Member or Guest role can [suggest features](/tarubot/admin/suggestions/) in the FC's own server.
+Every human member can link their own characters, choose a main and a nickname setting, check their own guest status and background work, report a problem, and use the utilities. Confirmed FC members can also record deposits and read the ledger. Holders of the Member or Guest role can [suggest features](/tarubot/admin/suggestions/) in the FC's own server, and pick their own roles from the [self-service role menu](/tarubot/admin/self-service-roles/) on the dashboard's **My roles** page.
 
 ## Officers
 
@@ -24,7 +24,7 @@ The Officer role grants TaruBot's officer commands only. It carries no Discord p
 
 Officers run the day-to-day commands: the guest decisions, assigning and unassigning characters, withdrawals and corrections in the ledger, the ledger, officer notification, guest review and changelog channels ([`/config changelog`](/tarubot/reference/commands/#config-changelog) for update posts), and `/config show` and `/config validate`.
 
-Officers, Officer-role holders included, also build the [self-service role menu](/tarubot/admin/self-service-roles/) on the dashboard's **Role menu** page: they can add any role that passes the menu's checks, and reset the menu. TaruBot doesn't check their own Discord permissions or role position for this; the menu's checks and where TaruBot's own role sits decide what can be added. Once members and guests can pick from the menu, a role on it is one anyone with Member or Guest can give themselves.
+Officers, Officer-role holders included, also build the [self-service role menu](/tarubot/admin/self-service-roles/) on the dashboard's **Role menu** page: they can add any role that passes the menu's checks, and reset the menu. TaruBot doesn't check their own Discord permissions or role position for this; the menu's checks and where TaruBot's own role sits decide what can be added. A role in a published category is one anyone with Member or Guest can give themselves on My roles.
 
 ## Server managers
 
@@ -49,6 +49,18 @@ Discord's role order applies on top of these levels:
 - When a manager chooses a role for TaruBot, the role must be below the manager's own highest role, unless they own the server.
 - While an Officer role is bound, `/officer grant`, `revoke` and `reset` also check that the manager's highest role is above it (the server owner is exempt) and that TaruBot can manage it.
 - The self-service role menu doesn't use the officer's own position: any officer can add a role below TaruBot's highest role that passes the menu's checks.
+
+## The dashboard
+
+When the dashboard is on, its pages check access the same way, against the person's current Discord roles and permissions, and again on every change:
+
+| Who | Pages |
+| --- | --- |
+| Holders of the Member or Guest role | My roles, while TaruBot doesn't have Administrator in the server |
+| Officers | Server configuration, My roles, Role menu and Background work |
+| Anyone else, including people in the lobby | None: they aren't signed in |
+
+While TaruBot has Administrator in a server, members and guests can't open its pages at all: the pages everyone can reach never run beside a bot that can do anything in the server. Use [`/setup overrides`](/tarubot/reference/commands/#setup-overrides), then remove Administrator once `/config validate` says it's no longer needed. Someone who has just lost Member or Guest can keep viewing for up to a minute, but any change they send is checked again first and refused.
 
 ## What Discord shows
 

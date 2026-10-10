@@ -1,18 +1,45 @@
 /**
  * The Role menu (2.39.0): officers build the server's self-service role menu, typed state in and
- * escaped markup out, with no service or gateway I/O. Members and guests pick from it from 2.40.0;
- * until then nothing here changes anyone's roles, and the page says so.
+ * escaped markup out, with no service or gateway I/O. Members and guests pick from it on My roles
+ * (2.40.0, views/my-roles.ts), whose address the lead gives, ready to copy; nothing here changes
+ * anyone's roles itself.
  *
  * One page of small native forms (PAGE_PATH takes no parameters), each carrying `op`, the IDs it
  * acts on, the menu `revision` it was rendered at (the officers' optimistic lock) and the session's
  * form token (postForm). Every edit is applied by ID, never by index, and a move names an absolute
  * place, so a repeated submit changes nothing the second time (the equal-state rule).
  *
+ * Layout (styles/role-menu.ts): each category is a compact card. Its head is one line (the name,
+ * the pick rule and how many roles, then the state badges), its roles wrap as mention chips or
+ * line up in two columns when any has a description, and its foot is a line saying what the state
+ * means and what each state button does, then one toolbar: the editors' buttons (Edit roles, Add
+ * roles, Edit category), the state buttons, Move up and Move down, and Delete category.
+ *
+ * The editors open on top of the page, so nothing on it moves when one opens (the owner's ask): a
+ * modal <dialog> each, opened by its toolbar button's invoker command (commandfor, command
+ * "show-modal"; no script), in the top layer, a panel near the top of a wide screen and a bottom
+ * sheet on a phone. While it is open the dimmed page under it takes neither focus nor clicks, so
+ * Tab stays in the panel and a click outside only closes it. Escape, a click outside or its Close
+ * button closes it, and focus goes back to the button that opened it. Each panel sits right after
+ * its button in the markup. A browser without invoker commands opens the same element as a popover
+ * instead (its popover and popovertarget attributes): the stylesheet still keeps clicks off the
+ * page, but the popover isn't modal, so Tab can leave it; that is accepted.
+ *
  * Accessibility: every control has a visible label, and controls that repeat per category or role
  * carry a visually hidden suffix naming what they act on (forms.ts's context()), so each name is
- * unique on the page (WCAG 2.4.6). Destructive actions (delete a category, reset the menu) sit
- * only inside a closed disclosure that states the consequence first. A refused form is re-rendered
- * with what was typed, its disclosure open and an error summary linking to its fields.
+ * unique on the page (WCAG 2.4.6). Each panel is a dialog named by its title (the action, then the
+ * category). Opening a long editor (Edit roles, Edit category) focuses its title, so a phone's
+ * keyboard doesn't come up over the sheet and a screen reader starts at the top; Add roles focuses
+ * its first choice, Delete category's confirmation its Cancel, and a panel with nothing to fill in
+ * its Close, and a note that says what such a panel is about describes it (aria-describedby).
+ * Destructive actions (delete a category, reset the menu) sit only inside a closed panel or
+ * disclosure that states the consequence first. A state button submits at once, so what it does is
+ * on screen before it, in the card's state line, and that sentence is also the button's description
+ * (aria-describedby). A refused form is re-rendered with what was typed and an error summary
+ * linking to its fields; a refused editor comes back drawn open on top of the page (openEditor),
+ * holding the summary, while the shell around it is inert. A conflict (409) isn't drawn open: the
+ * summary goes at the top, over the menu as it is now, and the editor keeps what the officer
+ * changed for when they open it again, its button lit.
  *
  * Role and channel names come from the gateway cache (mentions.ts), escaped and isolated; problem
  * messages use Discord's mention grammar and render through mentionText(). Nothing an officer
@@ -31,7 +58,7 @@ import {
   type SelfRoleMenu,
   type SelfRoleOption,
 } from "../../domain/self-roles.js";
-import { html, type SafeHtml, untrusted } from "../html.js";
+import { href, html, type SafeHtml, untrusted } from "../html.js";
 import { icon } from "../icons.js";
 import { channelName, mentionText, roleName, type WebNames } from "../mentions.js";
 import {
@@ -51,6 +78,7 @@ import {
   submitButton,
   textField,
 } from "./forms.js";
+import { MY_ROLES_PATH, pickRule } from "./my-roles.js";
 
 // ---------------------------------------------------------------------------------------------
 // Notices and the forms' vocabulary, shared with the page module
@@ -102,7 +130,8 @@ export function noticeFor(operation: MenuOperation): RoleMenuNotice {
 
 /**
  * The query parameter a success redirect names its category in, so the notice shows in that
- * category's card rather than at the top of a long page (the server never sees a fragment).
+ * category's card rather than at the top of a long page (the server never sees a fragment). A
+ * refused editor's Close link carries it too, with no notice, only to be a new GET (panel()).
  */
 export const NOTICE_CATEGORY = "category";
 
@@ -139,12 +168,6 @@ export const ANY_NUMBER = "any";
 /** A category's limit as its select value. */
 export const maxValue = (max: number | null): string => (max === null ? ANY_NUMBER : String(max));
 
-/** How many someone may pick, in words. */
-export function pickRule(max: number | null): string {
-  if (max === null) return "Pick any number";
-  return max === 1 ? "Pick one" : `Pick up to ${max}`;
-}
-
 /** The limit's choices: any number, one, then up to 2…MENU_LIMITS.max. */
 const MAX_OPTIONS: readonly SelectOption[] = [
   { value: ANY_NUMBER, label: pickRule(null) },
@@ -159,16 +182,21 @@ export const OPTION_STATES = ["offered", "removal_only", "remove"] as const;
 export type OptionState = (typeof OPTION_STATES)[number];
 
 /**
- * Each choice says its consequence, so a screen reader moving through the rows hears it with the
- * choice (the Edit roles note above all the rows isn't read with each one), and "Remove from the
- * menu", which saves without a confirmation, says what it leaves behind. The state comes first, so
- * a phone's closed select that cuts a long label still shows which it is.
+ * Short enough that a closed select shows the whole choice at every width, at 320px too (a choice
+ * that also said its consequence was cut off mid-sentence). What each does is the line above the
+ * rows (OPTION_STATES_HELP), on screen while the officer picks, and each select's description, so
+ * a screen reader hears it with the choice; Remove from menu saves without a confirmation, so the
+ * line says what it leaves behind.
  */
 const OPTION_STATE_LABELS: readonly SelectOption[] = [
   { value: "offered", label: "Offered" },
-  { value: "removal_only", label: "Not offered: people who have it can remove it" },
-  { value: "remove", label: "Remove from the menu: people keep it, but can't change it here" },
+  { value: "removal_only", label: "Not offered" },
+  { value: "remove", label: "Remove from menu" },
 ];
+
+/** What the two other state choices do: the Edit roles note's last sentences. */
+const OPTION_STATES_HELP =
+  "Not offered means nobody can add the role, but people who have it can still remove it. Remove from menu means people keep the role in Discord, but can't change it on My roles.";
 
 /** What a category's state looks like: its badge, and its tone. */
 const STATE_BADGES: Readonly<Record<CategoryState, { text: string; tone: string }>> = {
@@ -178,45 +206,61 @@ const STATE_BADGES: Readonly<Record<CategoryState, { text: string; tone: string 
 };
 
 /**
- * The state buttons, each with its one line of help. Members and guests can't pick roles until
- * 2.40.0, so what each state does for them is said as what will happen, and never as "here": they
- * will pick on a page of their own, not this one.
+ * The state buttons, each with its consequence. The buttons submit at once, with no confirmation,
+ * so the consequence is on screen before them: the card's state line says what the card's state
+ * means (STATE_LINES), then each button's `help`, a sentence that starts with the button's own
+ * label so it reads as that button's; the same sentence is the button's description
+ * (aria-describedby), heard with it. What each state does for members and guests is said as what
+ * happens on My roles, their own page, never as "here".
  */
 const STATE_ACTIONS: Readonly<Record<CategoryState, { label: string; help: string }>> = {
   published: {
     label: "Publish",
-    help: "Once members and guests can pick roles, everyone with Member or Guest can pick these.",
+    help: "Publish lets members and guests pick these roles.",
   },
   removal_only: {
     label: "Stop offering",
-    help: "Nobody can add these roles. People who have them will still be able to remove them themselves.",
+    help: "Stop offering means people can only remove these roles.",
   },
   draft: {
     label: "Move back to draft",
-    help: "Only officers see a draft. People who have these roles won't be able to change them until you publish again. Nobody's roles change.",
+    help: "Move back to draft hides the category from all but officers; people keep these roles but can't change them until you publish again.",
   },
 };
 
 /**
+ * What a card's state means for members and guests now: the first sentence of its foot's line,
+ * before what each of its state buttons would do (STATE_ACTIONS). Short, as the line says up to
+ * three things over every card's toolbar.
+ */
+const STATE_LINES: Readonly<Record<CategoryState, string>> = {
+  draft: "Draft: only officers see it.",
+  published: "Published: members and guests can pick these roles on My roles.",
+  removal_only: "Not offered: people who have these roles can only remove them on My roles.",
+};
+
+/**
  * Delete category's consequence, by the category's state: only a published category can offer Stop
- * offering instead (NEXT_STATES), and only officers have ever seen a draft.
+ * offering instead (NEXT_STATES). Members and guests don't see a draft now, though one moved back
+ * from published may have been on My roles before, so its note promises nothing about the past.
  */
 const DELETE_NOTES: Readonly<Record<CategoryState, string>> = {
   published:
     "People keep these roles in Discord, but won't be able to add or remove them themselves. To let people still remove them, choose Stop offering instead.",
   removal_only:
     "People keep these roles in Discord, but won't be able to remove them themselves any more.",
-  draft: "Only officers have seen this draft. People keep these roles in Discord.",
+  draft:
+    "Members and guests don't see a draft. People keep these roles in Discord, but won't be able to change them on My roles.",
 };
 
 /**
- * What Publish N drafts does. Members and guests can't pick roles until 2.40.0, so it says when
- * published categories reach them, and that a server replacing a reaction-role bot keeps its
- * drafts until the switch (the officer guide's cutover steps). Revisit in 2.40.0, when publishing
- * becomes immediate.
+ * What Publish N drafts does: members and guests can pick from a published category at once, so a
+ * server replacing a reaction-role bot keeps its drafts until the switch (the officer guide's
+ * cutover steps). Publishing is also when owner decision Q3 B starts to apply to the category's
+ * roles: reconciliation takes those that open channels from anyone with no access role.
  */
 const PUBLISH_NOTE =
-  "Published categories go live for members and guests with the release that lets them pick roles. If you're replacing a reaction-role bot, keep drafts until you switch over.";
+  "Members and guests can pick from a category on My roles as soon as it's published. From then on, TaruBot also takes its roles that open channels from anyone with none of the Member, Guest, Officer and FC Leader roles. If you're replacing a reaction-role bot, keep drafts until you switch over.";
 
 /** The states a category can move to from each state, in the order the buttons show. */
 const NEXT_STATES: Readonly<Record<CategoryState, readonly CategoryState[]>> = {
@@ -303,6 +347,11 @@ export interface RefusedEdit {
   readonly revision: bigint;
   /** The domain's field keys (MenuFieldError.field), or "form" for the form as a whole. */
   readonly errors: readonly MenuFieldError[];
+  /**
+   * A 409: the menu changed under the form. Its editor isn't drawn open (openEditor), so the
+   * officer can check the menu as it is now before opening it again.
+   */
+  readonly conflict?: boolean;
 }
 
 export interface RoleMenuView {
@@ -335,6 +384,36 @@ const PUBLISH_HELP = "role-menu-publish-help";
 const CATEGORIES = "role-menu-categories";
 const ADD_CATEGORY = "role-menu-add";
 const RESET = "role-menu-reset";
+
+/** A card's editors, each a panel opened on top of the page from the card's toolbar. */
+type EditorKind = "options" | "add" | "category" | "delete";
+
+/**
+ * An editor's id after its category's key: unlike every field id under that key (name, roles,
+ * acknowledged, and so on), so a panel's id never meets one of its own controls'.
+ */
+const EDITOR_IDS: Readonly<Record<EditorKind, string>> = {
+  options: "edit-roles",
+  add: "add-roles",
+  category: "edit-category",
+  delete: "delete",
+};
+
+/** A category's editor panel; its toolbar button names it in commandfor and popovertarget. */
+const editorId = (categoryId: string, kind: EditorKind): string =>
+  `${categoryKey(categoryId)}-${EDITOR_IDS[kind]}`;
+/** The panel's title, which names the dialog and can take focus (an error summary's target). */
+const editorTitleId = (categoryId: string, kind: EditorKind): string =>
+  `${editorId(categoryId, kind)}-title`;
+/** The note that says what a panel is about, which describes the dialog (aria-describedby). */
+const editorNoteId = (categoryId: string, kind: EditorKind): string =>
+  `${editorId(categoryId, kind)}-note`;
+
+/** The form an editor holds: Delete category's is the card's buttons' own ("action"). */
+const editorForm = (category: SelfRoleCategory, kind: EditorKind): RoleMenuForm =>
+  kind === "delete"
+    ? { kind: "action", categoryId: category.id }
+    : { kind, categoryId: category.id };
 
 /** The cached role names more than one role in the server has, per names snapshot. */
 const sharedNames = new WeakMap<WebNames, ReadonlySet<string>>();
@@ -435,8 +514,9 @@ const addFormShown = (view: RoleMenuView, menu: SelfRoleMenu, category: SelfRole
  * The element a refused field's error links to and is shown beside: the control when this page
  * renders it, the message itself for a form of buttons alone (a category's Move, state and Delete
  * buttons, whose errors are all about the form as a whole), the summary card's heading for Publish
- * N drafts, else the nearest thing that is there (the category's title, or the section), so every
- * error summary link resolves even after another officer removed what the form edited.
+ * N drafts, else the nearest thing that is there (Add roles' open panel's title when it has no
+ * form, the category's title for an editor that isn't drawn open, or the section), so every error
+ * summary link resolves even after another officer removed what the form edited.
  * Every target takes focus when its link is followed: a control, a choice group's fieldset or a
  * heading or paragraph with tabindex="-1", so keyboard focus lands beside the problem.
  */
@@ -454,6 +534,10 @@ function errorTarget(view: RoleMenuView, form: RoleMenuForm, field: string): str
   }
   const category = menu.categories.find((candidate) => candidate.id === form.categoryId);
   if (!category) return CATEGORIES;
+  if (form.kind === "action") return actionsId(category.id);
+  // An editor that isn't drawn open (a conflict, or Edit roles once its roles are gone) is a closed
+  // dialog, which a link can't reach: its card's heading, over the menu as it is now.
+  if (!isOpen(view, category, form.kind)) return titleId(category.id);
   const key = categoryKey(category.id);
   switch (form.kind) {
     case "category":
@@ -470,12 +554,11 @@ function errorTarget(view: RoleMenuView, form: RoleMenuForm, field: string): str
       return first ? `${optionKey(first.roleId)}-description` : titleId(category.id);
     }
     case "add":
-      if (!addFormShown(view, menu, category)) return titleId(category.id);
+      // The refused Add roles is drawn open (openEditor), its note saying why nothing can be added.
+      if (!addFormShown(view, menu, category)) return editorTitleId(category.id, "add");
       return field === "acknowledged" && view.editor.unreadableChannels > 0
         ? `${key}-acknowledged`
         : `${key}-roles`;
-    case "action":
-      return actionsId(category.id);
   }
 }
 
@@ -487,6 +570,60 @@ function isRefused(view: RoleMenuView, form: RoleMenuForm): boolean {
     !("categoryId" in form) || ("categoryId" in refused && refused.categoryId === form.categoryId)
   );
 }
+
+/**
+ * The editor a refused form comes back in, drawn open on top of the page: Edit roles, Add roles or
+ * Edit category, while its category is on the menu with that editor (Edit roles needs a role). A
+ * dialog can't be opened from markup, so it is drawn as the same panel, fixed by its class
+ * (openPanel), and the page's error summary goes in it, first, to take focus. A conflict (409)
+ * isn't drawn open: its sentence asks the officer to check the menu as it is now, which a panel
+ * over the dimmed, inert page would hide, so the summary stays at the top and the editor keeps
+ * what they changed for when they open it again (holdsRefused). Every other refused form (Add a
+ * category, Publish N drafts, Reset, and a card's buttons, Delete category's included, whose
+ * message shows in the card's foot) keeps the summary at the page's top too.
+ */
+function openEditor(
+  view: RoleMenuView,
+): { readonly category: SelfRoleCategory; readonly kind: EditorKind } | undefined {
+  const form = view.refused?.form;
+  const menu = view.editor.menu;
+  if (!form || view.refused?.conflict === true || !view.editor.configured || !menu)
+    return undefined;
+  if (form.kind !== "options" && form.kind !== "add" && form.kind !== "category") return undefined;
+  const category = menu.categories.find((candidate) => candidate.id === form.categoryId);
+  if (!category || (form.kind === "options" && category.options.length === 0)) return undefined;
+  return { category, kind: form.kind };
+}
+
+/** Whether the category's editor `kind` is the one drawn open. */
+function isOpen(view: RoleMenuView, category: SelfRoleCategory, kind: EditorKind): boolean {
+  const open = openEditor(view);
+  return open?.category.id === category.id && open.kind === kind;
+}
+
+/**
+ * Whether the page draws a refused editor open on top of it (openEditor). The page module then
+ * asks the layout to make the shell around the main content inert too (PostOutcome.modal).
+ */
+export const drawsEditorOpen = (view: RoleMenuView): boolean => openEditor(view) !== undefined;
+
+/**
+ * Whether the category's editor `kind` holds a refused form without being drawn open (a conflict):
+ * its button stays lit, as an open panel's does, marking where the officer's changes wait.
+ */
+const holdsRefused = (view: RoleMenuView, category: SelfRoleCategory, kind: EditorKind): boolean =>
+  kind !== "delete" && isRefused(view, editorForm(category, kind)) && !isOpen(view, category, kind);
+
+/**
+ * ` inert` on each of the page's own blocks while an editor is drawn open over them. Its backdrop
+ * already takes their clicks, and unlike a dialog it can't be closed with Escape, so a keyboard
+ * user who tabbed past its end would land on a control hidden under it (WCAG 2.4.11), and a screen
+ * reader would read the blurred page as if it were there. The layout makes the shell around them
+ * inert too (LayoutModel.modal: the skip link, the navigation, the page's header and the footer),
+ * so the panel is modal (aria-modal="true"): Close is the one way out.
+ */
+const behindPanel = (view: RoleMenuView): SafeHtml | "" =>
+  openEditor(view) === undefined ? "" : html` inert`;
 
 /** Errors about a form as a whole, shown at its top rather than beside one control. */
 const FORM_LEVEL: ReadonlySet<string> = new Set(["form", "rows"]);
@@ -610,6 +747,19 @@ function formErrors(view: RoleMenuView, form: RoleMenuForm, id?: string): SafeHt
     : html`<p class="orr-field__hint orr-field__hint--error form-error" id="${id}" tabindex="-1">${body}</p>`;
 }
 
+/**
+ * An editor's messages about its form as a whole, at the form's top: none while the editor is
+ * drawn open, where the error summary just above already says each of them (a 409's long sentence
+ * would otherwise read twice in a row). In a closed editor holding a refused form (a conflict),
+ * they say why the officer's changes are waiting there when they open it again.
+ */
+const editorErrors = (
+  view: RoleMenuView,
+  category: SelfRoleCategory,
+  kind: EditorKind,
+): SafeHtml | "" =>
+  isOpen(view, category, kind) ? "" : formErrors(view, editorForm(category, kind));
+
 /** The three text fields a category has, for Add a category and Edit category. */
 function categoryFields(
   view: RoleMenuView,
@@ -695,7 +845,7 @@ function summary(view: RoleMenuView, menu: SelfRoleMenu, checks: Checks): SafeHt
           )}`,
         )
       : "";
-  return html`<section class="orr-card orr-card--holo orr-holo-edge featured menu-summary" aria-labelledby="role-menu-summary">
+  return html`<section class="orr-card orr-card--holo orr-holo-edge featured menu-summary" aria-labelledby="role-menu-summary"${behindPanel(view)}>
 <div class="orr-card__head">
 <span class="menu-summary__mark menu-summary__mark--${mark}">${icon(mark === "warn" ? "triangle-alert" : mark === "wait" ? "clock" : "circle-check")}</span>
 <div class="orr-card__titles">
@@ -779,21 +929,132 @@ function banners(view: RoleMenuView): SafeHtml[] {
 /** The banners as one block under the lead, or nothing. */
 function bannerBlock(view: RoleMenuView): SafeHtml | "" {
   const shown = banners(view);
-  return shown.length === 0 ? "" : html`<div class="menu-banners">${shown}</div>`;
+  return shown.length === 0
+    ? ""
+    : html`<div class="menu-banners"${behindPanel(view)}>${shown}</div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
 // A category's card
 
-/** One role on the menu, as members will see it, with what an officer should know. */
+/**
+ * One role on the menu, as members will see it, with what an officer should know: its mention chip
+ * and badge, then its description and the channels it opens (beside the chip in a card with room,
+ * styles/role-menu.ts), and any problems as warning lines (the item then takes a row of its own,
+ * tinted, so drift stands out).
+ */
 function optionItem(option: SelfRoleOption, check: RoleCheck | undefined, names: WebNames) {
   const opened = opens(check, names);
-  return html`<li class="menu-option">
+  const flagged = check !== undefined && check.problems.length > 0;
+  return html`<li class="${flagged ? "menu-option menu-option--attention" : "menu-option"}">
 <p class="menu-option__role">${roleName(option.roleId, names)}${option.removalOnly ? badge("Not offered") : ""}</p>
 ${option.description === "" ? "" : html`<p class="menu-option__desc">${untrusted(option.description)}</p>`}
-${opened === "" ? "" : html`<p class="note menu-option__opens">${opened}</p>`}
+${opened === "" ? "" : html`<p class="menu-option__opens">${opened}</p>`}
 ${problems(check, names)}
 </li>`;
+}
+
+/** One of a card's editors, before it is placed: in its card as a closed dialog, or drawn open. */
+interface Editor {
+  readonly kind: EditorKind;
+  /** The toolbar button's text and the panel's title: "Edit roles". */
+  readonly label: string;
+  readonly body: SafeHtml;
+  /** Edit roles and Add roles lay their fields out wider; a confirmation is narrower. */
+  readonly size?: "wide" | "narrow";
+  /**
+   * What takes focus when the panel opens (autofocus): its title in a long editor, so a phone's
+   * on-screen keyboard doesn't cover the sheet and a screen reader starts at the top (the APG's
+   * advice for a dialog with much content); a control of the body's own ("body": Add roles' first
+   * choice, or Cancel in a confirmation); or Close, when there is nothing to fill in.
+   */
+  readonly focus: "title" | "body" | "close";
+  /**
+   * The id of the body's note that says what the panel is about, when focus would skip it: it
+   * describes the dialog, so a screen reader hears it as the panel opens.
+   */
+  readonly describedBy?: string;
+}
+
+/**
+ * A button's attributes that close the editor `id`: its invoker command where the browser has them
+ * (the dialog then gives focus back to its opener), else the popover's hide.
+ */
+const closes = (id: string): SafeHtml =>
+  html` commandfor="${id}" command="close" popovertarget="${id}" popovertargetaction="hide"`;
+
+/**
+ * An editor's panel: a head with its title (the action, then the category's name, which together
+ * name the dialog) and Close, then the editor's body. In its card it is a closed modal dialog,
+ * closed by Close, Escape or a click outside (closedby="any"); its popover attribute is the
+ * fallback for a browser without invoker commands. Delete category's confirmation is an alert
+ * dialog, described by its consequence. Drawn `open` (a refused form, openEditor) it is a plain
+ * element, as markup can't open a dialog: it is fixed on top of the page by its class instead, the
+ * error summary first in its body, and Close is a link that loads the page afresh at the card's
+ * heading, dropping what was typed. The link names the category in its query (NOTICE_CATEGORY,
+ * with no notice, so it shows nothing): one that differed from this POST's address only in its
+ * fragment would just scroll this page, panel and all.
+ */
+function panel(
+  view: RoleMenuView,
+  category: SelfRoleCategory,
+  editor: Editor,
+  open: boolean,
+): SafeHtml {
+  const id = editorId(category.id, editor.kind);
+  const title = editorTitleId(category.id, editor.kind);
+  const className = `overlay${open ? " overlay--open" : ""}${editor.size ? ` overlay--${editor.size}` : ""}`;
+  // The name shows under the action; the hidden ": " keeps the dialog's name one phrase. Never in
+  // capitals by CSS (as an .orr-label eyebrow would be): Chromium names the dialog in them too.
+  const words = html`${editor.label}<span class="overlay__subject"><span class="visually-hidden">: </span>${untrusted(category.name)}</span>`;
+  // Every Close is told apart by its editor and category (WCAG 2.4.6), as the toolbar's buttons.
+  const closeName = html`Close<span class="visually-hidden"> ${editor.label}</span>${named(category)}`;
+  const described =
+    editor.describedBy === undefined ? "" : html` aria-describedby="${editor.describedBy}"`;
+  if (open)
+    // A heading of the page's main content, after Add a category, where it sits in the markup. The
+    // shell and the page around it are inert (behindPanel), so it is modal.
+    return html`<div class="${className}" id="${id}" role="dialog" aria-modal="true" aria-labelledby="${title}"${described}>
+<div class="overlay__head"><h2 class="overlay__title" id="${title}" tabindex="-1">${words}</h2><a class="orr-btn orr-btn--ghost overlay__close" href="${href(
+      `${view.action}?${NOTICE_CATEGORY}=${category.id}#${titleId(category.id)}`,
+    )}">${closeName}</a></div>
+<div class="overlay__body">${errorSummary(summaryErrors(view))}${editor.body}</div>
+</div>`;
+  const focus = (target: Editor["focus"]) => (editor.focus === target ? html` autofocus` : "");
+  // A heading of its card (h3), whose toolbar it opens from.
+  return html`<dialog class="${className}" id="${id}" popover="auto" closedby="any"${
+    editor.kind === "delete" ? html` role="alertdialog"` : ""
+  } aria-labelledby="${title}"${described}>
+<div class="overlay__head"><h4 class="overlay__title" id="${title}" tabindex="-1"${focus("title")}>${words}</h4><button type="button" class="orr-btn orr-btn--ghost overlay__close"${closes(id)}${focus("close")}>${closeName}</button></div>
+<div class="overlay__body">${editor.body}</div>
+</dialog>`;
+}
+
+/**
+ * An editor's place in its card's toolbar: its button, then its closed panel, which the button
+ * opens as a modal dialog (commandfor, command "show-modal"), or as a popover where the browser
+ * has no invoker commands (popovertarget, which such a browser follows instead); the wrapper only
+ * keeps the two together in the markup, so the button is one of the toolbar's items. The button
+ * stays lit while the editor holds a refused form (holdsRefused). While the editor is drawn open
+ * at the page's end instead, a lit link to the open panel's title takes the button's place,
+ * marking under the backdrop which editor is open (a button there would name a panel that is no
+ * dialog, and do nothing).
+ */
+function tool(view: RoleMenuView, category: SelfRoleCategory, editor: Editor | ""): SafeHtml | "" {
+  if (editor === "") return "";
+  const id = editorId(category.id, editor.kind);
+  const className = `orr-btn orr-btn--secondary menu-opener${editor.kind === "delete" ? " menu-opener--danger" : ""}${
+    holdsRefused(view, category, editor.kind) ? " menu-opener--kept" : ""
+  }`;
+  const label = html`${editor.label}${named(category)}`;
+  return isOpen(view, category, editor.kind)
+    ? html`<div class="menu-tool"><a class="${className}" href="#${editorTitleId(category.id, editor.kind)}">${label}</a></div>`
+    : html`<div class="menu-tool"><button type="button" class="${className}" commandfor="${id}" command="show-modal" popovertarget="${id}" aria-haspopup="dialog">${label}</button>${panel(
+        view,
+        category,
+        editor,
+        false,
+      )}</div>`;
 }
 
 /** Move up and Move down: absolute places, so a repeat changes nothing. */
@@ -810,27 +1071,40 @@ function moves(view: RoleMenuView, category: SelfRoleCategory, at: number, last:
   return html`${at > 0 ? move("Move up", at - 1) : ""}${at < last ? move("Move down", at + 1) : ""}`;
 }
 
-/** The state buttons this category can take, each with its line of help. */
+/** The id of the sentence that says what the state button to `state` does, in the card's foot. */
+const stateHelpId = (category: SelfRoleCategory, state: CategoryState): string =>
+  `${categoryKey(category.id)}-${state}-help`;
+
+/**
+ * The card's state line, over its toolbar: what its state means, then what each state button this
+ * category offers does, a sentence each (STATE_ACTIONS), each the description of its button.
+ */
+function stateLine(category: SelfRoleCategory): SafeHtml {
+  return html`<p class="menu-category__state">${STATE_LINES[category.state]}${NEXT_STATES[
+    category.state
+  ].map(
+    (state) =>
+      html` <span id="${stateHelpId(category, state)}">${STATE_ACTIONS[state].help}</span>`,
+  )}</p>`;
+}
+
+/** The state buttons this category can take, each described by its sentence in the state line. */
 function stateActions(view: RoleMenuView, category: SelfRoleCategory): SafeHtml {
   const form: RoleMenuForm = { kind: "action", categoryId: category.id };
-  return html`<div class="menu-states">${NEXT_STATES[category.state].map((state) => {
-    const action = STATE_ACTIONS[state];
-    // The help line is the button's description, so it is heard with the button, not only when
-    // reading on past it.
-    const help = `${categoryKey(category.id)}-${state}-help`;
-    return pageForm(
+  return html`<div class="menu-states">${NEXT_STATES[category.state].map((state) =>
+    pageForm(
       view,
       html`${fields(view, form, "category.setState")}${hidden("state", state)}${submitButton(
-        html`${action.label}${named(category)}`,
-        { describedBy: help },
-      )}<p class="note" id="${help}">${action.help}</p>`,
+        html`${STATE_ACTIONS[state].label}${named(category)}`,
+        { describedBy: stateHelpId(category, state) },
+      )}`,
       "menu-state",
-    );
-  })}</div>`;
+    ),
+  )}</div>`;
 }
 
 /** Edit category: its name, description and limit. */
-function editCategory(view: RoleMenuView, category: SelfRoleCategory): SafeHtml {
+function editCategory(view: RoleMenuView, category: SelfRoleCategory): Editor {
   const form: RoleMenuForm = { kind: "category", categoryId: category.id };
   const refused = isRefused(view, form) ? view.refused?.values : undefined;
   const key = categoryKey(category.id);
@@ -839,11 +1113,13 @@ function editCategory(view: RoleMenuView, category: SelfRoleCategory): SafeHtml 
     `${WAS}description`,
     was?.description ?? category.description,
   )}${hidden(`${WAS}max`, was?.max ?? maxValue(category.max))}`;
-  return disclosure(
-    html`Edit category${named(category)}`,
-    pageForm(
+  return {
+    kind: "category",
+    label: "Edit category",
+    focus: "title",
+    body: pageForm(
       view,
-      html`${fields(view, form, "category.edit")}${shown}${formErrors(view, form)}${categoryFields(
+      html`${fields(view, form, "category.edit")}${shown}${editorErrors(view, category, "category")}${categoryFields(
         view,
         form,
         key,
@@ -856,14 +1132,18 @@ function editCategory(view: RoleMenuView, category: SelfRoleCategory): SafeHtml 
       )}${formActions(submitButton(html`Save category${named(category)}`))}`,
       "menu-form",
     ),
-    { open: isRefused(view, form) },
-  );
+  };
 }
 
-/** Edit roles: every option's description, place and state in one form (one POST). */
-function editOptions(view: RoleMenuView, category: SelfRoleCategory): SafeHtml | "" {
+/**
+ * Edit roles: every option's description, place and state in one form (one POST). The note above
+ * the rows ends with what Not offered and Remove from menu do (OPTION_STATES_HELP), which also
+ * describes every row's state select.
+ */
+function editOptions(view: RoleMenuView, category: SelfRoleCategory): Editor | "" {
   if (category.options.length === 0) return "";
   const form: RoleMenuForm = { kind: "options", categoryId: category.id };
+  const statesHelp = `${categoryKey(category.id)}-states-help`;
   const submitted = isRefused(view, form) ? view.refused?.values.rows : undefined;
   const rows = category.options.map((option, at) => {
     const kept = submitted?.get(option.roleId);
@@ -900,30 +1180,49 @@ ${selectField({
   label: html`On the menu${context(role)}`,
   options: OPTION_STATE_LABELS,
   value: kept?.state ?? state,
+  describedBy: statesHelp,
 })}
 </div>
 </fieldset>`;
   });
-  return disclosure(
-    html`Edit roles${named(category)}`,
-    pageForm(
+  return {
+    kind: "options",
+    label: "Edit roles",
+    size: "wide",
+    focus: "title",
+    body: pageForm(
       view,
-      html`${fields(view, form, "options.edit")}${formErrors(view, form)}<p class="note">Roles are shown in position order. Descriptions are optional, up to ${MENU_LIMITS.optionDescription} characters each. Not offered means nobody can add the role, but people who have it will still be able to remove it. Removing a role from the menu leaves it with everyone who has it in Discord.</p><div class="option-rows">${rows}</div>${formActions(
+      html`${fields(view, form, "options.edit")}${editorErrors(view, category, "options")}<p class="note">Roles are shown in position order. Descriptions are optional, up to ${MENU_LIMITS.optionDescription} characters each. <span id="${statesHelp}">${OPTION_STATES_HELP}</span></p><div class="option-rows">${rows}</div>${formActions(
         submitButton(html`Save roles${named(category)}`),
       )}`,
     ),
-    { open: isRefused(view, form) },
-  );
+  };
 }
 
 /** Add roles: a checkbox per eligible role, and why every other role isn't one. */
-function addRoles(view: RoleMenuView, menu: SelfRoleMenu, category: SelfRoleCategory): SafeHtml {
+function addRoles(view: RoleMenuView, menu: SelfRoleMenu, category: SelfRoleCategory): Editor {
   const form: RoleMenuForm = { kind: "add", categoryId: category.id };
   const roles = view.editor.roles;
   const key = categoryKey(category.id);
-  const open = isRefused(view, form) || category.options.length === 0;
+  // Always an editor, so the toolbar keeps its shape: when nothing can be added, its panel says
+  // why, where the officer looked for the form, in a note that describes the dialog, and its Close
+  // button takes focus.
+  const note = editorNoteId(category.id, "add");
+  const shown = (body: SafeHtml): Editor => ({
+    kind: "add",
+    label: "Add roles",
+    size: "wide",
+    focus: "close",
+    describedBy: note,
+    body: html`<div class="menu-add">${body}</div>`,
+  });
+  const why = (text: string): SafeHtml => html`<p class="note" id="${note}">${text}</p>`;
   if (roles === null)
-    return html`<p class="note">TaruBot can't read this server's roles right now, so roles can't be added. Try again in a minute.</p>`;
+    return shown(
+      why(
+        "TaruBot can't read this server's roles right now, so roles can't be added. Try again in a minute.",
+      ),
+    );
   const space = room(menu, category);
   const refused = ineligible(menu, roles);
   const refusedList =
@@ -941,11 +1240,13 @@ function addRoles(view: RoleMenuView, menu: SelfRoleMenu, category: SelfRoleCate
       MENU_LIMITS.optionsPerCategory - category.options.length <= 0
         ? `This category has the most roles a category can hold (${MENU_LIMITS.optionsPerCategory}).`
         : `The role menu has the most roles it can hold (${MENU_LIMITS.options}).`;
-    return html`<p class="note">${full}</p>`;
+    return shown(why(full));
   }
   const choices = eligible(menu, roles);
   if (choices.length === 0)
-    return html`<div class="menu-add"><p class="note">No other role can be added: every role in this server is on the menu already or fails a check.</p>${refusedList}</div>`;
+    return shown(
+      html`${why("No other role can be added: every role in this server is on the menu already or fails a check.")}${refusedList}`,
+    );
   const submitted = isRefused(view, form) ? view.refused?.values : undefined;
   const unreadable = view.editor.unreadableChannels;
   const acknowledgement =
@@ -974,11 +1275,16 @@ function addRoles(view: RoleMenuView, menu: SelfRoleMenu, category: SelfRoleCate
       ...(opened === "" ? {} : { hint: opened }),
     };
   });
-  return disclosure(
-    html`Add roles${named(category)}`,
-    html`<div class="menu-add">${pageForm(
+  // The form's button row comes last, after why the other roles can't be added, so it is the
+  // panel's foot (styles/role-menu.ts pins it to the panel's bottom edge).
+  return {
+    kind: "add",
+    label: "Add roles",
+    size: "wide",
+    focus: "body",
+    body: html`<div class="menu-add">${pageForm(
       view,
-      html`${fields(view, form, "options.add")}${formErrors(view, form)}${choiceGroup({
+      html`${fields(view, form, "options.add")}${editorErrors(view, category, "add")}${choiceGroup({
         id: `${key}-roles`,
         name: "roles",
         type: "checkbox",
@@ -987,24 +1293,74 @@ function addRoles(view: RoleMenuView, menu: SelfRoleMenu, category: SelfRoleCate
         checked: submitted?.roleIds ?? [],
         choices: options,
         error: errorsAt(view, form, `${key}-roles`),
-      })}${acknowledgement}${formActions(submitButton(html`Add selected roles${named(category)}`))}`,
-    )}${refusedList}</div>`,
-    { open },
-  );
+        // Drawn open, the error summary takes focus instead.
+        autofocus: !isOpen(view, category, "add"),
+      })}${acknowledgement}${refusedList}${formActions(submitButton(html`Add selected roles${named(category)}`))}`,
+    )}</div>`,
+  };
 }
 
-/** Delete category, behind its consequence. */
-function deleteCategory(view: RoleMenuView, category: SelfRoleCategory): SafeHtml {
+/**
+ * Delete category: a confirmation that states the consequence before its danger button, and is
+ * described by it, so a screen reader hears it as the panel opens. Cancel closes it and takes
+ * focus when it opens, so Enter or Space right away deletes nothing. A refused delete says why in
+ * the card's foot (Move, the states and Delete share one form-level message), so this panel is
+ * never drawn open.
+ */
+function deleteCategory(view: RoleMenuView, category: SelfRoleCategory): Editor {
   const form: RoleMenuForm = { kind: "action", categoryId: category.id };
-  return disclosure(
-    html`Delete category${named(category)}`,
-    pageForm(
+  const note = editorNoteId(category.id, "delete");
+  const cancel = html`<button type="button" class="orr-btn orr-btn--secondary"${closes(
+    editorId(category.id, "delete"),
+  )} autofocus>Cancel<span class="visually-hidden"> deleting the category</span>${named(category)}</button>`;
+  return {
+    kind: "delete",
+    label: "Delete category",
+    size: "narrow",
+    focus: "body",
+    describedBy: note,
+    body: pageForm(
       view,
-      html`${fields(view, form, "category.delete")}<p class="note">${DELETE_NOTES[category.state]}</p>${formActions(
+      html`${fields(view, form, "category.delete")}<p class="note" id="${note}">${DELETE_NOTES[category.state]}</p>${formActions(
         submitButton(html`Yes, delete category${named(category)}`, { variant: "danger" }),
+        cancel,
       )}`,
     ),
-  );
+  };
+}
+
+/** The category's editor `kind`, as its toolbar holds it ("" when it has none, as Edit roles). */
+function editorOf(
+  view: RoleMenuView,
+  menu: SelfRoleMenu,
+  category: SelfRoleCategory,
+  kind: EditorKind,
+): Editor | "" {
+  switch (kind) {
+    case "options":
+      return editOptions(view, category);
+    case "add":
+      return addRoles(view, menu, category);
+    case "category":
+      return editCategory(view, category);
+    case "delete":
+      return deleteCategory(view, category);
+  }
+}
+
+/**
+ * The refused editor (openEditor), drawn open on top of the page over a dimmed backdrop that takes
+ * the page's clicks, last in the main content: out of the card, whose glass and container query
+ * would hold a fixed box inside it, and after the page's own blocks, so the page under it lays out
+ * as on a GET. Nothing when no editor was refused.
+ */
+function openPanel(view: RoleMenuView, menu: SelfRoleMenu): SafeHtml | "" {
+  const open = openEditor(view);
+  if (!open) return "";
+  const editor = editorOf(view, menu, open.category, open.kind);
+  return editor === ""
+    ? ""
+    : html`<div class="overlay-backdrop"></div>${panel(view, open.category, editor, true)}`;
 }
 
 /**
@@ -1017,7 +1373,15 @@ function noticeCard(view: RoleMenuView, menu: SelfRoleMenu | null): string | nul
   return id !== null && menu?.categories.some((category) => category.id === id) ? id : null;
 }
 
-/** One category's card: what members will see, then the officer's tools. */
+/** "1 role", "N roles", or "No roles". */
+const roleCount = (count: number): string =>
+  count === 0 ? "No roles" : `${count} ${count === 1 ? "role" : "roles"}`;
+
+/**
+ * One category's card: a one-line head, the roles as members will see them, then the foot: a line
+ * on what the state means and what each state button does, and the officer's one toolbar, whose
+ * editors open on top of the page, so the card never changes when one opens.
+ */
 function categoryCard(
   view: RoleMenuView,
   menu: SelfRoleMenu,
@@ -1025,46 +1389,48 @@ function categoryCard(
   at: number,
   checks: Checks,
 ): SafeHtml {
-  // The success notice, ahead of the title, when this card's edit sent the officer here: the
-  // #status fragment then lands on this card, and keeps its focus and entrance rules.
+  // The success notice, ahead of the head's line, when this card's edit sent the officer here:
+  // the #status fragment then lands on this card, and keeps its focus and entrance rules.
   const saved = noticeCard(view, menu) === category.id ? notice(view.url, ROLE_MENU_NOTICES) : "";
   const state = STATE_BADGES[category.state];
   const attention = attentionIn(category, checks);
-  // The heading carries the state and any problems in words, since the badges come before it and
-  // someone moving by heading would skip them; the badges are hidden from assistive technology so
-  // that reading on doesn't repeat them.
+  // The heading carries the state and any problems in words, since the badges come before it in
+  // the markup (the stylesheet draws them at the line's end) and someone moving by heading would
+  // skip them; the badges are hidden from assistive technology so that reading on doesn't repeat
+  // them.
   const status = `${state.text.toLowerCase()}${attention > 0 ? `, ${needWord(attention)} attention` : ""}`;
+  // With any description, the roles line up in two columns where the card has room, each
+  // description beside its chip; without, the chips simply wrap.
+  const described = category.options.some((option) => option.description !== "");
   const options =
     category.options.length === 0
-      ? html`<p class="note">No roles yet. Add the roles people can pick from this category.</p>`
-      : html`<ul class="menu-options">${category.options.map((option) =>
-          optionItem(option, checks?.get(option.roleId), view.names),
+      ? html`<p class="note">No roles yet. Choose Add roles to list the roles people can pick from this category.</p>`
+      : html`<ul class="${described ? "menu-options menu-options--described" : "menu-options"}">${category.options.map(
+          (option) => optionItem(option, checks?.get(option.roleId), view.names),
         )}</ul>`;
   return html`<li class="orr-card menu-category" id="${categoryKey(category.id)}">
-<div class="orr-card__head">
-<div class="orr-card__titles">
+<div class="menu-category__head">
 ${saved}
 <p class="menu-category__meta">${badge(state.text, state.tone, true)}${
     attention > 0 ? badge(`${attention} to check`, "orr-badge--warning", true) : ""
-  }<span class="orr-label">${pickRule(category.max)}</span></p>
-<h3 class="orr-card__title menu-category__title" id="${titleId(category.id)}" tabindex="-1">${untrusted(category.name)}<span class="visually-hidden"> (${status})</span></h3>
-${category.description === "" ? "" : html`<p class="orr-card__desc">${untrusted(category.description)}</p>`}
+  }</p>
+<h3 class="menu-category__title" id="${titleId(category.id)}" tabindex="-1">${untrusted(category.name)}<span class="visually-hidden"> (${status})</span></h3>
+<p class="menu-category__facts"><span class="orr-label">${pickRule(category.max)}</span><span class="orr-label">${roleCount(category.options.length)}</span></p>
+${category.description === "" ? "" : html`<p class="menu-category__desc">${untrusted(category.description)}</p>`}
 </div>
-</div>
-<div class="orr-card__body">
+<div class="menu-category__body">
 ${options}
-<div class="menu-category__tools">
-${editOptions(view, category)}
-${addRoles(view, menu, category)}
-${editCategory(view, category)}
-</div>
 </div>
 <div class="menu-category__foot">
 ${formErrors(view, { kind: "action", categoryId: category.id }, actionsId(category.id))}
+${stateLine(category)}
+<div class="menu-toolbar">
+${tool(view, category, editOptions(view, category))}
+${tool(view, category, addRoles(view, menu, category))}
+${tool(view, category, editCategory(view, category))}
 ${stateActions(view, category)}
-<div class="menu-category__end">
 <div class="menu-moves">${moves(view, category, at, menu.categories.length - 1)}</div>
-${deleteCategory(view, category)}
+${tool(view, category, deleteCategory(view, category))}
 </div>
 </div>
 </li>`;
@@ -1075,11 +1441,11 @@ ${deleteCategory(view, category)}
 
 function categoriesSection(view: RoleMenuView, menu: SelfRoleMenu, checks: Checks): SafeHtml {
   const count = menu.categories.length;
-  return html`<section aria-labelledby="${CATEGORIES}">
+  return html`<section aria-labelledby="${CATEGORIES}"${behindPanel(view)}>
 <div class="section-heading">
 <h2 id="${CATEGORIES}" tabindex="-1">Categories</h2>
 <p class="section-description section-count">${count} of ${MENU_LIMITS.categories}</p>
-<p class="section-description">Members and guests will see published categories in this order, each with its roles.</p>
+<p class="section-description">Members and guests see published categories on My roles in this order, each with its roles.</p>
 </div>
 ${
   count === 0
@@ -1113,12 +1479,12 @@ function addCategorySection(view: RoleMenuView, menu: SelfRoleMenu): SafeHtml {
         )}${formActions(submitButton("Add category"))}`,
         "menu-form",
       );
-  return html`<section aria-labelledby="${ADD_CATEGORY}">
+  return html`<section aria-labelledby="${ADD_CATEGORY}"${behindPanel(view)}>
 <div class="section-heading">
 <h2 id="${ADD_CATEGORY}" tabindex="-1">Add a category</h2>
 <p class="section-description">New categories start as drafts, which only officers see.</p>
 </div>
-<div class="orr-card"><div class="orr-card__body">${body}</div></div>
+<div class="orr-card menu-create"><div class="orr-card__body">${body}</div></div>
 </section>`;
 }
 
@@ -1157,9 +1523,21 @@ function summaryErrors(view: RoleMenuView): FieldError[] {
 /** The Role menu page's main content. */
 export function renderRoleMenu(view: RoleMenuView): SafeHtml {
   const { editor } = view;
-  const lead = html`<p class="lead" id="${INTRO}" tabindex="-1">Officers list existing Discord roles here, in categories, such as pronouns or games. Members and guests will pick their own roles from this menu in an upcoming TaruBot update; until then, nothing here changes anyone's roles.</p>`;
-  // The success notice goes in its category's card when the redirect named one on the menu.
-  const top = html`${errorSummary(summaryErrors(view))}${
+  // My roles' address on this server, from the request URL rebuilt on WEB_PUBLIC_ORIGIN (never the
+  // Host header), for officers to share with members, such as in the old reaction-roles channel.
+  const myRoles = MY_ROLES_PATH.replace(":guild", editor.guildId);
+  // The intro: one sentence, then a small line with the one change TaruBot makes unasked, owner
+  // decision Q3 B's (Synchronization.user), said where officers read what the menu does (it covers
+  // people who never had Member or Guest too, such as lobby users given a game role by another
+  // bot), then My roles' address as a chip to copy.
+  const lead = html`<div class="menu-intro" id="${INTRO}" tabindex="-1"${behindPanel(view)}>
+<p class="lead">Members and guests pick their own roles from this menu on <a href="${href(myRoles)}">My roles</a>.</p>
+<p class="menu-intro__note">TaruBot adds or removes a listed role only when that person asks, apart from roles that open channels, which it takes from anyone with none of the Member, Guest, Officer and FC Leader roles.</p>
+<p class="menu-share"><span class="orr-label">Link to share</span> <code>${new URL(myRoles, view.url).href}</code></p>
+</div>`;
+  // The success notice goes in its category's card when the redirect named one on the menu. The
+  // error summary goes in a refused editor drawn open, else at the top.
+  const top = html`${openEditor(view) === undefined ? errorSummary(summaryErrors(view)) : ""}${
     noticeCard(view, editor.menu) === null ? notice(view.url, ROLE_MENU_NOTICES) : ""
   }`;
   if (!editor.configured)
@@ -1174,5 +1552,6 @@ ${callout(html`Set TaruBot up first: this server has no TaruBot configuration ye
 ${bannerBlock(view)}
 ${summary(view, menu, checks)}
 ${categoriesSection(view, menu, checks)}
-${addCategorySection(view, menu)}`;
+${addCategorySection(view, menu)}
+${openPanel(view, menu)}`;
 }

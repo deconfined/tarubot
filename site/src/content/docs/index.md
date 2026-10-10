@@ -30,7 +30,7 @@ hero:
 
 ## Who these pages are for
 
-- **[Use TaruBot](/tarubot/use/getting-started/)** is for members and visitors of a server that runs TaruBot: linking your characters, nicknames, guest access, the FC ledger, what to do when something goes wrong, and suggesting features.
+- **[Use TaruBot](/tarubot/use/getting-started/)** is for members and visitors of a server that runs TaruBot: linking your characters, nicknames, guest access, picking your own roles, the FC ledger, what to do when something goes wrong, and suggesting features.
 - **[Run a server](/tarubot/admin/add-to-server/)** is for officers and server managers: adding the bot, who can do what, setting a server up, roles, the self-service role menu, officers, guest applications, the ledger, officer notices, member status posts and update posts, health checks, and feature suggestions.
 - **[Deploy and operate](/tarubot/deploy/requirements/)** is for people who run their own TaruBot: requirements, the Discord application, installation, configuration, updates and backups, monitoring and the maintenance tools.
 - **[Architecture and design](/tarubot/architecture/overview/)** is for contributors and the curious: how the bot is built, how it decides access, what it stores, and why.
@@ -43,7 +43,7 @@ hero:
 - **Handles guests.** Registered visitors get Guest automatically; others can apply, and officers approve or deny in a staff channel.
 - **Manages nicknames.** Members can have their nickname follow their main character's name.
 - **Keeps the gil ledger.** Deposits, withdrawals and corrections are exact, numbered, permanent and posted to a channel.
-- **Builds a role menu.** On the web dashboard, officers list roles such as pronouns or games that members and guests will pick for themselves, replacing reaction roles.
+- **Lets people pick their own roles.** On the web dashboard, officers list roles such as pronouns or games, and members and guests pick their own on My roles, replacing reaction roles.
 - **Can gate channels.** Optional lobby onboarding shows newcomers only a lobby until they link a character or are approved.
 - **Tells officers what changed.** A short post in the officers' channel lists members who gained or lost access, Officer or FC Leader, with the reason, and characters that left the FC.
 - **Shares what's new.** After an update that changes something you can notice, in Discord, on the dashboard or on this site, it can post a short note in a channel the officers choose.

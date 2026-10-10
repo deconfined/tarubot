@@ -1,7 +1,9 @@
 /**
  * Self-service roles (2.39.0): the stored menu document and its limits, every officer edit as a
  * pure function with the equal-state rule, what the menu lists, and the one rule set for what may
- * be self-assigned (selfRoleChecker) over invented servers. Any officer may add any role the rules
+ * be self-assigned (selfRoleChecker) over invented servers. From 2.40.0, members' choices: what My
+ * roles shows one person, which categories a save changed, the merge and equal-state rules, the
+ * roles.self job's plan, and the channel-opening roles reconciliation takes (owner decision Q3 B). Any officer may add any role the rules
  * pass (owner decision, 2026-10-09), so the rules take no officer at all. Invented IDs: guild 100
  * (also @everyone's role), TaruBot 900 with its bot role 600, Member 201, Guest 202, Officer 203,
  * FC Leader 204, candidate roles from 300, a moderator role 400, and channels from 700.
@@ -10,9 +12,15 @@ import { describe, expect, test } from "bun:test";
 import { ChannelType as T, PermissionFlagsBits as P } from "discord.js";
 import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
 import {
+  accessLossRemovals,
   addable,
   applyOperation,
-  channelOpeningRoles,
+  type CategoryChoice,
+  CHOICE_MESSAGES,
+  changeable,
+  changedCategories,
+  choiceHeld,
+  choiceMenu,
   checkRoles,
   cleanText,
   EMPTY_MENU,
@@ -25,9 +33,15 @@ import {
   type MenuOperation,
   menuRoleIds,
   menuSchema,
+  mergeChoice,
   permissionNames,
+  planSelfRoles,
   readMenu,
+  readRoleChoice,
   removable,
+  type RoleChoice,
+  roleChoiceKey,
+  sameChoice,
   type SelfRoleCategory,
   type SelfRoleMenu,
   type SelfRoleSettings,
@@ -42,15 +56,6 @@ import {
   unreadableChannels,
 } from "../../src/domain/self-roles.js";
 import type { VisibilityChannel, VisibilityGuild } from "../../src/domain/visibility.js";
-import type { GuildAccess } from "../../src/application/guild-access.js";
-import type { DiscordPort } from "../../src/application/records.js";
-import { Service } from "../../src/application/service.js";
-import { Synchronization } from "../../src/application/synchronization.js";
-import type { Configuration } from "../../src/config/env.js";
-import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
-import { type Database, orm } from "../../src/infrastructure/postgres/database.js";
-import { dispatcher } from "../../src/jobs/dispatch.js";
-import type { PoolClient } from "pg";
 
 const GUILD = "100";
 const BOT = "900";
@@ -1627,15 +1632,6 @@ describe("removal, channel-opening roles and the health check", () => {
       });
   });
 
-  test("channelOpeningRoles: listed roles that open a channel, never drafts or cosmetic ones", () => {
-    const games = menu(
-      category(CAT.games, { state: "published", options: [option(C.game), option(C.cosmetic)] }),
-    );
-    expect(channelOpeningRoles(games, server(), SETTINGS)).toEqual([C.game]);
-    const draft = menu(category(CAT.games, { options: [option(C.game)] }));
-    expect(channelOpeningRoles(draft, server(), SETTINGS)).toEqual([]);
-  });
-
   test("selfRoleHealth counts what members see and what fails its check", () => {
     const shown = menu(
       category(CAT.pronouns, {
@@ -1691,79 +1687,657 @@ test("permission names follow Discord, once per bit, with one phrase for unknown
   expect(permissionNames(0n, "server")).toEqual([]);
 });
 
-describe("the roles.self stub (2.39.0)", () => {
-  test("the schedule pass closes every waiting role choice at once, and no other kind", async () => {
-    // Drizzle over a client that records each statement and answers no rows, so no roster is due.
-    const sent: { text: string; values: unknown[] }[] = [];
-    const client = {
-      query: async (config: { text: string }, values: unknown[] = []) => {
-        sent.push({ text: config.text, values });
-        return { rows: [], rowCount: 0, fields: [] };
+// ---------------------------------------------------------------------------------------------
+// Members' choices (2.40.0)
+
+/** My roles' categories, as all-zero UUIDs (the officer's form would mint real ones). */
+const MY = {
+  pronouns: "00000000-0000-4000-8000-000000000001",
+  games: "00000000-0000-4000-8000-000000000002",
+  old: "00000000-0000-4000-8000-000000000003",
+  draft: "00000000-0000-4000-8000-000000000004",
+} as const;
+/** A role the server doesn't have. */
+const GONE = "399";
+/**
+ * The menu members see here:
+ * - Pronouns, pick one: two roles anyone may pick, and Kick, which fails the add rules but whoever
+ *   holds it can remove;
+ * - Games, up to 2: Game (opens #game), Unnamed (fails the add rules) and a role above the
+ *   moderation roles (fails them too, but removable);
+ * - Old, Stop offering: Administrator (removable) and a role above TaruBot (can't be removed);
+ * - a draft holding a role the server no longer has.
+ */
+const CHOICES = menu(
+  category(MY.pronouns, {
+    state: "published",
+    max: 1,
+    options: [option(C.cosmetic), option(C.everyoneBits), option(C.kick)],
+  }),
+  category(MY.games, {
+    name: "Games",
+    state: "published",
+    max: 2,
+    options: [option(C.game), option(C.unnamed), option(C.tiedBelow)],
+  }),
+  category(MY.old, {
+    name: "Old",
+    state: "removal_only",
+    options: [option(C.administrator), option(C.above)],
+  }),
+  category(MY.draft, { name: "Draft", options: [option(GONE)] }),
+);
+const CHECK = selfRoleChecker(server(), SETTINGS);
+/** One category of a submission: what the form showed ticked, and what came back. */
+const sent = (categoryId: string, seen: string[], picked: string[]): CategoryChoice => ({
+  categoryId,
+  seen,
+  picked,
+});
+/** What a submission asks, for someone holding `held`. */
+const asked = (held: string[], ...submitted: CategoryChoice[]) =>
+  changedCategories(CHOICES, held, CHECK, submitted);
+/** The choice a submission asks, failing the test otherwise. */
+function choiceOf(result: ReturnType<typeof asked>): RoleChoice {
+  if (result.kind !== "choice") throw new Error(`Expected a choice, got ${JSON.stringify(result)}`);
+  return result.choice;
+}
+const NOTHING: RoleChoice = { chosen: [], offered: [] };
+
+describe("My roles: what one person sees", () => {
+  test("changeable roles as inputs, held ones they can't change as text, and drafts for officers only", () => {
+    const held = [C.cosmetic, C.everyoneBits, C.tiedBelow, C.administrator, C.above];
+    const shown = choiceMenu(CHOICES, { held, waiting: null, check: CHECK, officer: false });
+    // `addable`: offered and passing every rule now, so it could be picked again once removed.
+    const row = (
+      roleId: string,
+      held: boolean,
+      changeable: boolean,
+      notOffered = false,
+      addable = changeable && !notOffered,
+    ) => ({
+      roleId,
+      description: "",
+      held,
+      ticked: held,
+      changeable,
+      notOffered,
+      addable,
+    });
+    expect(shown).toEqual([
+      {
+        id: MY.pronouns,
+        name: "Pronouns",
+        description: "",
+        max: 1,
+        state: "published",
+        input: "one",
+        // Kick fails the add rules and isn't held, so it isn't shown at all.
+        options: [row(C.cosmetic, true, true), row(C.everyoneBits, true, true)],
+        // Two held in a pick-one category: the page preselects no radio and says to pick one.
+        ticked: 2,
       },
-    };
-    const app = {
-      db: { orm: orm(client as unknown as PoolClient) },
-      config: { ROSTER_INTERVAL_SECONDS: 21600 },
-    } as unknown as Service;
-    await new Synchronization(app).schedule();
-    // Each statement with its bound values written in, so the whole condition reads at once.
-    const statements = sent.map(({ text, values }) =>
-      text.replace(/\$(\d+)/g, (_, n: string) => JSON.stringify(values[Number(n) - 1])),
-    );
-    const choices = statements.filter((text) => text.includes('"jobs"."kind" = "roles.self"'));
-    // One close and the 30-day retention, both limited to role choices by their outermost AND.
-    // The close has no age, server or due-time condition: 2.39.0 never runs these jobs, so every
-    // waiting one ends now, whatever holds it, except a running one with a live lease. Its
-    // status, succeeded, is one the payload-clearing trigger fires on.
-    expect(choices).toEqual([
-      'update "jobs" set "status" = "succeeded", "lease_until" = null, "completed_at" = now(), "last_error" = null, "result" = "{\\"skipped\\":\\"needs a newer TaruBot\\"}" where ("jobs"."kind" = "roles.self" and ("jobs"."status" in ("queued", "blocked", "disabled") or ("jobs"."status" = "running" and ("jobs"."lease_until" is null or "jobs"."lease_until" < now()))))',
-      'delete from "jobs" where ("jobs"."kind" = "roles.self" and "jobs"."status" in ("succeeded", "failed") and "jobs"."completed_at" < now()-30*interval \'1 day\')',
+      {
+        id: MY.games,
+        name: "Games",
+        description: "",
+        max: 2,
+        state: "published",
+        input: "many",
+        // The role above the moderation roles is held and removable, but no longer addable: once
+        // unticked it can't be picked again, which the page warns about.
+        options: [row(C.game, false, true), row(C.tiedBelow, true, true, false, false)],
+        ticked: 1,
+      },
+      {
+        id: MY.old,
+        name: "Old",
+        description: "",
+        max: null,
+        state: "removal_only",
+        input: "many",
+        // Removable, so an input marked no longer offered; above TaruBot, so a line of text.
+        options: [row(C.administrator, true, true, true), row(C.above, true, false, true)],
+        ticked: 1,
+      },
     ]);
+    // Officers also see the draft, disabled, with every option and their own roles ticked.
+    const officer = choiceMenu(CHOICES, { held, waiting: null, check: CHECK, officer: true });
+    expect(officer.map((category) => category.id)).toEqual([
+      MY.pronouns,
+      MY.games,
+      MY.old,
+      MY.draft,
+    ]);
+    expect(officer.at(-1)).toMatchObject({ state: "draft", options: [row(GONE, false, false)] });
   });
 
-  test("a member's role choice left by 2.40.0 completes as skipped, touching nothing", async () => {
-    // Every dependency throws on first use and records it: the stub must answer before any
-    // database read, Discord call or delivery_attempts row.
-    const touched: string[] = [];
-    const trap = <T>(name: string): T =>
-      new Proxy(
-        {},
+  test("a waiting change shows as it asks; Stop offering shows only to people who can remove a role", () => {
+    const waiting: RoleChoice = { offered: [C.game, C.tiedBelow], chosen: [C.game] };
+    const shown = choiceMenu(CHOICES, {
+      held: [C.tiedBelow],
+      waiting,
+      check: CHECK,
+      officer: false,
+    });
+    expect(shown.find((category) => category.id === MY.games)?.options).toMatchObject([
+      { roleId: C.game, held: false, ticked: true },
+      { roleId: C.tiedBelow, held: true, ticked: false },
+    ]);
+    // Holding only the role above TaruBot: nothing in Old can be changed, so it isn't shown.
+    expect(
+      choiceMenu(CHOICES, { held: [C.above], waiting: null, check: CHECK, officer: false }).map(
+        (category) => category.id,
+      ),
+    ).toEqual([MY.pronouns, MY.games]);
+    // A role not offered any more shows only to its holders.
+    const notOffered = menu(
+      category(MY.pronouns, {
+        state: "published",
+        options: [option(C.cosmetic), option(C.everyoneBits, { removalOnly: true })],
+      }),
+    );
+    const rows = (held: string[]) =>
+      choiceMenu(notOffered, { held, waiting: null, check: CHECK, officer: false })[0]?.options;
+    expect(rows([])?.map((row) => row.roleId)).toEqual([C.cosmetic]);
+    expect(rows([C.everyoneBits])?.[1]).toMatchObject({
+      roleId: C.everyoneBits,
+      changeable: true,
+      notOffered: true,
+    });
+  });
+
+  test("without TaruBot's view nothing is changeable, and held roles show as text", () => {
+    const shown = choiceMenu(CHOICES, {
+      held: [C.cosmetic, C.administrator],
+      waiting: null,
+      check: null,
+      officer: false,
+    });
+    expect(shown.map((category) => category.id)).toEqual([MY.pronouns]);
+    expect(shown[0]?.options).toMatchObject([{ roleId: C.cosmetic, changeable: false }]);
+    expect(changeable(CHOICES, C.cosmetic, true, null)).toBeFalse();
+  });
+});
+
+describe("My roles: which categories a save changed", () => {
+  test("what came back as it was shown changes nothing, including a radio left alone", () => {
+    expect(
+      choiceOf(
+        asked([C.cosmetic], sent(MY.pronouns, [C.cosmetic], [C.cosmetic]), sent(MY.games, [], [])),
+      ),
+    ).toEqual(NOTHING);
+    // Nothing held: "None" was preselected and kept.
+    expect(choiceOf(asked([], sent(MY.pronouns, [""], [""])))).toEqual(NOTHING);
+    // Several held in a pick-one category: no radio was preselected, and the browser sent nothing.
+    expect(choiceOf(asked([C.cosmetic, C.everyoneBits], sent(MY.pronouns, [], [])))).toEqual(
+      NOTHING,
+    );
+  });
+
+  test("a changed category offers every role the person may change there, and chosen what they picked", () => {
+    expect(choiceOf(asked([], sent(MY.pronouns, [""], [C.everyoneBits])))).toEqual({
+      // Kick fails the add rules and isn't held: not theirs to change.
+      offered: [C.cosmetic, C.everyoneBits],
+      chosen: [C.everyoneBits],
+    });
+    // The odd state: picking one keeps it and removes the others; "None" removes them all.
+    expect(
+      choiceOf(asked([C.cosmetic, C.everyoneBits], sent(MY.pronouns, [], [C.cosmetic]))),
+    ).toEqual({ offered: [C.cosmetic, C.everyoneBits], chosen: [C.cosmetic] });
+    expect(choiceOf(asked([C.cosmetic, C.everyoneBits], sent(MY.pronouns, [], [""])))).toEqual({
+      offered: [C.cosmetic, C.everyoneBits],
+      chosen: [],
+    });
+    // A held Kick can be removed, so it is part of the category's offer once it is changed.
+    expect(choiceOf(asked([C.kick], sent(MY.pronouns, [C.kick], [C.cosmetic])))).toEqual({
+      offered: [C.cosmetic, C.everyoneBits, C.kick],
+      chosen: [C.cosmetic],
+    });
+    // Only the changed category: Games came back as shown.
+    expect(
+      choiceOf(
+        asked(
+          [C.tiedBelow],
+          sent(MY.pronouns, [""], [C.cosmetic]),
+          sent(MY.games, [C.tiedBelow], [C.tiedBelow]),
+        ),
+      ),
+    ).toEqual({ offered: [C.cosmetic, C.everyoneBits], chosen: [C.cosmetic] });
+  });
+
+  test("someone else's change since the page rendered is left alone in an untouched category", () => {
+    // Dyno gave Everyone-bits after the page showed Cosmetic alone ticked; the member didn't touch
+    // Pronouns, so nothing there changes, although what they hold differs from what came back.
+    expect(
+      choiceOf(asked([C.cosmetic, C.everyoneBits], sent(MY.pronouns, [C.cosmetic], [C.cosmetic]))),
+    ).toEqual(NOTHING);
+    // An officer removed a role the page showed ticked: an untouched checkbox list is unchanged.
+    expect(choiceOf(asked([], sent(MY.games, [C.game], [C.game])))).toEqual(NOTHING);
+  });
+
+  test("Stop offering: a holder may untick a role; a held role that can't be changed is ignored", () => {
+    expect(
+      choiceOf(asked([C.administrator, C.above], sent(MY.old, [C.administrator], []))),
+    ).toEqual({ offered: [C.administrator], chosen: [] });
+    // The role above TaruBot was shown as text; sending it ticked changes nothing.
+    expect(
+      choiceOf(
+        asked(
+          [C.administrator, C.above],
+          sent(MY.old, [C.administrator], [C.administrator, C.above]),
+        ),
+      ),
+    ).toEqual(NOTHING);
+    // Ticked by someone who doesn't hold it: nobody may add a role no longer offered.
+    expect(asked([], sent(MY.old, [], [C.administrator]))).toEqual({ kind: "conflict" });
+  });
+
+  test("a role, a None or a category the menu no longer allows there is a conflict", () => {
+    for (const [held, submission] of [
+      // A role the server and the menu don't have.
+      [[], sent(MY.pronouns, [""], ["999"])],
+      // A role from another category.
+      [[], sent(MY.pronouns, [""], [C.game])],
+      // "None" outside a pick-one category.
+      [[], sent(MY.games, [], [""])],
+      // A draft is never submitted.
+      [[], sent(MY.draft, [], [GONE])],
+      // A category that no longer exists, with a role in it.
+      [[], sent("00000000-0000-4000-8000-000000000009", [], [C.cosmetic])],
+    ] as const)
+      expect({ submission, result: asked([...held], submission) }).toEqual({
+        submission,
+        result: { kind: "conflict" },
+      });
+    // The same category twice.
+    expect(asked([], sent(MY.games, [], [C.game]), sent(MY.games, [], []))).toEqual({
+      kind: "conflict",
+    });
+    // A draft or a deleted category sent with nothing in it changes nothing.
+    expect(
+      choiceOf(
+        asked([], sent(MY.draft, [], []), sent("00000000-0000-4000-8000-000000000009", [""], [])),
+      ),
+    ).toEqual(NOTHING);
+  });
+
+  test("a role that fails a rule now, or too many in a category, is refused with the category", () => {
+    expect(asked([], sent(MY.games, [], [C.game, C.unnamed]))).toEqual({
+      kind: "invalid",
+      errors: [
         {
-          get(_, key) {
-            touched.push(`${name}.${String(key)}`);
-            throw new Error(`${name} used`);
-          },
+          categoryId: MY.games,
+          roleId: C.unnamed,
+          message: CHOICE_MESSAGES.unavailableRole(C.unnamed),
         },
-      ) as T;
-    const app = new Service(
-      trap<Database>("db"),
-      trap<DiscordPort>("discord"),
-      trap<Lodestone>("lodestone"),
-      trap<Configuration>("config"),
+      ],
+    });
+    // A form with two radios checked (hand-made): pick one.
+    expect(asked([], sent(MY.pronouns, [""], [C.cosmetic, C.everyoneBits]))).toEqual({
+      kind: "invalid",
+      errors: [{ categoryId: MY.pronouns, max: 1, message: CHOICE_MESSAGES.max(1) }],
+    });
+    expect(CHOICE_MESSAGES.max(3)).toBe("Pick at most 3 roles here.");
+  });
+
+  test("a lowered limit: left alone it stands, saving it with too many is refused", () => {
+    const lowered = menu(
+      category(MY.games, {
+        state: "published",
+        max: 2,
+        options: [option(C.cosmetic), option(C.everyoneBits), option(C.game)],
+      }),
     );
-    const run = dispatcher(app, trap<Synchronization>("sync"), trap<GuildAccess>("access"));
-    let guarded = 0;
-    const result = await run(
-      {
-        id: "9f1c2b3a-4d5e-4f60-8a7b-1c2d3e4f5a6b",
-        kind: "roles.self",
-        guild_id: GUILD,
-        user_id: "200",
-        payload: { chosen: [C.cosmetic], offered: [C.cosmetic], savedAt: "2026-10-09T12:00:00Z" },
-        payload_version: 1,
-        generation: 1,
-        attempts: 1,
-        message_id: null,
-        created_at: new Date("2026-10-09T12:00:00Z"),
-        due_at: new Date("2026-10-09T12:00:00Z"),
-        lease_token: "00000000-0000-4000-8000-000000000001",
-      },
-      async () => {
-        guarded++;
-      },
+    const all = [C.cosmetic, C.everyoneBits, C.game];
+    const save = (seen: string[], picked: string[]) =>
+      changedCategories(lowered, all, CHECK, [sent(MY.games, seen, picked)]);
+    expect(choiceOf(save(all, all))).toEqual(NOTHING);
+    expect(choiceOf(save(all, [C.cosmetic, C.game]))).toEqual({
+      offered: all,
+      chosen: [C.cosmetic, C.game],
+    });
+    expect(save([C.cosmetic], all)).toEqual({
+      kind: "invalid",
+      errors: [{ categoryId: MY.games, max: 2, message: CHOICE_MESSAGES.max(2) }],
+    });
+  });
+
+  test("roles held there that can't be changed count toward a changed category's limit", () => {
+    // Pick one, and the member holds a role that sits above TaruBot now, so it can't be changed
+    // here: picking the other role would leave them with two.
+    const pickOne = menu(
+      category(MY.pronouns, {
+        state: "published",
+        max: 1,
+        options: [option(C.above), option(C.cosmetic)],
+      }),
     );
-    expect(result).toEqual({ skipped: "needs a newer TaruBot" });
-    expect(touched).toEqual([]);
-    expect(guarded).toBe(0);
+    expect(changeable(pickOne, C.above, true, CHECK)).toBeFalse();
+    const one = (seen: string[], picked: string[]) =>
+      changedCategories(pickOne, [C.above], CHECK, [sent(MY.pronouns, seen, picked)]);
+    // The page preselects no radio there, so a category left alone sends nothing either way.
+    expect(choiceOf(one([], []))).toEqual(NOTHING);
+    expect(one([], [C.cosmetic])).toEqual({
+      kind: "invalid",
+      errors: [{ categoryId: MY.pronouns, message: CHOICE_MESSAGES.fixedMax([C.above], 1) }],
+    });
+    // "No role from this category" still removes whatever they can change there.
+    expect(choiceOf(one([], [""]))).toEqual({ offered: [C.cosmetic], chosen: [] });
+    // Up to 2 with one such role held: one more fits, two more don't.
+    const upToTwo = menu(
+      category(MY.games, {
+        state: "published",
+        max: 2,
+        options: [option(C.above), option(C.cosmetic), option(C.everyoneBits)],
+      }),
+    );
+    const two = (picked: string[]) =>
+      changedCategories(upToTwo, [C.above], CHECK, [sent(MY.games, [], picked)]);
+    expect(choiceOf(two([C.cosmetic]))).toEqual({
+      offered: [C.cosmetic, C.everyoneBits],
+      chosen: [C.cosmetic],
+    });
+    expect(two([C.cosmetic, C.everyoneBits])).toEqual({
+      kind: "invalid",
+      errors: [{ categoryId: MY.games, message: CHOICE_MESSAGES.fixedMax([C.above], 2) }],
+    });
+    // The role they keep, sent ticked as well (a hand-made form), isn't counted twice.
+    expect(two([C.cosmetic, C.everyoneBits, C.above])).toEqual({
+      kind: "invalid",
+      errors: [{ categoryId: MY.games, message: CHOICE_MESSAGES.fixedMax([C.above], 2) }],
+    });
+    // The message names the roles the person keeps there, and what's left to pick.
+    expect(CHOICE_MESSAGES.fixedMax([C.above], 1)).toBe(
+      `<@&${C.above}> can't be changed here right now and counts toward this category's limit of one role, so you can't pick another role here.`,
+    );
+    expect(CHOICE_MESSAGES.fixedMax([C.above], 2)).toBe(
+      `<@&${C.above}> can't be changed here right now and counts toward this category's limit of 2 roles, so pick at most 1 other role here.`,
+    );
+    expect(CHOICE_MESSAGES.fixedMax([C.above, C.tiedAbove, C.kick], 5)).toBe(
+      `<@&${C.above}>, <@&${C.tiedAbove}> and <@&${C.kick}> can't be changed here right now and count toward this category's limit of 5 roles, so pick at most 2 other roles here.`,
+    );
+  });
+});
+
+describe("My roles: merging saves and the equal-state rule", () => {
+  test("a save replaces what the waiting change asked for its categories and keeps the rest", () => {
+    const pronouns: RoleChoice = { offered: [C.cosmetic, C.everyoneBits], chosen: [C.cosmetic] };
+    const games: RoleChoice = { offered: [C.game, C.tiedBelow], chosen: [C.game] };
+    expect(mergeChoice(null, games, CHOICES)).toEqual(games);
+    expect(mergeChoice(pronouns, games, CHOICES)).toEqual({
+      chosen: [C.cosmetic, C.game],
+      offered: [C.cosmetic, C.everyoneBits, C.game, C.tiedBelow],
+    });
+    // The same category again: the newer answer wins.
+    expect(
+      mergeChoice(pronouns, { offered: pronouns.offered, chosen: [C.everyoneBits] }, CHOICES),
+    ).toEqual({ chosen: [C.everyoneBits], offered: [C.cosmetic, C.everyoneBits] });
+    // A role taken off the menu since the first save is dropped (the job would skip it anyway).
+    expect(mergeChoice({ offered: ["555", C.cosmetic], chosen: ["555"] }, games, CHOICES)).toEqual({
+      chosen: [C.game],
+      offered: [C.cosmetic, C.game, C.tiedBelow],
+    });
+    // An unreadable menu keeps nothing of the waiting change.
+    expect(mergeChoice(pronouns, games, null)).toEqual(games);
+  });
+
+  test("a changed category replaces the waiting change there whole, roles the page hid included", () => {
+    // The waiting change picked Cosmetic in a pick-one category, then officers stopped offering
+    // it: the page hides it (not held), so the person can't untick it, and picks the other role.
+    const pickOne = menu(
+      category(MY.pronouns, {
+        state: "published",
+        max: 1,
+        options: [option(C.cosmetic, { removalOnly: true }), option(C.everyoneBits)],
+      }),
+    );
+    const waiting: RoleChoice = { chosen: [C.cosmetic], offered: [C.cosmetic, C.everyoneBits] };
+    const [shown] = choiceMenu(pickOne, { held: [], waiting, check: CHECK, officer: false });
+    expect(shown?.options.map((row) => [row.roleId, row.ticked])).toEqual([
+      [C.everyoneBits, false],
+    ]);
+    const next = choiceOf(
+      changedCategories(pickOne, [], CHECK, [sent(MY.pronouns, [""], [C.everyoneBits])]),
+    );
+    expect(next).toEqual({ chosen: [C.everyoneBits], offered: [C.everyoneBits] });
+    const merged = mergeChoice(waiting, next, pickOne);
+    expect(merged).toEqual({ chosen: [C.everyoneBits], offered: [C.everyoneBits] });
+    // One pick, so the job adds it rather than skipping the category as over its limit.
+    expect(planSelfRoles(merged, pickOne, [], new Set())).toEqual({
+      add: [C.everyoneBits],
+      remove: [],
+      skipped: 0,
+    });
+
+    // Up to 2: the waiting change picked Cosmetic and Game, Cosmetic stopped being offered, and
+    // the save picks Everyone bits and Game. Cosmetic can't stay beside them.
+    const upToTwo = menu(
+      category(MY.games, {
+        state: "published",
+        max: 2,
+        options: [
+          option(C.cosmetic, { removalOnly: true }),
+          option(C.everyoneBits),
+          option(C.game),
+        ],
+      }),
+    );
+    const two: RoleChoice = {
+      chosen: [C.cosmetic, C.game],
+      offered: [C.cosmetic, C.everyoneBits, C.game],
+    };
+    const save = choiceOf(
+      changedCategories(upToTwo, [], CHECK, [sent(MY.games, [C.game], [C.everyoneBits, C.game])]),
+    );
+    const both = mergeChoice(two, save, upToTwo);
+    expect(new Set(both.chosen)).toEqual(new Set([C.everyoneBits, C.game]));
+    expect(new Set(both.offered)).toEqual(new Set([C.everyoneBits, C.game]));
+    expect(planSelfRoles(both, upToTwo, [], new Set()).skipped).toBe(0);
+  });
+
+  test("a category the form showed from the waiting change but the person left alone keeps it", () => {
+    // Waiting: Everyone bits in Pronouns and Game in Games. The page ticks both from it; the
+    // person unticks Game and sends Pronouns back as shown.
+    const waiting: RoleChoice = {
+      chosen: [C.everyoneBits, C.game],
+      offered: [C.cosmetic, C.everyoneBits, C.game],
+    };
+    const shown = choiceMenu(CHOICES, { held: [], waiting, check: CHECK, officer: false });
+    const ticked = (categoryId: string) =>
+      (shown.find((entry) => entry.id === categoryId)?.options ?? [])
+        .filter((row) => row.ticked)
+        .map((row) => row.roleId);
+    expect(ticked(MY.pronouns)).toEqual([C.everyoneBits]);
+    expect(ticked(MY.games)).toEqual([C.game]);
+    const next = choiceOf(
+      asked(
+        [],
+        sent(MY.pronouns, [C.everyoneBits], [C.everyoneBits]),
+        sent(MY.games, [C.game], []),
+      ),
+    );
+    // Only Games changed: what the waiting change asked in Pronouns stands.
+    expect(next.chosen).toEqual([]);
+    expect(mergeChoice(waiting, next, CHOICES)).toEqual({
+      chosen: [C.everyoneBits],
+      offered: [C.cosmetic, C.everyoneBits, ...next.offered],
+    });
+  });
+
+  test("the same choice in any order is the same; a choice already held is nothing to do", () => {
+    expect(
+      sameChoice(
+        { offered: [C.cosmetic, C.game], chosen: [C.game] },
+        { offered: [C.game, C.cosmetic], chosen: [C.game] },
+      ),
+    ).toBeTrue();
+    expect(
+      sameChoice(
+        { offered: [C.cosmetic], chosen: [] },
+        { offered: [C.cosmetic], chosen: [C.cosmetic] },
+      ),
+    ).toBeFalse();
+    const choice: RoleChoice = { offered: [C.cosmetic, C.game], chosen: [C.game] };
+    expect(choiceHeld(choice, [C.game, C.kick])).toBeTrue();
+    expect(choiceHeld(choice, [C.game, C.cosmetic])).toBeFalse();
+    expect(choiceHeld(choice, [])).toBeFalse();
+  });
+
+  test("the payload: role IDs within the menu's cap, chosen within offered, and the save's clock", () => {
+    const valid = {
+      chosen: [C.game],
+      offered: [C.game, C.cosmetic],
+      savedAt: "2026-10-09T12:00:00.000Z",
+    };
+    expect(readRoleChoice(valid)).toEqual(valid);
+    expect(roleChoiceKey(GUILD, "200")).toBe("self-roles:100:200");
+    const many = Array.from({ length: 51 }, (_, at) => String(1000 + at));
+    for (const bad of [
+      {},
+      null,
+      { ...valid, chosen: [C.kick] },
+      { ...valid, offered: [C.game, C.game] },
+      { ...valid, savedAt: "yesterday" },
+      { ...valid, names: ["He/Him"] },
+      { ...valid, offered: many },
+      { ...valid, chosen: ["not an ID"], offered: ["not an ID"] },
+    ])
+      expect({ bad, read: readRoleChoice(bad) }).toEqual({ bad, read: null });
+  });
+});
+
+describe("the roles.self job's plan", () => {
+  const NONE = new Set<string>();
+
+  test("only listed roles in the changed categories, never a draft, a deleted role or an access role", () => {
+    const choice: RoleChoice = {
+      offered: [C.cosmetic, C.everyoneBits, C.game, GONE, "555", ROLE.member],
+      chosen: [C.everyoneBits, GONE, "555", ROLE.member],
+    };
+    // Game isn't wanted and isn't held: no difference, so nothing to count.
+    expect(planSelfRoles(choice, CHOICES, [C.cosmetic], new Set([ROLE.member]))).toEqual({
+      add: [C.everyoneBits],
+      remove: [C.cosmetic],
+      // The draft's role, the role off the menu, and the access role: each differs, none applied.
+      skipped: 3,
+    });
+    // A role already as wanted is neither planned nor counted.
+    expect(
+      planSelfRoles({ offered: [C.cosmetic], chosen: [C.cosmetic] }, CHOICES, [C.cosmetic], NONE),
+    ).toEqual({ add: [], remove: [], skipped: 0 });
+  });
+
+  test("a role no longer offered is removed from holders but never added", () => {
+    const choice: RoleChoice = { offered: [C.administrator, C.above], chosen: [C.above] };
+    expect(planSelfRoles(choice, CHOICES, [C.administrator], NONE)).toEqual({
+      add: [],
+      remove: [C.administrator],
+      skipped: 1,
+    });
+  });
+
+  test("a category whose choices now exceed its limit is skipped whole, and counted", () => {
+    const lowered = menu(
+      category(MY.games, {
+        state: "published",
+        max: 1,
+        options: [option(C.cosmetic), option(C.everyoneBits), option(C.game)],
+      }),
+    );
+    const choice: RoleChoice = {
+      offered: [C.cosmetic, C.everyoneBits, C.game],
+      chosen: [C.cosmetic, C.everyoneBits],
+    };
+    expect(planSelfRoles(choice, lowered, [C.game], NONE)).toEqual({
+      add: [],
+      remove: [],
+      skipped: 3,
+    });
+  });
+
+  test("roles held in a category that the choice doesn't cover count toward its limit", () => {
+    // Pick one: the member holds a role the save couldn't change (above TaruBot), so adding the
+    // one they picked would leave them with two. The whole category is skipped, and counted.
+    const pickOne = menu(
+      category(MY.pronouns, {
+        state: "published",
+        max: 1,
+        options: [option(C.above), option(C.cosmetic)],
+      }),
+    );
+    expect(
+      planSelfRoles({ offered: [C.cosmetic], chosen: [C.cosmetic] }, pickOne, [C.above], NONE),
+    ).toEqual({ add: [], remove: [], skipped: 1 });
+    // Up to 2, one such role held: one more is added, two more skip the category.
+    const upToTwo = menu(
+      category(MY.games, {
+        state: "published",
+        max: 2,
+        options: [option(C.above), option(C.cosmetic), option(C.everyoneBits)],
+      }),
+    );
+    const offered = [C.cosmetic, C.everyoneBits];
+    expect(planSelfRoles({ offered, chosen: [C.cosmetic] }, upToTwo, [C.above], NONE)).toEqual({
+      add: [C.cosmetic],
+      remove: [],
+      skipped: 0,
+    });
+    expect(planSelfRoles({ offered, chosen: offered }, upToTwo, [C.above], NONE)).toEqual({
+      add: [],
+      remove: [],
+      skipped: 2,
+    });
+    // A role the choice covers counts as chosen or not, whatever is held: dropping one to make
+    // room for another fits.
+    expect(
+      planSelfRoles(
+        { offered: [C.above, C.cosmetic], chosen: [C.cosmetic] },
+        pickOne,
+        [C.above],
+        NONE,
+      ),
+    ).toEqual({ add: [C.cosmetic], remove: [C.above], skipped: 0 });
+  });
+
+  test("an unreadable menu lists nothing: every difference is skipped", () => {
+    const choice: RoleChoice = { offered: [C.cosmetic, C.game], chosen: [C.game] };
+    expect(planSelfRoles(choice, null, [C.cosmetic], NONE)).toEqual({
+      add: [],
+      remove: [],
+      skipped: 2,
+    });
+  });
+});
+
+describe("losing Member and Guest (owner decision Q3 B)", () => {
+  const games = (state: SelfRoleCategory["state"], ...roleIds: string[]) =>
+    menu(category(MY.games, { state, options: roleIds.map((roleId) => option(roleId)) }));
+
+  test("held channel-opening roles go; cosmetic ones, drafts and roles not held stay", () => {
+    const both = games("published", C.game, C.cosmetic);
+    expect(accessLossRemovals(both, server(), SETTINGS, [C.game, C.cosmetic])).toEqual([C.game]);
+    expect(accessLossRemovals(both, server(), SETTINGS, [C.cosmetic])).toEqual([]);
+    // Stop offering still lists the role, so it still goes.
+    expect(accessLossRemovals(games("removal_only", C.game), server(), SETTINGS, [C.game])).toEqual(
+      [C.game],
+    );
+    // A draft is never acted on.
+    expect(accessLossRemovals(games("draft", C.game), server(), SETTINGS, [C.game])).toEqual([]);
+  });
+
+  test("a channel-opening role TaruBot can't remove is left alone", () => {
+    const opens = server({
+      channels: (channels) =>
+        channels.map((channel) =>
+          channel.id === CH.game
+            ? { ...channel, overwrites: [...channel.overwrites, ow(C.above, P.ViewChannel)] }
+            : channel,
+        ),
+    });
+    expect(selfRoleChecker(opens, SETTINGS)(C.above).opens).toEqual([CH.game]);
+    expect(
+      accessLossRemovals(games("published", C.above, C.game), opens, SETTINGS, [C.above, C.game]),
+    ).toEqual([C.game]);
   });
 });

@@ -1,10 +1,11 @@
 /**
  * The development harness's opt-in review states: harnessOptions maps each --state-* flag, and
- * the harness, started on loopback with a state and signed in as the invented officer, shows that
- * state on the rendered pages. The default data stays web-server.test.ts's and
- * web-mentions.test.ts's. Assertions use the pinned semantic hooks (bracketed .check tokens,
- * .marker-* classes, .featured, dt/dd facts, the work-sample table) and approved copy, not layout
- * markup. Credential-free: invented IDs, no network beyond loopback.
+ * the harness, started on loopback with a state and signed in as the invented officer (as the
+ * member for My roles' --state-roles), shows that state on the rendered pages. The default data
+ * stays web-server.test.ts's and web-mentions.test.ts's. Assertions use the pinned semantic hooks
+ * (bracketed .check tokens, .marker-* classes, .featured, dt/dd facts, the work-sample table, the
+ * #status banners) and approved copy, not layout markup. Credential-free: invented IDs, no network
+ * beyond loopback.
  */
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
@@ -12,11 +13,15 @@ import { configurationChecks } from "../../src/discord/presenters/configuration.
 import {
   HARNESS_GUILDS,
   HARNESS_MENU,
+  HARNESS_ROLES_STATES,
+  type HarnessAccount,
   type HarnessStates,
   HOSTILE_NAMES,
   harnessOptions,
   harnessReport,
+  MENU_CATEGORY,
   MENU_REVISION,
+  MENU_ROLE,
   startHarness,
 } from "../fixtures/web-dev.js";
 
@@ -61,6 +66,8 @@ describe("harnessOptions", () => {
       hostileNames: true,
     });
     expect(harnessOptions(["--state-checks", "warn"]).states).toEqual({ checks: "warn" });
+    for (const roles of HARNESS_ROLES_STATES)
+      expect(harnessOptions([`--state-roles=${roles}`]).states).toEqual({ roles });
   });
 
   test("refuses an unknown check level, a misspelt flag and a lone --cert", () => {
@@ -68,6 +75,9 @@ describe("harnessOptions", () => {
       "Pass --state-checks=warn or --state-checks=fail.",
     );
     expect(() => harnessOptions(["--state-cooldown"])).toThrow();
+    expect(() => harnessOptions(["--state-roles=applied"])).toThrow(
+      "Pass --state-roles=queued, blocked, failed, skipped or expired.",
+    );
     expect(() => harnessOptions(["--cert", "cert.pem"])).toThrow("Pass --cert and --key together.");
   });
 });
@@ -123,10 +133,14 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
   const health = (document: Page) => document.querySelector(".featured");
 
   /**
-   * Start the harness in `states`, sign in as the officer through the fake authorize page (as
-   * web-server.test.ts does), and read `/` plus each path as the signed-in officer.
+   * Start the harness in `states`, sign in as the officer (or `account`) through the fake
+   * authorize page (as web-server.test.ts does), and read `/` plus each path as them.
    */
-  async function officerPages(states: HarnessStates, paths: readonly string[]) {
+  async function officerPages(
+    states: HarnessStates,
+    paths: readonly string[],
+    account: HarnessAccount = "officer",
+  ) {
     const harness = await startHarness({ states });
     try {
       const jar = new Map<string, string>();
@@ -146,7 +160,9 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
       expect(login.status).toBe(302);
       const authorize = login.headers.get("location") ?? "";
       const choice = await (await browse(authorize)).text();
-      const approve = /href="(\/oauth2\/approve\/[0-9a-f-]+\/officer)"/u.exec(choice)?.[1];
+      const approve = new RegExp(`href="(/oauth2/approve/[0-9a-f-]+/${account})"`, "u").exec(
+        choice,
+      )?.[1];
       expect(approve).toBeDefined();
       const approved = await browse(new URL(approve ?? "", authorize));
       const callback = await browse(approved.headers.get("location") ?? "");
@@ -191,7 +207,8 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
     for (const marker of ["queued", "running", "failed", "blocked"])
       expect(work?.querySelectorAll(`.marker-${marker}`)).toHaveLength(1);
     expect(work?.querySelectorAll(".marker-waiting, .marker-paused")).toHaveLength(0);
-    expect(isolated(page("/"))).toEqual([HARNESS_GUILDS.example.name]);
+    // The officer also holds Member in Second FC (2.40.0), so it is listed, with My roles only.
+    expect(isolated(page("/"))).toEqual([HARNESS_GUILDS.example.name, HARNESS_GUILDS.second.name]);
   });
 
   test("--state-menu-problems: Server configuration warns about the Role menu and Administrator too", async () => {
@@ -317,6 +334,72 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
     expect(fact(page(configuration), "Last roster error")?.textContent).toContain("rate_limited");
   });
 
+  test("--state-roles: each state's banner on My roles, as the member sees it", async () => {
+    const myRoles = `/g/${HARNESS_GUILDS.example.id}/my-roles`;
+    const read = async (states: HarnessStates) =>
+      (await officerPages(states, [myRoles], "member"))(myRoles);
+    const banners = (document: Page) =>
+      [...document.querySelectorAll("#status .notice")].map((banner) => banner.textContent);
+    const games = (document: Page) =>
+      [...document.querySelectorAll(`fieldset#category-${MENU_CATEGORY.games} input[checked]`)].map(
+        (input) => input.getAttribute("value"),
+      );
+    // Without a state nobody has a change on record, and the member holds Valheim.
+    const healthy = await read({});
+    expect(banners(healthy)).toEqual([]);
+    expect(games(healthy)).toEqual([MENU_ROLE.valheim]);
+    // A waiting change asks for Minecraft instead of Valheim, so the form shows that.
+    const queued = await read({ roles: "queued" });
+    expect(banners(queued)).toEqual([
+      "Saved. TaruBot is updating your roles in Discord. This usually takes under a minute; reload to check.",
+    ]);
+    expect(games(queued)).toEqual([MENU_ROLE.minecraft]);
+    // While Discord changes are paused it is parked, and the form can't be sent.
+    const paused = await read({ roles: "queued", activation: true });
+    expect(banners(paused)).toEqual([
+      "Saved. Role changes are paused in this server, so yours will be applied when they resume. If that takes more than 7 days, your change is dropped and you can pick again.",
+    ]);
+    expect(paused.querySelectorAll("main form")).toHaveLength(0);
+    // The banner doesn't explain the missing Save button, so a short line does.
+    expect(
+      [...paused.querySelectorAll(".my-roles-callouts .notice")].map((note) => note.textContent),
+    ).toEqual(["You can't change your roles here until role changes resume."]);
+    const blocked = await read({ roles: "blocked" });
+    expect(banners(blocked)).toEqual([
+      "Saved, but TaruBot can't change roles in this server right now. Officers can see why. TaruBot keeps trying for up to 7 days after your last saved change.",
+    ]);
+    expect(games(blocked)).toEqual([MENU_ROLE.minecraft]);
+    // A finished change's warning says when it ended, on the harness's own (wall) clock, in UTC.
+    const dated = (before: string, after: string) =>
+      expect.stringMatching(
+        new RegExp(
+          `^${RegExp.escape(before)} \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} UTC${RegExp.escape(after)}$`,
+          "u",
+        ),
+      );
+    expect(banners(await read({ roles: "failed" }))).toEqual([
+      dated(
+        "TaruBot couldn't apply your last change, and stopped trying on",
+        ". Check your roles below and pick again, then save. If it keeps happening, ask an officer.",
+      ),
+    ]);
+    expect(banners(await read({ roles: "skipped" }))).toEqual([
+      dated(
+        "Your roles were updated on",
+        ", but 2 of your choices couldn't be applied. Check your roles below, or ask an officer.",
+      ),
+    ]);
+    const expired = await read({ roles: "expired" });
+    expect(banners(expired)).toEqual([
+      dated(
+        "TaruBot couldn't apply your last change within 7 days, so it was dropped on",
+        ". Pick your roles again, then save.",
+      ),
+    ]);
+    // A finished change holds no role IDs: the form shows only what the member holds.
+    expect(games(expired)).toEqual([MENU_ROLE.valheim]);
+  });
+
   test("--state-hostile-names: every name stays isolated text on every server", async () => {
     const servers = HOSTILE_NAMES.guilds.map((guild) => `/g/${guild.id}/configuration`);
     const page = await officerPages({ hostileNames: true }, [...servers, status]);
@@ -324,7 +407,11 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
     expect(home.querySelectorAll('.servers a[href$="/status"]')).toHaveLength(
       HOSTILE_NAMES.guilds.length,
     );
-    expect(isolated(home)).toEqual(HOSTILE_NAMES.guilds.map((guild) => guild.name));
+    // Second FC, where the officer is a member (2.40.0), keeps its name and comes last.
+    expect(isolated(home)).toEqual([
+      ...HOSTILE_NAMES.guilds.map((guild) => guild.name),
+      HARNESS_GUILDS.second.name,
+    ]);
     for (const [index, guild] of HOSTILE_NAMES.guilds.entries()) {
       const document = page(servers[index] ?? "");
       // Each server's name is isolated exactly once, in the shell.
