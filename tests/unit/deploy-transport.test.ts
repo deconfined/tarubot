@@ -41,7 +41,12 @@ const publicLine = new RegExp(
 type Host = { stdout: string[]; stderr?: string; exit?: number };
 // Each suite runs with no LANG and under UTF-8 locales: glibc's [A-Za-z] matches letters such as é
 // under en_US.UTF-8, so the transport's own C-locale matching must hold whatever the runner sets.
-const availableLocales = Bun.spawnSync(["locale", "-a"]).stdout.toString().toLowerCase();
+// The Alpine test image has no `locale` tool (musl ships no locale archive): only the unset case
+// runs there, and the glibc hosts (CI's Ubuntu runner, developers) cover the UTF-8 suites.
+const localeTool = Bun.which("locale");
+const availableLocales = localeTool
+  ? Bun.spawnSync([localeTool, "-a"]).stdout.toString().toLowerCase()
+  : "";
 const locales = [undefined, "C.UTF-8", "en_US.UTF-8"].filter(
   (locale) =>
     locale === undefined || availableLocales.includes(locale.toLowerCase().replace("-", "")),
