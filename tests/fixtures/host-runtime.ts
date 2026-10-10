@@ -98,6 +98,14 @@ export function hostSandbox(
         `export * from ${JSON.stringify(join(repository, `src/config/${module}.ts`))};\n`,
       );
   }
+  // Observation runs the entry's actual probe against an invented database module, package.json
+  // (written per call by the fake docker) and /health/ready answer: see observe-scenario.ts.
+  const observeRuntime = join(sim, "observe-runtime");
+  mkdirSync(join(observeRuntime, "dist/src/infrastructure/postgres"), { recursive: true });
+  writeFileSync(
+    join(observeRuntime, "dist/src/infrastructure/postgres/database.js"),
+    `export * from ${JSON.stringify(join(repository, "tests/fixtures/host-runtime/observe-database.ts"))};\n`,
+  );
   mkdirSync(join(runtime, "dist/src/web"), { recursive: true });
   writeFileSync(
     join(runtime, "dist/src/web/settings.js"),
@@ -114,6 +122,7 @@ export function hostSandbox(
     BUN_REAL: process.execPath,
     COMPOSE_FIXTURE: join(repository, "tests/fixtures/host-runtime/compose-config.ts"),
     SCOPE_FIXTURE: join(repository, "tests/fixtures/host-runtime/scope-run.ts"),
+    OBSERVE_FIXTURE: join(repository, "tests/fixtures/host-runtime/observe-fetch.ts"),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_AUTHOR_NAME: "Host test",
@@ -204,12 +213,15 @@ export function hostSandbox(
   writeFileSync(join(sim, "argv"), "");
   return { directory, root, state, sim, environment, live, target, deploymentTarget };
 }
+export const deployScript = join(repository, "ops/deploy.sh");
+/** Run the host entry (or `entry`, an installed copy of it) as the forced command would. */
 export function deploy(
   box: HostSandbox,
   request?: string,
   args: string[] = [box.deploymentTarget],
+  entry = deployScript,
 ) {
-  return subprocess(["bash", join(repository, "ops/deploy.sh"), ...args], {
+  return subprocess(["bash", entry, ...args], {
     ...box.environment,
     SSH_ORIGINAL_COMMAND:
       request ??
@@ -234,4 +246,3 @@ export function events(box: HostSandbox): string[] {
 export function knob(box: HostSandbox, name: string) {
   writeFileSync(join(box.sim, `fail-${name}`), "");
 }
-export const deployScript = join(repository, "ops/deploy.sh");

@@ -60,7 +60,7 @@ docker compose logs --since 1h tarubot
 
 Logs are structured JSON lines. Tokens, passwords, message payloads and command option values are never logged.
 
-For upstream automated delivery, Actions receives only fixed step/result tokens. Detailed host diagnostics stay in private deployment logs; inspect them privately as the owner. Repository checks do not establish which release is live. The [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-observation-and-outcomes) covers exact image/schema/writer observation.
+For upstream automated delivery, Actions receives only fixed step/result tokens and, when a delivery fails, fixed-shape reasons: which check failed, exit statuses, container facts, readiness flags and error codes, never settings, messages or IDs. Detailed host diagnostics stay in private deployment logs; inspect them privately as the owner ([reading a failed delivery](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#reading-a-failed-delivery)). Repository checks do not establish which release is live. The [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-observation-and-outcomes) covers exact image/schema/writer observation.
 
 **Finding a member's error.** Every failure reply ends with `Code <code> · Ref <interaction ID>`, and the log entry for it carries the same ID in `operation`:
 
