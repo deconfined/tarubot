@@ -101,6 +101,8 @@ test("command inventory exactly matches the declared public surface", async () =
       "issue",
       // 2.28.0: members and guests suggest features publicly on GitHub.
       "suggest",
+      // 2.42.0: anyone gets a link to the dashboard.
+      "dashboard",
     ].sort(),
   );
 });

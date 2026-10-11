@@ -1,6 +1,7 @@
 /**
  * Utility presenters: /ping and /channel (guests-sync-utility#50–#53), neutral reference replies
- * with no service behind them, /issue's confirmation (2.18.0) and /suggest's (2.28.0). Pure.
+ * with no service behind them, /issue's confirmation (2.18.0), /suggest's (2.28.0) and /dashboard's
+ * link (2.42.0). Pure.
  */
 import { ChannelType } from "discord.js";
 import { code, link, mentionChannel, plain } from "./format.js";
@@ -20,6 +21,9 @@ const TIMESTAMP = {
   "issue.received": false,
   "issue.saved": false,
   "suggest.posted": false,
+  "dashboard.link": false,
+  "dashboard.development": false,
+  "dashboard.off": false,
 } as const satisfies Record<string, boolean>;
 
 /** A utility reply state; tests catalogue one case per kind. */
@@ -161,5 +165,37 @@ export function suggestionReply(posted: SuggestionPosted): Presented {
       },
       { name: "Next", value: "Follow it on GitHub. To report a problem instead, use **/issue**." },
     ],
+  });
+}
+
+/**
+ * /dashboard (2.42.0): a Link button to the dashboard's home page, which signs people in and lists
+ * the servers whose pages admit them, or takes them straight to their only page. Pages are per
+ * server and per audience (Background work for officers, My roles for members and guests), so no
+ * one server page suits everyone. The origin is the parsed WEB_PUBLIC_ORIGIN (Dashboard), never
+ * request data. Discord link buttons need https here (reply.ts), so a development origin
+ * (http://localhost or http://[::1]) is shown as text instead. Null: the web is off or its
+ * settings are invalid, said plainly as an unconfigured feature (info, no Code or Ref).
+ */
+export function dashboardReply(origin: string | null): Presented {
+  if (origin === null)
+    return card("dashboard.off", {
+      tone: "info",
+      title: "Dashboard not turned on",
+      description:
+        "The dashboard isn't turned on for this TaruBot. Whoever runs your TaruBot can turn it on.",
+    });
+  if (!origin.startsWith("https://"))
+    return card("dashboard.development", {
+      tone: "neutral",
+      title: "Dashboard",
+      description: `This TaruBot's dashboard is at a development address, ${code(origin)}, which opens only on the computer running TaruBot.`,
+    });
+  return card("dashboard.link", {
+    tone: "neutral",
+    title: "Dashboard",
+    description: "Open TaruBot's dashboard and sign in with Discord to see the pages open to you.",
+    footer: origin,
+    buttons: [{ style: "link", label: "Open the dashboard", url: origin }],
   });
 }

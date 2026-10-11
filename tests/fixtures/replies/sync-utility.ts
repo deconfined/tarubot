@@ -20,6 +20,7 @@ import {
 } from "../../../src/discord/presenters/synchronization.js";
 import {
   channelReply,
+  dashboardReply,
   issueReply,
   pingReply,
   suggestionReply,
@@ -442,6 +443,31 @@ export const UTILITY_CASES = {
         url: "https://github.com/deconfined/tarubot/issues/34",
         repository: "deconfined/tarubot",
       }),
+  },
+  // 2.42.0: /dashboard's link, a development address shown as text, or the web turned off.
+  "dashboard.link": {
+    spec: "2.42.0 dashboard link",
+    audience: "member",
+    tone: "neutral",
+    title: "Dashboard",
+    timestamp: false,
+    render: () => dashboardReply("https://tarubot.example.org"),
+  },
+  "dashboard.development": {
+    spec: "2.42.0 dashboard link",
+    audience: "member",
+    tone: "neutral",
+    title: "Dashboard",
+    timestamp: false,
+    render: () => dashboardReply("http://localhost:8080"),
+  },
+  "dashboard.off": {
+    spec: "2.42.0 dashboard link",
+    audience: "member",
+    tone: "info",
+    title: "Dashboard not turned on",
+    timestamp: false,
+    render: () => dashboardReply(null),
   },
 } as const satisfies ReplyCatalog<UtilityReplyKind>;
 

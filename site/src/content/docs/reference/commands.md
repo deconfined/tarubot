@@ -675,6 +675,14 @@ Show the current channel's ID, name and type. In a channel TaruBot can't see, it
 
 This command has no options.
 
+### /dashboard
+
+Get a link to TaruBot's [dashboard](/tarubot/admin/health-checks/#dashboard): an **Open the dashboard** button to its address, where you sign in with Discord and see the pages open to you. If the dashboard isn't turned on for this TaruBot, the reply says so, with no link. While it's on, TaruBot's status in the member list shows the same address.
+
+**Who can use it:** anyone.
+
+This command has no options.
+
 ### /issue
 
 Report a problem to the maintainers of this TaruBot deployment. See [Progress and problems](/tarubot/use/progress-and-problems/).

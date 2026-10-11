@@ -55,6 +55,9 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
     "TaruBot's dashboard now has a public status page, linked at the bottom of every page: anyone can see whether TaruBot is up and its uptime over 90 days, no sign-in needed. While it restarts, the dashboard says so.",
   "2.41.1":
     "On the dashboard's Role menu, editors now open right next to the button you pressed instead of at the top of the screen.",
+  // Conditional, as 2.40.0's is: the link and the status need the dashboard turned on.
+  "2.42.0":
+    "The new /dashboard command gives you a link to TaruBot's dashboard, and TaruBot's status in the member list now shows its address, wherever the dashboard is turned on.",
 };
 
 /**

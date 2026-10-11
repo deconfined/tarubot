@@ -1,10 +1,12 @@
 /** Composition root: create capabilities once, discover modules, then connect the bot. */
 import { multistream, pino } from "pino";
+import { Dashboard } from "./application/dashboard.js";
 import { GuildEvents } from "./application/guild-events.js";
 import { GuildAccess } from "./application/guild-access.js";
 import { DiscordGuildAccess } from "./discord/guild-access.js";
 import {
   applicationKey,
+  dashboardKey,
   databaseKey,
   gatewayKey,
   guildEventsKey,
@@ -47,6 +49,7 @@ import { Database } from "./infrastructure/postgres/database.js";
 import { dispatcher } from "./jobs/dispatch.js";
 import { Queue } from "./jobs/queue.js";
 import { startWeb, type WebServer } from "./web/server.js";
+import { webSettings } from "./web/settings.js";
 
 const config = configuration();
 // Issue reports include the newest log records (info and above, after this redaction).
@@ -73,7 +76,12 @@ const [commands, components, events] = await Promise.all([
   loadEvents(),
 ]);
 const db = new Database(config.DATABASE_URL);
-const gateway = new DiscordGateway();
+// The dashboard's address (2.42.0), for /dashboard's link and TaruBot's custom status: the origin
+// from the same parse startWeb repeats, or null while the web is off or its settings are invalid
+// (startWeb reports those). Read once at startup, like the web's own settings.
+const parsedWeb = webSettings(config);
+const dashboard = new Dashboard(parsedWeb.status === "on" ? parsedWeb.settings.origin : null);
+const gateway = new DiscordGateway({ dashboardOrigin: dashboard.origin });
 // The Lodestone parser runs in this process (2.21.0); its own events join the bot's log.
 const lodestone = new Lodestone({ log: (level, fields, message) => log[level](fields, message) });
 const app = new Service(db, gateway, lodestone, config);
@@ -187,7 +195,8 @@ const services = new Services()
   // The Role menu's edits (2.39.0) refuse once shutdown starts and roll back if it starts mid-edit.
   .provide(selfRolesKey, new SelfRoles(app, () => lifecycle.isStopping()))
   .provide(lifecycleKey, lifecycle)
-  .provide(publicStatusKey, publicStatus);
+  .provide(publicStatusKey, publicStatus)
+  .provide(dashboardKey, dashboard);
 const context: BotContext = {
   client: gateway.client,
   services,

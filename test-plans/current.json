@@ -1,21 +1,21 @@
 {
-  "title": "Session: 2.41.1 Role menu editors beside their buttons review",
-  "objective": "Review 2.41.1 on owner-authorized staging: on the dashboard's Role menu, each category's editors open right next to the button that opened them (just below it, or above it near the bottom of the window), phones keep the bottom sheet and the page behind never moves. No new migration; a target still on 2.40.x also takes 2.41.0's 013. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.42.0 /dashboard link and dashboard status review",
+  "objective": "Review 2.42.0 on owner-authorized staging: /dashboard answers privately with an Open the dashboard button to the staging dashboard's address, and TaruBot's status in the member list reads 'Dashboard: <origin>'. No new migration or setting; the deploy registers the new command in DevBot's guild. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest and backups before authorizing the staging upgrade; 2.41.1 adds no migration and changes no setting. A target still on 2.40.x also takes 2.41.0's 013_status_samples.sql (going back needs the pre-migration backup) and its reviewed deploy entry, reinstalled before approving.",
-    "Sign in as an officer and open Role menu in a desktop browser (Chrome, Safari or Firefox). Scroll a card's buttons near the top, the middle and the bottom of the window and open Edit roles, Add roles, Edit category and Delete category: each opens just under its button, or just above it near the bottom, wholly on screen, and the page behind doesn't move.",
-    "Check that Escape and Close put focus back on the button, that an Add roles with nothing ticked comes back centred, and that a phone still opens each editor as a sheet from the bottom. Approve production only after its own healthy baseline."
+    "Review the exact release source/digest and backups before authorizing the staging upgrade; 2.42.0 adds no migration and changes no setting, and the deploy registers /dashboard in DevBot's guild (22 roots, 48 paths). A target still on 2.40.x also takes 2.41.0's 013_status_samples.sql (going back needs the pre-migration backup) and its reviewed deploy entry, reinstalled before approving.",
+    "Run /dashboard as a member and as an officer: a private Dashboard card with the address underneath and an Open the dashboard button that opens the staging dashboard's home page, which signs you in.",
+    "Check that TaruBot's status in the member list reads 'Dashboard: <staging origin>' as plain text on desktop and phone, and still does after a bot restart. Approve production only after its own healthy baseline."
   ],
   "assistant": [
-    "Before release, check the credential-free harness in Chromium, Firefox and WebKit at 768, 1280 and 1440 px (each editor on the first, a middle and the last card, scrolled near the top, middle and bottom), the 390 px sheet and the centred fallback without anchor positioning, and run the full suite with disposable PostgreSQL.",
+    "Before release, run the full suite with disposable PostgreSQL, the version gate and the documentation site build; the /dashboard and custom status tests build clients without logging in.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Refresh the status snapshot every minute from readiness, the Lodestone and the pause state; serve /status from memory with no session, cookie or query, at most 600 requests a minute.",
-    "While holding the writer lease, write one status sample per five-minute bucket, delete samples after 90 days apart from the first, and keep the daily counts in memory.",
+    "Send a custom status reading 'Dashboard: <origin>' with every new gateway session while the web settings are valid, and none otherwise; answer /dashboard with a link button to that origin, or say the dashboard isn't turned on.",
+    "Refresh the status snapshot every minute and, while holding the writer lease, write one status sample per five-minute bucket, as in 2.41.0.",
     "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; keep role choices private as in 2.40.0.",
-    "Expose database, Discord and writer-lease readiness; report 2.41.1, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.42.0, startup time and effect state without pinging members."
   ]
 }
