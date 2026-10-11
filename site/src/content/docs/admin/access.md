@@ -56,9 +56,9 @@ When the dashboard is on, its pages check access the same way, against the perso
 
 | Who | Pages |
 | --- | --- |
-| Holders of the Member or Guest role | My roles, while TaruBot doesn't have Administrator in the server |
-| Officers | Server configuration, My roles, Role menu and Background work |
-| Anyone else, including people in the lobby | None: they aren't signed in |
+| Holders of the Member or Guest role | My roles and Mod mail (their own cases), while TaruBot doesn't have Administrator in the server |
+| Officers | Server configuration, My roles, Role menu, Background work and Mod mail (every case) |
+| Anyone else, including people in the lobby | No signed-in pages; anyone can open the public [status page](/tarubot/use/progress-and-problems/#is-tarubot-up) |
 
 While TaruBot has Administrator in a server, members and guests can't open its pages at all: the pages everyone can reach never run beside a bot that can do anything in the server. Use [`/setup overrides`](/tarubot/reference/commands/#setup-overrides), then remove Administrator once `/config validate` says it's no longer needed. Someone who has just lost Member or Guest can keep viewing for up to a minute, but any change they send is checked again first and refused.
 

@@ -72,9 +72,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     # Container hardening (2.30.3, #51): the bot writes no file at runtime (tested with its tools
-    # and health check; docs/VERIFICATION.md), so its root filesystem is read-only with no tmpfs.
+    # and health check), so its root filesystem is read-only with no tmpfs.
     # It binds no privileged port and needs no capability, and nothing in it may gain privileges.
-    # DevBot's overlay inherits these; docker-compose.production.yml repeats them for production.
+    # The DevBot overlay inherits these; docker-compose.production.yml and docker-compose.staging.yml
+    # repeat them.
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

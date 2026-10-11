@@ -8,7 +8,7 @@ Use the [contributor workflow](../CONTRIBUTING.md), [persistence guide](PERSISTE
 
 Default-export `defineCommand`, `defineEvent` or `defineComponent` from a `*.command.ts`, `*.event.ts` or `*.component.ts` file in the corresponding `src/` directory. Discovery is recursive and deterministic; production loads the compiled `.js` files. Duplicate identities, invalid exports and missing services fail startup. `bun run build` removes stale compiled routes.
 
-Command registration and runtime use the same definitions. After a definition changes, use `bun run commands:register --guild ID` for development or `--global` for an authorized production cutover, then rebuild/restart execution code. `scripts/commands.ts` also provides command inventory and guild-scope cleanup; see [maintenance-tool profiles](CONFIGURATION.md#maintenance-tool-profiles).
+Command registration and runtime use the same definitions. Managed deliveries register them automatically: globally for production, in DevBot's guild for staging. In a local installation, after a definition changes, use `bun run commands:register --guild ID`, then rebuild/restart execution code. `scripts/commands.ts` also provides command inventory and guild-scope cleanup; see [maintenance-tool profiles](CONFIGURATION.md#maintenance-tool-profiles).
 
 ## Maintenance tooling boundaries
 

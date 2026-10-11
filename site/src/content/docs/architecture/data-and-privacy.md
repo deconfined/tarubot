@@ -38,7 +38,7 @@ The numbered files in [`migrations/`](https://github.com/deconfined/tarubot/tree
 
 - Ending a link, a grant or a revocation marks it ended; the record stays.
 - Ledger entries are immutable: database triggers refuse updates and deletes, and corrections are new entries that name the entry they correct.
-- Every officer decision, and every other command decision, is written with its **audit** record and its queued Discord work (the **outbox**) in one transaction, on one database connection. Either all three commit, or none does, so no decision is ever made without its record or its follow-up. A member's own choices for themselves are different: a role save on My roles, like the `/main` and `/nickname` preferences, commits only its state and queued work without an audit record, and Discord is the record (owner decision Q4 A; see [Self-service roles](#self-service-roles)).
+- Every officer decision, and every other command decision, is written with its **audit** record and its queued Discord work (the **outbox**) in one transaction, on one database connection. Either all three commit, or none does, so no decision is ever made without its record or its follow-up. A member's own choices for themselves are different: a role save on My roles, like the `/main` and `/nickname` preferences, commits only its state and queued work without an audit record, and Discord is the record (owner decision Q4 A; see [Self-service roles](#self-service-roles)). Mod mail is the other exception: only turning it on or off is audited, while cases, replies, closes and reopens stay in mod mail's own tables and go when a case is deleted (see [Mod mail](#mod-mail)).
 
 Expired claim challenges are deleted a week after they expire, and a closed [mod mail](#mod-mail) case, with its messages and read log, 90 days after it closed. Links, grants, rosters, audits, ledger entries, imports and job history are kept, apart from a member's finished role-choice jobs, which TaruBot deletes after 30 days, and the status page's samples, deleted after 90 days apart from the very first; an operator can prune diagnostic history, but should keep financial and access records.
 
@@ -117,7 +117,7 @@ A public issue can be closed or deleted, but GitHub's notification emails, event
 ## Replies and messages
 
 - **Replies are private** to the person who ran the command. Officers see more detail than members, but members never see officers' reasons, other members' records, job internals or diagnostics. The one exception: an applicant sees the denial reason for their own application.
-- **No pings.** Every message is sent with mentions disabled, so names in replies and posts never notify anyone.
+- **No pings.** Every message is sent with mentions disabled, so names in replies and posts never notify anyone. The one exception is a [mod mail](#mod-mail) ping, which mentions the Officer role, and only it, in the officer notifications channel.
 - **Guest answers** appear only in the review message in the officers' channel, never in replies, status views or downloads.
 - **Full details (JSON)**, the only way records reach Discord as a file, is offered only to officers, and never includes tokens or application answers.
 
