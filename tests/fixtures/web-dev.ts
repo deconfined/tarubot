@@ -17,7 +17,8 @@
  * `states`):
  * - --state-checks=warn: Server configuration's checklist has warnings and no failures (a stale
  *   roster, Administrator still needed, a core permission only from @everyone, a permission it
- *   never needs, a channel missing TaruBot's override), and the Lodestone is cooling down as with
+ *   never needs, a channel missing TaruBot's override, mod mail's pings notifying nobody and a
+ *   Mention Everyone allow TaruBot doesn't need), and the Lodestone is cooling down as with
  *   --state-cooling: that cooldown is the only process-health check that can wait without a change
  *   of effects mode, so Background work's health shows [WAIT].
  * - --state-checks=fail: failures too (two access roles above TaruBot, a missing core permission,
@@ -72,6 +73,15 @@
  *   their tile only: a setting leaves the headline Operational). Its snapshot is real
  *   (PublicStatus over these sources and an in-memory store), so the first tick writes the current
  *   bucket's sample as production would.
+ * - --state-modmail=cases|empty|off|unreadable|nokey|long|limit|quiet: Mod mail (2.43.0) in
+ *   Example FC, which is off with no cases by default. cases turns it on with cases in every state (tests/
+ *   fixtures/modmail.ts describes them); empty turns it on with none; off keeps the cases but turns
+ *   it off; unreadable writes one topic and one message under another key; nokey leaves MODMAIL_KEY
+ *   unset; long adds a case with long, multi-line messages; limit gives the member the 3 open cases
+ *   allowed, so their Open a case button says why it's unavailable; quiet keeps the cases but
+ *   TaruBot can't mention the Officer role, so the settings card warns that pings notify nobody.
+ *   Open a case, replies, Close, Reopen and the switch work on an in-memory copy, with the real
+ *   rules.
  * My roles (2.40.0) reads the same menus. Each account holds a few invented menu roles (HELD), and
  *   a save runs the real rules (SelfRoles.choose's), then a fake worker applies it about two
  *   seconds later, as the roles.self job would (planSelfRoles, every role checked again), so a
@@ -101,6 +111,7 @@ import {
   applicationKey,
   gatewayKey,
   lifecycleKey,
+  modmailKey,
   publicStatusKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
@@ -174,6 +185,14 @@ import {
   MemoryStatusSamples,
 } from "./status-samples.js";
 import {
+  HARNESS_FORMER_MEMBER,
+  HARNESS_MODMAIL_STATES,
+  HARNESS_SECOND_OFFICER,
+  type HarnessModMailState,
+  harnessModMail,
+  modmailStore,
+} from "./modmail.js";
+import {
   CHANNEL,
   configGuild,
   configReport,
@@ -244,6 +263,8 @@ export interface HarnessStates {
   readonly roles?: HarnessRolesState;
   /** --state-history: the status page's invented 90-day history. */
   readonly history?: HarnessHistory;
+  /** --state-modmail: Mod mail's switch and invented cases (2.43.0). */
+  readonly modmail?: HarnessModMailState;
 }
 
 /** --state-roles' values, each a banner My roles shows. */
@@ -644,7 +665,8 @@ export function harnessGateway(states: HarnessStates = {}): DiscordGateway {
 /**
  * --state-checks=warn's view of TaruBot's role and channels, on a server without onboarding:
  * Administrator held and still needed for a channel missing TaruBot's override, Manage Nicknames
- * only from @everyone, and Manage Messages, which it never needs, from its own role.
+ * only from @everyone, Manage Messages, which it never needs, from its own role, and (2.43.0) mod
+ * mail's pings notifying nobody, with Mention Everyone allowed to TaruBot in the ledger instead.
  */
 function warningView(guildId: string): VisibilityReport {
   const healthy = visibilityReport({}, false);
@@ -658,6 +680,7 @@ function warningView(guildId: string): VisibilityReport {
           : row,
       ),
       neverNeeded: [{ permission: "ManageMessages", roles: [ROLE.bot] }],
+      mentions: { officerPing: "silent", unneeded: [CHANNEL.ledger], officerChannel: null },
       missing: { ...healthy.missing, channels: [CHANNEL.ledger] },
       missingCount: 1,
     },
@@ -1528,16 +1551,53 @@ function harnessServices(states: HarnessStates, statusNow: () => Date): Services
       upstream: { status: "current", checkedAt: null, components: [] },
     },
     visibility: { missing: null, onboardingPending: null, checked: null, checkedAt: null },
+    modmail: true,
   });
   return new Services()
     .provide(applicationKey, app)
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway(states))
     .provide(selfRolesKey, harnessSelfRoles(states, menus, harnessPeople()))
+    .provide(modmailKey, harnessModMailFor(states))
     .provide(
       publicStatusKey,
       harnessStatus(states, () => lifecycle.status(), statusNow),
     );
+}
+
+/** Mod mail's invented people: Example FC and the harness's accounts. */
+const MODMAIL_PEOPLE = {
+  guild: HARNESS_GUILDS.example.id,
+  officer: HARNESS_ACCOUNTS.officer.id,
+  member: HARNESS_ACCOUNTS.member.id,
+  guest: HARNESS_ACCOUNTS.guest.id,
+  timedOut: HARNESS_ACCOUNTS.timedOut.id,
+} as const;
+
+/**
+ * Mod mail's fake (2.43.0) for `states`: its store from --state-modmail, names as the harness's
+ * member cache gives them (the accounts' labels, or --state-hostile-names' names), a second
+ * officer, and someone who left (null). TaruBot's Administrator follows the Role menu's snapshot,
+ * as for My roles.
+ */
+export function harnessModMailFor(states: HarnessStates = {}) {
+  const hostile: Readonly<Record<string, string>> = states.hostileNames
+    ? HOSTILE_NAMES.members
+    : {};
+  const names = new Map<string, string | null>(
+    Object.entries(HARNESS_ACCOUNTS).map(([key, account]) => [
+      account.id,
+      hostile[key] ?? account.label,
+    ]),
+  );
+  names.set(HARNESS_SECOND_OFFICER, "Another officer of Example FC");
+  names.set(HARNESS_FORMER_MEMBER, null);
+  return harnessModMail(modmailStore(states.modmail, MODMAIL_PEOPLE), {
+    people: MODMAIL_PEOPLE,
+    names,
+    administrator: (guildId) => holdsAdministrator(harnessSnapshot(guildId, states)),
+    effectsMode: harnessEffects(states),
+  });
 }
 
 /**
@@ -1719,6 +1779,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       "state-menu-unreadable": { type: "boolean", default: false },
       "state-roles": { type: "string" },
       "state-history": { type: "string" },
+      "state-modmail": { type: "string" },
     },
     allowPositionals: false,
   });
@@ -1735,6 +1796,12 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
   const historyState = HARNESS_HISTORIES.find((state) => state === history);
   if (history !== undefined && historyState === undefined)
     throw new Error("Pass --state-history=incidents or --state-history=new.");
+  const modmail = values["state-modmail"];
+  const modmailState = HARNESS_MODMAIL_STATES.find((state) => state === modmail);
+  if (modmail !== undefined && modmailState === undefined)
+    throw new Error(
+      "Pass --state-modmail=cases, empty, off, unreadable, nokey, long, limit or quiet.",
+    );
   const tls =
     values.cert && values.key
       ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
@@ -1755,6 +1822,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       ...(values["state-menu-unreadable"] && { menuUnreadable: true }),
       ...(rolesState && { roles: rolesState }),
       ...(historyState && { history: historyState }),
+      ...(modmailState && { modmail: modmailState }),
     },
   };
 }
@@ -1778,6 +1846,7 @@ if (import.meta.main) {
     menuUnreadable: "--state-menu-unreadable",
     roles: "--state-roles",
     history: "--state-history",
+    modmail: "--state-modmail",
   } as const satisfies Record<keyof HarnessStates, string>;
   const states = Object.entries(options.states ?? {}).map(([state, value]) => {
     const flag = flags[state as keyof HarnessStates];

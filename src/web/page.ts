@@ -14,8 +14,24 @@ import { ICON_NAMES, type IconName } from "./icons.js";
 import { POST_WINDOW_MS } from "./limits.js";
 import type { Session } from "./sessions.js";
 
-/** Every page is a server page: `/g/:guild/` and lowercase segments, with no other parameter. */
-export const PAGE_PATH = /^\/g\/:guild(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/u;
+/**
+ * Every page is a server page: `/g/:guild/` and lowercase segments, optionally ending in one
+ * `/:number` (2.43.0, mod mail's case pages), a positive whole number server.ts validates before
+ * the page runs. No other parameter.
+ */
+export const PAGE_PATH = /^\/g\/:guild(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+(?:\/:number)?$/u;
+
+/** A path's `:number`, as server.ts accepts it: a positive whole number without a leading zero. */
+export const PAGE_NUMBER = /^[1-9][0-9]{0,15}$/u;
+
+/** The request-body cap for every route (Bun's and hono/body-limit's), 64 KiB. */
+export const WEB_BODY_LIMIT = 65536;
+
+/**
+ * The most a page may raise its own POSTs' body cap to (PageOptions.bodyLimit), 256 KiB: enough
+ * for any form TaruBot draws, small enough that a page can't make the listener take much more.
+ */
+export const PAGE_BODY_LIMIT_MAX = 262144;
 
 /**
  * The services a page sees: get() only. server.ts hands each page a view that throws "Page used
@@ -34,6 +50,11 @@ export interface PageContext {
   readonly actor: Actor;
   /** The `:guild` parameter, validated with idSchema; equals actor.guildId. */
   readonly guildId: string;
+  /**
+   * The `:number` parameter of a page whose path ends in one (PAGE_NUMBER, so 1 or more); null for
+   * every other page.
+   */
+  readonly number: bigint | null;
   /** The bot's services, limited to the keys the page declared in `requires`. */
   readonly services: PageServices;
   /**
@@ -93,6 +114,29 @@ export interface PageOptions {
   /** The page's label in the server navigation; omitted pages aren't listed there. */
   readonly nav?: string;
   /**
+   * Whether the navigation lists the page for this viewer, beyond `access` (2.43.0: Mod mail is
+   * listed to members and guests only while it's on). Only ever hides a link: the page itself still
+   * opens for anyone `access` admits. It gets the page's own scoped services. Omitted: listed for
+   * everyone the page admits.
+   */
+  readonly navWhen?: (actor: Actor, services: PageServices) => Promise<boolean> | boolean;
+  /**
+   * Resolve the actor afresh on every GET too (2.43.0), never from the minute-long memo: for a page
+   * whose content is private enough that someone removed from the server, or demoted from
+   * officer, must lose it on their next request (mod mail's pages). Costs one Discord request per
+   * GET (the light resolution); POSTs are always fresh.
+   */
+  readonly freshActor?: boolean;
+  /**
+   * Only with `post`: this page's POST body cap in bytes, above WEB_BODY_LIMIT and at most
+   * PAGE_BODY_LIMIT_MAX (2.43.0), for a form whose fields the browser lets grow past 64 KiB once
+   * urlencoded, so text it allowed comes back as the page's own 422 with the text kept rather than
+   * a bare 413 that loses it. Size it for the worst case: 9 bytes per UTF-16 unit of each field's
+   * maxlength (a three-byte character percent-encoded), plus the other fields. Omitted:
+   * WEB_BODY_LIMIT.
+   */
+  readonly bodyLimit?: number;
+  /**
    * The decorative icon beside the page's navigation label and its link on the server list, by
    * icons.ts name; omitted, the label stands alone.
    */
@@ -110,7 +154,13 @@ export class Page {
   /** POSTs per user and server in each POST_WINDOW_MS; set exactly when `post` is. */
   readonly postLimit: number | undefined;
   readonly nav: string | undefined;
+  readonly navWhen: PageOptions["navWhen"];
+  readonly freshActor: boolean;
+  /** This page's POST body cap in bytes (WEB_BODY_LIMIT unless it declared more). */
+  readonly bodyLimit: number;
   readonly icon: IconName | undefined;
+  /** The path ends in `/:number`. */
+  readonly numbered: boolean;
 
   constructor(options: PageOptions) {
     // Discovered modules are untyped at runtime, so re-check what the options type promises.
@@ -145,6 +195,25 @@ export class Page {
       throw new Error("A page's navigation label must be text.");
     if (options.icon !== undefined && !(ICON_NAMES as readonly unknown[]).includes(options.icon))
       throw new Error("A page's icon must name one of the icons in icons.ts.");
+    if (options.freshActor !== undefined && typeof options.freshActor !== "boolean")
+      throw new Error("A page's freshActor must be true or false.");
+    if (
+      options.bodyLimit !== undefined &&
+      (options.post === undefined ||
+        !Number.isSafeInteger(options.bodyLimit) ||
+        options.bodyLimit <= WEB_BODY_LIMIT ||
+        options.bodyLimit > PAGE_BODY_LIMIT_MAX)
+    )
+      throw new Error(
+        `A page's bodyLimit needs a post handler, and must be a whole number of bytes above ${WEB_BODY_LIMIT} and at most ${PAGE_BODY_LIMIT_MAX}.`,
+      );
+    if (options.navWhen !== undefined && typeof options.navWhen !== "function")
+      throw new Error("A page's navWhen must be a function.");
+    if (options.navWhen !== undefined && options.nav === undefined)
+      throw new Error("A page's navWhen needs a navigation label.");
+    // A navigation link has no number to fill in.
+    if (options.path.endsWith("/:number") && options.nav !== undefined)
+      throw new Error("A page whose path ends in /:number can't be in the navigation.");
     this.path = options.path;
     this.title = options.title;
     this.access = [...new Set(options.access)];
@@ -153,12 +222,23 @@ export class Page {
     this.post = options.post;
     this.postLimit = options.postLimit;
     this.nav = options.nav;
+    this.navWhen = options.navWhen;
+    this.freshActor = options.freshActor === true;
+    this.bodyLimit = options.bodyLimit ?? WEB_BODY_LIMIT;
     this.icon = options.icon;
+    this.numbered = options.path.endsWith("/:number");
   }
 
-  /** This page's path in one server; `guildId` must already have passed idSchema. */
-  href(guildId: string): string {
-    return this.path.replace(":guild", guildId);
+  /**
+   * This page's path in one server; `guildId` must already have passed idSchema, and a numbered
+   * page needs its `number` (already PAGE_NUMBER).
+   */
+  href(guildId: string, number?: bigint | null): string {
+    const path = this.path.replace(":guild", guildId);
+    if (!this.numbered) return path;
+    if (number === undefined || number === null || number < 1n)
+      throw new Error("A numbered page's link needs its number.");
+    return path.replace(":number", String(number));
   }
 }
 

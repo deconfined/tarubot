@@ -15,6 +15,7 @@ import { databaseKey, lifecycleKey, publicStatusKey } from "../application/keys.
 import type { StatusSnapshot } from "../application/public-status.js";
 import type { BotContext } from "../bot/context.js";
 import type { ServiceKey, Services } from "../bot/services.js";
+import type { Actor } from "../domain/policy.js";
 import { Failure, idSchema } from "../domain/values.js";
 import { AccessResolver, admits, listServers, type WebGuild } from "./access.js";
 import { ASSET_CACHE_CONTROL, ASSETS } from "./assets.js";
@@ -58,7 +59,13 @@ import {
   tooManySignIns,
 } from "./limits.js";
 import { DiscordSignIn } from "./oauth.js";
-import type { Page, PageContext, PageServices } from "./page.js";
+import {
+  PAGE_NUMBER,
+  type Page,
+  type PageContext,
+  type PageServices,
+  WEB_BODY_LIMIT,
+} from "./page.js";
 import { loadPages } from "./pages.js";
 import { RETURN_PARAM, safeReturnPath } from "./return-path.js";
 import {
@@ -72,8 +79,17 @@ import { type WebSettings, type WebSettingsInput, webSettings } from "./settings
 import { renderPublicStatus, STATUS_TITLE } from "./views/public-status.js";
 import { renderHome, renderNoAccess, type ServerLink } from "./views/servers.js";
 
-/** Bun's request-body cap; hono/body-limit applies the same 64 KiB inside the app. */
-export const WEB_BODY_LIMIT = 65536;
+/**
+ * The request-body cap, 64 KiB, which hono/body-limit applies inside the app to every route but a
+ * page that declares a larger `bodyLimit` for its own POSTs (2.43.0: mod mail's). Bun's own cap on
+ * the listener is the largest of these (listenerBodyLimit).
+ */
+export { WEB_BODY_LIMIT } from "./page.js";
+
+/** Bun's request-body cap on the listener: the largest cap any route applies. */
+export function listenerBodyLimit(pages: Iterable<Page>): number {
+  return Math.max(WEB_BODY_LIMIT, ...[...pages].map((page) => page.bodyLimit));
+}
 /** Above the edge's two-minute upstream keepalive, so the proxy closes idle connections first. */
 export const WEB_IDLE_TIMEOUT_SECONDS = 150;
 /** stop() waits this long for open connections to finish, then closes them. */
@@ -207,6 +223,31 @@ function scopedServices(services: Pick<Services, "get">, declared: Page["require
 }
 
 /**
+ * The navigation links a page's navWhen hides from `actor` (2.43.0), each asked through that page's
+ * own scoped services. It only hides: a navWhen that fails (a database outage, say) hides its link
+ * rather than failing the page it would merely be listed on, and the page itself still opens.
+ */
+async function hiddenPages(
+  pages: Iterable<Page>,
+  services: Pick<Services, "get">,
+  actor: Actor,
+): Promise<ReadonlySet<string>> {
+  const hidden = new Set<string>();
+  for (const page of pages) {
+    if (!page.navWhen || !admits(actor, page.access)) continue;
+    const navWhen = page.navWhen;
+    // Promise.resolve().then() runs it inside the chain, so one that throws synchronously hides
+    // its link like one that rejects, instead of failing every page it would be listed on.
+    const listed = await Promise.resolve()
+      .then(() => navWhen(actor, scopedServices(services, page.requires)))
+      .then((answer) => answer === true)
+      .catch(() => false);
+    if (!listed) hidden.add(page.path);
+  }
+  return hidden;
+}
+
+/**
  * The Hono app: security headers first, then the request reference and log line, the body limit,
  * fixed routes, page routes (the E1 checks on each POST route; a wrong method on a known path is
  * an explicit 405 with Allow), a 404 fallback and an error handler mapping Failure categories to
@@ -311,9 +352,26 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
   // or Bun's cap cutting the stream) is the sender's doing: a 400, never an unexpected 500, which
   // would let anyone file issue reports with broken bodies. Only a failure before next() is a
   // read; a later layer's non-Error throw passes through to Bun's error().
-  const limit = bodyLimit({ maxSize: WEB_BODY_LIMIT });
+  // A page that declares a larger cap for its own POSTs (mod mail's, 2.43.0) names it here first,
+  // matched on its own path pattern, so every other route keeps 64 KiB.
+  const limits = new Map<number, ReturnType<typeof bodyLimit>>([
+    [WEB_BODY_LIMIT, bodyLimit({ maxSize: WEB_BODY_LIMIT })],
+  ]);
+  for (const definition of pages.values())
+    if (definition.post && definition.bodyLimit > WEB_BODY_LIMIT) {
+      const size = definition.bodyLimit;
+      if (!limits.has(size)) limits.set(size, bodyLimit({ maxSize: size }));
+      app.post(definition.path, async (c, next) => {
+        c.set("bodyLimit", size);
+        await next();
+      });
+    }
   app.use(async (c, next) => {
     let reading = true;
+    const limit =
+      limits.get(c.get("bodyLimit") ?? WEB_BODY_LIMIT) ??
+      limits.get(WEB_BODY_LIMIT) ??
+      bodyLimit({ maxSize: WEB_BODY_LIMIT });
     try {
       return await limit(c, () => {
         reading = false;
@@ -408,7 +466,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       pages.values(),
       "get",
     )) {
-      const links = navLinks(pages.values(), entry.actor);
+      const hidden = await hiddenPages(pages.values(), context.services, entry.actor);
+      const links = navLinks(pages.values(), entry.actor, undefined, hidden);
       if (links.length > 0) servers.push({ id: entry.guild.id, name: entry.guild.name, links });
     }
     // Exactly one server with exactly one page: straight there. The href is the page's own path
@@ -531,8 +590,9 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
    *    actor, so a POST over budget costs no Discord REST call.
    * And every request:
    * 8. The actor resolves like a slash command's (memoized up to 60 s on GET and resolved light on a
-   *    miss, fresh and full on POST: AccessResolver's ActorUse); not a current human member is 404,
-   *    so responses never reveal membership elsewhere.
+   *    miss, fresh and light on GET for a page that declares freshActor, fresh and full on POST:
+   *    AccessResolver's ActorUse); not a current human member is 404, so responses never reveal
+   *    membership elsewhere.
    * 9. A missing access flag is 403: on a GET with its own sentence (notOpen), on a POST with the
    *    status's own.
    * The application operations a page calls authorize the actor again, as REQUIREMENTS.md asks of
@@ -560,6 +620,14 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
     return async (c: RequestContext): Promise<Response> => {
       const guildId = c.req.param("guild") ?? "";
       if (!idSchema.safeParse(guildId).success) throw new HTTPException(404);
+      // A numbered page's `:number` (2.43.0) is checked as strictly as the server ID, before
+      // anything else: anything but a positive whole number is no page at all.
+      let number: bigint | null = null;
+      if (definition.numbered) {
+        const text = c.req.param("number") ?? "";
+        if (!PAGE_NUMBER.test(text)) throw new HTTPException(404);
+        number = BigInt(text);
+      }
       const current = c.get("session");
       const token = c.get("formToken");
       const requested = new URL(c.req.url);
@@ -571,7 +639,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
       // The page's own path in this server: from the definition and the checked ID, never the
       // request's text.
       const back: ErrorFrame = {
-        back: { href: definition.href(guildId), label: definition.title },
+        back: { href: definition.href(guildId, number), label: definition.title },
       };
       let form: FormData | undefined;
       if (post) {
@@ -597,7 +665,12 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         if (wait > 0) throw overBudget(wait);
         c.set("errorFrame", null);
       }
-      const actor = await access.actor(guildId, current.userId, post ? "post" : "get");
+      // A page that declares freshActor (mod mail's) never reuses the memo, even on GET.
+      const actor = await access.actor(
+        guildId,
+        current.userId,
+        post ? "post" : definition.freshActor ? "fresh" : "get",
+      );
       // The resolver answers for this server and user; anything else is a bug, refused as absent.
       if (!actor || actor.guildId !== guildId || actor.userId !== current.userId)
         throw new HTTPException(404);
@@ -610,6 +683,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         session: current,
         actor,
         guildId,
+        number,
         services,
         formToken: token,
         report: context.report,
@@ -622,7 +696,12 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         guild: {
           id: guildId,
           name: guild.name,
-          nav: navLinks(pages.values(), actor, definition.path),
+          nav: navLinks(
+            pages.values(),
+            actor,
+            definition.path,
+            await hiddenPages(pages.values(), context.services, actor),
+          ),
           // The side navigation's note: officers configure, members and guests pick roles.
           audience: actor.officer ? "officer" : "member",
         },
@@ -738,7 +817,7 @@ export async function startWeb(
         port: options.port ?? settings.port,
         ...(options.tls && { tls: options.tls }),
         development: false,
-        maxRequestBodySize: WEB_BODY_LIMIT,
+        maxRequestBodySize: listenerBodyLimit(pages.values()),
         idleTimeout: WEB_IDLE_TIMEOUT_SECONDS,
         // Bun builds request.url from the Host header unchecked: a Host such as "[" or
         // "example.org:99999" gives a URL that URL() refuses, and some others a relative one that

@@ -1,21 +1,23 @@
 {
-  "title": "Session: 2.42.0 /dashboard link and dashboard status review",
-  "objective": "Review 2.42.0 on owner-authorized staging: /dashboard answers privately with an Open the dashboard button to the staging dashboard's address, and TaruBot's status in the member list reads 'Dashboard: <origin>'. No new migration or setting; the deploy registers the new command in DevBot's guild. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.43.0 mod mail review",
+  "objective": "Review 2.43.0 on owner-authorized staging: members open a private case with /modmail or the dashboard's Open a case form, officers answer on the Mod mail page, pings and DMs carry only the case number and a link, and closed cases expire after 90 days. Adds migration 014 and the optional MODMAIL_KEY setting; the deploy registers /modmail in DevBot's guild. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Review the exact release source/digest and backups before authorizing the staging upgrade; 2.42.0 adds no migration and changes no setting, and the deploy registers /dashboard in DevBot's guild (22 roots, 48 paths). A target still on 2.40.x also takes 2.41.0's 013_status_samples.sql (going back needs the pre-migration backup) and its reviewed deploy entry, reinstalled before approving.",
-    "Run /dashboard as a member and as an officer: a private Dashboard card with the address underneath and an Open the dashboard button that opens the staging dashboard's home page, which signs you in.",
-    "Check that TaruBot's status in the member list reads 'Dashboard: <staging origin>' as plain text on desktop and phone, and still does after a bot restart. Approve production only after its own healthy baseline."
+    "Before upgrading, make a key with openssl rand -base64 32, keep a copy off the host and add MODMAIL_KEY to staging; review the digest and backups. 2.43.0 adds 014_modmail.sql (going back needs the pre-migration backup) and registers /modmail.",
+    "Allow the TaruBot role Mention @everyone, @here and All Roles in the officer notifications channel; turn mod mail on. Open cases with /modmail and with Open a case on the dashboard; both say all officers can read it.",
+    "The ping notifies officers with only the case number and link; reply as the officers; the member's DM and page show The officers; close and reopen by replying. Timed out, /modmail is gone but the dashboard still works.",
+    "Without Administrator, allow Mention Everyone on TaruBot's own entry in that channel, drift another role's View there, run the onboarding pass (dry run, then apply): it applies with no refusal.",
+    "Open another member's case number (a plain 404), check the read log; approve production only after its own baseline and key."
   ],
   "assistant": [
-    "Before release, run the full suite with disposable PostgreSQL, the version gate and the documentation site build; the /dashboard and custom status tests build clients without logging in.",
+    "Before release, run the full suite with disposable PostgreSQL, the version gate and the documentation site build; the mod mail tests use invented data and keys derived from phrases.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
-    "Perform no live host, token, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
+    "Perform no live host, token, key, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Send a custom status reading 'Dashboard: <origin>' with every new gateway session while the web settings are valid, and none otherwise; answer /dashboard with a link button to that origin, or say the dashboard isn't turned on.",
-    "Refresh the status snapshot every minute and, while holding the writer lease, write one status sample per five-minute bucket, as in 2.41.0.",
-    "Serve dashboard pages, the stylesheet, fonts and license notices from the same bot process only when web is enabled; keep role choices private as in 2.40.0.",
-    "Expose database, Discord and writer-lease readiness; report 2.42.0, startup time and effect state without pinging members."
+    "Keep mod mail off until an officer turns it on; encrypt every topic and message with MODMAIL_KEY, and report only whether the key is valid.",
+    "Ping the officer role in the officer notifications channel (Mention Everyone allowed there only) and DM the member with a case number and a link only, at most once per case per 10 minutes, waiting while Discord changes are paused.",
+    "Delete closed cases 90 days after closing, under the writer lease; keep the status samples and role choices as in 2.41.0 and 2.40.0.",
+    "Expose database, Discord and writer-lease readiness; report 2.43.0, startup time and effect state without pinging members."
   ]
 }

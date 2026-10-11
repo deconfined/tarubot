@@ -61,6 +61,12 @@ const schema = z.object({
   WEB_PUBLIC_ORIGIN: z.string().optional(),
   WEB_PORT: z.string().optional(),
   DISCORD_CLIENT_SECRET: z.string().optional(),
+  // Mod mail's encryption key (2.43.0): base64 for 32 bytes, from `openssl rand -base64 32`. A
+  // plain optional string with no format rule here, for the same reason as the web settings:
+  // src/infrastructure/modmail/cipher.ts checks it at startup, and a missing or malformed key only
+  // makes mod mail unavailable (reported by name, never by value), never stops the bot. A plain
+  // environment secret like DISCORD_CLIENT_SECRET, not one of the *_FILE settings.
+  MODMAIL_KEY: z.string().optional(),
 });
 export type Configuration = z.infer<typeof schema>;
 

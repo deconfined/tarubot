@@ -19,6 +19,7 @@ import {
   gatewayKey,
   lifecycleKey,
   publicStatusKey,
+  modmailKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
@@ -53,6 +54,7 @@ import { definePage, type Page } from "../../src/web/page.js";
 import { loadPages } from "../../src/web/pages.js";
 import {
   createWebApp,
+  listenerBodyLimit,
   startWeb,
   WEB_BODY_LIMIT,
   type WebContext,
@@ -73,6 +75,7 @@ import {
   harnessGateway,
   harnessOptions,
   harnessPeople,
+  harnessModMailFor,
   harnessSelfRoles,
   MENU_CATEGORY,
   MENU_REVISION,
@@ -250,6 +253,7 @@ function services(
       upstream: { status: "current", checkedAt: null, components: [] },
     },
     visibility: { missing: 7776, onboardingPending: 7777, checked: 7778, checkedAt: null },
+    modmail: false,
   });
   const status = world.status ?? statusFixture(() => lifecycle.status());
   return new Services()
@@ -257,6 +261,7 @@ function services(
     .provide(lifecycleKey, lifecycle)
     .provide(gatewayKey, harnessGateway())
     .provide(selfRolesKey, harnessSelfRoles(states, world.menus, world.people))
+    .provide(modmailKey, harnessModMailFor(states))
     .provide(publicStatusKey, status.service);
 }
 
@@ -1705,7 +1710,8 @@ describe("server pages (D12)", () => {
     const visitor = new Browser(w);
     for (const path of await discovered())
       for (const guild of [GUILD, UNSERVED, ABSENT]) {
-        const target = path.replace(":guild", guild);
+        // A numbered page (2.43.0's mod mail case) takes case 1.
+        const target = path.replace(":guild", guild).replace(":number", "1");
         const response = await visitor.get(target);
         expect({ target, status: response.status }).toEqual({ target, status: 303 });
         expect(response.headers.get("location")).toBe(`/login?to=${encodeURIComponent(target)}`);
@@ -1719,7 +1725,8 @@ describe("server pages (D12)", () => {
     w.resolutions.length = 0;
     for (const path of await discovered())
       for (const guild of ["abc", "0", "01", "18446744073709551616", ABSENT, UNSERVED]) {
-        const target = path.replace(":guild", guild);
+        // A numbered page (2.43.0's mod mail case) takes case 1.
+        const target = path.replace(":guild", guild).replace(":number", "1");
         expect({ target, status: (await officer.get(target)).status }).toEqual({
           target,
           status: 404,
@@ -2002,12 +2009,12 @@ describe("members and guests (2.40.0)", () => {
     expect(nav).not.toContain(`/g/${GUILD}/status`);
     expect(nav).not.toContain(`/g/${GUILD}/form`);
     expect(document.querySelector(".side-nav__note")?.textContent).toBe(
-      "Pick your roles here. Everything else is in Discord.",
+      "Your own pages in this server. Everything else is in Discord.",
     );
     const officer = await signedIn(w);
     const officerView = parseHTML(await (await officer.get(picks)).text()).document;
     expect(officerView.querySelector(".side-nav__note")?.textContent).toBe(
-      "Most settings are changed in Discord; the role menu is set here.",
+      "Most settings are changed in Discord; the role menu and mod mail are set here.",
     );
   });
 
@@ -3174,12 +3181,24 @@ describe("startWeb", () => {
       "Sec-Fetch-Site": "same-origin",
       "Content-Type": "application/x-www-form-urlencoded",
     };
-    const body = new TextEncoder().encode(`a=${"x".repeat(WEB_BODY_LIMIT + 10)}`);
+    // Bun's cap is the largest any route applies: mod mail's pages take 96 KiB (2.43.0).
+    const listener = listenerBodyLimit((await loadPages()).values());
+    expect(listener).toBe(96 * 1024);
+    const body = new TextEncoder().encode(`a=${"x".repeat(listener + 10)}`);
     // With Content-Length, Bun refuses before the app sees the request: no page, no headers.
     const sized = await fetch(url, { method: "POST", headers, body });
     expect(sized.status).toBe(413);
     expect(await sized.text()).toBe("");
     expect(sized.headers.get("content-type")).toBeNull();
+    // Under Bun's cap but over this route's own 64 KiB: the app's 413, a page with the headers.
+    const app = await fetch(url, {
+      method: "POST",
+      headers,
+      body: new TextEncoder().encode(`a=${"x".repeat(WEB_BODY_LIMIT + 10)}`),
+    });
+    expect(app.status).toBe(413);
+    expect(app.headers.get("content-type")).toContain("text/html");
+    await app.text();
     // Chunked, the app's body cap reads the stream until Bun cuts it: Bun's 413 again, and the
     // failed read is the sender's doing, never an issue report.
     let at = 0;

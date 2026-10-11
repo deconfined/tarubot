@@ -3226,7 +3226,10 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
           `/channels/${changed.id}`,
           `/channels/${changed.id}`,
         ]);
-        expect(fixture.writes).toEqual([`/channels/${changed.id}`]);
+        // Only the drifted channel's entries, one at a time (2.43.0).
+        expect(fixture.writes.length).toBeGreaterThan(0);
+        for (const route of fixture.writes)
+          expect(route.startsWith(`/channels/${changed.id}/permissions/`)).toBe(true);
         expect([parent.permission_overwrites, updates.permission_overwrites]).toEqual([
           closed,
           closed,

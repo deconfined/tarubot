@@ -58,6 +58,9 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
   // Conditional, as 2.40.0's is: the link and the status need the dashboard turned on.
   "2.42.0":
     "The new /dashboard command gives you a link to TaruBot's dashboard, and TaruBot's status in the member list now shows its address, wherever the dashboard is turned on.",
+  // Conditional too: officers turn mod mail on per server, and it needs the dashboard.
+  "2.43.0":
+    "Members and guests can now privately message their officers with /modmail or from TaruBot's dashboard once officers turn it on; the conversation stays on the dashboard.",
 };
 
 /**

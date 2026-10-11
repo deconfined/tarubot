@@ -26,6 +26,11 @@ export interface ApiRole {
   permissions: string;
   hoist: boolean;
   managed: boolean;
+  /**
+   * Anyone may mention it (Discord's "Allow anyone to @mention this role"). Mod mail's officer ping
+   * (2.43.0) notifies officers through it, or through Mention Everyone; absent counts as not.
+   */
+  mentionable?: boolean;
 }
 
 /** A channel permission overwrite: type 0 targets a role, type 1 a member. */
@@ -156,7 +161,15 @@ export const POSTING_PERMISSIONS = {
   ReadMessageHistory: P.ReadMessageHistory,
 } as const;
 
-/** Permissions TaruBot never uses; /config validate warns when it holds any (answer 4). */
+/**
+ * Permissions TaruBot never uses server-wide; /config validate warns when its roles grant any
+ * (answer 4). Mention Everyone has one exception, set by hand and never by TaruBot (Discord won't
+ * let a bot allow a permission it lacks without Administrator, and it isn't wanted): while mod mail
+ * is on (2.43.0, owner decision of 2026-10-11), an allow for TaruBot in the officer notifications
+ * channel's own permissions, so its mention of the Officer role notifies officers while that role
+ * stays non-mentionable. Anywhere else, and in that channel while mod mail is off, it is reported
+ * as not needed (domain/visibility.ts's mentions).
+ */
 export const NEVER_NEEDED_PERMISSIONS = {
   ManageGuild: P.ManageGuild,
   ManageMessages: P.ManageMessages,

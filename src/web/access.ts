@@ -75,17 +75,21 @@ export type ResolveActor = (
  *   (1 REST call: the member).
  * - `sign-in`: admission at the callback. Never the memo, so a sign-in always sees Discord as it
  *   is now; `light`, and up to SERVER_LIST_LIMIT servers, one at a time.
+ * - `fresh`: a GET of a page that declares `freshActor` (2.43.0, mod mail's pages, which show
+ *   private text). Never the memo, so an officer removed or demoted loses the page on their very
+ *   next request rather than up to ACTOR_MEMO_MS later; `light` (1 REST call), as `get`.
  * - `post`: every page POST. Never the memo to admit, and always `full` (3 REST calls), as a
  *   slash command: no write is ever admitted on cached role definitions. (The page server may
  *   refuse a POST from the memo first, through peek(), so a page someone can't use costs them
  *   nothing to hammer; that never admits anyone.)
  * A fresh answer (sign-in or post) replaces the memo, so the GETs after it see it too.
  */
-export type ActorUse = "get" | "sign-in" | "post";
+export type ActorUse = "get" | "fresh" | "sign-in" | "post";
 
 /** The resolution mode for each use: only a POST pays for the full one. */
 const MODE: Readonly<Record<ActorUse, ActorResolution>> = {
   get: "light",
+  fresh: "light",
   "sign-in": "light",
   post: "full",
 };
@@ -217,7 +221,7 @@ export async function listServers(
   userId: string,
   access: AccessResolver,
   pages: Iterable<Page>,
-  use: Exclude<ActorUse, "post">,
+  use: Exclude<ActorUse, "post" | "fresh">,
 ): Promise<ServerEntry[]> {
   const all = [...pages];
   const servers: ServerEntry[] = [];

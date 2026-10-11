@@ -45,6 +45,8 @@ services:
       GITHUB_REPORTS_REPO: ${GITHUB_REPORTS_REPO:-deconfined/tarubot-reports}
       # Production's suggestion App credentials are intentionally not passed.
       HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
+      # Staging's own mod mail key (2.43.0), never production's.
+      MODMAIL_KEY: ${MODMAIL_KEY:-}
     healthcheck:
       test: [CMD, bun, -e, "const r=await fetch('http://localhost:3000/health/ready');process.exit(r.ok?0:1)"]
       interval: 15s

@@ -1,5 +1,5 @@
 /** Transport-only interaction dispatch: lookup, acknowledgement, actor checks, and replies. */
-import { DiscordAPIError, PermissionFlagsBits } from "discord.js";
+import { DiscordAPIError, MessageFlags, PermissionFlagsBits } from "discord.js";
 import type {
   AutocompleteInteraction,
   ChatInputCommandInteraction,
@@ -156,11 +156,11 @@ export class InteractionRouter {
     const progress: Progress = {
       scope: interactionScope(interaction),
       confirmed: confirmedOption(interaction),
-      acknowledgement: replyAcknowledgement(
-        interaction.guildId,
-        ephemeral,
-        this.context.publicResponseGuildId,
-      ),
+      // A module that is always private (/modmail) ignores DevBot's public-response override,
+      // for its refusals and failures too: a public card would show who used it.
+      acknowledgement: module?.alwaysPrivate
+        ? { flags: MessageFlags.Ephemeral }
+        : replyAcknowledgement(interaction.guildId, ephemeral, this.context.publicResponseGuildId),
       viewer: undefined,
       mode: "reply",
       phase: "execute",

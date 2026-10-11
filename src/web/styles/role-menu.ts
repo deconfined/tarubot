@@ -53,18 +53,31 @@ const ANCHORED_EDITORS = ["edit-roles", "add-roles", "edit-category", "delete"] 
  * so these cover every one.
  */
 const ANCHOR_PAIRS = Array.from({ length: MENU_LIMITS.categories }, (_, at) =>
-  ANCHORED_EDITORS.map(
-    (editor) => `    .anchor-c${at}-${editor} {
-      anchor-name: --c${at}-${editor};
-    }
-
-    .anchored-c${at}-${editor} {
-      position-anchor: --c${at}-${editor};
-    }`,
-  ),
+  ANCHORED_EDITORS.map((editor) => anchorPair(`c${at}-${editor}`)),
 )
   .flat()
   .join("\n\n");
+
+/**
+ * One static pair: `.anchor-<name>` names a button `--<name>`, and `.anchored-<name>` points its
+ * panel at it.
+ */
+function anchorPair(name: string): string {
+  return `    .anchor-${name} {
+      anchor-name: --${name};
+    }
+
+    .anchored-${name} {
+      position-anchor: --${name};
+    }`;
+}
+
+/**
+ * The other pages' anchored panels, which share these rules: Mod mail's Open a case (2.43.0,
+ * views/modmail.ts), one button on its page. Kept here so every anchoring declaration stays in
+ * this stylesheet's one @supports block.
+ */
+const PAGE_ANCHORS = ["modmail-open"].map(anchorPair).join("\n\n");
 
 export const ROLE_MENU_CSS = `/* Role menu */
 
@@ -1107,6 +1120,8 @@ main.orr-enter:has(.overlay--open) {
 
   @media (min-width: 40rem) and (min-height: 30rem) {
 ${ANCHOR_PAIRS}
+
+${PAGE_ANCHORS}
 
     .overlay--anchored:is(:popover-open, :modal) {
       --overlay-gap: var(--space-2);

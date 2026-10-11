@@ -1,5 +1,11 @@
 /** Guild channel provisioning and visibility writes, with fresh reads and explicit bot access. */
-import { ChannelType, OverwriteType, PermissionFlagsBits as P } from "discord.js";
+import {
+  ChannelType,
+  DiscordAPIError,
+  OverwriteType,
+  PermissionFlagsBits as P,
+  Routes,
+} from "discord.js";
 import type {
   Channel,
   Client,
@@ -11,6 +17,7 @@ import type {
 } from "discord.js";
 import {
   channelAccessOverwrites,
+  overwriteWrites,
   sameOverwrites,
   type AccessChannel,
   type AccessOverwrite,
@@ -37,6 +44,24 @@ import {
   type SetupBlocker,
   type SetupPlanningPort,
 } from "../application/setup-plan.js";
+
+/**
+ * Discord refused one of a channel's permission writes with Missing Permissions (50013): a named
+ * refusal, so the reply and the job say which channel and why, rather than Discord's bare code.
+ * The pass stops there, as for any refusal: its readback can't pass with that channel unsettled.
+ * Discord lets a bot allow or deny only permissions it holds itself (unless it has Administrator),
+ * so the likely cause is an entry the pass had to change that also carries one it lacks, set by
+ * hand on TaruBot's own member entry: moving that allow to the TaruBot role's entry, which the
+ * pass never writes, or running the pass once with Administrator, settles it.
+ */
+function writeRefused(channelId: string): Failure {
+  return new Failure(
+    "blocked",
+    `Discord refused to change the permissions of <#${channelId}> (Missing Permissions). TaruBot can allow or deny only permissions it holds itself: if TaruBot's own entry there allows one it lacks, such as Mention Everyone set for mod mail's pings, move that allow to the TaruBot role's entry, or turn Administrator on for TaruBot while this runs.`,
+    0,
+    { kind: "resource", resource: "channel", id: channelId },
+  );
+}
 
 /** Immutable identity fences around the Gateway-updated SDK cache for one pass only. */
 interface ReconciliationScope {
@@ -908,11 +933,29 @@ export class DiscordGuildAccess implements GuildAccessPort, SetupPlanningPort {
     before = fresh.overwrites;
     desired = channelAccessOverwrites(before, guildId, botId, roles, audience);
     if (sameOverwrites(before, desired)) return moved;
-    // No await since freshForWrite's last managedChannel check, so the target is still readable.
-    await channel.permissionOverwrites.set(
-      desired.map((value) => ({ ...value, allow: BigInt(value.allow), deny: BigInt(value.deny) })),
-      "TaruBot onboarding visibility policy",
-    );
+    // Entry by entry (2.43.0), never the whole list: an entry the policy leaves alone is never
+    // resent, so a permission TaruBot lacks that someone set by hand there (Mention Everyone on
+    // TaruBot's role in the officer notifications channel, for mod mail's pings) can't make
+    // Discord refuse the write. overwriteWrites orders them so no state in between is more open
+    // than the channel before or after. The first is planned with no await since freshForWrite's
+    // last managedChannel check, so the target is still readable; a refusal partway leaves the
+    // channel between the two, which the readback below or the next pass, planned afresh,
+    // settles.
+    for (const write of overwriteWrites(before, desired, botId)) {
+      const route = Routes.channelPermission(channelId, write.id);
+      const reason = "TaruBot onboarding visibility policy";
+      try {
+        if (write.kind === "delete") await this.client.rest.delete(route, { reason });
+        else
+          await this.client.rest.put(route, {
+            body: { type: write.type, allow: write.allow, deny: write.deny },
+            reason,
+          });
+      } catch (error) {
+        if (error instanceof DiscordAPIError && error.code === 50013) throw writeRefused(channelId);
+        throw error;
+      }
+    }
     const verified = await this.client.channels.fetch(channelId, { force: true });
     if (!verified || !("permissionOverwrites" in verified))
       throw new Failure("blocked", "Channel disappeared during access enforcement.");

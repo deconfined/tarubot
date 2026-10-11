@@ -24,6 +24,11 @@ const payload = customType<{ data: unknown; driverData: unknown }>({
   // node-postgres already decodes JSONB, including scalar JSON strings.
   fromDriver: (value) => value,
 });
+/**
+ * Mod mail's ciphertexts (migration 014): nonce, ciphertext and tag as one bytea. node-postgres
+ * returns a Buffer and binds one as bytea.
+ */
+const bytes = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => "bytea" });
 const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 const money = (name: string) => bigint(name, { mode: "bigint" });
 
@@ -442,4 +447,74 @@ export const statusSamples = pgTable("status_samples", {
   lodestone: text("lodestone", { enum: ["available", "cooling_down", "unreachable"] }).notNull(),
   changes: text("changes", { enum: ["live", "paused"] }).notNull(),
   version: text("version").notNull(),
+});
+
+/**
+ * Mod mail (migration 014, 2.43.0): the officers' switch and each server's case counter. No row is
+ * off, at revision 1, with no case numbered yet. src/application/modmail.ts writes it; only the
+ * switch is audited.
+ */
+export const modmailSettings = pgTable("modmail_settings", {
+  guild_id: externalId("guild_id").primaryKey(),
+  enabled: boolean("enabled").notNull().default(false),
+  revision: money("revision").notNull().default(1n),
+  /** The last case number handed out here; opening a case increments it under its row lock. */
+  last_number: money("last_number").notNull().default(0n),
+  updated_by: externalId("updated_by"),
+  updated_at: instant("updated_at").notNull().defaultNow(),
+});
+/**
+ * One mod mail case. The topic is AES-256-GCM ciphertext under MODMAIL_KEY, bound to its server
+ * and case (src/infrastructure/modmail/cipher.ts); the key itself is never stored. A trigger keeps
+ * the identity and topic fixed. Closing sets delete_after (90 days on); retention deletes the case
+ * with its messages and reads.
+ */
+export const modmailCases = pgTable("modmail_cases", {
+  id: uuid("id").primaryKey(),
+  guild_id: externalId("guild_id").notNull(),
+  number: money("number").notNull(),
+  opener_id: externalId("opener_id").notNull(),
+  state: text("state", { enum: ["officers", "member", "closed"] }).notNull(),
+  /** The close/reopen lock; every change bumps it. */
+  revision: money("revision").notNull().default(1n),
+  opened_at: instant("opened_at").notNull().defaultNow(),
+  last_activity_at: instant("last_activity_at").notNull().defaultNow(),
+  /** When the current state began: how long the case has waited on officers or the member. */
+  state_since: instant("state_since").notNull().defaultNow(),
+  closed_at: instant("closed_at"),
+  delete_after: instant("delete_after"),
+  topic: bytes("topic").notNull(),
+  topic_key_id: text("topic_key_id").notNull(),
+});
+/**
+ * A case's thread, append-only (a trigger refuses every UPDATE): messages with an encrypted body,
+ * and the 'closed' and 'reopened' lines of its state history. `seq` orders them.
+ */
+export const modmailMessages = pgTable("modmail_messages", {
+  id: uuid("id").primaryKey(),
+  case_id: uuid("case_id").notNull(),
+  seq: money("seq").generatedAlwaysAsIdentity(),
+  kind: text("kind", { enum: ["message", "closed", "reopened"] }).notNull(),
+  author_id: externalId("author_id").notNull(),
+  side: text("side", { enum: ["member", "officer"] }).notNull(),
+  /** An officer's choice for this row: their server name, or "The officers"; null for the member. */
+  signed_as: text("signed_as", { enum: ["name", "officers"] }),
+  body: bytes("body"),
+  key_id: text("key_id"),
+  created_at: instant("created_at").notNull().defaultNow(),
+});
+/**
+ * Who read a case and when (append-only): `case` for a view of its page (repeat views by one
+ * reader within a minute are one row), `list` for a list that showed its decrypted topic (one row
+ * per reader per case per hour).
+ */
+export const modmailReads = pgTable("modmail_reads", {
+  id: money("id").primaryKey().generatedAlwaysAsIdentity(),
+  case_id: uuid("case_id").notNull(),
+  reader_id: externalId("reader_id").notNull(),
+  side: text("side", { enum: ["member", "officer"] }).notNull(),
+  kind: text("kind", { enum: ["case", "list"] })
+    .notNull()
+    .default("case"),
+  read_at: instant("read_at").notNull().defaultNow(),
 });

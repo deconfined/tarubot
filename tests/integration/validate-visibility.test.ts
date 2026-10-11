@@ -283,6 +283,7 @@ describe.skipIf(!url)("/config validate reads TaruBot's view and the stored reco
       retiredRoles: [ROLE.retired],
       pendingReviewChannels: [CHANNEL.oldReviews],
       recordedHidden: [],
+      modmail: false,
     });
   });
 
@@ -292,6 +293,7 @@ describe.skipIf(!url)("/config validate reads TaruBot's view and the stored reco
       retiredRoles: [],
       pendingReviewChannels: [],
       recordedHidden: [],
+      modmail: false,
     });
     expect((await loadVisibilityRecords(db.orm, GUILD)).pendingReviewChannels).toEqual([]);
   });

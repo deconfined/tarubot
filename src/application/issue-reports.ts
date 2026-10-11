@@ -164,6 +164,9 @@ export class IssueReports {
       config.HEALTHCHECKS_PING_URL,
       // The web sign-in's OAuth client secret (#43); unset until the web is configured.
       config.DISCORD_CLIENT_SECRET ?? "",
+      // Mod mail's encryption key (2.43.0). The bot strips it from its configuration at startup
+      // (main.ts), so this matters only to a caller that keeps it there, such as a tool or test.
+      config.MODMAIL_KEY ?? "",
       password,
     ].filter(Boolean);
   }

@@ -19,8 +19,10 @@
  * a category is viewable when any of its channels is.
  *
  * Since 2.35.0 (#46) it also answers PUT /channels/{id}/permissions/{target}, the one write
- * /setup overrides makes: it upserts that single entry and nothing else, records the route in
- * `writes`, and answers 50001 for a channel the bot can't view. `discord.putError` fails a PUT
+ * /setup overrides makes and (2.43.0) one of the two onboarding's pass makes, entry by entry, with
+ * DELETE /channels/{id}/permissions/{target}: each upserts or removes that single entry and
+ * nothing else, records the route in `writes` (and every PUT and DELETE, in order, in
+ * `entryWrites`), and answers 50001 for a channel the bot can't view. `discord.putError` fails a PUT
  * first (it may wait, for a request in flight), `discord.afterPut` runs after one lands, and
  * `discord.propagate` models Discord copying a category's new overwrites to the children that
  * were synced with it. It is on by default, as Discord documents ("Any further changes to a parent
@@ -142,6 +144,14 @@ export function discordAccessFixture() {
   const reads: string[] = [];
   /** Every PUT as sent (2.35.0): its route, raw body and audit-log reason. */
   const puts: { route: string; body: unknown; reason: string | undefined }[] = [];
+  /** Every per-entry PUT and DELETE (2.43.0), in the order sent, with a PUT's bits. */
+  const entryWrites: {
+    method: "PUT" | "DELETE";
+    route: string;
+    target: string;
+    allow?: string | undefined;
+    deny?: string | undefined;
+  }[] = [];
   // Mutable settings a test changes through the returned object (see the module comment).
   const discord: {
     obfuscation: Obfuscation;
@@ -390,6 +400,11 @@ export function discordAccessFixture() {
     if (!match?.[1] || !match[2]) throw new Error(`Unexpected fixture write ${route}`);
     const [, channelId, target] = match;
     puts.push({ route, body: structuredClone(options?.body), reason: options?.reason });
+    const sent = z
+      .object({ allow: z.string(), deny: z.string() })
+      .partial()
+      .parse(options?.body ?? {});
+    entryWrites.push({ method: "PUT", route, target, ...sent });
     const failure = await discord.putError?.(channelId, options?.signal ?? undefined);
     if (failure) throw failure;
     const channel = channels.find((candidate) => candidate.id === channelId);
@@ -405,6 +420,28 @@ export function discordAccessFixture() {
       ...channel.permission_overwrites.filter((entry) => entry.id !== target),
       { id: target, type: body.type, allow: body.allow, deny: body.deny },
     ];
+    if (discord.propagate && channel.type === ChannelType.GuildCategory)
+      for (const child of channels)
+        if (child.parent_id === channel.id && sameSet(child.permission_overwrites, before))
+          child.permission_overwrites = structuredClone(channel.permission_overwrites);
+    await discord.afterPut?.(channelId);
+    return undefined;
+  });
+  const remove = spyOn(client.rest, "delete").mockImplementation(async (route, options) => {
+    const match = /^\/channels\/(\d+)\/permissions\/(\d+)$/u.exec(route);
+    if (!match?.[1] || !match[2]) throw new Error(`Unexpected fixture delete ${route}`);
+    const [, channelId, target] = match;
+    entryWrites.push({ method: "DELETE", route, target });
+    const failure = await discord.putError?.(channelId, options?.signal ?? undefined);
+    if (failure) throw failure;
+    const channel = channels.find((candidate) => candidate.id === channelId);
+    if (!channel) throw discordError(10003, 404, "DELETE", route);
+    if (hidden(channel)) throw discordError(50001, 403, "DELETE", route);
+    writes.push(route);
+    const before = structuredClone(channel.permission_overwrites);
+    channel.permission_overwrites = channel.permission_overwrites.filter(
+      (entry) => entry.id !== target,
+    );
     if (discord.propagate && channel.type === ChannelType.GuildCategory)
       for (const child of channels)
         if (child.parent_id === channel.id && sameSet(child.permission_overwrites, before))
@@ -460,6 +497,7 @@ export function discordAccessFixture() {
     writes,
     reads,
     puts,
+    entryWrites,
     ready,
     add,
     discord,
@@ -503,6 +541,7 @@ export function discordAccessFixture() {
       patch.mockRestore();
       post.mockRestore();
       put.mockRestore();
+      remove.mockRestore();
       ready.mockRestore();
       await client.destroy();
     },

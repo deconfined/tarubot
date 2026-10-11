@@ -60,10 +60,12 @@ Grant these twelve on TaruBot's own role, at the server level. Together they are
 
 In every channel TaruBot posts to (the ledger, officer notifications, update posts and guest reviews) it needs all four of **View Channel**, **Send Messages**, **Embed Links** and **Read Message History**. `/config` refuses a channel that lacks any of them, and `/config validate` checks them again.
 
+With [mod mail](/tarubot/admin/mod-mail/) on, TaruBot also needs **Mention @everyone, @here and All Roles** (Mention Everyone) in the officer notifications channel, and only there, so its pings of the Officer role notify officers while that role stays non-mentionable. It isn't one of the twelve: allow it by hand for the TaruBot role in that channel's own permissions ([how](/tarubot/admin/mod-mail/#let-pings-notify-officers)). TaruBot never grants it to itself, and its pings never mention @everyone or @here.
+
 ## Right after adding the bot
 
 1. **Role order.** Discord only lets a bot manage roles below its own highest role, and nicknames of members whose highest role is below it. In **Server Settings → Roles**, drag TaruBot's role above the four roles it will manage, and above the members whose nicknames it will manage.
-2. **Only TaruBot's own role gives it permissions.** Keep the twelve on TaruBot's own role, and don't give TaruBot another role that adds permissions. `/config validate` warns when one of the first seven comes only from @everyone or from another role, since a change to that role would take it away, and it lists any permission TaruBot never needs (Manage Server, Manage Messages, Mention Everyone, Kick Members, Ban Members, Time Out Members and Manage Webhooks) with the roles that give it.
+2. **Only TaruBot's own role gives it permissions.** Keep the twelve on TaruBot's own role, and don't give TaruBot another role that adds permissions. `/config validate` warns when one of the first seven comes only from @everyone or from another role, since a change to that role would take it away, and it lists any permission TaruBot never needs (Manage Server, Manage Messages, Mention Everyone, Kick Members, Ban Members, Time Out Members and Manage Webhooks) with the roles that give it. Mention Everyone's one exception is the officer notifications channel's own permissions while mod mail is on, above; `/config validate` also warns about an allow for TaruBot in any other channel.
 3. **Two-factor authentication.** If the server requires two-factor authentication for moderation, Discord lets a bot use Manage Roles, Manage Channels and Administrator there only while the account that owns the bot's application has two-factor authentication turned on. Without it, TaruBot's role and channel changes are refused.
 4. **The application's intents.** In the Developer Portal, **Server Members Intent** on, **Presence Intent** and **Message Content Intent** off.
 5. **Access roles.** The access roles (Member, Guest, Officer, FC Leader) must be distinct, ordinary roles without Administrator, Manage Server or Manage Roles. With onboarding on, they must not have Manage Channels either.
@@ -119,7 +121,7 @@ Until you do, Administrator stays needed.
 You can remove:
 
 - **TaruBot's Administrator**, as soon as `/config validate` says it is no longer needed.
-- **Permissions TaruBot never needs**, which `/config validate` lists.
+- **Permissions TaruBot never needs**, which `/config validate` lists, and Mention Everyone allowed to TaruBot in any channel but the officer notifications channel (that one too while mod mail is off).
 - **Your own Administrator, Manage Server or Manage Roles**, if you were given them only to set TaruBot up. Managers need Manage Server and Manage Roles again to rebind a role, change an officer override or switch the role layout.
 
 Never remove:
