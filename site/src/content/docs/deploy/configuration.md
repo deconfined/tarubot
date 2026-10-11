@@ -36,7 +36,7 @@ The stock, production and staging manifests pass these settings to the bot. [Ins
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `WEB_PUBLIC_ORIGIN` | (empty) | Enables web when set to the public HTTPS origin, for example `https://tarubot.example.org`. Shared with Caddy; also determines application URLs and the exact OAuth redirect `https://tarubot.example.org/auth/callback`. |
+| `WEB_PUBLIC_ORIGIN` | (empty) | Enables web when set to the public HTTPS origin, for example `https://tarubot.example.org`. Shared with Caddy; also determines application URLs and the exact OAuth redirect `https://tarubot.example.org/auth/callback`. From 2.42.0, while the web settings are valid, `/dashboard` links to it and TaruBot's Discord status reads `Dashboard: https://tarubot.example.org`. |
 | `WEB_PORT` | `8080` | Private web listener and Caddy upstream port. Not published on the host; distinct from `HEALTH_PORT`. |
 | `DISCORD_CLIENT_SECRET` | (empty) | The existing Discord application's OAuth client secret, required with web enabled. Plain environment only; no `DISCORD_CLIENT_SECRET_FILE` form. |
 

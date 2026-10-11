@@ -8,7 +8,7 @@ sidebar:
 Your officers can offer roles you choose for yourself, such as pronouns, games or regions. You pick them on **My roles**, a page on your server's TaruBot website, and TaruBot adds or removes them for you in Discord. It replaces reaction roles: roles you already have show up on the page already ticked, however you got them.
 
 :::note[Where to find it]
-My roles needs a **2.40.0 or newer** TaruBot with its web pages turned on. Your officers can copy the page's link from their Role menu page; ask them for it if nobody has shared it.
+My roles needs a **2.40.0 or newer** TaruBot with its web pages turned on. Your officers can copy the page's link from their Role menu page; ask them for it if nobody has shared it. From 2.42.0, [`/dashboard`](/tarubot/reference/commands/#dashboard) also gives you a link to TaruBot's web pages, and TaruBot's status in the member list shows their address.
 :::
 
 ## Who can use it
@@ -22,7 +22,7 @@ While TaruBot still has Discord's Administrator permission in the server, My rol
 
 ## Open My roles
 
-1. **Open the link** your officers shared, or your TaruBot's web address.
+1. **Open the link** your officers shared, or your TaruBot's web address, which `/dashboard` links to.
 2. **Sign in with Discord.** Signing in asks Discord only who you are: TaruBot can't read your messages, your other servers or your email, and it keeps no Discord token.
 3. If My roles in one server is the only page open to you, you land straight on it. Otherwise choose your server, then **My roles**.
 

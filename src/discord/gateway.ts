@@ -1,6 +1,7 @@
 /** Discord.js adapter: current permission checks, complete observations, and scoped effects. */
 import { createHash } from "node:crypto";
 import {
+  ActivityType,
   ChannelType,
   Client,
   DiscordAPIError,
@@ -11,7 +12,7 @@ import {
   OverwriteType,
   PermissionFlagsBits,
 } from "discord.js";
-import type { Collection, Guild, GuildMember, Role } from "discord.js";
+import type { Collection, Guild, GuildMember, PresenceData, Role } from "discord.js";
 import { permissionKeys, permissionLabel, POSTING_PERMISSIONS } from "../domain/permissions.js";
 import { Failure, normalized } from "../domain/values.js";
 import type { VisibilityGuild } from "../domain/visibility.js";
@@ -45,16 +46,52 @@ function ascendingRoles(roles: Collection<string, Role>): Role[] {
   return [...roles.values()].sort((left, right) => left.comparePositionTo(right));
 }
 
+/**
+ * Discord's limit on a custom status's text, the activity's `state`: the 128 characters its client
+ * accepts. An origin always fits; a longer text is dropped, never cut into a wrong address.
+ */
+export const CUSTOM_STATUS_LIMIT = 128;
+
+/**
+ * TaruBot's "currently doing" line in the member list (2.42.0): a Custom activity reading
+ * "Dashboard: <origin>" while the web is on, and none while it is off or its settings are invalid
+ * (origin null). Bots may send only an activity's name, state, type and url, and url works only for
+ * Twitch or YouTube streams, so the address shows as text and isn't a link. Discord requires a
+ * name; for a Custom activity it shows only the state. A new object on every call, because
+ * discord.js writes into the presence and activities it is given.
+ */
+export function dashboardPresence(origin: string | null): PresenceData {
+  const state = origin === null ? null : `Dashboard: ${origin}`;
+  if (state === null || state.length > CUSTOM_STATUS_LIMIT) return {};
+  return { activities: [{ type: ActivityType.Custom, name: "Custom Status", state }] };
+}
+
+/** What the composition root tells the gateway; tools and tests construct it without. */
+export interface GatewayOptions {
+  /** The dashboard's origin for TaruBot's custom status; null or omitted, no activity. */
+  readonly dashboardOrigin?: string | null;
+}
+
 /** Exposes a reusable Discord client plus application-owned projections of SDK state. */
 export class DiscordGateway implements DiscordPort {
-  // Exactly Guilds and GuildMembers. The message intents (GuildMessages, MessageContent,
-  // DirectMessages) are banned permanently, and tests/unit/intents.test.ts pins the set; enable
-  // privileged ones in the portal.
-  readonly client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
-    allowedMentions: { parse: [] },
-    rest: { timeout: 15000, retries: 3 },
-  });
+  readonly client: Client;
+
+  constructor(options: GatewayOptions = {}) {
+    this.client = new Client({
+      // Exactly Guilds and GuildMembers. The message intents (GuildMessages, MessageContent,
+      // DirectMessages) are banned permanently, and tests/unit/intents.test.ts pins the set;
+      // enable privileged ones in the portal.
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+      allowedMentions: { parse: [] },
+      rest: { timeout: 15000, retries: 3 },
+      // The presence goes in as a client option, not client.user.setPresence() on ready: discord.js
+      // sends this option in every IDENTIFY, so a new session after an invalid session or a
+      // connection that couldn't resume shows it again, and a RESUME keeps the session's presence
+      // on Discord's side. setPresence() reaches only the current session, never updates what
+      // later IDENTIFYs send, and the ready event fires only once, never after a reconnect.
+      presence: dashboardPresence(options.dashboardOrigin ?? null),
+    });
+  }
   /**
    * Copy mutable SDK state into the small snapshot consumed by application policy. view() serves
    * the actor, command targets and guild-wide reads alike, so a missing join time names the

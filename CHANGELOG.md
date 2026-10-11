@@ -1,6 +1,13 @@
 # Version history
 
-The current application version is **2.41.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.42.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.42.0 — Link the dashboard from Discord
+
+- Add **`/dashboard`**, open to anyone in the server and private like every reply: an **Open the dashboard** button to the dashboard's address, where people sign in with Discord and see the pages open to them, with the address underneath. The link goes to the dashboard's home page, not a server page, since which pages someone can open depends on who they are. While the dashboard is off, or its settings are invalid, the reply says plainly that it isn't turned on for this TaruBot, with no link. A development address (`http://localhost` or `http://[::1]`) is shown as text instead, since TaruBot's link buttons accept only https addresses.
+- Show the address as TaruBot's status in the member list, a custom status reading `Dashboard: https://tarubot.example.org` for that origin, and no status while the dashboard is off or its settings are invalid. Discord lets a bot's status be text only, so the address isn't clickable there. TaruBot sends it each time it opens a new Discord session, so it comes back after a reconnect. Both read `WEB_PUBLIC_ORIGIN` once at startup, as the dashboard does, so a changed address shows once the container is recreated.
+- The command surface grows to 22 roots and 48 paths, so the commands must be registered again. The managed deploy entry already registers them on every delivery, before starting the new release (globally for production, in DevBot's guild for staging), so the owner has nothing extra to do. A stock installation registers them again after updating, as the update steps say.
+- This release adds no database migration and changes no setting.
 
 ## 2.41.1 — Open Role menu editors next to their button
 

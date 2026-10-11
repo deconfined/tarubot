@@ -56,7 +56,7 @@ Add cases to `tests/fixtures/replies/` and pin wording in the group's unit tests
 
 ## Web pages
 
-The web pages (#43) run in the bot process: `src/main.ts` starts a second listener once the writer lease and Discord are ready, and the shutdown drain stops it. They stay off until `WEB_PUBLIC_ORIGIN` is set. `src/web/settings.ts` parses the web settings when the web starts, so a bad value turns the web off with a report naming the setting and never stops the bot. `src/web/http.ts` holds the header set and the POST checks; `src/web/server.ts` owns the fixed routes (`/`, sign-in, sign-out, `/health/ready`, the public `/status` and the assets) and wires the request pipeline.
+The web pages (#43) run in the bot process: `src/main.ts` starts a second listener once the writer lease and Discord are ready, and the shutdown drain stops it. They stay off until `WEB_PUBLIC_ORIGIN` is set. `src/web/settings.ts` parses the web settings when the web starts, so a bad value turns the web off with a report naming the setting and never stops the bot. `src/main.ts` runs the same parse once before Discord connects, for the dashboard's address: `/dashboard` reads it through `dashboardKey` (commands never import web code), and the gateway's client option `presence` carries it as the custom status (`dashboardPresence`), which discord.js sends with every IDENTIFY. Off or invalid settings give neither. `src/web/http.ts` holds the header set and the POST checks; `src/web/server.ts` owns the fixed routes (`/`, sign-in, sign-out, `/health/ready`, the public `/status` and the assets) and wires the request pipeline.
 
 ### Add a page
 

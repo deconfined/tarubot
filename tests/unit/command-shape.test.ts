@@ -48,11 +48,11 @@ test("every declared path, with all of its options, fits its own command's shape
       expect(undeclaredShape(declared, invoke(path, supplied)), command.name).toBeNull();
     }
   }
-  // The registered surface: 47 paths across 21 roots (a root without subcommands is one path);
-  // 2.18.0 added /issue, 2.25.0 /config changelog, 2.28.0 /suggest, and 2.35.0 split /setup into
-  // /setup onboarding and /setup overrides.
-  expect(paths).toBe(47);
-  expect((await loadCommands()).size).toBe(21);
+  // The registered surface: 48 paths across 22 roots (a root without subcommands is one path);
+  // 2.18.0 added /issue, 2.25.0 /config changelog, 2.28.0 /suggest, 2.35.0 split /setup into
+  // /setup onboarding and /setup overrides, and 2.42.0 added /dashboard.
+  expect(paths).toBe(48);
+  expect((await loadCommands()).size).toBe(22);
 });
 
 /** /setup as 2.34.0 registered it: options only, no subcommand. */

@@ -1300,13 +1300,16 @@ test("the path tables return one embed for every registered command path", async
   );
   const paths = await registeredPaths();
   // 41 in 2.14.0, plus /officer reset and /guest reset (owner decision, 2026-09-24), plus /issue
-  // (2.18.0), /config changelog (2.25.0) and /suggest (2.28.0); 2.35.0 split /setup in two.
-  expect(paths).toHaveLength(47);
+  // (2.18.0), /config changelog (2.25.0) and /suggest (2.28.0); 2.35.0 split /setup in two, and
+  // 2.42.0 added /dashboard.
+  expect(paths).toHaveLength(48);
   // /apply opens a form, whose refusal and receipt the router and guest-application tests cover,
-  // /version reads GitHub, which version.test stubs, and /issue and /suggest have their own tests
-  // below; every other path is exercised above.
+  // /version reads GitHub, which version.test stubs, /issue and /suggest have their own tests
+  // below, and dashboard.test runs /dashboard with its service; every other path is exercised
+  // above.
   expect(paths.filter((path) => !covered.has(path))).toEqual([
     "apply",
+    "dashboard",
     "issue",
     "suggest",
     "version",

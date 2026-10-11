@@ -2,6 +2,7 @@
 import { ServiceKey } from "../bot/services.js";
 import { DiscordGateway } from "../discord/gateway.js";
 import { Database } from "../infrastructure/postgres/database.js";
+import { Dashboard } from "./dashboard.js";
 import { GuildEvents } from "./guild-events.js";
 import { IssueReports } from "./issue-reports.js";
 import { ApplicationLifecycle } from "./lifecycle.js";
@@ -70,4 +71,9 @@ export const selfRolesKey = new ServiceKey(
 export const publicStatusKey = new ServiceKey(
   "public status",
   (value): value is PublicStatus => value instanceof PublicStatus,
+);
+/** The dashboard's address (2.42.0): /dashboard links to it, or says the web is off. */
+export const dashboardKey = new ServiceKey(
+  "dashboard address",
+  (value): value is Dashboard => value instanceof Dashboard,
 );
