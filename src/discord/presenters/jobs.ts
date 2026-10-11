@@ -42,6 +42,9 @@ export const JOB_KIND: Readonly<Record<string, { readonly label: string; readonl
     // A member's own picks from the self-service role menu (queued from 2.40.0; 2.39.0 completes a
     // leftover one as skipped).
     "roles.self": { label: "Role choices", done: "Role choices applied" },
+    // Mod mail (2.43.0): the officers' ping and the member's DM, each naming a case only.
+    "modmail.ping": { label: "Mod mail ping", done: "Officers pinged" },
+    "modmail.dm": { label: "Mod mail DM", done: "Member told by DM" },
   };
 
 /** A kind's member-facing label; a kind this release doesn't know falls back to its raw name. */

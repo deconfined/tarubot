@@ -119,6 +119,8 @@ export function visibilitySnapshot(guild: Guild, bot: GuildMember): VisibilityGu
       permissions: String(role.permissions.bitfield),
       hoist: role.hoist,
       managed: role.managed,
+      // Mod mail's officer ping notifies through a mentionable role (domain/visibility.ts).
+      mentionable: role.mentionable,
     })),
     channels,
     heldRoles: [...heldRoles],

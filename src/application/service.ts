@@ -677,10 +677,17 @@ export class Service {
     // The "Role menu" check (2.39.0): the menu members see, judged on the same fresh view, which
     // is why this costs no extra Discord request. Without a view its problems read as unknown.
     const selfRoles = await selfRolesHealth(this.db.orm, guild, snapshot);
+    // Mod mail's switch (2.43.0): while it's on, a missing officer notifications channel means
+    // officers are never pinged about cases, so the checklist warns instead of saying "off".
+    const [modmail] = await this.db.orm
+      .select({ enabled: t.modmailSettings.enabled })
+      .from(t.modmailSettings)
+      .where(eq(t.modmailSettings.guild_id, guild.id));
     return {
       ...(changelogAudience ? { changelogAudience } : {}),
       visibility,
       selfRoles,
+      modmail: modmail?.enabled === true,
       configuration: guild,
       effectsGloballyEnabled: this.config.ENABLE_EFFECTS,
       effectsMode: this.effectsMode(guild),

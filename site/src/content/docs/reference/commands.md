@@ -697,6 +697,14 @@ Report a problem to the maintainers of this TaruBot deployment. See [Progress an
 /issue description:My Member role disappeared after I ran /main this morning.
 ```
 
+### /modmail
+
+Privately message the server's officers. A form opens with a **topic** (up to 100 characters) and a **message** (up to 4,000), and says at the top that all of the server's officers can read it. TaruBot answers with **Case #N opened** and a button to the case on the dashboard, where the conversation continues; officers are pinged with the case number only. The dashboard's Mod mail page opens cases the same way, with **Open a case**. See [Message your officers](/tarubot/use/mod-mail/) and, for officers, [Mod mail](/tarubot/admin/mod-mail/).
+
+**Who can use it:** holders of the server's Member or Guest role, once an officer has turned mod mail on, while TaruBot doesn't have Administrator in the server. Discord takes slash commands away during a time-out, so a member in one can't run `/modmail`; they can still open a case and reply on the dashboard. Each person can have 3 open cases in a server and open 5 in any 24 hours, however they open them. When it can't be used, TaruBot says why before the form opens.
+
+This command has no options.
+
 ### /ping
 
 Show Discord's gateway latency.

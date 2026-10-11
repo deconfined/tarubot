@@ -35,6 +35,11 @@ export interface WebVariables {
   formToken: string | null;
   /** How an error page answering this request differs from its status's own (ErrorFrame). */
   errorFrame: ErrorFrame | null;
+  /**
+   * A larger body cap the route's page declared for its POSTs (Page.bodyLimit, 2.43.0), set before
+   * the body cap reads it; unset, the cap is WEB_BODY_LIMIT.
+   */
+  bodyLimit: number | undefined;
 }
 
 /**
@@ -298,6 +303,15 @@ export interface Problem {
   readonly retryAfter: number;
   /** The reporter level: 5xx problems go through report() at this level, others are logged. */
   readonly level: ReportLevel;
+}
+
+/**
+ * A page's "there's nothing here for you" (2.43.0): exactly the 404 an unknown path gets, wording,
+ * code and all, so a page that refuses a record someone may not see (another member's mod mail
+ * case) is indistinguishable from one that doesn't exist. Pages throw it; they may not import Hono.
+ */
+export function pageNotFound(): never {
+  throw new HTTPException(404);
 }
 
 /** The catalog code an HTTP refusal (an HTTPException from middleware or a route) is shown with. */

@@ -44,6 +44,12 @@ interface CommandMetadata {
   readonly data: Pick<SlashCommandBuilder, "toJSON">;
   readonly access?: "user" | "officer";
   readonly ephemeral?: boolean;
+  /**
+   * Replies stay private even where DevBot's public-response override (PUBLIC_TEST_RESPONSES)
+   * would make them public (2.43.0): for a command whose reply, even a refusal, would tell
+   * onlookers something about the person (/modmail: that they opened a case).
+   */
+  readonly alwaysPrivate?: boolean;
   readonly requires?: readonly ServiceKey<unknown>[];
   readonly autocomplete?: (
     context: AutocompleteContext,
@@ -94,6 +100,7 @@ export class Command {
   readonly name: string;
   readonly access: "user" | "officer";
   readonly ephemeral: boolean;
+  readonly alwaysPrivate: boolean;
   readonly requires: readonly ServiceKey<unknown>[];
   readonly execute: CommandOptions["execute"];
   readonly modal: CommandOptions["modal"];
@@ -130,6 +137,9 @@ export class Command {
     this.name = this.definition.name;
     this.access = options.access ?? "user";
     this.ephemeral = options.ephemeral ?? true;
+    this.alwaysPrivate = options.alwaysPrivate === true;
+    if (this.alwaysPrivate && !this.ephemeral)
+      throw new Error("A command can't be both always private and public.");
     this.requires = options.requires ?? [];
     this.execute = options.execute;
     this.modal = options.modal;

@@ -78,6 +78,7 @@ test("command inventory exactly matches the declared public surface", async () =
       "unassign",
       "characters",
       "main",
+      "modmail",
       "nickname",
       "refresh",
       "sync status",

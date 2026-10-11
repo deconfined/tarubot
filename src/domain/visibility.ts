@@ -130,6 +130,11 @@ export interface VisibilityRecords {
   readonly pendingReviewChannels: readonly string[];
   /** details.hiddenOnPurpose of the newest 'setup.overrides' audit row. */
   readonly recordedHidden: readonly string[];
+  /**
+   * Mod mail is on (modmail_settings.enabled, 2.43.0): its officer pings then need TaruBot to be
+   * able to mention the Officer role in the officer notifications channel (OfficerPing).
+   */
+  readonly modmail: boolean;
 }
 
 /** No stored facts. */
@@ -137,6 +142,7 @@ export const NO_RECORDS: VisibilityRecords = {
   retiredRoles: [],
   pendingReviewChannels: [],
   recordedHidden: [],
+  modmail: false,
 };
 
 /** What the analysis needs to know about the server's settings. */
@@ -154,6 +160,11 @@ export interface VisibilitySettings {
   readonly accessRoles: readonly string[];
   readonly retiredRoles: readonly string[];
   readonly recordedHidden: readonly string[];
+  /** Mod mail is on (VisibilityRecords.modmail). */
+  readonly modmail: boolean;
+  /** Where mod mail pings officers, and whom: the officer notifications channel and Officer role. */
+  readonly officerNotifications: string | null;
+  readonly officerRole: string | null;
 }
 
 /** Distinct non-null values, in first-seen order. */
@@ -186,6 +197,9 @@ export function visibilitySettings(
     ]),
     retiredRoles: distinct(records.retiredRoles),
     recordedHidden: distinct(records.recordedHidden),
+    modmail: records.modmail,
+    officerNotifications: guild.officer_notifications_channel_id,
+    officerRole: guild.officer_role_id,
   };
 }
 
@@ -418,6 +432,86 @@ export interface PrivateCategory {
   readonly inside: readonly string[];
 }
 
+/**
+ * Whether mod mail's officer ping (2.43.0) notifies anyone. TaruBot posts a mention of the Officer
+ * role in the officer notifications channel, and Discord notifies the role's holders only when the
+ * role is mentionable or TaruBot has Mention Everyone in that channel; otherwise the ping posts and
+ * notifies nobody. The owner's way (decision of 2026-10-11) is an allow for TaruBot in that
+ * channel's own permissions, set by hand, so the Officer role stays non-mentionable. In order:
+ * - missing: the channel isn't in TaruBot's view at all (deleted), so nothing can be posted;
+ * - cannot_post: TaruBot can't see the channel or lacks a posting permission there (View Channel,
+ *   Send Messages, Embed Links, Read Message History), as if Administrator were off; Discord's
+ *   implicit denials mean no View is nothing at all and no Send is no mention either;
+ * - mentionable: the Officer role is mentionable, so the ping works (and anyone can ping it);
+ * - allowed: an entry in that channel's own permissions gives TaruBot Mention Everyone;
+ * - server_wide: only a server-wide grant gives it (TaruBot's role's permissions, or @everyone's),
+ *   which /config validate says to remove from TaruBot's role, and doing so would silence pings;
+ * - administrator: only Administrator lets TaruBot post or mention there, so pings go quiet once
+ *   it comes off;
+ * - silent: pings post but notify nobody.
+ */
+export type OfficerPing =
+  | "missing"
+  | "cannot_post"
+  | "mentionable"
+  | "allowed"
+  | "server_wide"
+  | "administrator"
+  | "silent";
+
+/**
+ * Mod mail's officer ping for a channel and role (see OfficerPing), or null when it can't be told:
+ * no channel or role set, the role missing from the view, or the role is @everyone (the gateway
+ * never mentions it). Shared by /config validate and the Mod mail page's settings card.
+ */
+export function officerPing(
+  guild: VisibilityGuild,
+  channelId: string | null,
+  roleId: string | null,
+): OfficerPing | null {
+  if (channelId === null || roleId === null || roleId === guild.guildId) return null;
+  const role = guild.roles.find((entry) => entry.id === roleId);
+  if (!role) return null;
+  const channel = guild.channels.find((entry) => entry.id === channelId);
+  if (!channel) return "missing";
+  const administrator = grantingRoles(guild, P.Administrator, guild.bot.roles).length > 0;
+  const view = asIfView(guild);
+  const bits = channelBits(guild, channel, view);
+  // An unreadable entry's overwrites are synthetic: TaruBot can't see the channel.
+  if (unreadable(guild, channel) || (bits & POSTING_BITS) !== POSTING_BITS)
+    return administrator ? "administrator" : "cannot_post";
+  if (role.mentionable === true) return "mentionable";
+  // The same channel with no server-wide Mention Everyone: what its own entries give.
+  const fromEntries = channelBits(guild, channel, {
+    ...view,
+    base: view.base & ~P.MentionEveryone,
+  });
+  if ((fromEntries & P.MentionEveryone) !== 0n) return "allowed";
+  if ((bits & P.MentionEveryone) !== 0n) return "server_wide";
+  return administrator ? "administrator" : "silent";
+}
+
+/**
+ * Channels whose own permissions allow Mention Everyone to TaruBot itself: its member entry, or an
+ * entry for one of its as-if roles (never @everyone's, which every member shares, as neverNeeded
+ * leaves @everyone out), in display order. Unreadable entries carry synthetic overwrites, so they
+ * are skipped.
+ */
+function mentionAllows(guild: VisibilityGuild, view: AsIf): string[] {
+  const roles = new Set(view.roles.filter((id) => id !== guild.guildId));
+  const forTaruBot = (entry: ApiOverwrite) =>
+    (entry.type === 1 && entry.id === guild.bot.id) || (entry.type === 0 && roles.has(entry.id));
+  return displayOrder(guild.channels)
+    .filter(
+      (channel) =>
+        !unreadable(guild, channel) &&
+        channel.overwrites.some(
+          (entry) => forTaruBot(entry) && (BigInt(entry.allow) & P.MentionEveryone) !== 0n,
+        ),
+    )
+    .map((channel) => channel.id);
+}
+
 /** What /config validate, the officer alert and readiness report about TaruBot's view. */
 export interface VisibilityReport {
   readonly mode: "checked" | "onboarding";
@@ -441,6 +535,24 @@ export interface VisibilityReport {
     readonly permission: NeverNeededPermission;
     readonly roles: readonly string[];
   }[];
+  /**
+   * Mention Everyone in channels (2.43.0). Server-wide it is in neverNeeded; in a channel's own
+   * permissions TaruBot needs it only in the officer notifications channel, while mod mail is on.
+   */
+  readonly mentions: {
+    /** Mod mail's officer ping; null while mod mail is off, or when it can't be told. */
+    readonly officerPing: OfficerPing | null;
+    /**
+     * Channels allowing it to TaruBot itself (mentionAllows) where it's never needed: every one
+     * but the officer notifications channel.
+     */
+    readonly unneeded: readonly string[];
+    /**
+     * The officer notifications channel's own allow for TaruBot: expected while mod mail is on,
+     * unneeded while it's off; null when there is none (or no such channel is set).
+     */
+    readonly officerChannel: "expected" | "unneeded" | null;
+  };
   /**
    * Access roles, and retired roles someone still holds, not strictly below TaruBot's highest
    * as-if role (`highest`, null for @everyone alone). `throughShared` are those of notBelow that
@@ -681,7 +793,28 @@ export function analyseVisibility(
     core.some((row) => row.source === "missing") ||
     (onboardingMissing?.length ?? 0) > 0 ||
     order.throughShared.length > 0;
-  const common = { administrator, core, onboardingMissing, neverNeeded, roleOrder: order };
+  // Mention Everyone in channels: expected in the officer notifications channel while mod mail is
+  // on, and nowhere else. A weak ping is a warning, never a reason Administrator is still needed.
+  const allows = mentionAllows(guild, view);
+  const notices = settings.officerNotifications;
+  const mentions: VisibilityReport["mentions"] = {
+    officerPing: settings.modmail ? officerPing(guild, notices, settings.officerRole) : null,
+    unneeded: allows.filter((id) => id !== notices),
+    officerChannel:
+      notices !== null && allows.includes(notices)
+        ? settings.modmail
+          ? "expected"
+          : "unneeded"
+        : null,
+  };
+  const common = {
+    administrator,
+    core,
+    onboardingMissing,
+    neverNeeded,
+    mentions,
+    roleOrder: order,
+  };
   const none = { categories: [], inside: [], channels: [], posting: [], unreadable: [] };
 
   if (settings.onboarding) {

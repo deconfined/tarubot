@@ -45,6 +45,10 @@ When every channel is covered again, and only if the alert posted, it follows wi
 - **A server with onboarding** gets no alert, because onboarding's own pass gives TaruBot its channel access. `/config validate` and `/sync status` show a pass that hasn't reached a channel.
 - **Without an officer notifications channel** the alert isn't posted; `/config validate` still lists the channels. Once you set the channel, an alert still owed follows five minutes later.
 
+## Mod mail pings
+
+From 2.43.0, while [mod mail](/tarubot/admin/mod-mail/) is on, the same channel gets a short post when a member opens a case or replies to one: the case number and a button to it, mentioning the Officer role and only that role, never the member's name or what they wrote. At most one per case every 10 minutes. Mod mail can't be turned on without this channel, and `/config validate` warns if it's unset while mod mail is on. For the mention to notify officers, allow the TaruBot role **Mention @everyone, @here and All Roles** in this channel's own permissions ([how](/tarubot/admin/mod-mail/#let-pings-notify-officers)); TaruBot needs it nowhere else.
+
 ## Member status changes
 
 The same officer notifications channel gets one post, "Member status changes", listing what changed about your members. There is nothing else to set up and no separate switch: while the channel is set, the posts are on.

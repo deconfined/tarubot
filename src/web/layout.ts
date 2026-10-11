@@ -68,7 +68,7 @@ interface LayoutFrame {
     readonly nav: readonly NavLink[];
     /**
      * Who is viewing, for the side navigation's note (server.ts sets it from actor.officer):
-     * officers configure, members and guests pick their roles. Omitted, the officers' note.
+     * officers configure, members and guests have their own pages. Omitted, the officers' note.
      */
     readonly audience?: Audience;
   };
@@ -81,11 +81,11 @@ export type Audience = "officer" | "member";
 const SIDE_NOTE: Readonly<Record<Audience, { readonly caption: string; readonly note: string }>> = {
   officer: {
     caption: "Settings and background work",
-    note: "Most settings are changed in Discord; the role menu is set here.",
+    note: "Most settings are changed in Discord; the role menu and mod mail are set here.",
   },
   member: {
-    caption: "Your roles",
-    note: "Pick your roles here. Everything else is in Discord.",
+    caption: "Your pages",
+    note: "Your own pages in this server. Everything else is in Discord.",
   },
 };
 
@@ -109,17 +109,28 @@ export const BRAND = "TaruBot";
 
 /**
  * A server's navigation: the pages that declare a `nav` label and admit this actor (the same
- * admits() that routing applies), in path order, linked in the actor's server. `currentPath` is the
- * route pattern being shown ("/g/:guild/status"), which gets aria-current.
+ * admits() that routing applies), less any `hidden` (pages whose navWhen said no, which server.ts
+ * works out), in path order, linked in the actor's server. `currentPath` is the route pattern
+ * being shown ("/g/:guild/status"), which gets aria-current, and so does the page a numbered page
+ * sits under (Mod mail for "/g/:guild/modmail/:number").
  */
-export function navLinks(pages: Iterable<Page>, actor: Actor, currentPath?: string): NavLink[] {
+export function navLinks(
+  pages: Iterable<Page>,
+  actor: Actor,
+  currentPath?: string,
+  hidden: ReadonlySet<string> = new Set(),
+): NavLink[] {
   return [...pages]
-    .filter((page) => page.nav !== undefined && admits(actor, page.access))
+    .filter(
+      (page) => page.nav !== undefined && admits(actor, page.access) && !hidden.has(page.path),
+    )
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
     .map((page) => ({
       href: page.href(actor.guildId),
       label: page.nav ?? page.title,
-      current: page.path === currentPath,
+      current:
+        currentPath !== undefined &&
+        (page.path === currentPath || currentPath.startsWith(`${page.path}/`)),
       ...(page.icon === undefined ? {} : { icon: page.icon }),
     }));
 }

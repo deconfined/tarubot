@@ -44,6 +44,20 @@ The stock, production and staging manifests pass these settings to the bot. [Ins
 
 Apply environment changes by recreating containers, not `docker compose restart`, which retains their old environment. Follow [enable, change and disable](/tarubot/deploy/operations/#dashboard-enable-change-and-disable) without starting a second writer.
 
+## Optional mod mail
+
+The stock, production and staging manifests pass this setting to the bot. [Mod mail](/tarubot/admin/mod-mail/) needs it, the dashboard and an officer notifications channel.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `MODMAIL_KEY` | (empty) | The key that encrypts every mod mail topic and message: base64 for exactly 32 bytes. Generate one with `openssl rand -base64 32`. Empty, or a value that isn't base64 for 32 bytes, leaves mod mail unavailable (an invalid value is reported by name, never shown) without stopping the bot; `/health/ready` reports only `modmail: true` or `false`. Secret; plain environment only, with no `MODMAIL_KEY_FILE` form. |
+
+The key never enters the database, so a database dump, the provider's point-in-time recovery and anyone who can only read the database see the text encrypted. It doesn't help against someone who can write to the database (they could delete cases, or make themselves an officer and read them on the dashboard) or who controls the host.
+
+**Losing the key loses every case**, for good. Keep it in the host's `.env` and one more copy off the host, such as in a password manager. The managed daily backup encrypts the whole `.env`, key included, next to the database dump and to the same recipients: that copy is how a lost key is recovered, and it means **whoever holds your backups' age identity can read every mod mail case in them**. That's deliberate, so a lost host restores fully, cases included; guard the age identity as you would the key. A database restore needs the same key to read its cases.
+
+Don't change the key while cases matter: 2.43.0 has no key rotation, so a different key makes every existing case unreadable (the pages say so, and TaruBot files one issue report). Give each deployment its own key, as you would its other secrets. Apply a change by recreating the container, not restarting it.
+
 ## Lodestone
 
 Read by the bot's Lodestone adapter, which fetches and parses Lodestone pages in the bot process. The defaults suit almost every deployment.

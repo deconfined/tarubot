@@ -41,7 +41,7 @@ import type {
 import { GUEST_APPLICATIONS_CLOSED } from "../../domain/guest-application.js";
 import { type PermissionKey, permissionLabel } from "../../domain/permissions.js";
 import type { SelfRoleHealth } from "../../domain/self-roles.js";
-import type { CoreRow, VisibilityReport } from "../../domain/visibility.js";
+import type { CoreRow, OfficerPing, VisibilityReport } from "../../domain/visibility.js";
 import type { Viewer } from "./audience.js";
 import { recheckButton, syncStatusButton } from "./controls.js";
 import {
@@ -523,15 +523,104 @@ function coreRows(report: VisibilityReport, guildId: string, budget: MentionBudg
   });
 }
 
+/** Where mod mail pings officers, and whom: the guild's officer notifications channel and role. */
+interface PingTarget {
+  readonly channel: string | null;
+  readonly role: string | null;
+}
+
+/**
+ * Discord's path to the one Mention Everyone allow TaruBot needs, as the Mod mail page says it:
+ * set by hand, since TaruBot never grants itself a permission.
+ */
+const mentionFix = (channel: string): string =>
+  `${channel} → Edit Channel → Permissions → the TaruBot role → allow Mention @everyone, @here and All Roles`;
+
+/** Mod mail's ping row for one OfficerPing state, naming the role and channel; none when unknown. */
+function pingRow(state: OfficerPing | null, role: string, channel: string): Row | undefined {
+  const fix = mentionFix(channel);
+  switch (state) {
+    case null:
+      return undefined;
+    case "missing":
+      return {
+        check: "warn",
+        text: `Mod mail pings can't be posted: TaruBot can't find ${channel}; choose it again with /config officer_notifications`,
+      };
+    case "cannot_post":
+      return {
+        check: "warn",
+        text: `Mod mail pings can't be posted: TaruBot can't see or post in ${channel}; give it ${POSTING_LABELS} there`,
+      };
+    case "mentionable":
+      return {
+        check: "ok",
+        text: `Mod mail pings: ${role} is mentionable, so they notify officers`,
+      };
+    case "allowed":
+      return { check: "ok", text: `Mod mail pings: TaruBot can mention ${role} in ${channel}` };
+    case "server_wide":
+      return {
+        check: "warn",
+        text: `Mod mail pings: TaruBot can mention ${role} in ${channel} only through Mention Everyone granted server-wide; before removing it: ${fix}`,
+      };
+    case "administrator":
+      return {
+        check: "warn",
+        text: `Mod mail pings reach ${role} in ${channel} only through Administrator; before removing it, fix that channel's rows below and: ${fix}`,
+      };
+    case "silent":
+      return {
+        check: "warn",
+        text: `Mod mail pings post in ${channel} but notify nobody: TaruBot can't mention ${role} there. Fix: ${fix}`,
+      };
+  }
+}
+
+/**
+ * Mention Everyone in channels (2.43.0, owner decision of 2026-10-11): while mod mail is on, whether
+ * its ping of the Officer role reaches officers ([OK]; [WARN] with the fix when it can't be posted,
+ * notifies nobody, or would stop once Administrator or a server-wide grant comes off: never a
+ * [FAIL], since mod mail still works and the officer channel itself is checked above); then
+ * TaruBot's own allows where it's never needed ([WARN]): any channel but the officer notifications
+ * channel, and that one too while mod mail is off, saying why it would be needed.
+ */
+function mentionRows(report: VisibilityReport, target: PingTarget, budget: MentionBudget): Row[] {
+  const { officerPing, unneeded, officerChannel } = report.mentions;
+  const rows: Row[] = [];
+  const channel =
+    target.channel === null ? "the officer notifications channel" : mentionChannel(target.channel);
+  const role = target.role === null ? "the Officer role" : mentionRole(target.role);
+  const ping = pingRow(officerPing, role, channel);
+  if (ping) rows.push(ping);
+  if (unneeded.length > 0)
+    rows.push({
+      check: "warn",
+      text: `Mention Everyone: allowed to TaruBot in ${channelMentions(unneeded, budget.channels)}, where it's never needed; remove ${unneeded.length > 1 ? "those allows" : "that allow"}`,
+    });
+  if (officerChannel === "unneeded")
+    rows.push({
+      check: "warn",
+      text: `Mention Everyone: allowed to TaruBot in ${channel}, which only mod mail needs (so its pings notify officers), and mod mail is off; remove it, or keep it for when mod mail is turned on`,
+    });
+  return rows;
+}
+
 /**
  * The "TaruBot's role" section, everything as if Administrator were off: Administrator itself
  * (off; on and still needed; on and no longer needed, saying how to remove it), the core seven,
  * onboarding's permissions on onboarding servers only (a server without onboarding never sees a
  * row naming Manage Channels or the other four), the role order ([FAIL] for roles TaruBot sits
  * below, and [WARN] for those it stays above only through a shared Administrator role, which keep
- * Administrator needed), and permissions it never needs.
+ * Administrator needed), permissions it never needs, and Mention Everyone in channels
+ * (mentionRows).
  */
-function roleRows(report: VisibilityReport, guildId: string, budget: MentionBudget): Row[] {
+function roleRows(
+  report: VisibilityReport,
+  guildId: string,
+  budget: MentionBudget,
+  target: PingTarget = { channel: null, role: null },
+): Row[] {
   const { administrator } = report;
   const holders = roleMentions(administrator.roles, guildId, budget.roles);
   const rows: Row[] = [
@@ -584,14 +673,19 @@ function roleRows(report: VisibilityReport, guildId: string, budget: MentionBudg
         : { check: "ok", text: "Role order: no access roles to stay above" },
     );
   const never = report.neverNeeded;
+  // Mention Everyone is the one with an exception, in a channel's permissions: say where it goes.
+  const mention = never.some((row) => row.permission === "MentionEveryone")
+    ? "; mod mail needs Mention Everyone only as an allow in the officer notifications channel's permissions"
+    : "";
   rows.push(
     never.length > 0
       ? {
           check: "warn",
-          text: `Never needed: ${labels(never.map((row) => row.permission))} (from ${roleMentions([...new Set(never.flatMap((row) => row.roles))], guildId, budget.roles)})`,
+          text: `Never needed: ${labels(never.map((row) => row.permission))} (from ${roleMentions([...new Set(never.flatMap((row) => row.roles))], guildId, budget.roles)})${mention}`,
         }
       : { check: "ok", text: "No permissions it never needs" },
   );
+  rows.push(...mentionRows(report, target, budget));
   return rows;
 }
 
@@ -851,6 +945,14 @@ export function configurationChecks(report: ConfigurationReport): HealthCheck[] 
         capability(report, "officer_notifications_channel_id", notices),
       ),
     );
+  // With mod mail on (2.43.0) this channel is where officers hear about cases, so unset is a
+  // problem, not a choice; the Mod mail page says the same.
+  else if (report.modmail === true)
+    add(
+      "Channels",
+      "warn",
+      "Officer notifications: not set, so officer alerts are skipped and officers aren't pinged about mod mail cases",
+    );
   else add("Channels", "off", "Officer notifications: not set, so officer alerts are skipped");
   const changelog = guild.changelog_channel_id;
   if (changelog !== null) {
@@ -910,7 +1012,12 @@ export function configurationChecks(report: ConfigurationReport): HealthCheck[] 
   // their problems count toward it. No role section when TaruBot's view couldn't be read.
   const visibility = report.visibility;
   if (visibility)
-    for (const row of fitted((budget) => roleRows(visibility, guild.id, budget)))
+    for (const row of fitted((budget) =>
+      roleRows(visibility, guild.id, budget, {
+        channel: guild.officer_notifications_channel_id,
+        role: guild.officer_role_id,
+      }),
+    ))
       add("TaruBot's role", row.check, row.text);
   for (const row of visibility
     ? fitted((budget) => visibilityRows(visibility, budget))

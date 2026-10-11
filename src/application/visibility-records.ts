@@ -2,9 +2,11 @@
  * The stored facts TaruBot's visibility analysis needs beyond the guild row (2.35.0, #46): retired
  * roles (which TaruBot must stay above while anyone holds them), the review channels of pending
  * guest applications and of applications whose review redraw hasn't finished (posting channels,
- * since the redraw fetches and edits the review there), and the channels the newest /setup
- * overrides run found hidden from TaruBot on purpose. /config validate, the overrides run and the
- * officer alert all load them here, so the three agree. Read-only; no migration.
+ * since the redraw fetches and edits the review there), the channels the newest /setup overrides
+ * run found hidden from TaruBot on purpose, and (2.43.0) whether mod mail is on, which decides
+ * whether TaruBot's Mention Everyone in the officer notifications channel is needed. /config
+ * validate, the overrides run and the officer alert all load them here, so the three agree.
+ * Read-only.
  */
 import { and, desc, eq, exists, inArray, or, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -28,7 +30,7 @@ const OVERRIDES_DETAILS = z.object({ hiddenOnPurpose: z.array(idSchema) });
 const UNFINISHED = ["queued", "running", "blocked", "disabled"];
 
 /**
- * Load the guild's visibility records in three reads. A malformed or missing hiddenOnPurpose is
+ * Load the guild's visibility records in four reads. A malformed or missing hiddenOnPurpose is
  * treated as none recorded, never as an error: the analysis then calls those channels missing,
  * which /setup overrides re-examines.
  */
@@ -66,9 +68,14 @@ export async function loadVisibilityRecords(db: Orm, guildId: string): Promise<V
     .orderBy(desc(t.auditEvents.id))
     .limit(1);
   const recorded = OVERRIDES_DETAILS.safeParse(latest?.details);
+  const [modmail] = await db
+    .select({ enabled: t.modmailSettings.enabled })
+    .from(t.modmailSettings)
+    .where(eq(t.modmailSettings.guild_id, guildId));
   return {
     retiredRoles: retired.map((row) => row.role).sort(),
     pendingReviewChannels: pending.map((row) => row.channel).sort(),
     recordedHidden: recorded.success ? [...new Set(recorded.data.hiddenOnPurpose)] : [],
+    modmail: modmail?.enabled === true,
   };
 }

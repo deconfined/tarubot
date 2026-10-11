@@ -7,10 +7,12 @@ import type { Service } from "../application/service.js";
 import type { Synchronization } from "../application/synchronization.js";
 import type { GuildAccess } from "../application/guild-access.js";
 import type { IssueReports } from "../application/issue-reports.js";
+import { ModMailNotices } from "../application/modmail.js";
 import { RoleChoiceJob } from "../application/self-roles.js";
 import { deliverStatus, dropStatus } from "../application/status-notices.js";
 import { project } from "../config/project.js";
 import { changelogStep } from "../domain/changelog.js";
+import { MODMAIL_DM_KIND, MODMAIL_JOB_KINDS, MODMAIL_PING_KIND } from "../domain/modmail.js";
 import { effectsPaused } from "../domain/failures.js";
 import { RELEASE_NOTES } from "../domain/release-notes.js";
 import { ROLE_CHOICE_KIND } from "../domain/self-roles.js";
@@ -25,6 +27,16 @@ const emptyPayload = (payload: unknown): boolean =>
   !Array.isArray(payload) &&
   Object.keys(payload).length === 0;
 
+/** A mod mail notification kind (2.43.0). */
+const modmailJob = (kind: string): boolean =>
+  (MODMAIL_JOB_KINDS as readonly string[]).includes(kind);
+
+/** What the dispatcher needs beyond the services: since 2.43.0, the dashboard's origin. */
+export interface DispatcherOptions {
+  /** The parsed WEB_PUBLIC_ORIGIN (Dashboard.origin), for mod mail's links; null while off. */
+  readonly dashboardOrigin?: string | null;
+}
+
 /**
  * Bind application capabilities once; each invocation revalidates its persisted payload. `notes`
  * is the release-note map update posts read (the compiled RELEASE_NOTES); tests pass their own.
@@ -35,11 +47,15 @@ export function dispatcher(
   access: GuildAccess,
   reports?: IssueReports,
   notes: Readonly<Record<string, string>> = RELEASE_NOTES,
+  options: DispatcherOptions = {},
 ): (job: Job, guard: () => Promise<void>) => Promise<unknown> {
   // The roles.self job's operation, built here and nowhere else: it writes any member's roles from
   // the job it is given, so no service key provides it and no web page can reach it. The worker
   // runs under the writer lease, whose guard fences every Discord write.
   const choices = new RoleChoiceJob(app);
+  // Mod mail's pings and DMs (2.43.0), likewise built only here: it DMs any member from the job it
+  // is given. It holds no cipher and reads no text.
+  const modmail = new ModMailNotices(app, options.dashboardOrigin ?? null);
   return async (job, guard) => {
     if (job.payload_version !== 1)
       throw new Failure(
@@ -116,6 +132,14 @@ export function dispatcher(
     // effects gate, so empty work never parks as disabled (the roles.layout precedent above).
     if (job.kind === ROLE_CHOICE_KIND && emptyPayload(job.payload))
       return { skipped: "nothing to apply" };
+    // Mod mail's pings and DMs (2.43.0) with nothing to send complete here, before the effects
+    // gate, so nothing parks for nothing (the officer.status precedent): the case is gone, a ping
+    // has no officer notifications channel (nothing is saved for later), or the member already saw
+    // what a DM would announce. Paused Discord changes then park the rest like every post and DM.
+    if (modmailJob(job.kind)) {
+      const skipped = await modmail.skip(job, guild);
+      if (skipped !== null) return { skipped };
+    }
     if (!app.config.ENABLE_EFFECTS || !guild.effects_enabled)
       throw effectsPaused(app.config.ENABLE_EFFECTS);
     // The status post has its own resume, window, freeze, send and mark (status-notices.ts), and
@@ -297,6 +321,12 @@ export function dispatcher(
               ),
             );
         }
+      } else if (job.kind === MODMAIL_PING_KIND) {
+        // The case number, the event and a link, with the officer role mentioned; no text.
+        ({ messageId, channelId } = await modmail.ping(job, guild));
+      } else if (job.kind === MODMAIL_DM_KIND) {
+        // Best effort like the decision DM: closed DMs end the job as dm_blocked, never retried.
+        await modmail.dm(job, guild);
       } else if (job.kind === "officer.notify") {
         if (!guild.officer_notifications_channel_id)
           return { skipped: "officer notifications unconfigured" };

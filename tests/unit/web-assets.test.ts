@@ -522,8 +522,11 @@ describe("the stylesheet", () => {
     ];
     expect(named.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
     expect(pointed.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
-    expect(block.match(/anchor-name:/gu)).toHaveLength(40);
-    expect(block.match(/position-anchor:/gu)).toHaveLength(40);
+    // Plus Mod mail's Open a case (2.43.0), the one other anchored panel, in the same block.
+    expect(block).toMatch(/\.anchor-modmail-open \{\s*anchor-name: --modmail-open;\s*\}/u);
+    expect(block).toMatch(/\.anchored-modmail-open \{\s*position-anchor: --modmail-open;\s*\}/u);
+    expect(block.match(/anchor-name:/gu)).toHaveLength(41);
+    expect(block.match(/position-anchor:/gu)).toHaveLength(41);
     // From 40rem wide and 30rem tall only: a phone keeps its sheet (the overlay test above pins
     // it), a short screen its near-full panel; nothing here names the phone's or short screen's
     // queries.
@@ -564,6 +567,8 @@ describe("the stylesheet", () => {
         .filter(Boolean),
     ).toEqual([
       ...pairs.flatMap((pair) => [`.anchor-${pair}`, `.anchored-${pair}`]),
+      ".anchor-modmail-open",
+      ".anchored-modmail-open",
       placed,
       unpadded,
       placed,

@@ -336,6 +336,11 @@ export interface ConfigurationReport {
    * against the same view. Service.validate always sets it; a report without it shows no section.
    */
   readonly selfRoles?: SelfRoleHealth;
+  /**
+   * Mod mail is turned on here (2.43.0): the officer notifications channel then carries its pings,
+   * so an unset channel warns. Service.validate always sets it; absent reads as off.
+   */
+  readonly modmail?: boolean;
 }
 
 /** Holders an Officer-role binding adopted as manual officer grants. */

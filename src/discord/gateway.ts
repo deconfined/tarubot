@@ -33,6 +33,7 @@ import { cachedAsHidden, MISSING_ACCESS, UNKNOWN_CHANNEL } from "./obfuscation.j
 import { changelogPost } from "./presenters/changelog.js";
 import { decisionDm, guestReviewPost } from "./presenters/guests.js";
 import { ledgerPost } from "./presenters/ledger.js";
+import { modmailDm, modmailPing } from "./presenters/modmail.js";
 import { statusPost } from "./presenters/officer.js";
 import type { Presented } from "./presenters/reply.js";
 import { readVisibility } from "./visibility.js";
@@ -66,6 +67,11 @@ export function dashboardPresence(origin: string | null): PresenceData {
   return { activities: [{ type: ActivityType.Custom, name: "Custom Status", state }] };
 }
 
+/** Member fetches one mod mail page view may make for names the cache lacks. */
+export const DISPLAY_NAME_FETCHES = 5;
+/** How long a member fetch's Unknown Member is remembered for mod mail's names. */
+export const GONE_MEMBER_MS = 10 * 60_000;
+
 /** What the composition root tells the gateway; tools and tests construct it without. */
 export interface GatewayOptions {
   /** The dashboard's origin for TaruBot's custom status; null or omitted, no activity. */
@@ -75,6 +81,8 @@ export interface GatewayOptions {
 /** Exposes a reusable Discord client plus application-owned projections of SDK state. */
 export class DiscordGateway implements DiscordPort {
   readonly client: Client;
+  /** `<guild>:<user>` → until when displayNames treats them as gone (GONE_MEMBER_MS). */
+  private readonly goneMembers = new Map<string, number>();
 
   constructor(options: GatewayOptions = {}) {
     this.client = new Client({
@@ -568,6 +576,46 @@ export class DiscordGateway implements DiscordPort {
     const member = this.client.guilds.cache.get(guildId)?.members.cache.get(userId);
     return member ? [...member.roles.cache.keys()] : null;
   }
+  /**
+   * Display names for mod mail's pages (2.43.0): the gateway's member cache first (the
+   * GuildMembers intent and the startup enumeration keep it close to complete), then a member
+   * fetch for at most DISPLAY_NAME_FETCHES of the rest, so one page view costs a bounded number of
+   * requests. Unknown Member or Unknown User means the person left: null. Any other error, or an ID
+   * past the bound, gets no entry, and the page shows an ID or a neutral word instead.
+   */
+  async displayNames(
+    guildId: string,
+    userIds: readonly string[],
+  ): Promise<ReadonlyMap<string, string | null>> {
+    const names = new Map<string, string | null>();
+    const guild = this.client.guilds.cache.get(guildId);
+    if (!guild) return names;
+    const now = Date.now();
+    for (const [key, until] of this.goneMembers) if (until <= now) this.goneMembers.delete(key);
+    const missing: string[] = [];
+    for (const id of new Set(userIds)) {
+      const member = guild.members.cache.get(id);
+      if (member) names.set(id, member.displayName);
+      else if (this.goneMembers.has(`${guildId}:${id}`)) names.set(id, null);
+      else missing.push(id);
+    }
+    await Promise.all(
+      missing.slice(0, DISPLAY_NAME_FETCHES).map(async (id) => {
+        try {
+          names.set(id, (await guild.members.fetch({ user: id })).displayName);
+        } catch (error) {
+          if (error instanceof DiscordAPIError && [10007, 10013].includes(Number(error.code))) {
+            names.set(id, null);
+            // Someone gone stays gone for a while: a page reloaded over and over asks Discord
+            // about them once per GONE_MEMBER_MS, not once per view. A rejoin enters the member
+            // cache through GuildMemberAdd, which this check reads first.
+            this.goneMembers.set(`${guildId}:${id}`, now + GONE_MEMBER_MS);
+          }
+        }
+      }),
+    );
+    return names;
+  }
   /** Recheck the expected nickname immediately before writing to respect intervening manual edits. */
   async nickname(
     guildId: string,
@@ -600,12 +648,28 @@ export class DiscordGateway implements DiscordPort {
    * `text` is the documented plain-text exclusion (officer.notify, the DevBot smoke check): the
    * caller has escaped it, and it is cut to fit Discord's content limit.
    */
-  private static render(message: PostMessage) {
+  private static render(message: PostMessage, guildId?: string) {
     if (message.kind === "changelog") return DiscordGateway.sendable(changelogPost(message.view));
     if (message.kind === "ledger") return DiscordGateway.sendable(ledgerPost(message.view));
     if (message.kind === "review")
       return DiscordGateway.sendable(guestReviewPost(message.application));
     if (message.kind === "status") return DiscordGateway.sendable(statusPost(message.view));
+    if (message.kind === "modmail") {
+      // Mod mail's officer ping (2.43.0): the one post that may ping, and then exactly the
+      // configured officer role. The mention goes in content (embeds never ping) and
+      // allowedMentions names that role alone, so nothing else in the post can notify anyone.
+      // Without an Officer role the post goes out mentioning nobody, and so it does if the role is
+      // the server's own ID, which is @everyone's: a ping must never reach the whole server.
+      const options = DiscordGateway.sendable(modmailPing(message.view));
+      const role = message.view.roleId;
+      return role === null || role === guildId
+        ? options
+        : {
+            ...options,
+            content: `<@&${role}>`,
+            allowedMentions: { parse: [] as [], roles: [role] },
+          };
+    }
     return {
       content: message.text.slice(0, 1950),
       allowedMentions: { parse: [] as [] },
@@ -633,8 +697,9 @@ export class DiscordGateway implements DiscordPort {
       `0x${createHash("sha256").update(key).digest("hex").slice(0, 15)}`,
     ).toString();
     // Posts render deterministically from stored data, so a retry under this nonce is identical.
-    return (await channel.send({ ...DiscordGateway.render(message), nonce, enforceNonce: true }))
-      .id;
+    return (
+      await channel.send({ ...DiscordGateway.render(message, guildId), nonce, enforceNonce: true })
+    ).id;
   }
   /**
    * Redraw the review message for the application's current state (the decision, disabled
@@ -679,11 +744,16 @@ export class DiscordGateway implements DiscordPort {
    * 'the server where you applied'.
    */
   async dm(user: string, message: DirectMessage): Promise<void> {
-    const serverName = this.client.guilds.cache.get(message.application.guild_id)?.name ?? null;
-    const presented = decisionDm(message.application, {
-      cooldownSeconds: message.cooldownSeconds,
-      serverName,
-    });
+    const guildId = message.kind === "decision" ? message.application.guild_id : message.guildId;
+    const serverName = this.client.guilds.cache.get(guildId)?.name ?? null;
+    // A mod mail DM (2.43.0) says which case and server and links it, never the reply's text.
+    const presented =
+      message.kind === "decision"
+        ? decisionDm(message.application, {
+            cooldownSeconds: message.cooldownSeconds,
+            serverName,
+          })
+        : modmailDm(message, serverName);
     try {
       await (await this.client.users.fetch(user)).send(DiscordGateway.sendable(presented));
     } catch (error) {

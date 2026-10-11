@@ -788,12 +788,63 @@ describe("TaruBot's role and Visibility (2.35.0, #46)", () => {
     });
     expect(rowsOf(validate(report, configGuild()), "TaruBot's role")?.slice(3)).toEqual([
       `[FAIL] Role order: move TaruBot's highest role above <@&${ROLE.officer}> and <@&${ROLE.leader}>`,
-      `[WARN] Never needed: Manage Server and Mention Everyone (from <@&${ROLE.bot}> and <@&${ROLE_A}>)`,
+      `[WARN] Never needed: Manage Server and Mention Everyone (from <@&${ROLE.bot}> and <@&${ROLE_A}>); mod mail needs Mention Everyone only as an allow in the officer notifications channel's permissions`,
     ]);
     const bare = checked({ roleOrder: { highest: null, notBelow: [], throughShared: [] } });
     expect(fieldOf(validate(bare), "TaruBot's role")).toContain(
       "[OK] Role order: no access roles to stay above",
     );
+  });
+
+  test("mod mail's officer ping and Mention Everyone allows (2.43.0): warnings with the fix, never a failure", () => {
+    const mentionRows = (mentions: ReturnType<typeof visibilityReport>["mentions"]) =>
+      (rowsOf(validate(checked({ mentions })), "TaruBot's role") ?? []).filter(
+        (row) => row.includes("Mention") || row.includes("Mod mail pings"),
+      );
+    const none = { officerPing: null, unneeded: [], officerChannel: null } as const;
+    const path = `<#${CHANNEL.notices}> → Edit Channel → Permissions → the TaruBot role → allow Mention @everyone, @here and All Roles`;
+    // Mod mail off, nothing allowed: no row at all.
+    expect(mentionRows(none)).toEqual([]);
+    expect(mentionRows({ ...none, officerPing: "allowed", officerChannel: "expected" })).toEqual([
+      `[OK] Mod mail pings: TaruBot can mention <@&${ROLE.officer}> in <#${CHANNEL.notices}>`,
+    ]);
+    expect(mentionRows({ ...none, officerPing: "mentionable" })).toEqual([
+      `[OK] Mod mail pings: <@&${ROLE.officer}> is mentionable, so they notify officers`,
+    ]);
+    expect(mentionRows({ ...none, officerPing: "silent" })).toEqual([
+      `[WARN] Mod mail pings post in <#${CHANNEL.notices}> but notify nobody: TaruBot can't mention <@&${ROLE.officer}> there. Fix: ${path}`,
+    ]);
+    expect(mentionRows({ ...none, officerPing: "administrator" })).toEqual([
+      `[WARN] Mod mail pings reach <@&${ROLE.officer}> in <#${CHANNEL.notices}> only through Administrator; before removing it, fix that channel's rows below and: ${path}`,
+    ]);
+    // Only a server-wide grant (which "Never needed" says to remove from TaruBot's role).
+    expect(mentionRows({ ...none, officerPing: "server_wide" })).toEqual([
+      `[WARN] Mod mail pings: TaruBot can mention <@&${ROLE.officer}> in <#${CHANNEL.notices}> only through Mention Everyone granted server-wide; before removing it: ${path}`,
+    ]);
+    // Nowhere to post: Discord's implicit denials, or a channel TaruBot can't find.
+    expect(mentionRows({ ...none, officerPing: "cannot_post" })).toEqual([
+      `[WARN] Mod mail pings can't be posted: TaruBot can't see or post in <#${CHANNEL.notices}>; give it View Channel, Send Messages, Embed Links and Read Message History there`,
+    ]);
+    expect(mentionRows({ ...none, officerPing: "missing" })).toEqual([
+      `[WARN] Mod mail pings can't be posted: TaruBot can't find <#${CHANNEL.notices}>; choose it again with /config officer_notifications`,
+    ]);
+    // Allows TaruBot never needs: anywhere else, and the officer channel while mod mail is off.
+    expect(mentionRows({ ...none, unneeded: [CHANNEL.ledger, CHANNEL.reviews] })).toEqual([
+      `[WARN] Mention Everyone: allowed to TaruBot in <#${CHANNEL.ledger}> and <#${CHANNEL.reviews}>, where it's never needed; remove those allows`,
+    ]);
+    expect(mentionRows({ ...none, officerChannel: "unneeded" })).toEqual([
+      `[WARN] Mention Everyone: allowed to TaruBot in <#${CHANNEL.notices}>, which only mod mail needs (so its pings notify officers), and mod mail is off; remove it, or keep it for when mod mail is turned on`,
+    ]);
+    // A silent ping is a warning: the checklist's verdict counts no problem for it.
+    const silent = healthReply(
+      configReport({
+        guild: offGuild,
+        visibility: checked({ mentions: { ...none, officerPing: "silent" } }),
+      }),
+      officer,
+      { now },
+    );
+    expect(onlyEmbed(silent).title).not.toContain("problem");
   });
 
   test("role order kept only by a shared Administrator role is a warning to fix before removing it", () => {

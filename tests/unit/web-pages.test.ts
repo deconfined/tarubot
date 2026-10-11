@@ -464,7 +464,7 @@ describe("the shell and /", () => {
     expect(document.body.classList.contains("console-page")).toBe(true);
     // Officers (and a model that doesn't say) get the officers' side note.
     expect(document.querySelector(".side-nav__context")?.textContent).toBe(
-      "Settings and background workMost settings are changed in Discord; the role menu is set here.",
+      "Settings and background workMost settings are changed in Discord; the role menu and mod mail are set here.",
     );
   });
 
@@ -475,9 +475,9 @@ describe("the shell and /", () => {
         layout({ title: "My roles", signedIn: true, formToken: TOKEN, guild }, html`<p>Body</p>`),
       ),
     );
-    expect(document.querySelector(".side-nav__context p")?.textContent).toBe("Your roles");
+    expect(document.querySelector(".side-nav__context p")?.textContent).toBe("Your pages");
     expect(document.querySelector(".side-nav__note")?.textContent).toBe(
-      "Pick your roles here. Everything else is in Discord.",
+      "Your own pages in this server. Everything else is in Discord.",
     );
     const officer = inspect(
       await render(
@@ -493,7 +493,7 @@ describe("the shell and /", () => {
       ),
     );
     expect(officer.querySelector(".side-nav__note")?.textContent).toBe(
-      "Most settings are changed in Discord; the role menu is set here.",
+      "Most settings are changed in Discord; the role menu and mod mail are set here.",
     );
   });
 
@@ -935,6 +935,7 @@ describe("Status", () => {
         checked: 7778,
         checkedAt: "2026-10-04T00:00:00.000Z",
       },
+      modmail: false,
     });
     const page = (await loadPages()).get("/g/:guild/status");
     if (!page) throw new Error("Status page not discovered");
@@ -952,6 +953,7 @@ describe("Status", () => {
       session,
       actor,
       guildId: GUILD,
+      number: null,
       services: new Services()
         .provide(applicationKey, app)
         .provide(lifecycleKey, lifecycle)
@@ -1511,9 +1513,11 @@ describe("Role menu (2.39.0)", () => {
     expect(page?.postLimit).toBe(120);
     expect(page?.nav).toBe("Role menu");
     expect(page?.icon).toBe("list");
-    // Officers' navigation, in path order: My roles (2.40.0) is theirs too (owner decision Q6).
+    // Officers' navigation, in path order: My roles (2.40.0) is theirs too (owner decision Q6),
+    // and Mod mail (2.43.0) is listed to officers whether or not it's on.
     expect(navLinks((await loadPages()).values(), officer).map((link) => link.label)).toEqual([
       "Server configuration",
+      "Mod mail",
       "My roles",
       "Role menu",
       "Background work",
@@ -2958,9 +2962,18 @@ describe("My roles (2.40.0)", () => {
     expect(page?.nav).toBe("My roles");
     expect(page?.icon).toBe("user");
     expect(page?.title).toBe("My roles");
-    // Members and guests see My roles alone; with Administrator (A2), nothing at all.
-    for (const actor of [member, guest])
-      expect(navLinks(pages.values(), actor).map((link) => link.label)).toEqual(["My roles"]);
+    // Members and guests see My roles, and Mod mail while it's on (server.ts hides it otherwise,
+    // through its navWhen); with Administrator (A2), nothing at all.
+    const modmailOff = new Set(["/g/:guild/modmail"]);
+    for (const actor of [member, guest]) {
+      expect(navLinks(pages.values(), actor).map((link) => link.label)).toEqual([
+        "Mod mail",
+        "My roles",
+      ]);
+      expect(
+        navLinks(pages.values(), actor, undefined, modmailOff).map((link) => link.label),
+      ).toEqual(["My roles"]);
+    }
     expect(navLinks(pages.values(), { ...member, botAdministrator: true })).toEqual([]);
     // Unknown (TaruBot's own member isn't cached) counts as holding it.
     const unknown: Actor = {

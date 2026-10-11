@@ -181,3 +181,90 @@ export function sameOverwrites(
     );
   return canonical(left) === canonical(right);
 }
+
+/** One per-entry write of a channel's overwrites: an entry's exact bits (PUT), or its removal. */
+export type OverwriteWrite =
+  | {
+      readonly kind: "put";
+      readonly id: string;
+      readonly type: OverwriteType;
+      readonly allow: string;
+      readonly deny: string;
+    }
+  | { readonly kind: "delete"; readonly id: string };
+
+/**
+ * The per-entry writes that take a channel's overwrites from `before` to `desired` (2.43.0), for
+ * onboarding's pass, which once sent the whole list in one PATCH. Only entries that change are
+ * written, so an entry the policy doesn't touch is never resent: Discord lets a bot allow or deny
+ * only permissions it holds itself, and resending an unchanged entry that carries one it lacks
+ * (Mention Everyone, set by hand on TaruBot's role in the officer notifications channel for mod
+ * mail's pings) could be refused. Empty entries count as absent, as in sameOverwrites.
+ *
+ * The writes land one at a time, so the order keeps every state in between no more open than the
+ * channel before or after the pass. Discord's overwrite algorithm only ever grants more as an
+ * entry gains allow bits or loses deny bits, so:
+ * 1. TaruBot's own member entry first, at its desired value: it only ever widens TaruBot's own
+ *    access (the policy gives TaruBot View, Send, History, Embed and Attach, and lifts the denies
+ *    that would stop its writes), never anyone else's, and it keeps TaruBot able to finish, where
+ *    a restricted @everyone written first could otherwise hide the channel from it mid-pass;
+ * 2. every other changed entry at its restrictive meet: the allow bits both values share and the
+ *    deny bits either has (removed, when nothing is left), which is no more open than before;
+ * 3. then each of those at its desired value, opening only towards what the policy wants.
+ * An entry whose change is only restrictive is final after step 2, and one whose change is only
+ * permissive skips it, so most changes are one request each. Sorted by ID within each step.
+ */
+export function overwriteWrites(
+  before: readonly AccessOverwrite[],
+  desired: readonly AccessOverwrite[],
+  bot: string,
+): OverwriteWrite[] {
+  interface Bits {
+    readonly type: OverwriteType;
+    readonly allow: bigint;
+    readonly deny: bigint;
+  }
+  const entries = (items: readonly AccessOverwrite[]) =>
+    new Map<string, Bits>(
+      items
+        .filter((item) => BigInt(item.allow) !== 0n || BigInt(item.deny) !== 0n)
+        .map((item) => [
+          item.id,
+          { type: item.type, allow: BigInt(item.allow), deny: BigInt(item.deny) },
+        ]),
+    );
+  const from = entries(before);
+  const to = entries(desired);
+  const same = (a: Bits | undefined, b: Bits | undefined) =>
+    (a === undefined && b === undefined) ||
+    (a !== undefined &&
+      b !== undefined &&
+      a.type === b.type &&
+      a.allow === b.allow &&
+      a.deny === b.deny);
+  const write = (id: string, value: Bits | undefined): OverwriteWrite =>
+    value === undefined || (value.allow === 0n && value.deny === 0n)
+      ? { kind: "delete", id }
+      : { kind: "put", id, type: value.type, allow: String(value.allow), deny: String(value.deny) };
+  const changed = [...new Set([...from.keys(), ...to.keys()])]
+    .filter((id) => !same(from.get(id), to.get(id)))
+    .sort((left, right) => left.localeCompare(right));
+  const writes: OverwriteWrite[] = [];
+  const own = changed.filter((id) => id === bot && to.get(id)?.type === OverwriteType.Member);
+  for (const id of own) writes.push(write(id, to.get(id)));
+  const others = changed.filter((id) => !own.includes(id));
+  const finals: string[] = [];
+  for (const id of others) {
+    const a = from.get(id);
+    const b = to.get(id);
+    const type = b?.type ?? a?.type ?? OverwriteType.Role;
+    const allow = (a?.allow ?? 0n) & (b?.allow ?? 0n);
+    const meet: Bits = { type, allow, deny: ((a?.deny ?? 0n) | (b?.deny ?? 0n)) & ~allow };
+    const empty = meet.allow === 0n && meet.deny === 0n;
+    // Already as restrictive as it gets: the change only opens it, so it waits for step 3.
+    if (!same(empty ? undefined : meet, a)) writes.push(write(id, meet));
+    if (!same(empty ? undefined : meet, b)) finals.push(id);
+  }
+  for (const id of finals) writes.push(write(id, to.get(id)));
+  return writes;
+}

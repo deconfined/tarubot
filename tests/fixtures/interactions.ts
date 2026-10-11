@@ -201,9 +201,13 @@ export function interactionFixture() {
         throw new Error("Invalid autocomplete fixture");
       return interaction;
     },
+    /**
+     * A modal submission by the fixture member: one text input per answer, in order (/apply's two
+     * by default; any form's fields, such as /modmail's topic and message, when given).
+     */
     submit(
       customId: string,
-      answers = {
+      answers: Readonly<Record<string, unknown>> = {
         introduction: "I enjoy playing games with friends.",
         interest: "A friend invited me to meet your community.",
       },
@@ -215,14 +219,14 @@ export function interactionFixture() {
           type: InteractionType.ModalSubmit,
           data: {
             custom_id: customId,
-            components: Object.entries({
-              introduction: answers.introduction,
-              interest: answers.interest,
-            }).map(([custom_id, value], index) => ({
-              type: ComponentType.Label,
-              id: index * 2 + 1,
-              component: { type: ComponentType.TextInput, id: index * 2 + 2, custom_id, value },
-            })),
+            // Text answers only: a caller's extra non-text facts (a join time) aren't fields.
+            components: Object.entries(answers)
+              .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+              .map(([custom_id, value], index) => ({
+                type: ComponentType.Label,
+                id: index * 2 + 1,
+                component: { type: ComponentType.TextInput, id: index * 2 + 2, custom_id, value },
+              })),
           },
         },
       ]);

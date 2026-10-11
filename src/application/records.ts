@@ -93,6 +93,17 @@ export interface StatusPostView {
   readonly entries: readonly StatusEntry[];
 }
 /**
+ * What a mod mail ping shows (2.43.0): the case number, what happened, the case page's link (null
+ * while the web is off) and the officer role to mention (null: no mention). Never the text or the
+ * member, so nothing in the post or its job reveals either.
+ */
+export interface ModMailPingView {
+  readonly number: bigint;
+  readonly event: "opened" | "reply";
+  readonly url: string | null;
+  readonly roleId: string | null;
+}
+/**
  * A channel post as data; the gateway renders it through the reply presenters, so jobs never
  * build message text. `text` is the documented plain-text exclusion (officer.notify, and the
  * DevBot smoke check): already escaped by its caller and sent as content.
@@ -102,13 +113,26 @@ export type PostMessage =
   | { readonly kind: "changelog"; readonly view: ChangelogPostView }
   | { readonly kind: "ledger"; readonly view: LedgerPostView }
   | { readonly kind: "review"; readonly application: ApplicationRecord }
-  | { readonly kind: "status"; readonly view: StatusPostView };
-/** A direct message as data: the applicant's approval or denial, with the reapply cooldown. */
-export interface DirectMessage {
-  readonly kind: "decision";
-  readonly application: ApplicationRecord;
-  readonly cooldownSeconds: number;
-}
+  | { readonly kind: "status"; readonly view: StatusPostView }
+  | { readonly kind: "modmail"; readonly view: ModMailPingView };
+/**
+ * A direct message as data: the applicant's approval or denial, with the reapply cooldown; or a
+ * mod mail case's member told an officer replied or closed it (2.43.0), with the case number and
+ * link only, never the text.
+ */
+export type DirectMessage =
+  | {
+      readonly kind: "decision";
+      readonly application: ApplicationRecord;
+      readonly cooldownSeconds: number;
+    }
+  | {
+      readonly kind: "modmail";
+      readonly guildId: string;
+      readonly number: bigint;
+      readonly event: "reply" | "closed";
+      readonly url: string | null;
+    };
 /**
  * What a self-service role write did: counts only, never which roles (owner decision Q4 A), so a
  * job result built from it can't reveal anyone's choices.
@@ -187,4 +211,14 @@ export interface DiscordPort {
    * cached (the caller falls back to the actor's roles). Optional, like visibility.
    */
   cachedRoles?(guild: string, user: string): readonly string[] | null;
+  /**
+   * Server display names for mod mail's pages (2.43.0), resolved when a page renders and never
+   * stored: from the gateway's member cache, and for the few it lacks a member fetch each (a
+   * bounded number per call). A name, null when Discord says the person isn't a member any more,
+   * and no entry when it can't tell. Optional, like visibility: without it pages show IDs.
+   */
+  displayNames?(
+    guild: string,
+    users: readonly string[],
+  ): Promise<ReadonlyMap<string, string | null>>;
 }

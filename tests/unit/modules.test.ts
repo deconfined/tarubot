@@ -215,13 +215,26 @@ test("compiled output discovers the same module inventory as source", async () =
   const errors = await new Response(child.stderr).text();
   expect(await child.exited).toBe(0);
   expect(errors).toBe("");
-  // Component prefixes in discovery (file-name) order: the seven 2.14.0 namespaces.
+  // Component prefixes in discovery (file-name) order: the seven 2.14.0 namespaces, and the
+  // /modmail form's (2.43.0).
   expect(JSON.parse(output)).toEqual({
     commands: [...source.keys()],
     events: 15,
-    components: ["config", "details", "guest-apply", "guest", "ledger", "sync", "verify"],
+    components: [
+      "config",
+      "details",
+      "guest-apply",
+      "guest",
+      "ledger",
+      "modmail",
+      "sync",
+      "verify",
+    ],
     // Web page paths (#43) in discovery order, the same in compiled output as in source.
     pages: [...pages.keys()],
   });
   expect(pages.has("/g/:guild/status")).toBe(true);
+  // Mod mail (2.43.0): the inbox and the numbered case page.
+  expect(pages.has("/g/:guild/modmail")).toBe(true);
+  expect(pages.has("/g/:guild/modmail/:number")).toBe(true);
 }, 30000);

@@ -6,6 +6,7 @@ import { Dashboard } from "./dashboard.js";
 import { GuildEvents } from "./guild-events.js";
 import { IssueReports } from "./issue-reports.js";
 import { ApplicationLifecycle } from "./lifecycle.js";
+import { ModMail } from "./modmail.js";
 import { PublicStatus } from "./public-status.js";
 import { Service } from "./service.js";
 import { Synchronization } from "./synchronization.js";
@@ -76,4 +77,12 @@ export const publicStatusKey = new ServiceKey(
 export const dashboardKey = new ServiceKey(
   "dashboard address",
   (value): value is Dashboard => value instanceof Dashboard,
+);
+/**
+ * Mod mail (2.43.0): /modmail opens cases through it, and the Mod mail pages read, reply, close and
+ * switch it on or off. The pings and DMs (ModMailNotices) are deliberately not behind a key.
+ */
+export const modmailKey = new ServiceKey(
+  "mod mail",
+  (value): value is ModMail => value instanceof ModMail,
 );

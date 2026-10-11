@@ -12,6 +12,7 @@ import {
   guildEventsKey,
   issueReportsKey,
   lifecycleKey,
+  modmailKey,
   publicStatusKey,
   synchronizationKey,
   roleAdministrationKey,
@@ -22,6 +23,7 @@ import {
 import { Heartbeat } from "./application/heartbeat.js";
 import { IssueReports } from "./application/issue-reports.js";
 import { ApplicationLifecycle } from "./application/lifecycle.js";
+import { ModMail, ModMailRetention } from "./application/modmail.js";
 import {
   changesPausedAnywhere,
   PgStatusSamples,
@@ -41,17 +43,36 @@ import type { BotContext } from "./bot/context.js";
 import { bindEvents, loadCommands, loadComponents, loadEvents } from "./bot/discovery.js";
 import { InteractionRouter, interactionRouterKey } from "./bot/router.js";
 import { Services } from "./bot/services.js";
-import { configuration } from "./config/env.js";
+import { type Configuration, configuration } from "./config/env.js";
 import { DiscordGateway } from "./discord/gateway.js";
 import { DiscordOverrides } from "./discord/overrides.js";
 import { Lodestone } from "./infrastructure/lodestone/client.js";
+import {
+  INVALID_KEY_PROBLEM,
+  type ModMailKey,
+  readModMailKey,
+} from "./infrastructure/modmail/cipher.js";
 import { Database } from "./infrastructure/postgres/database.js";
+import { Failure } from "./domain/values.js";
 import { dispatcher } from "./jobs/dispatch.js";
 import { Queue } from "./jobs/queue.js";
 import { startWeb, type WebServer } from "./web/server.js";
 import { webSettings } from "./web/settings.js";
 
-const config = configuration();
+/**
+ * The configuration, without MODMAIL_KEY (2.43.0): the key is decoded here once into the cipher,
+ * deleted from process.env, and left out of the configuration every service receives, so no log,
+ * report or later reader of either finds it. The original string can't be wiped (JavaScript
+ * strings are immutable); once this function returns nothing references it.
+ */
+function startupSettings(): { config: Configuration; modmail: ModMailKey } {
+  const settings = configuration();
+  const modmail = readModMailKey(settings.MODMAIL_KEY);
+  delete process.env.MODMAIL_KEY;
+  const { MODMAIL_KEY: _key, ...rest } = settings;
+  return { config: rest, modmail };
+}
+const { config, modmail: modmailCipher } = startupSettings();
 // Issue reports include the newest log records (info and above, after this redaction).
 const recentLogs = new RecentLogs();
 const log = pino(
@@ -102,36 +123,45 @@ const report: Reporter = (error, operation, options = {}) => {
   logReport(error, operation, options);
   if ((options.level ?? "error") === "error") void reports.error(error, operation, options.scope);
 };
+// Mod mail's key (2.43.0), read once by startupSettings above: unset leaves mod mail unavailable
+// quietly, a malformed value leaves it unavailable too and is reported once TaruBot holds the
+// writer lease (below), by the setting's name, never its value; neither stops the bot.
+// Closed cases go 90 days after closing: its own timer, under the writer lease (started below).
+const modmailRetention = new ModMailRetention(db.orm);
 // Public suggestions (2.28.0): production posts as the GitHub App, DevBot previews into the
 // reports repository; without their settings /suggest says it is switched off.
 const suggestions = new Suggestions(app, suggestionTarget(config), report);
-const queue = new Queue(db, dispatcher(app, sync, access, reports), (event) => {
-  if (event.type === "worker") return report(event.error, event.job?.id ?? "queue");
-  // Classified attempts log at their own level: expected waits stay at debug unless they stall.
-  // Only identifiers, codes, approved diagnostics and timings are logged, never payloads or tokens.
-  const { job, outcome } = event;
-  log[outcome.level](
-    {
-      operation: job.id,
-      kind: job.kind,
-      generation: job.generation,
-      attempts: job.attempts,
-      code: outcome.code,
-      status: outcome.status,
-      category: outcome.category,
-      source: outcome.source,
-      diagnostic: outcome.diagnostic,
-      delaySeconds: Math.ceil(outcome.delaySeconds),
-      durationMs: event.durationMs,
-      waitMs: event.waitMs,
-      ageMs: event.ageMs,
-    },
-    "Job attempt outcome classified; inspect scoped work status.",
-  );
-  // A job that ended failed at error level is reported; repeats of a kind group into one issue.
-  if (outcome.status === "failed" && outcome.level === "error")
-    void reports.jobFailed(job, outcome);
-});
+const queue = new Queue(
+  db,
+  dispatcher(app, sync, access, reports, undefined, { dashboardOrigin: dashboard.origin }),
+  (event) => {
+    if (event.type === "worker") return report(event.error, event.job?.id ?? "queue");
+    // Classified attempts log at their own level: expected waits stay at debug unless they stall.
+    // Only identifiers, codes, approved diagnostics and timings are logged, never payloads or tokens.
+    const { job, outcome } = event;
+    log[outcome.level](
+      {
+        operation: job.id,
+        kind: job.kind,
+        generation: job.generation,
+        attempts: job.attempts,
+        code: outcome.code,
+        status: outcome.status,
+        category: outcome.category,
+        source: outcome.source,
+        diagnostic: outcome.diagnostic,
+        delaySeconds: Math.ceil(outcome.delaySeconds),
+        durationMs: event.durationMs,
+        waitMs: event.waitMs,
+        ageMs: event.ageMs,
+      },
+      "Job attempt outcome classified; inspect scoped work status.",
+    );
+    // A job that ended failed at error level is reported; repeats of a kind group into one issue.
+    if (outcome.status === "failed" && outcome.level === "error")
+      void reports.jobFailed(job, outcome);
+  },
+);
 // /setup (2.35.0, #46): onboarding, and TaruBot's own channel overrides written over raw REST. It is
 // built before the lifecycle so shutdown can drain a /setup overrides run in progress.
 const roleAdministration = new RoleAdministration(
@@ -154,17 +184,20 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
     await heartbeat.tick();
     await reports.tick();
   },
+  // Readiness reports only whether the key is valid (2.43.0); the configuration no longer has it.
+  modmail: modmailCipher.status === "on",
   // A /suggest post still at GitHub finishes, and records its row, before the lease is released;
   // a /setup overrides run stops and writes its audit row (2.35.0); the web stops listening, and
   // connections still open after 5 s are closed (their handlers aren't cancelled, like in-flight
-  // slash commands); the status page's timer stops, and a sample being written finishes (2.41.0).
-  // None ever rejects.
+  // slash commands); the status page's timer stops, and a sample being written finishes (2.41.0);
+  // mod mail's retention timer stops, and a pass in progress finishes (2.43.0). None ever rejects.
   drain: () =>
     Promise.all([
       suggestions.drain(),
       roleAdministration.drain(),
       web?.stop(),
       publicStatus.stop(),
+      modmailRetention.stop(),
     ]).then(() => {}),
 });
 // The public status page (2.41.0): a snapshot refreshed every minute from readiness, the Lodestone
@@ -196,7 +229,12 @@ const services = new Services()
   .provide(selfRolesKey, new SelfRoles(app, () => lifecycle.isStopping()))
   .provide(lifecycleKey, lifecycle)
   .provide(publicStatusKey, publicStatus)
-  .provide(dashboardKey, dashboard);
+  .provide(dashboardKey, dashboard)
+  // Mod mail (2.43.0): its writes refuse once shutdown starts and roll back if it starts mid-write.
+  .provide(
+    modmailKey,
+    new ModMail(app, modmailCipher, dashboard.origin, () => lifecycle.isStopping(), report),
+  );
 const context: BotContext = {
   client: gateway.client,
   services,
@@ -241,6 +279,15 @@ try {
 // The writer lease is held and Discord is ready: sample from now on, web or no web, so the history
 // is complete when the page is turned on. Never rejects.
 publicStatus.start();
+// Mod mail retention (2.43.0) on its own timer, while this process holds the writer lease; deleted
+// counts reach the log, never which cases. Never rejects.
+modmailRetention.start(() => lifecycle.status().writerLease, {
+  deleted: (deleted) => log.info({ deleted }, "Mod mail cases deleted after retention"),
+  report,
+});
+// Reported here, under the lease like the web's invalid settings, so only the writer files it.
+if (modmailCipher.status === "invalid")
+  report(new Failure("configuration", INVALID_KEY_PROBLEM), "modmail key");
 // Never rejects: with WEB_PUBLIC_ORIGIN unset it returns null and nothing listens, and a web fault
 // is reported and leaves the bot running.
 web = await startWeb(

@@ -2,14 +2,18 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType, OverwriteType, PermissionFlagsBits as P } from "discord.js";
 import { isObfuscated, OBFUSCATED_CHANNEL_NAME } from "../../src/discord/obfuscation.js";
-import { DENY_MASK, VOICE_DENY_MASK } from "../../src/domain/permissions.js";
+import { channelPermissions, DENY_MASK, VOICE_DENY_MASK } from "../../src/domain/permissions.js";
 import {
   accessRoles,
   channelAccessOverwrites,
   initiallyStaffOnly,
+  overwriteWrites,
   sameOverwrites,
   type AccessChannel,
+  type AccessOverwrite,
+  type OverwriteWrite,
 } from "../../src/domain/channel-access.js";
+import { Failure } from "../../src/domain/values.js";
 import {
   type ChannelFixture,
   discordAccessFixture,
@@ -416,7 +420,13 @@ test("protected areas that inherit visibility retain the guild default while ord
       expect(channel?.permissionsFor(newcomer).has(P.ViewChannel)).toBe(false);
       expect(channel?.permissionsFor(member).has(P.ViewChannel)).toBe(true);
       expect([updates, parent]).toEqual(before);
-      expect(fixture.writes).toEqual([`/channels/${ordinary.id}`]);
+      // Entry by entry (2.43.0): TaruBot's own first, then @everyone's deny (restrictive), then
+      // the four roles' allows; nothing else is written.
+      expect(fixture.writes).toEqual(
+        ["900", "100", "201", "202", "203", "204"].map(
+          (target) => `/channels/${ordinary.id}/permissions/${target}`,
+        ),
+      );
     } finally {
       await fixture.close();
     }
@@ -777,7 +787,11 @@ describe("channel obfuscation (#47)", () => {
         }),
       ).toBe(true);
       expect(guards).toBe(2);
-      expect(fixture.writes).toEqual([`/channels/${target.id}`]);
+      // Only this channel's entries, one at a time, and never the kept exceptions (2.43.0).
+      expect(fixture.writes.length).toBeGreaterThan(0);
+      for (const route of fixture.writes)
+        expect(route.startsWith(`/channels/${target.id}/permissions/`)).toBe(true);
+      expect(fixture.writes.some((route) => /\/permissions\/(500|405)$/u.test(route))).toBe(false);
       // The exceptions ACCESS-03 keeps survive, so the plan came from what the read returned.
       const exceptions = target.permission_overwrites.filter((overwrite) =>
         ["500", "405"].includes(overwrite.id),
@@ -1260,6 +1274,301 @@ describe("after /setup overrides (2.35.0, #46)", () => {
       expect(BigInt(planned.find((entry) => entry.id === "900")?.deny ?? "0")).toBe(
         P.CreateInstantInvite,
       );
+    } finally {
+      await fixture.close();
+    }
+  });
+});
+
+/**
+ * Onboarding's pass writes a channel's overwrites entry by entry (2.43.0), never the whole list,
+ * so an entry it doesn't change, such as a Mention Everyone allow set by hand for mod mail's pings,
+ * is never resent; each state in between is no more open than the channel before or after.
+ */
+describe("per-entry channel writes (2.43.0)", () => {
+  const role = (id: string, allow = 0n, deny = 0n): AccessOverwrite => ({
+    id,
+    type: OverwriteType.Role,
+    allow: String(allow),
+    deny: String(deny),
+  });
+  const member = (id: string, allow = 0n, deny = 0n): AccessOverwrite => ({
+    id,
+    type: OverwriteType.Member,
+    allow: String(allow),
+    deny: String(deny),
+  });
+  const POSTING =
+    P.ViewChannel | P.SendMessages | P.ReadMessageHistory | P.EmbedLinks | P.AttachFiles;
+  /** Apply writes to a list, as Discord applies each PUT and DELETE. */
+  const apply = (list: readonly AccessOverwrite[], write: OverwriteWrite): AccessOverwrite[] => {
+    const rest = list.filter((entry) => entry.id !== write.id);
+    return write.kind === "delete"
+      ? rest
+      : [...rest, { id: write.id, type: write.type, allow: write.allow, deny: write.deny }];
+  };
+
+  test("settled: nothing to write; one changed entry: one write, never TaruBot's", () => {
+    const settled = [
+      role("100", 0n, P.ViewChannel),
+      role("201", 0n, P.ViewChannel),
+      role("203", P.ViewChannel),
+      member("900", POSTING | P.MentionEveryone),
+    ];
+    expect(overwriteWrites(settled, settled, "900")).toEqual([]);
+    // Empty entries count as absent on either side, as sameOverwrites has it.
+    expect(overwriteWrites([...settled, role("500")], settled, "900")).toEqual([]);
+    const drifted = settled.map((entry) =>
+      entry.id === "201" ? role("201", P.ViewChannel) : entry,
+    );
+    expect(overwriteWrites(drifted, settled, "900")).toEqual([
+      { kind: "put", id: "201", type: OverwriteType.Role, allow: "0", deny: String(P.ViewChannel) },
+    ]);
+    // An entry the policy empties is deleted, in one request.
+    expect(overwriteWrites([...settled, role("500", P.ViewChannel)], settled, "900")).toEqual([
+      { kind: "delete", id: "500" },
+    ]);
+  });
+
+  test("TaruBot's own entry first, then restrictive meets, then the openings", () => {
+    const before = [
+      member("900", P.ViewChannel),
+      role("201", P.ViewChannel | P.SendMessages),
+      role("202", 0n, P.ViewChannel),
+      role("203", P.ViewChannel, P.SendMessages),
+    ];
+    const desired = [
+      member("900", POSTING),
+      role("100", 0n, P.ViewChannel),
+      role("201", P.SendMessages, P.ViewChannel),
+      role("203", P.SendMessages, P.ViewChannel),
+      role("204", P.ViewChannel),
+    ];
+    const writes = overwriteWrites(before, desired, "900");
+    expect(writes.map((write) => `${write.kind} ${write.id}`)).toEqual([
+      // TaruBot's own access, widened first so it can finish.
+      "put 900",
+      // Restrictive: @everyone's new deny, 201 losing View, and 203's mixed change cut to what
+      // both sides allow.
+      "put 100",
+      "put 201",
+      "put 203",
+      // Openings: 202's deny removed, 203's Send allowed, 204's new allow.
+      "delete 202",
+      "put 203",
+      "put 204",
+    ]);
+    expect(writes[3]).toEqual({
+      kind: "put",
+      id: "203",
+      type: OverwriteType.Role,
+      allow: "0",
+      deny: String(P.ViewChannel | P.SendMessages),
+    });
+    let state: AccessOverwrite[] = [...before];
+    for (const write of writes) state = apply(state, write);
+    expect(sameOverwrites(state, desired)).toBe(true);
+  });
+
+  test("no state between the writes is more open than before or after, for anyone but TaruBot", () => {
+    // A seeded walk over random entries for @everyone, four roles and two members.
+    let seed = 7;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed;
+    };
+    const BITS = [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.EmbedLinks];
+    const randomBits = () =>
+      BITS.filter(() => next() % 3 === 0).reduce((all, bit) => all | bit, 0n);
+    const randomEntry = (id: string, type: OverwriteType): AccessOverwrite | null => {
+      if (next() % 4 === 0) return null;
+      const allow = randomBits();
+      return { id, type, allow: String(allow), deny: String(randomBits() & ~allow) };
+    };
+    const ids: [string, OverwriteType][] = [
+      ["100", OverwriteType.Role],
+      ["201", OverwriteType.Role],
+      ["202", OverwriteType.Role],
+      ["203", OverwriteType.Role],
+      ["204", OverwriteType.Role],
+      ["401", OverwriteType.Member],
+      ["900", OverwriteType.Member],
+    ];
+    const list = () =>
+      ids.map(([id, type]) => randomEntry(id, type)).filter((entry) => entry !== null);
+    const people = [
+      { id: "400", roles: [] },
+      { id: "401", roles: ["201"] },
+      { id: "402", roles: ["202", "203"] },
+      { id: "403", roles: ["201", "204"] },
+    ];
+    const base = P.ViewChannel | P.SendMessages;
+    for (let round = 0; round < 300; round++) {
+      const before = list();
+      const desired = list();
+      const writes = overwriteWrites(before, desired, "900");
+      const perms = (state: readonly AccessOverwrite[], person: (typeof people)[number]) =>
+        channelPermissions("100", base, state, person);
+      let state: AccessOverwrite[] = [...before];
+      for (const write of writes) {
+        state = apply(state, write);
+        for (const person of people) {
+          const now = perms(state, person);
+          const allowed = perms(before, person) | perms(desired, person);
+          expect({ round, person: person.id, extra: now & ~allowed }).toEqual({
+            round,
+            person: person.id,
+            extra: 0n,
+          });
+        }
+      }
+      expect(sameOverwrites(state, desired)).toBe(true);
+    }
+  });
+
+  test("the pass sends only what changed: no request when settled, and never TaruBot's hand-set allow", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const settled = [
+        { id: "100", type: OverwriteType.Role, allow: "0", deny: String(P.ViewChannel) },
+        { id: "201", type: OverwriteType.Role, allow: "0", deny: String(P.ViewChannel) },
+        { id: "202", type: OverwriteType.Role, allow: "0", deny: String(P.ViewChannel) },
+        {
+          id: "203",
+          type: OverwriteType.Role,
+          allow: String(
+            P.ViewChannel | P.SendMessages | P.ReadMessageHistory | P.UseApplicationCommands,
+          ),
+          deny: "0",
+        },
+        {
+          id: "204",
+          type: OverwriteType.Role,
+          allow: String(
+            P.ViewChannel | P.SendMessages | P.ReadMessageHistory | P.UseApplicationCommands,
+          ),
+          deny: "0",
+        },
+        // Mod mail's hand-set allow, on TaruBot's own member entry and on its role (600).
+        {
+          id: "900",
+          type: OverwriteType.Member,
+          allow: String(POSTING | P.MentionEveryone),
+          deny: "0",
+        },
+        { id: "600", type: OverwriteType.Role, allow: String(P.MentionEveryone), deny: "0" },
+      ];
+      const notices = fixture.add(
+        "officer-notifications",
+        ChannelType.GuildText,
+        structuredClone(settled),
+      );
+      expect(
+        sameOverwrites(
+          settled,
+          channelAccessOverwrites(settled, "100", "900", fixture.bindings, "officers"),
+        ),
+      ).toBe(true);
+      expect(
+        await fixture.port.channel("100", notices.id, fixture.bindings, "officers", async () => {}),
+      ).toBe(false);
+      expect(fixture.entryWrites).toEqual([]);
+      // Someone lets the Member role view it: one PUT puts that entry back, nothing else is sent.
+      notices.permission_overwrites = notices.permission_overwrites.map((entry) =>
+        entry.id === "201" ? { ...entry, allow: String(P.ViewChannel), deny: "0" } : entry,
+      );
+      expect(
+        await fixture.port.channel("100", notices.id, fixture.bindings, "officers", async () => {}),
+      ).toBe(true);
+      expect(fixture.entryWrites).toEqual([
+        {
+          method: "PUT",
+          route: `/channels/${notices.id}/permissions/201`,
+          target: "201",
+          allow: "0",
+          deny: String(P.ViewChannel),
+        },
+      ]);
+      // Both hand-set allows are still there, untouched.
+      expect(notices.permission_overwrites.find((entry) => entry.id === "900")?.allow).toBe(
+        String(POSTING | P.MentionEveryone),
+      );
+      expect(notices.permission_overwrites.find((entry) => entry.id === "600")?.allow).toBe(
+        String(P.MentionEveryone),
+      );
+      // An entry the policy empties goes with one DELETE.
+      notices.permission_overwrites.push({
+        id: "500",
+        type: OverwriteType.Role,
+        allow: String(P.ViewChannel),
+        deny: "0",
+      });
+      fixture.entryWrites.length = 0;
+      await fixture.port.channel("100", notices.id, fixture.bindings, "officers", async () => {});
+      expect(fixture.entryWrites).toEqual([
+        { method: "DELETE", route: `/channels/${notices.id}/permissions/500`, target: "500" },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("a change landing between the writes is caught by the readback; the next pass settles it", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const target = fixture.add("general");
+      let meddled = false;
+      // Someone allows a role the policy never keeps View for while the pass writes.
+      fixture.discord.afterPut = (channelId) => {
+        if (meddled || channelId !== target.id) return;
+        meddled = true;
+        target.permission_overwrites.push({
+          id: "500",
+          type: OverwriteType.Role,
+          allow: String(P.ViewChannel),
+          deny: "0",
+        });
+      };
+      await expect(
+        fixture.port.channel("100", target.id, fixture.bindings, "members", async () => {}),
+      ).rejects.toMatchObject({ code: "transient" });
+      fixture.discord.afterPut = undefined;
+      fixture.entryWrites.length = 0;
+      // Planned afresh from the channel as it is: only the stray entry goes.
+      expect(
+        await fixture.port.channel("100", target.id, fixture.bindings, "members", async () => {}),
+      ).toBe(true);
+      expect(fixture.entryWrites).toEqual([
+        { method: "DELETE", route: `/channels/${target.id}/permissions/500`, target: "500" },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("Discord's Missing Permissions on one write names the channel and the likely cause", async () => {
+    const fixture = discordAccessFixture();
+    try {
+      const target = fixture.add("officer-notifications");
+      fixture.discord.putError = (channelId) =>
+        channelId === target.id
+          ? discordError(50013, 403, "PUT", `/channels/${channelId}/permissions/900`)
+          : undefined;
+      const refused = await fixture.port
+        .channel("100", target.id, fixture.bindings, "officers", async () => {})
+        .catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(Failure);
+      expect(refused).toMatchObject({
+        code: "blocked",
+        detail: { kind: "resource", resource: "channel", id: target.id },
+      });
+      const message = refused instanceof Failure ? refused.message : "";
+      expect(message).toContain(`<#${target.id}>`);
+      expect(message).toContain("Missing Permissions");
+      expect(message).toContain("Mention Everyone");
+      expect(message).toContain("TaruBot role's entry");
+      // Stopped at the first refusal: nothing after it was sent.
+      expect(fixture.entryWrites).toHaveLength(1);
     } finally {
       await fixture.close();
     }

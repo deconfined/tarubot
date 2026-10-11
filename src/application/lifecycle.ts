@@ -75,6 +75,11 @@ export interface LifecycleOptions {
    * fatal, and its counts never change readiness.
    */
   readonly visibility?: VisibilityMonitor;
+  /**
+   * MODMAIL_KEY is set and valid (2.43.0), for readiness's boolean. main.ts decodes the key once
+   * and passes only this; the configuration the lifecycle gets no longer holds the key.
+   */
+  readonly modmail: boolean;
 }
 const LIFECYCLE_DEFAULTS: LifecycleOptions = {
   leaseRetryMs: 5000,
@@ -87,6 +92,7 @@ const LIFECYCLE_DEFAULTS: LifecycleOptions = {
   exit: (code) => process.exit(code),
   tick: async () => {},
   drain: async () => {},
+  modmail: false,
 };
 
 /** Only pg_locks identifies the holder (shared with migrate()'s refusal). */
@@ -131,7 +137,6 @@ export class ApplicationLifecycle {
   private databaseReady = false;
   private stopping = false;
   private capabilities: unknown = { synchronization: "initializing" };
-
   constructor(
     private readonly config: Configuration,
     private readonly db: Database,
@@ -471,6 +476,7 @@ export class ApplicationLifecycle {
     capabilities: unknown;
     lodestone: LodestoneStatus;
     visibility: VisibilityStatus;
+    modmail: boolean;
   } {
     const available =
       !this.stopping &&
@@ -494,6 +500,9 @@ export class ApplicationLifecycle {
       // Informational (2.35.0, #46): channels missing TaruBot's override, counted as if
       // Administrator were off, and onboarding's pending channels. Never part of `ready`.
       visibility: this.visibilityStatus(),
+      // Informational (2.43.0): whether mod mail's key is set and valid, as a boolean only, never
+      // the key, its ID or why. Never part of `ready`: the bot runs without mod mail.
+      modmail: this.options.modmail,
     };
   }
 

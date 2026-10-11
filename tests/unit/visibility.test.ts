@@ -26,6 +26,7 @@ import {
   asIfRoles,
   channelState,
   NO_RECORDS,
+  officerPing,
   type OverrideTarget,
   overrideTarget,
   planOverrides,
@@ -822,6 +823,246 @@ describe("the report", () => {
     expect(analyseVisibility(world([seen], { roles }), SETTINGS).administratorNeeded).toBe(false);
     // Without Administrator, it is never "needed".
     expect(analyseVisibility(world([hidden]), SETTINGS).administratorNeeded).toBe(false);
+  });
+});
+
+/**
+ * Mention Everyone in channels (2.43.0, owner decision of 2026-10-11): mod mail's ping of the
+ * Officer role (203) in the officer notifications channel (702) notifies officers only through a
+ * mentionable role or TaruBot's Mention Everyone there, set by hand in that channel's own
+ * permissions; an allow anywhere else, or there while mod mail is off, isn't needed.
+ */
+describe("Mention Everyone and mod mail's officer ping", () => {
+  const MENTION = ow(BOT, 1, P.MentionEveryone);
+  /** The default roles, the Officer role mentionable or not, TaruBot's role granting `bot`. */
+  const roles = (bot: bigint, mentionable = false): ApiRole[] =>
+    ROLES(bot).map((entry) => (entry.id === "203" ? { ...entry, mentionable } : entry));
+  const report = (guild: VisibilityGuild, modmail: boolean, config = {}) =>
+    analyseVisibility(guild, settings(config, { modmail })).mentions;
+
+  test("on or off, an allow in the officer channel or another, server-wide, a mentionable role", () => {
+    for (const modmail of [false, true])
+      for (const officerAllow of [false, true])
+        for (const serverWide of [false, true])
+          for (const otherChannel of [false, true])
+            for (const mentionable of [false, true]) {
+              const guild = world(
+                [
+                  ch("701", { overwrites: otherChannel ? [MENTION] : [] }),
+                  ch("702", { overwrites: officerAllow ? [MENTION] : [], position: 1 }),
+                  ch("703", { position: 2 }),
+                ],
+                { roles: roles(CORE | (serverWide ? P.MentionEveryone : 0n), mentionable) },
+              );
+              const full = analyseVisibility(guild, settings({}, { modmail }));
+              const at = { modmail, officerAllow, serverWide, otherChannel, mentionable };
+              expect({ at, mentions: full.mentions }).toEqual({
+                at,
+                mentions: {
+                  officerPing: !modmail
+                    ? null
+                    : mentionable
+                      ? "mentionable"
+                      : officerAllow
+                        ? "allowed"
+                        : serverWide
+                          ? "server_wide"
+                          : "silent",
+                  unneeded: otherChannel ? ["701"] : [],
+                  officerChannel: officerAllow ? (modmail ? "expected" : "unneeded") : null,
+                },
+              });
+              // Server-wide on TaruBot's role is never needed, mod mail or not.
+              expect(full.neverNeeded.some((row) => row.permission === "MentionEveryone")).toBe(
+                serverWide,
+              );
+              // None of it makes Administrator needed, or counts as a missing channel.
+              expect(full.missingCount).toBe(0);
+            }
+  });
+
+  test("its bot role's entry counts as TaruBot's; @everyone's and another role's don't", () => {
+    const viaRole = world([
+      ch("701"),
+      ch("702", { overwrites: [ow(BOT_ROLE, 0, P.MentionEveryone)] }),
+    ]);
+    expect(report(viaRole, true)).toEqual({
+      officerPing: "allowed",
+      unneeded: [],
+      officerChannel: "expected",
+    });
+    // @everyone's allow is every member's; another role TaruBot lacks isn't TaruBot's either.
+    const others = world([
+      ch("701", { overwrites: [ow(GUILD, 0, P.MentionEveryone)] }),
+      ch("703", { overwrites: [ow("500", 0, P.MentionEveryone)] }),
+      ch("702"),
+    ]);
+    expect(report(others, false)).toEqual({
+      officerPing: null,
+      unneeded: [],
+      officerChannel: null,
+    });
+    // But @everyone's allow in the officer channel does let TaruBot mention there.
+    const everyone = world([ch("702", { overwrites: [ow(GUILD, 0, P.MentionEveryone)] })]);
+    expect(report(everyone, true).officerPing).toBe("allowed");
+  });
+
+  test("a deny on TaruBot in the officer channel wins over a server-wide grant", () => {
+    const denied = world([ch("702", { overwrites: [ow(BOT, 1, 0n, P.MentionEveryone)] })], {
+      roles: roles(CORE | P.MentionEveryone),
+    });
+    expect(report(denied, true).officerPing).toBe("silent");
+    // @everyone's server-wide grant (Discord's default) works too, but only server-wide, so it's
+    // flagged like TaruBot's own role's (never "never needed": every member shares it).
+    const byDefault = world([ch("702")], {
+      roles: ROLES().map((entry) =>
+        entry.id === GUILD
+          ? { ...entry, permissions: String(EVERYONE | P.MentionEveryone) }
+          : entry,
+      ),
+    });
+    expect(report(byDefault, true).officerPing).toBe("server_wide");
+    expect(analyseVisibility(byDefault, SETTINGS).neverNeeded).toEqual([]);
+  });
+
+  test("only Administrator: the ping works until it comes off", () => {
+    const admin = world([ch("702")], { roles: roles(CORE | P.Administrator) });
+    expect(report(admin, true).officerPing).toBe("administrator");
+    expect(officerPing(admin, "702", "203")).toBe("administrator");
+    // With the allow in place, removing Administrator changes nothing for the ping.
+    const ready = world([ch("702", { overwrites: [MENTION] })], {
+      roles: roles(CORE | P.Administrator),
+    });
+    expect(report(ready, true).officerPing).toBe("allowed");
+  });
+
+  test("nothing to judge, or nowhere to post: unset, @everyone as the role, missing, unreadable", () => {
+    const guild = world([ch("702"), ch("704", { overwrites: SYNTHETIC })]);
+    expect(report(guild, true, { officer_notifications_channel_id: null }).officerPing).toBeNull();
+    expect(report(guild, true, { officer_role_id: null }).officerPing).toBeNull();
+    expect(officerPing(guild, "702", GUILD)).toBeNull();
+    expect(officerPing(guild, "702", "299")).toBeNull();
+    // Set but not in TaruBot's view (deleted), or there but unreadable: a warning, never no row.
+    expect(officerPing(guild, "799", "203")).toBe("missing");
+    expect(officerPing(guild, "704", "203")).toBe("cannot_post");
+    // An unreadable channel's overwrites are synthetic: never read as an allow either.
+    expect(
+      report(world([ch("704", { obfuscated: true, overwrites: [MENTION] })]), false).unneeded,
+    ).toEqual([]);
+  });
+
+  /**
+   * The delta review's probes (2026-10-11): Discord's implicit denials (no View Channel is
+   * nothing, no Send Messages is no mention either), and a server-wide grant the never-needed row
+   * says to remove.
+   */
+  test("can't post there: denied Send or View, even with a Mention Everyone allow or a mentionable role", () => {
+    const sendDenied = world([
+      ch("702", { overwrites: [ow(BOT, 1, P.MentionEveryone, P.SendMessages)] }),
+    ]);
+    expect(officerPing(sendDenied, "702", "203")).toBe("cannot_post");
+    // validate's own posting rows flag the channel too.
+    expect(analyseVisibility(sendDenied, settings({}, { modmail: true })).missing.posting).toEqual([
+      { id: "702", lacks: ["SendMessages"] },
+    ]);
+    const viewDenied = world([
+      ch("702", { overwrites: [ow(BOT, 1, P.MentionEveryone, P.ViewChannel)] }),
+    ]);
+    expect(officerPing(viewDenied, "702", "203")).toBe("cannot_post");
+    const mentionable = world([ch("702", { overwrites: [ow(BOT, 1, 0n, P.SendMessages)] })], {
+      roles: roles(CORE, true),
+    });
+    expect(officerPing(mentionable, "702", "203")).toBe("cannot_post");
+    // With Administrator it can post today: flagged as working only through Administrator.
+    const admin = world(
+      [ch("702", { overwrites: [ow(BOT, 1, P.MentionEveryone, P.SendMessages)] })],
+      {
+        roles: roles(CORE | P.Administrator),
+      },
+    );
+    expect(officerPing(admin, "702", "203")).toBe("administrator");
+  });
+
+  test("a server-wide grant on TaruBot's role is 'server_wide', and removing it, as advised, silences pings", () => {
+    const wide = world([ch("702")], { roles: roles(CORE | P.MentionEveryone) });
+    const full = analyseVisibility(wide, settings({}, { modmail: true }));
+    expect(full.mentions.officerPing).toBe("server_wide");
+    expect(full.neverNeeded.map((row) => row.permission)).toContain("MentionEveryone");
+    expect(officerPing(world([ch("702")], { roles: roles(CORE) }), "702", "203")).toBe("silent");
+    // Only a channel entry is "allowed": the TaruBot role's entry, its member entry, @everyone's.
+    for (const entry of [
+      ow(BOT_ROLE, 0, P.MentionEveryone),
+      MENTION,
+      ow(GUILD, 0, P.MentionEveryone),
+    ])
+      expect(officerPing(world([ch("702", { overwrites: [entry] })]), "702", "203")).toBe(
+        "allowed",
+      );
+    // Discord's order still holds: a member deny beats a role allow, a member allow beats denies,
+    // a role allow beats @everyone's channel deny, and @everyone's deny removes a server-wide grant.
+    expect(
+      officerPing(
+        world([
+          ch("702", {
+            overwrites: [ow(BOT_ROLE, 0, P.MentionEveryone), ow(BOT, 1, 0n, P.MentionEveryone)],
+          }),
+        ]),
+        "702",
+        "203",
+      ),
+    ).toBe("silent");
+    expect(
+      officerPing(
+        world([
+          ch("702", {
+            overwrites: [
+              ow(GUILD, 0, 0n, P.MentionEveryone),
+              ow(BOT_ROLE, 0, 0n, P.MentionEveryone),
+              MENTION,
+            ],
+          }),
+        ]),
+        "702",
+        "203",
+      ),
+    ).toBe("allowed");
+    expect(
+      officerPing(
+        world([
+          ch("702", {
+            overwrites: [ow(GUILD, 0, 0n, P.MentionEveryone), ow(BOT_ROLE, 0, P.MentionEveryone)],
+          }),
+        ]),
+        "702",
+        "203",
+      ),
+    ).toBe("allowed");
+    expect(
+      officerPing(
+        world([ch("702", { overwrites: [ow(GUILD, 0, 0n, P.MentionEveryone)] })], {
+          roles: roles(CORE | P.MentionEveryone),
+        }),
+        "702",
+        "203",
+      ),
+    ).toBe("silent");
+  });
+
+  test("onboarding servers report it the same way", () => {
+    const guild = world([
+      ch("702", { overwrites: [MENTION] }),
+      ch("701", { overwrites: [MENTION] }),
+    ]);
+    const onboarding = analyseVisibility(
+      guild,
+      settings({ access_policy_enabled: true }, { modmail: true }),
+    );
+    expect(onboarding.mode).toBe("onboarding");
+    expect(onboarding.mentions).toEqual({
+      officerPing: "allowed",
+      unneeded: ["701"],
+      officerChannel: "expected",
+    });
   });
 });
 

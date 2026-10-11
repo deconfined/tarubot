@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { configurationChecks } from "../../src/discord/presenters/configuration.js";
+import { HARNESS_MODMAIL_STATES } from "../fixtures/modmail.js";
 import { HARNESS_HISTORIES } from "../fixtures/status-samples.js";
 import {
   HARNESS_GUILDS,
@@ -71,6 +72,8 @@ describe("harnessOptions", () => {
       expect(harnessOptions([`--state-roles=${roles}`]).states).toEqual({ roles });
     for (const history of HARNESS_HISTORIES)
       expect(harnessOptions([`--state-history=${history}`]).states).toEqual({ history });
+    for (const modmail of HARNESS_MODMAIL_STATES)
+      expect(harnessOptions([`--state-modmail=${modmail}`]).states).toEqual({ modmail });
   });
 
   test("refuses an unknown check level, a misspelt flag and a lone --cert", () => {
@@ -83,6 +86,9 @@ describe("harnessOptions", () => {
     );
     expect(() => harnessOptions(["--state-history=outage"])).toThrow(
       "Pass --state-history=incidents or --state-history=new.",
+    );
+    expect(() => harnessOptions(["--state-modmail=busy"])).toThrow(
+      "Pass --state-modmail=cases, empty, off, unreadable, nokey, long, limit or quiet.",
     );
     expect(() => harnessOptions(["--cert", "cert.pem"])).toThrow("Pass --cert and --key together.");
   });

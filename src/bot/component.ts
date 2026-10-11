@@ -29,6 +29,11 @@ export interface ComponentOptions {
   readonly access?: "user" | "officer";
   readonly requires?: readonly ServiceKey<unknown>[];
   /**
+   * Replies stay private even under DevBot's public-response override (2.43.0), as the command
+   * option of the same name: /modmail's form receipt would otherwise say who opened a case.
+   */
+  readonly alwaysPrivate?: boolean;
+  /**
    * The acknowledgement mode, or a function choosing it from the custom ID. It runs before
    * Discord's three-second acknowledgement, so it must be synchronous and do no I/O; if it throws,
    * the router replies instead and the handler's strict parser reports the out-of-date control.
@@ -62,6 +67,7 @@ export class Component {
   readonly access: "user" | "officer";
   readonly requires: readonly ServiceKey<unknown>[];
   readonly acknowledge: NonNullable<ComponentOptions["acknowledge"]>;
+  readonly alwaysPrivate: boolean;
   readonly execute: ComponentOptions["execute"];
 
   constructor(options: ComponentOptions) {
@@ -83,6 +89,7 @@ export class Component {
     this.access = options.access ?? "user";
     this.requires = options.requires ?? [];
     this.acknowledge = options.acknowledge ?? "reply";
+    this.alwaysPrivate = options.alwaysPrivate === true;
     this.execute = options.execute;
   }
 }

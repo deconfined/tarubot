@@ -160,6 +160,7 @@ export const visibilityReport = (
   })),
   onboardingMissing: onboarding ? [] : null,
   neverNeeded: [],
+  mentions: { officerPing: null, unneeded: [], officerChannel: null },
   roleOrder: { highest: ROLE.bot, notBelow: [], throughShared: [] },
   missing: { categories: [], inside: [], channels: [], posting: [], unreadable: [] },
   masked: [],

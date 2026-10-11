@@ -58,6 +58,8 @@ services:
       GITHUB_REPORTS_REPO: ${GITHUB_REPORTS_REPO:-deconfined/tarubot-reports}
       # Heartbeat (2.22.0): a healthchecks.io ping URL; empty turns it off.
       HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
+      # Mod mail's encryption key (2.43.0): base64 for 32 bytes; empty leaves mod mail unavailable.
+      MODMAIL_KEY: ${MODMAIL_KEY:-}
     depends_on:
       # Local capabilities can operate while Lodestone is degraded; storage must be ready.
       postgres:
