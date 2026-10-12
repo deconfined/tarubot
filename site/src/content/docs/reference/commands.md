@@ -295,7 +295,7 @@ Choose the channel where ledger entries are posted.
 
 ### /config officer_notifications
 
-Choose the channel for officer notices: Lodestone trouble and its recovery, and the "Member status changes" posts about members who gained or lost access, Officer or FC Leader and characters that left the FC. See [Officer notices](/tarubot/admin/notices-and-updates/#officer-notices) and [Member status changes](/tarubot/admin/notices-and-updates/#member-status-changes).
+Choose the channel for officer notices: Lodestone trouble and its recovery, missing channel overrides, the "Member status changes" posts about members who gained or lost access, Officer or FC Leader and characters that left the FC, and, with mod mail on, its pings of the Officer role. Mod mail can't be turned on without this channel. See [Officer notices](/tarubot/admin/notices-and-updates/#officer-notices) and [Member status changes](/tarubot/admin/notices-and-updates/#member-status-changes).
 
 **Who can use it:** officers.
 

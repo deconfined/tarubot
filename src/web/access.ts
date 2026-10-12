@@ -16,7 +16,7 @@ import type { Page } from "./page.js";
  * (actor.officer after enrichment: Manage Server, or the Officer role with rank access) and
  * `manager` (authorizeRoleManager passes: Manage Server and Manage Roles). 2.40.0 adds `member`
  * and `guest` (the bound Member or Guest role held now, while TaruBot holds no Administrator in
- * the server: owner decisions Q6 A and A2). 3.1.0 adds operator.
+ * the server: owner decisions Q6 A and A2). An `operator` flag is planned in #105; nothing has it yet.
  */
 export const PAGE_ACCESS = ["officer", "manager", "member", "guest"] as const;
 

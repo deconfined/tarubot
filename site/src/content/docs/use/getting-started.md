@@ -11,7 +11,7 @@ TaruBot connects a Discord server to a Final Fantasy XIV Free Company. You prove
 
 - **In a server only.** Every TaruBot command is a slash command that works inside a server where TaruBot is set up. None of them works in direct messages.
 - **Replies are private.** Only you can see TaruBot's reply to your command. Nobody else in the channel sees it.
-- **No pings.** TaruBot never pings anyone, even when a reply or post names a member or a role.
+- **No pings.** TaruBot never pings you, even when a reply or post names a member or a role. The only mention that notifies anyone is mod mail's ping of the Officer role, in the officers' own channel.
 
 Type `/` in any channel you can write in, and Discord lists the commands with their options. The [command reference](/tarubot/reference/commands/) describes every one.
 

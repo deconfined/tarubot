@@ -47,8 +47,8 @@ export const deployments = {
 /**
  * `rehearsal` is the production application against a disposable database, read-only on Discord.
  * `staging` (#50) is DevBot's application on the staging host, against its own database on the
- * managed cluster; `devbot` is the same application on the workstation's local database, until the
- * DevBot move retires it.
+ * managed cluster; `devbot` is the same application on a local `tarubot_dev` database. The
+ * workstation DevBot it was written for is retired, and DevBot now runs only on staging.
  */
 export type DeploymentName = "production" | "rehearsal" | "staging" | "devbot" | "unmanaged";
 export type DatabaseSetting = "DATABASE_URL" | "RESTORE_DATABASE_URL";
@@ -360,7 +360,7 @@ export function assertToolScope(
   const refuse = (reason: string) =>
     new Failure("configuration", `Refusing ${scope.tool} under the ${name} profile: ${reason}`);
   const productionApp = name === "production" || name === "rehearsal";
-  /** Profiles that run DevBot's application: staging on its host, devbot on the workstation. */
+  /** Profiles that run DevBot's application: staging on its host, devbot on a local database. */
   const devbotApp = name === "staging" || name === "devbot";
   const application = values.DISCORD_APPLICATION_ID || null;
   /**
@@ -456,7 +456,7 @@ export function assertToolScope(
     );
 
   // A restore-copy migration rehearsal is DevBot's (and unmanaged installations') procedure; the
-  // production application rehearses migrations in its *_rehearsal database (docs/MIGRATION.md E2).
+  // production application rehearses migrations in its *_rehearsal database (the rehearsal profile).
   if (scope.restoreRehearsal && productionApp)
     throw refuse(
       "--restore-rehearsal is DevBot's restore-copy rehearsal; the production application rehearses in a *_rehearsal database.",

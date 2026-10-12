@@ -47,7 +47,7 @@ const managedUrl = (name: string, host = MANAGED, user = "tarubot", port = 27520
 const localUrl = (name: string, host = "localhost") =>
   `postgresql://tarubot:${PASSWORD}@${host}:5432/${name}`;
 
-/** The shape of DevBot's local .env once its DATABASE_URL names tarubot_dev. */
+/** A devbot-profile .env: DevBot's application on a local tarubot_dev database. */
 const devbotEnv = (overrides: Environment = {}): Environment => ({
   DISCORD_TOKEN: TOKEN,
   DISCORD_APPLICATION_ID: DEVBOT_APP,
@@ -235,7 +235,7 @@ describe("profiles", () => {
     expect(assertToolScope(env, scope.preview("4242"), direct).name).toBe("unmanaged");
     // A DB-only environment (no marker, no application ID) is unmanaged even against a managed URL.
     // The production host's container sets TARUBOT_ENVIRONMENT=production
-    // (production-compose.test.ts), which selects the production profile instead.
+    // (docker-compose.production.yml), which selects the production profile instead.
     expect(
       assertToolScope({ DATABASE_URL: managedUrl("tarubot") }, scope.migrate, {
         execArgv: [],
@@ -386,7 +386,7 @@ describe("databases", () => {
   });
 
   test("(C5) DevBot's tools use exactly tarubot_dev on this machine or the Compose service", () => {
-    // The owner's current .env shape (…/tarubot) is refused until it names tarubot_dev.
+    // A local .env still naming the stock …/tarubot is refused until it names tarubot_dev.
     refused(
       () =>
         assertToolScope(devbotEnv({ DATABASE_URL: localUrl("tarubot") }), scope.migrate, direct),

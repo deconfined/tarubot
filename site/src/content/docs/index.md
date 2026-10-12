@@ -50,7 +50,7 @@ hero:
 - **Shares what's new.** After an update that changes something you can notice, in Discord, on the dashboard or on this site, it can post a short note in a channel the officers choose.
 - **Shows whether it's up.** With the dashboard on, a public [status page](/tarubot/use/progress-and-problems/#is-tarubot-up) shows TaruBot's status right now and its uptime over the last 90 days, with no sign-in.
 
-Every change is saved and audited before TaruBot touches Discord, and the Discord work it owes survives restarts and outages.
+Every change is saved before TaruBot touches Discord, officers' decisions with an audit record, and the Discord work it owes survives restarts and outages.
 
 ## About these pages
 

@@ -1,5 +1,6 @@
 # Explicit source-build override for contributors; normal deployments use published GHCR images.
-# DevBot: docker compose -f docker-compose.yml -f docker-compose.devbot.yml -f docker-compose.build.yml ...
+# Local build: docker compose -f docker-compose.yml -f docker-compose.build.yml ... (DevBot runs only
+# published releases on the staging host; never start its application from a local build).
 services:
   tarubot:
     image: tarubot:local

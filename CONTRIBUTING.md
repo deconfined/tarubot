@@ -90,7 +90,7 @@ The build validates site links; `tests/unit/docs-site.test.ts` checks public con
 
 ## Live testing and delivery
 
-- [DevBot](docs/DEV_GUILD.md): isolated local development and owner-run acceptance.
+- [DevBot](docs/DEV_GUILD.md): DevBot on the staging host, isolated local development and owner-run acceptance.
 - [Deployment](docs/DEPLOYMENT.md): release orchestration, pinned provenance, owner provisioning, cutover and recovery.
 - [Threat model](docs/THREAT_MODEL.md): agreed scope and the requirement to prefer simple, standard components.
 

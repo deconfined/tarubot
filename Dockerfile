@@ -18,7 +18,7 @@ WORKDIR /app
 COPY package.json bun.lock bunfig.toml ./
 RUN bun install --frozen-lockfile --production
 
-# Both services execute compiled ESM as a non-root user.
+# The bot and its maintenance tools execute compiled ESM as a non-root user.
 FROM base AS runtime
 WORKDIR /app
 COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules

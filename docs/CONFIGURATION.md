@@ -29,7 +29,7 @@ Managed web setting changes require owner-approved recreation against the record
 
 Mod mail's `MODMAIL_KEY` (2.43.0) is a plain environment secret like `DISCORD_CLIENT_SECRET`, not a `*_FILE` setting: base64 for exactly 32 bytes, from `openssl rand -base64 32`, checked at startup by `src/infrastructure/modmail/cipher.ts`. Empty or malformed only makes mod mail unavailable (a malformed value is reported by name once the bot holds the writer lease), never stops the bot; readiness says only whether it is valid, and issue reports redact it. The production manifest passes it through (`MODMAIL_KEY: ${MODMAIL_KEY:-}`), as do the stock and staging ones. main.ts reads it once, deletes it from `process.env` and keeps it out of the configuration object, so nothing that logs or reports settings can find it later. Keep a copy off the host: it encrypts every case and has no rotation yet ([deployment](DEPLOYMENT.md#pending-recovery-rotation-and-host-loss)). The daily backup's encrypted `.env` copy holds it too.
 
-Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; local DevBot uses its reports token for private previews. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
+Private issue reports may not target the public repository. Public-suggestion App credentials belong only to production; DevBot, on the staging host, previews into the private reports repository with staging's own reports token. See the site's [monitoring reference](../site/src/content/docs/deploy/monitoring.md).
 
 ## Maintenance-tool profiles
 
