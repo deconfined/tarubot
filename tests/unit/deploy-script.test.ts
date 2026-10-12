@@ -1158,16 +1158,117 @@ describe.skipIf(!hostToolsAvailable)("failure-safe delivery: the restore", () =>
     ).toBe("no");
   });
 
-  test("a stopped one-off left by a killed command is removed before the restore", () => {
+  test("one-offs left by killed commands are removed before the restore and again before it starts", () => {
     const box = sandbox();
-    writeFileSync(join(box.sim, "oneoffs"), "feed00000001\n");
+    // Every probe of the previous image leaves a one-off behind, as a probe killed by its timeout
+    // does: the kit's before the stop, and the restore's own after it.
+    writeFileSync(join(box.sim, "probe-leaves-oneoff"), "");
     knob(box, "backup");
     const result = deploy(box);
     expect(result.stdout).toEndWith("result rolled-back\n");
     const actions = events(box);
-    expect(actions.indexOf("reap")).toBeGreaterThan(actions.indexOf("stop"));
-    expect(actions.indexOf("reap")).toBeLessThan(actions.indexOf("restore-up"));
+    const stopped = actions.indexOf("stop");
+    const reaps = actions
+      .map((action, at) => (action === "reap" ? at : -1))
+      .filter((at) => at > stopped);
+    // Before the probe and again after it, and the bot's lookup then sees one container.
+    expect(reaps.length).toBeGreaterThanOrEqual(2);
+    expect(reaps.at(-1)).toBeLessThan(actions.indexOf("restore-up"));
     restoredBox(box);
+  });
+
+  test("the previous image's database check gets one retry for a state it can't tell, never for ahead", () => {
+    const blip = sandbox();
+    knob(blip, "backup");
+    // First answer at restore time is unknown, then accept: the retry rescues the restore.
+    writeFileSync(join(blip.sim, "probe-sequence"), "unknown\naccept\n");
+    const rescued = deploy(blip);
+    expect(rescued.stdout).toEndWith("result rolled-back\n");
+    const ahead = sandbox();
+    knob(ahead, "backup");
+    writeFileSync(join(ahead.sim, "probe-sequence"), "ahead\naccept\n");
+    const refused = deploy(ahead);
+    expect(refused.stdout).toContain("reason restore outcome=skipped cause=schema-ahead\n");
+    expect(refused.stdout).toEndWith("result needs-owner\n");
+  });
+
+  test("a restored bot that fails a later sample is fenced, with the check named", () => {
+    const box = sandbox();
+    knob(box, "backup");
+    // Samples 1 to 4 are the sustained observation; the fourth fails.
+    writeFileSync(join(box.sim, "restore-observe-fails-at"), "4");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith(
+      "reason restore outcome=failed check=probe\nreason fence writers=stopped\nresult needs-owner\n",
+    );
+    expect(events(box).filter((action) => action === "restore-observe")).toHaveLength(4);
+    expect(events(box)).not.toContain("restart-policy");
+    expect(existsSync(join(box.state, "pending"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
+      false,
+    );
+  });
+
+  test("a bookkeeping fault after the restored bot is observed never stops it", () => {
+    for (const [knobName, unfinished] of [
+      ["restart-policy", "arm=failed"],
+      ["rm-pending", "pending=kept"],
+    ] as const) {
+      const box = sandbox();
+      knob(box, "backup");
+      knob(box, knobName);
+      const result = deploy(box);
+      expect(result.stdout).toContain(`reason restore outcome=restored ${unfinished}\n`);
+      expect(result.stdout).toEndWith("result needs-owner\n");
+      // Healthy and running, left for the owner with its marker: no second fence.
+      const bot = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
+      expect(bot.State.Running).toBe(true);
+      expect(bot.Config.Labels["org.opencontainers.image.version"]).toBe(box.live.version);
+      expect(existsSync(join(box.state, "pending"))).toBe(true);
+      // The stop step and the first fence, and no second fence of the restored bot.
+      expect(events(box).filter((action) => action === "stop")).toHaveLength(2);
+      expect(recordedDigest(box)).toBe(box.live.digest);
+    }
+  });
+
+  test("a failed run record doesn't stop the restore from completing", () => {
+    const box = sandbox();
+    knob(box, "backup");
+    // last-run.tmp can't be written: the record is best effort, the restore is not.
+    mkdirSync(join(box.state, "last-run.tmp"), { recursive: true });
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("result rolled-back\n");
+    restoredBox(box);
+    expect(existsSync(join(box.state, "last-run"))).toBe(false);
+  });
+
+  test("the kit rehearses the previous image against the host's settings as they are now", () => {
+    const box = sandbox();
+    knob(box, "restore-scope");
+    const result = deploy(box);
+    expect(result.stdout).toContain("reason failed step=pull check=restore-kit");
+    expect(result.stdout).toEndWith("result refused\n");
+    expect(events(box)).not.toContain("stop");
+  });
+
+  test("a restore that registered but can't redo it says Discord may hold the new commands", () => {
+    const box = sandbox();
+    knob(box, "register");
+    knob(box, "restore-register");
+    knob(box, "restore-up");
+    const result = deploy(box);
+    expect(result.stdout).toContain("reason commands state=unknown\n");
+    expect(result.stdout).toEndWith("reason fence writers=stopped\nresult needs-owner\n");
+    // When the restore did put the previous commands back before it failed, it doesn't say so.
+    const redone = sandbox();
+    knob(redone, "register");
+    knob(redone, "restore-up");
+    expect(deploy(redone).stdout).not.toContain("commands state=unknown");
+    // A failure before the registration never says it.
+    const early = sandbox();
+    knob(early, "backup");
+    knob(early, "restore-up");
+    expect(deploy(early).stdout).not.toContain("commands state=unknown");
   });
 
   test("a restore needs a recorded release: without one the delivery is refused and nothing stops", () => {
@@ -1203,6 +1304,82 @@ describe.skipIf(!hostToolsAvailable)("failure-safe delivery: the restore", () =>
     expect(result.stdout).toEndWith("result rolled-back\n");
     restoredBox(box);
     expect(events(box)).toContain("restore-register-guild");
+  });
+});
+
+/*
+ * The previous image's database check (RESTORE_PROBE), read from the entry exactly as it ships and run
+ * with Bun against invented stand-ins for that image's database module, one per way the exact schema
+ * check can end. The fake docker prints canned answers, so this is what pins the text itself.
+ */
+describe("the previous image's database check", () => {
+  const probeText = (() => {
+    const text = readFileSync(deployScript, "utf8");
+    const marker = "readonly RESTORE_PROBE='";
+    const start = text.indexOf(marker) + marker.length;
+    return text.slice(start, text.indexOf("\n'\n", start)).replaceAll(`'"'"'`, "'");
+  })();
+  const failure = (message: string, code = "schema") =>
+    `Object.assign(new Error(${JSON.stringify(message)}), { name: "Failure", code: ${JSON.stringify(code)} })`;
+  const mismatch =
+    "Schema version/checksum mismatch. Use matching versioned migrations and application image.";
+  function probe(schemaBody: string, constructorBody = "") {
+    const directory = join(sandbox(false).directory, "probe");
+    mkdirSync(join(directory, "dist/src/infrastructure/postgres"), { recursive: true });
+    writeFileSync(
+      join(directory, "dist/src/infrastructure/postgres/database.js"),
+      `export const SCHEMA_VERSION = "015_member_blocks.sql";
+export class Database {
+  constructor(url) { ${constructorBody} }
+  async schema() { ${schemaBody} }
+  async close() { console.error("closed"); }
+}\n`,
+    );
+    const result = Bun.spawnSync([process.execPath, "--no-env-file", "-e", probeText], {
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? "", DATABASE_URL: "postgresql://invented/db" },
+      stdin: "ignore",
+    });
+    return {
+      code: result.exitCode,
+      line: JSON.parse(result.stdout.toString().trim().split("\n").at(-1) ?? "{}"),
+      stderr: result.stderr.toString(),
+    };
+  }
+
+  test("a database its schema check accepts is accept, and the connection is closed", () => {
+    expect(probe("")).toMatchObject({
+      code: 0,
+      line: { state: "accept", schema: "015_member_blocks.sql" },
+      stderr: "closed\n",
+    });
+  });
+  test("the exact-match refusal after a committed migration is ahead", () => {
+    expect(probe(`throw ${failure(mismatch)};`)).toMatchObject({
+      code: 1,
+      line: { state: "ahead", schema: "015_member_blocks.sql" },
+      stderr: "closed\n",
+    });
+  });
+  test("every other way the check can end is unknown", () => {
+    for (const body of [
+      `throw ${failure("Run db:migrate before starting the application.")};`,
+      `throw ${failure(mismatch, "input")};`,
+      `throw ${failure("Schema ok but not this one", "schema")};`,
+      `throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });`,
+      `throw "a string";`,
+    ])
+      expect(probe(body)).toMatchObject({ code: 1, line: { state: "unknown" } });
+    // A constructor that throws is unknown too, with nothing to close.
+    expect(probe("", `throw new Error("bad url");`)).toMatchObject({
+      code: 1,
+      line: { state: "unknown", schema: "015_member_blocks.sql" },
+      stderr: "",
+    });
+  });
+  test("it reads and writes nothing: only schema() and close() of the database are used", () => {
+    expect(probeText).not.toMatch(/\.(query|migrate|transaction|connect)\(/u);
+    expect(probeText.match(/db\.\w+\(/gu)?.sort()).toEqual(["db.close(", "db.schema("]);
   });
 });
 
@@ -1681,7 +1858,7 @@ const failureScenarios: FailureScenario[] = [
   {
     name: "restore: leftover one-offs can't be removed",
     knobs: ["backup", "reap"],
-    setup: (box) => writeFileSync(join(box.sim, "oneoffs"), "feed00000001\n"),
+    setup: (box) => writeFileSync(join(box.sim, "probe-leaves-oneoff"), ""),
     result: "needs-owner",
     reasons: [
       "reason failed step=backup check=backup status=1",

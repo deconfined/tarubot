@@ -90,7 +90,7 @@ export function hostSandbox(
   const sim = join(directory, "simulation");
   const bin = join(directory, "bin");
   for (const path of [home, sim, bin, join(directory, "tmp")]) mkdirSync(path, { recursive: true });
-  for (const tool of ["docker", "age", "curl", "git", "sleep", "date"]) {
+  for (const tool of ["docker", "age", "curl", "git", "sleep", "date", "rm"]) {
     cpSync(join(repository, "tests/fixtures/host-runtime", tool), join(bin, tool));
     chmodSync(join(bin, tool), 0o755);
   }

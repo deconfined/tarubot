@@ -624,6 +624,44 @@ for (const locale of locales) {
           }
         });
 
+        for (const [reason, note] of [
+          ["arm=failed", "Its restart policy could not be enabled."],
+          ["pending=kept", "Its pending marker could not be cleared."],
+        ] as const) {
+          test(`a restored bot whose record couldn't be finished (${reason}) is running, not stopped`, () => {
+            const result = run({
+              stdout: [
+                entryLine,
+                ...steps,
+                "reason failed step=backup check=backup status=1",
+                "reason fence writers=stopped",
+                `reason restore outcome=restored ${reason}`,
+                "result needs-owner",
+              ],
+              exit: 1,
+            });
+            expect(sentence(result)).toBe(
+              `::error::Likely cause: the pre-migration backup failed; nothing was migrated. The host restored the previous release and it is running, but it kept its pending marker. ${note} Check the host before any new delivery. Its private log on the host is ${logPath}; see ${docs}.`,
+            );
+          });
+        }
+
+        test("restored-bot values outside their narrow patterns read as empty", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...steps,
+              "reason failed step=backup check=backup status=1",
+              "reason restore outcome=restored arm=fine pending=gone",
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toBe(
+            `::error::Likely cause: the pre-migration backup failed; nothing was migrated. The host restored the previous release and it is running, but it kept its pending marker. Check the host before any new delivery. Its private log on the host is ${logPath}; see ${docs}.`,
+          );
+        });
+
         test("an accepted-release report matters only beside a needs-owner result", () => {
           for (const result of ["result rolled-back", "result refused"]) {
             const out = run({
