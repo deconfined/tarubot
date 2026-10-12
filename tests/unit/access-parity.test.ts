@@ -12,6 +12,7 @@
  * subject. memberEligible is an input (`eligible`) for the same reason, which makes D6 visible.
  */
 import { describe, expect, test } from "bun:test";
+import { CONFIG_PERMISSION, LEDGER_PERMISSION } from "../../src/application/service.js";
 import { loadCommands, loadComponents } from "../../src/bot/discovery.js";
 import { type Audience, audienceOf, viewerOf } from "../../src/discord/presenters/audience.js";
 import { mayAccess, mayOpen } from "../../src/domain/modmail.js";
@@ -202,6 +203,21 @@ const LEGACY_PAGES: Readonly<Record<string, readonly LegacyPageAccess[]>> = {
   "/g/:guild/status": ["officer"],
 };
 
+/** 2.43.0's Service.configure allowlist (src/application/service.ts), in its order. */
+const LEGACY_CONFIG_FIELDS = [
+  "fc_id",
+  "member_role_id",
+  "guest_role_id",
+  "officer_role_id",
+  "leader_role_id",
+  "ledger_channel_id",
+  "officer_notifications_channel_id",
+  "changelog_channel_id",
+] as const;
+
+/** The operations 2.43.0's /ledger subcommands passed to Service.ledger. */
+const LEGACY_LEDGER_OPERATIONS = ["deposit", "withdraw", "initialize", "adjust"] as const;
+
 // ================================================================================================
 // END OF FROZEN 2.43.0.
 // ================================================================================================
@@ -324,6 +340,15 @@ const legacyActorOf = (person: Person): LegacyActor => ({
   ...administrator(person),
 });
 
+/**
+ * 2.43.0's actor as owner decision Q2 A would have left it: Manage Server makes no officer, so only
+ * the Officer role does. Everything else is as 2.43.0 resolved it, Manage Server included.
+ */
+const legacyNoQ2AActorOf = (person: Person): LegacyActor => ({
+  ...legacyActorOf(person),
+  officer: person.officerRoleCounts,
+});
+
 /** 2.44.0's resolved actor, its access from the fixture that mirrors Service.enrichActor. */
 function nextActorOf(person: Person): Actor {
   const spec = {
@@ -339,10 +364,11 @@ function nextActorOf(person: Person): Actor {
   return { ...spec, access: accessOf({ ...spec, officer: person.officerRoleCounts }) };
 }
 
-/** Each person with both actors, built once. */
+/** Each person with both releases' actors, and 2.43.0's without Q2A's officer, built once. */
 const ACTORS = PEOPLE.map((person) => ({
   person,
   legacy: legacyActorOf(person),
+  legacyNoQ2A: legacyNoQ2AActorOf(person),
   next: nextActorOf(person),
 }));
 
@@ -379,6 +405,15 @@ const membershipNeeded = (): Failure =>
     "The FC ledger is for confirmed members of this server's Free Company.",
     0,
     { kind: "scope", scope: "membership" },
+  );
+
+/** Service's memberRoleNeeded refusal (2.44.0): confirmed membership, but not the permission. */
+const memberRoleNeeded = (permission: "ledger.view" | "ledger.deposit"): Failure =>
+  new Failure(
+    "forbidden",
+    "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.",
+    0,
+    { kind: "scope", scope: "membership", permission },
   );
 
 /** The actor half of ModMail.staticRefusal, unchanged: Member or Guest, and no Administrator. */
@@ -422,19 +457,10 @@ const ownRecord = (name: string): Decision => ({
   next: (actor, facts) => passes(() => authorizeOwner(actor, actor.guildId, ownerOf(facts))),
 });
 
-/** Service.configure's fields and the permission each needs now (service.ts CONFIG_PERMISSION). */
-const CONFIG_FIELDS: Readonly<Record<string, PermissionId>> = {
-  fc_id: "admin.fc",
-  member_role_id: "admin.roles",
-  guest_role_id: "admin.roles",
-  officer_role_id: "admin.roles",
-  leader_role_id: "admin.roles",
-  ledger_channel_id: "config.channels",
-  officer_notifications_channel_id: "config.officer_channel",
-  changelog_channel_id: "config.channels",
-};
-
-/** Service.configure's authorization in each release, in its own order. */
+/**
+ * Service.configure's authorization in each release, in its own order, for one field and the
+ * permission src's CONFIG_PERMISSION names for it.
+ */
 const configure = (field: string, id: PermissionId): Decision => ({
   name: `Service.configure(${field})`,
   reads: ["onboarding", "rankSet", "configured"],
@@ -458,7 +484,7 @@ const configure = (field: string, id: PermissionId): Decision => ({
 const WITHDRAWALS =
   "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.";
 
-/** Service.ledger's authorization for one operation (service.ts LEDGER_PERMISSION). */
+/** Service.ledger's authorization for one operation and src's LEDGER_PERMISSION for it. */
 const ledger = (operation: string, id: PermissionId): Decision => ({
   name: `Service.ledger(${operation})`,
   reads: ["eligible"],
@@ -471,14 +497,14 @@ const ledger = (operation: string, id: PermissionId): Decision => ({
       }
       if (!actor.officer && !facts.eligible) throw membershipNeeded();
     }),
+  // Without ledger.audit a deposit checks membership first, then the permission (memberRoleNeeded).
   next: (actor, facts) =>
     passes(() => {
       if (operation !== "deposit") requirePermission(actor, actor.guildId, id, WITHDRAWALS);
-      if (
-        operation === "deposit" &&
-        !(can(actor, "ledger.deposit") && (can(actor, "ledger.audit") || facts.eligible))
-      )
-        throw membershipNeeded();
+      if (operation === "deposit") {
+        if (!can(actor, "ledger.audit") && !facts.eligible) throw membershipNeeded();
+        if (!can(actor, "ledger.deposit")) throw memberRoleNeeded("ledger.deposit");
+      }
     }),
 });
 
@@ -498,11 +524,20 @@ const ledgerRead = (current: boolean): Decision => ({
       }
       if (!actor.officer && !facts.eligible) throw membershipNeeded();
     }),
+  // Without ledger.audit it checks membership first, then ledger.view (memberRoleNeeded).
   next: (actor, facts) =>
     passes(() => {
-      if (!current) requirePermission(actor, actor.guildId, "ledger.audit");
-      if (!can(actor, "ledger.audit") && !(can(actor, "ledger.view") && facts.eligible))
-        throw membershipNeeded();
+      if (!current)
+        requirePermission(
+          actor,
+          actor.guildId,
+          "ledger.audit",
+          "Only officers can view a previous FC's ledger.",
+        );
+      if (!can(actor, "ledger.audit")) {
+        if (!facts.eligible) throw membershipNeeded();
+        if (!can(actor, "ledger.view")) throw memberRoleNeeded("ledger.view");
+      }
     }),
 });
 
@@ -545,7 +580,7 @@ const DECISIONS: readonly Decision[] = [
       passes(() => authorizeOwner(actor, actor.guildId, ownerOf(facts))) &&
       (facts.self || can(actor, "admin.links") || !facts.confersRank),
   },
-  ...Object.entries(CONFIG_FIELDS).map(([field, id]) => configure(field, id)),
+  ...Object.entries(CONFIG_PERMISSION).map(([field, id]) => configure(field, id)),
   officerLevel("Service.configureGuestApplications", "config.guest_applications"),
   managerLevel("Service.configureOfficerRank", "admin.ranks"),
   managerLevel("Service.configureRoleLayout", "admin.roles"),
@@ -580,10 +615,7 @@ const DECISIONS: readonly Decision[] = [
           requirePermission(actor, actor.guildId, "admin.links");
       }),
   },
-  ledger("deposit", "ledger.deposit"),
-  ledger("withdraw", "ledger.withdraw"),
-  ledger("initialize", "ledger.initialize"),
-  ledger("adjust", "ledger.adjust"),
+  ...Object.entries(LEDGER_PERMISSION).map(([operation, id]) => ledger(operation, id)),
   ledgerRead(true),
   ledgerRead(false),
   anyone("Service.apply", "guests.apply"),
@@ -809,6 +841,8 @@ interface Case {
   readonly person: Person;
   readonly facts: Facts;
   readonly legacy: Outcome;
+  /** 2.43.0's answer had Manage Server made no officer (legacyNoQ2AActorOf). */
+  readonly legacyNoQ2A: Outcome;
   readonly next: Outcome;
 }
 
@@ -839,8 +873,15 @@ const OFFICER_COMPLETION = new Set(["router /officer", "/officer autocomplete"])
 const DELTAS: readonly Delta[] = [
   {
     // Owner decision Q2 A: Manage Server without Manage Roles was a full officer; it grants nothing.
+    // It explains only the officer Manage Server made: 2.44.0 must still answer as 2.43.0 would
+    // have without it (legacyNoQ2A), so what the person's roles gave them is kept. With the Officer
+    // role counting, their officer came from the role, so nothing is Q2A's.
     name: "Q2A",
-    covers: ({ person }) => person.manageServer && !person.manageRoles,
+    covers: ({ person, legacyNoQ2A, next }) =>
+      person.manageServer &&
+      !person.manageRoles &&
+      !person.officerRoleCounts &&
+      legacyNoQ2A === next,
   },
   {
     // D4: removing someone else's link that counts for rank needs admin.links (server managers).
@@ -868,7 +909,8 @@ const DELTAS: readonly Delta[] = [
   },
   {
     // D6: the ledger's member side needs ledger.view or ledger.deposit (Member or Officer role)
-    // as well as confirmed FC membership; ledger.audit still skips membership.
+    // as well as confirmed FC membership, refused with memberRoleNeeded once membership is
+    // confirmed; ledger.audit still skips both.
     name: "D6",
     covers: ({ decision, person, facts }) =>
       LEDGER_MEMBERSHIP.has(decision) &&
@@ -921,13 +963,20 @@ function compare(decisions: readonly Decision[], deltas: readonly Delta[] = DELT
   for (const decision of decisions) {
     const reads = decision.reads ?? [];
     for (const facts of situations(reads))
-      for (const { person, legacy: before, next: after } of ACTORS) {
+      for (const { person, legacy: before, legacyNoQ2A: withoutQ2A, next: after } of ACTORS) {
         if (!possible(person, facts)) continue;
         evaluated += 1;
         const legacy = decision.legacy(before, facts);
         const next = decision.next(after, facts);
         if (legacy === next) continue;
-        const disagreement: Case = { decision: decision.name, person, facts, legacy, next };
+        const disagreement: Case = {
+          decision: decision.name,
+          person,
+          facts,
+          legacy,
+          legacyNoQ2A: decision.legacy(withoutQ2A, facts),
+          next,
+        };
         const explaining = narrows(legacy, next)
           ? deltas.filter((delta) => delta.covers(disagreement))
           : [];
@@ -945,6 +994,9 @@ describe("2.43.0 to 2.44.0 access parity", () => {
     expect([...commands.keys()].sort()).toEqual(Object.keys(LEGACY_COMMANDS).sort());
     expect([...components.keys()].sort()).toEqual(Object.keys(LEGACY_COMPONENTS).sort());
     expect([...pages.keys()].sort()).toEqual(Object.keys(LEGACY_PAGES).sort());
+    // The configure and ledger decisions come from src's maps, so each must still name them all.
+    expect(Object.keys(CONFIG_PERMISSION).sort()).toEqual([...LEGACY_CONFIG_FIELDS].sort());
+    expect(Object.keys(LEDGER_PERMISSION).sort()).toEqual([...LEGACY_LEDGER_OPERATIONS].sort());
     const names = [...DECISIONS, ...decisions].map((decision) => decision.name);
     expect(new Set(names).size).toBe(names.length);
   });
@@ -975,6 +1027,29 @@ describe("2.43.0 to 2.44.0 access parity", () => {
     };
     const { unexplained } = compare([narrowed]);
     expect(unexplained.some((line) => line.includes("officerRoleCounts=true"))).toBe(true);
+    // Q2A takes away only Manage Server's own officer, never what a role gave beside it.
+    const manageServerOnly = (actor: Actor) => actor.serverManager === true && !actor.manageRoles;
+    const officerRoleIgnored: Decision = {
+      ...officerLevel("mutant: Officer role ignored beside Manage Server", "config.view"),
+      next: (actor) =>
+        !manageServerOnly(actor) &&
+        passes(() => requirePermission(actor, actor.guildId, "config.view")),
+    };
+    expect(
+      compare([officerRoleIgnored]).unexplained.some((line) =>
+        line.includes("manageServer=true manageRoles=false officerRoleCounts=true"),
+      ),
+    ).toBe(true);
+    const memberIgnored: Decision = {
+      name: "mutant: Member ignored beside Manage Server",
+      legacy: (actor) => legacyMaySuggest(actor, BINDINGS),
+      next: (actor) => !manageServerOnly(actor) && maySuggest(actor),
+    };
+    expect(
+      compare([memberIgnored]).unexplained.some((line) =>
+        line.includes("manageServer=true manageRoles=false officerRoleCounts=false member=true"),
+      ),
+    ).toBe(true);
     // Each delta explains only what it names: with none listed, the real decisions all fail.
     expect(compare(DECISIONS, []).unexplained.length).toBeGreaterThan(0);
   });

@@ -175,6 +175,19 @@ const membershipNeeded = (): Failure =>
     { kind: "scope", scope: "membership" },
   );
 
+/**
+ * Ledger access for a confirmed FC member without ledger.view or ledger.deposit (2.44.0): those
+ * come with the Member role, which TaruBot gives after a roster check, so the remedy differs from
+ * membershipNeeded's. The detail names the permission, so the reply can say so.
+ */
+const memberRoleNeeded = (permission: "ledger.view" | "ledger.deposit"): Failure =>
+  new Failure(
+    "forbidden",
+    "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.",
+    0,
+    { kind: "scope", scope: "membership", permission },
+  );
+
 /** The applicant's join changed while the form was open, so the form's join context is stale. */
 const joinChanged = (): Failure =>
   new Failure(
@@ -231,7 +244,7 @@ export type CharacterQuery =
   | { readonly name: string; readonly world: string };
 
 /** Each /ledger operation's permission. */
-const LEDGER_PERMISSION: Readonly<Record<string, PermissionId>> = {
+export const LEDGER_PERMISSION: Readonly<Record<string, PermissionId>> = {
   deposit: "ledger.deposit",
   withdraw: "ledger.withdraw",
   initialize: "ledger.initialize",
@@ -254,7 +267,7 @@ const CONFIG_FIELDS = [
   "changelog_channel_id",
 ] as const;
 
-const CONFIG_PERMISSION: Readonly<Record<(typeof CONFIG_FIELDS)[number], PermissionId>> = {
+export const CONFIG_PERMISSION: Readonly<Record<(typeof CONFIG_FIELDS)[number], PermissionId>> = {
   fc_id: "admin.fc",
   member_role_id: "admin.roles",
   guest_role_id: "admin.roles",
@@ -2278,16 +2291,17 @@ export class Service {
         .for("share");
       if (!current || current.revision !== guild.revision)
         throw new Failure("conflict", SETTINGS_CHANGED);
-      // A deposit needs ledger.deposit and, unless the actor may audit the ledger, confirmed FC
-      // membership (memberEligible), checked here under the settings fence.
-      if (
-        operation === "deposit" &&
-        !(
-          can(actor, "ledger.deposit") &&
-          (can(actor, "ledger.audit") || (await this.memberEligible(client, current, actor.userId)))
+      // A deposit needs confirmed FC membership (memberEligible, checked here under the settings
+      // fence) unless the actor may audit the ledger, and ledger.deposit, which the Member and
+      // Officer roles carry. Membership is checked first, so its remedy comes first.
+      if (operation === "deposit") {
+        if (
+          !can(actor, "ledger.audit") &&
+          !(await this.memberEligible(client, current, actor.userId))
         )
-      )
-        throw membershipNeeded();
+          throw membershipNeeded();
+        if (!can(actor, "ledger.deposit")) throw memberRoleNeeded("ledger.deposit");
+      }
       const [account] = await db
         .select()
         .from(t.ledgerAccounts)
@@ -2496,13 +2510,12 @@ export class Service {
         "ledger.audit",
         "Only officers can view a previous FC's ledger.",
       );
-    // Reading the current FC's ledger needs ledger.view and confirmed FC membership, or
-    // ledger.audit, which sees every ledger without the membership condition.
-    if (
-      !can(actor, "ledger.audit") &&
-      !(can(actor, "ledger.view") && (await this.memberEligible(this.db.pool, guild, actor.userId)))
-    )
-      throw membershipNeeded();
+    // Reading the current FC's ledger needs confirmed FC membership and ledger.view, or
+    // ledger.audit, which sees every ledger without either condition.
+    if (!can(actor, "ledger.audit")) {
+      if (!(await this.memberEligible(this.db.pool, guild, actor.userId))) throw membershipNeeded();
+      if (!can(actor, "ledger.view")) throw memberRoleNeeded("ledger.view");
+    }
     const db = this.db.orm;
     const [account] = await db
       .select()

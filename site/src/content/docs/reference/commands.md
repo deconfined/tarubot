@@ -11,7 +11,7 @@ Every command works only inside a server, and every reply is private to the pers
 
 - **Anyone** means any human member of the server.
 - **Officers** hold the Officer role with TaruBot backing it: a linked character holds the officer rank, or a server manager granted it with `/officer grant`. A role given by hand alone doesn't count, and neither does Manage Server alone. See [Who can do what](/tarubot/admin/access/).
-- **Server managers** have both Manage Server and Manage Roles, and can use every command. Bot officer access alone isn't enough.
+- **Server managers** have both Manage Server and Manage Roles, and can use every command except `/suggest` and `/modmail`, which follow their own Member or Guest role. Bot officer access alone isn't enough.
 - **Confirmed FC members** hold the Member role and have a linked character that an accepted roster lists in the server's Free Company.
 
 A **Member** option suggests server members as you type. You can also paste a user ID or an @mention, which is how you name someone who has left the server.

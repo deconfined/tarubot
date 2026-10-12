@@ -1031,9 +1031,15 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(await service.ledgerRead(inGuild, null, null, false)).toMatchObject({
       account: { fc_id: fc },
     });
+    // The refusal names ledger.view, so the reply leads to the Member role rather than the roster.
     await expect(
       service.ledgerRead(actorOf({ ...inGuild, member: false, guest: true }), null, null, false),
-    ).rejects.toMatchObject({ code: "forbidden", detail: { kind: "scope", scope: "membership" } });
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      message:
+        "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.",
+      detail: { kind: "scope", scope: "membership", permission: "ledger.view" },
+    });
     const otherGuild = "777777777777777777";
     await db.query("INSERT INTO guilds(id,fc_id,ledger_channel_id) VALUES($1,$2,'777888999')", [
       otherGuild,
@@ -1058,9 +1064,18 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     });
     const second = await service.guild(visitor);
     expect(await service.memberEligible(db.pool, second, owner)).toBe(false);
-    await expect(service.ledgerRead(visitor, null, null, false)).rejects.toMatchObject({
+    // Missing roster evidence is the membership refusal, which names no permission.
+    const unconfirmed = await service.ledgerRead(visitor, null, null, false).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(unconfirmed).toMatchObject({
       code: "forbidden",
-      detail: { kind: "scope", scope: "membership" },
+      message: "The FC ledger is for confirmed members of this server's Free Company.",
+    });
+    expect(unconfirmed instanceof Failure ? unconfirmed.detail : "missing").toEqual({
+      kind: "scope",
+      scope: "membership",
     });
     expect(await service.characters(visitor, owner)).toEqual({ characters: [] });
     const balance = z
@@ -5741,12 +5756,102 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await expect(service.configureRoleLayout(delegated, true)).rejects.toMatchObject(
       managersOnly("admin.roles"),
     );
-    // Choosing a channel stays officer work.
+    // Choosing a channel stays officer work: config.channels is a staff permission, not a fixed
+    // one, so it covers the update-post channel as well as the ledger's.
     expect(await service.configure(delegated, "ledger_channel_id", "98203")).toMatchObject({
       status: "saved",
     });
-    expect(await service.guild(manager)).toMatchObject({ fc_id: fcId, member_role_id: "98101" });
+    expect(await service.configure(delegated, "changelog_channel_id", "98205")).toMatchObject({
+      status: "saved",
+      field: "changelog_channel_id",
+      value: "98205",
+      previous: null,
+    });
+    expect(await service.guild(manager)).toMatchObject({
+      fc_id: fcId,
+      member_role_id: "98101",
+      ledger_channel_id: "98203",
+      changelog_channel_id: "98205",
+    });
     expect(await service.unlinkCompany(manager, fcId)).toMatchObject({ status: "unlinked" });
+  });
+
+  test("a ledger deposit needs confirmed FC membership, then the Member role's ledger.deposit (2.44.0)", async () => {
+    const fcId = "9230000000000098019";
+    const { manager } = await rbacGuild("888888888888888819", fcId);
+    const guildId = manager.guildId;
+    // A server manager links the character, and an accepted roster confirms it in the FC.
+    const user = "98074";
+    await service.assign(manager, user, rosterMember("77980741", fcId), "In the FC");
+    await publishRoster(fcId, [rosterMember("77980741", fcId)]);
+    expect(await service.memberEligible(db.pool, await service.guild(manager), user)).toBe(true);
+    await service.ledger(manager, "initialize", "100", "Opening balance", randomUUID());
+    const entries = async () =>
+      (
+        await db.orm
+          .select({
+            sequence: t.ledgerEntries.sequence,
+            operation: t.ledgerEntries.operation,
+            delta: t.ledgerEntries.delta,
+            actor: t.ledgerEntries.actor_id,
+          })
+          .from(t.ledgerEntries)
+          .where(eq(t.ledgerEntries.guild_id, guildId))
+          .orderBy(asc(t.ledgerEntries.sequence))
+      ).map((row) => [row.sequence, row.operation, row.delta, row.actor]);
+    // (a) Holding the Member role, the confirmed member records a deposit.
+    const member = actorOf({ guildId, userId: user, manageRoles: false, member: true });
+    const key = randomUUID();
+    expect(await service.ledger(member, "deposit", 5, "Chest run", key)).toMatchObject({
+      status: "recorded",
+      channelId: "98201",
+      entry: { sequence: 2n, operation: "deposit", delta: 5n, balance: 105n, actor_id: user },
+    });
+    const recorded = [
+      [1n, "initialize", 100n, manager.userId],
+      [2n, "deposit", 5n, user],
+    ];
+    expect(await entries()).toEqual(recorded);
+    // (b) The same confirmed member holding only Guest (the Member role not given yet, or role
+    // changes paused) lacks ledger.deposit, so the refusal names it and the Member role.
+    await expect(
+      service.ledger(
+        actorOf({ guildId, userId: user, manageRoles: false, guest: true }),
+        "deposit",
+        5,
+        "Without the Member role",
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      message:
+        "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.",
+      detail: { kind: "scope", scope: "membership", permission: "ledger.deposit" },
+    });
+    // (c) A Member role holder with no confirmed character gets the membership refusal, which
+    // names no permission: the remedy is the roster, not the role.
+    const unconfirmed = await service
+      .ledger(
+        actorOf({ guildId, userId: "98075", manageRoles: false, member: true }),
+        "deposit",
+        5,
+        "Not on the roster",
+        randomUUID(),
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(unconfirmed).toMatchObject({
+      code: "forbidden",
+      message: "The FC ledger is for confirmed members of this server's Free Company.",
+    });
+    expect(unconfirmed instanceof Failure ? unconfirmed.detail : "missing").toEqual({
+      kind: "scope",
+      scope: "membership",
+    });
+    // Neither refusal wrote a ledger row.
+    expect(await entries()).toEqual(recorded);
   });
 
   test("FC Leader comes only from a link that counts for rank (2.44.0)", async () => {

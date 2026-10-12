@@ -26,7 +26,7 @@ Discord's Manage Server alone doesn't make anyone an officer. All of these comma
 [`/config officer_rank`](/tarubot/reference/commands/#config-officer_rank) names the FC rank whose holders get officer access:
 
 - A linked character with confirmed FC membership and that rank on an accepted roster qualifies its owner, when its link [counts for rank](/tarubot/admin/access/#links-that-count-for-rank). With several linked characters, any one is enough.
-- Until a new link's first roster check, a member who already holds the Officer role keeps it, but gets officer permissions only once the roster confirms the rank.
+- Until a new link's first roster check, a member who already holds the Officer role keeps it, but gets officer permissions only once the roster confirms the rank, or lists the character without rank details.
 - Rank names match regardless of case, spacing and Unicode forms. This is the **FC rank**, not the character's Grand Company rank.
 - A rank alone grants nothing until an FC is linked and an Officer role is bound; the reply says what's still missing.
 - A changed rank rechecks every member. Naming the saved rank again, or `unset_rank:true` with no rank set, changes nothing and says so.

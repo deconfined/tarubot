@@ -62,7 +62,7 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
   "2.43.0":
     "Members and guests can now privately message their officers with /modmail or from TaruBot's dashboard once officers turn it on; the conversation stays on the dashboard.",
   "2.44.0":
-    "TaruBot now checks a named permission for every command and dashboard page. Manage Server alone no longer makes someone an officer, and only server managers can link the FC, choose TaruBot's roles or remove a character link that counts for FC rank.",
+    "TaruBot now checks a named permission for each command, button and dashboard page it guards. Manage Server alone no longer makes someone an officer, and only server managers can link the FC, choose TaruBot's roles or remove someone else's character link that counts for FC rank.",
 };
 
 /**

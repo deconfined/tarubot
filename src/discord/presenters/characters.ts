@@ -805,7 +805,7 @@ export function assignReply(
     delegated && {
       name: "Officer rank",
       value:
-        "You assigned this as a delegated officer, so this link can grant Member or Guest but never the Officer role, even if the character holds the officer rank.",
+        "You assigned this as a delegated officer, so this link can grant Member or Guest but never the Officer or FC Leader role, even if the character holds the officer rank or leads the FC.",
     },
     effects.length > 0 && { name: "Effects", value: effects.join(" ") },
     result.roster.fresh ? null : rosterEvidence(result.roster, mode),

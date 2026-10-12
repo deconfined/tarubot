@@ -129,6 +129,7 @@ import {
   type MyRoles,
   menuRoleNames,
   offersRoles,
+  PUBLISHING_OPS,
   type RoleChoiceOutcome,
   type RoleChoiceStatus,
   SelfRoles,
@@ -158,7 +159,6 @@ import {
   EMPTY_MENU,
   holdsAdministrator,
   type MenuFieldError,
-  type MenuOperation,
   mergeChoice,
   menuRoleIds,
   planSelfRoles,
@@ -1297,16 +1297,6 @@ function jobStatus(job: HarnessJob | undefined, now: number): RoleChoiceStatus |
 }
 
 /**
- * The Role menu operations that make roles self-assignable, which need rolemenu.publish rather than
- * rolemenu.edit: SelfRoles.edit's PUBLISHING_OPS (2.44.0).
- */
-const PUBLISHING_OPS: ReadonlySet<MenuOperation["op"]> = new Set([
-  "options.add",
-  "category.setState",
-  "menu.publishAll",
-]);
-
-/**
  * The SelfRoles service over invented data: editor() and edit() as src/application/self-roles.ts
  * has them, with an in-memory menu per server in `menus` instead of PostgreSQL and the invented
  * snapshot instead of Discord. The order of checks and the outcomes are the real operation's: an
@@ -1352,6 +1342,7 @@ export function harnessSelfRoles(
   roles.edit = async (actor, request): Promise<SelfRoleEditOutcome> => {
     const { operation } = request;
     requirePermission(actor, actor.guildId, "rolemenu.view");
+    // SelfRoles.edit's own split, imported, so the harness can't drift from the real operation.
     requirePermission(
       actor,
       actor.guildId,

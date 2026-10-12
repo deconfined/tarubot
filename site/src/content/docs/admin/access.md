@@ -13,7 +13,7 @@ TaruBot checks every command, button and dashboard change against the person's c
 | Holders of the **Member** role | Everything above, plus [suggest features](/tarubot/admin/suggestions/) in the FC's own server, open [mod mail](/tarubot/admin/mod-mail/) cases, pick their own roles on the dashboard's **My roles** page, and read the ledger and record deposits while a linked character is a confirmed FC member |
 | Holders of the **Guest** role | Everything everyone can do, plus suggest features, mod mail and My roles |
 | **Officers**, through the Officer role | Every [officer permission](#officer-permissions), plus the ledger and My roles |
-| **Server managers** | Every permission, including the ones [only they](#server-managers) can have |
+| **Server managers** | Every permission, including the ones [only they](#server-managers) can have, except suggesting features and opening mod mail cases, which follow their own Member or Guest role |
 
 The FC Leader role opens staff channels under onboarding, but carries no TaruBot permission. The permissions each role carries are fixed in this release.
 
@@ -26,7 +26,7 @@ A member is a TaruBot **officer** in a server when they hold the server's bound 
 
 Discord's **Manage Server** permission on its own doesn't make anyone an officer. A server manager, who also has Manage Roles, holds every permission anyway.
 
-TaruBot gives the Officer role to exactly those members. A role given by hand alone doesn't count: its holder gets **Officers only**, and TaruBot removes the role at its next pass. While TaruBot can't tell yet, for example before a new link's first roster check, a member who already holds the role keeps it, but it gives officer permissions only once a roster confirms the rank. See [Officers](/tarubot/admin/officers/).
+TaruBot gives the Officer role to exactly those members. A role given by hand alone doesn't count: its holder gets **Officers only**, and TaruBot removes the role at its next pass. While TaruBot can't tell yet, for example before a new link's first roster check, a member who already holds the role keeps it, but it gives officer permissions only once a roster confirms the rank, or lists the character without rank details. See [Officers](/tarubot/admin/officers/).
 
 The Officer role grants TaruBot's officer permissions only. It carries no Discord permissions, and it doesn't let anyone manage Discord roles or channels. A revocation takes effect at once, even while Discord is still removing the role.
 
@@ -46,7 +46,7 @@ For the Role menu, TaruBot doesn't check the officer's own Discord permissions o
 
 ## Server managers
 
-A **server manager** has both **Manage Server** and **Manage Roles** (the server owner and Administrator have both). Server managers hold every permission. Some can't go to anyone else, because whoever holds them could give themselves the rest: changing who holds authority can't be delegated through the Officer role itself. Only server managers can:
+A **server manager** has both **Manage Server** and **Manage Roles** (the server owner and Administrator have both). Server managers hold every permission except suggesting features and opening mod mail cases, which follow their own Member or Guest role. Some can't go to anyone else, because whoever holds them could give themselves the rest: changing who holds authority can't be delegated through the Officer role itself. Only server managers can:
 
 - link or unlink the FC ([`/config fc link`](/tarubot/reference/commands/#config-fc-link), [`/config fc unlink`](/tarubot/reference/commands/#config-fc-unlink)), since the FC's roster decides who is a member;
 - choose any of the four roles TaruBot manages: Member, Guest, Officer and FC Leader ([`/config roles`](/tarubot/reference/commands/#config-roles-member)), and set the role layout ([`/config role_layout`](/tarubot/reference/commands/#config-role_layout));
@@ -78,7 +78,7 @@ When the dashboard is on, its pages check the same permissions, against the pers
 | Who | Pages |
 | --- | --- |
 | Holders of the Member or Guest role | My roles and Mod mail (their own cases), while TaruBot doesn't have Administrator in the server |
-| Officers | Server configuration, My roles, Role menu, Background work and Mod mail (every case) |
+| Officers and server managers | Server configuration, My roles, Role menu, Background work and Mod mail (every case) |
 | Anyone else, including people in the lobby | No signed-in pages; anyone can open the public [status page](/tarubot/use/progress-and-problems/#is-tarubot-up) |
 
 While TaruBot has Administrator in a server, members and guests can't open its pages at all: the pages everyone can reach never run beside a bot that can do anything in the server. Use [`/setup overrides`](/tarubot/reference/commands/#setup-overrides), then remove Administrator once `/config validate` says it's no longer needed. Someone who has just lost Member or Guest can keep viewing for up to a minute, but any change they send is checked again first and refused.

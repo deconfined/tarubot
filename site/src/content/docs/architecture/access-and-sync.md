@@ -40,7 +40,7 @@ When evidence is **uncertain**, such as a stale roster or a link not yet checked
 
 ## Permissions
 
-Each function TaruBot guards checks one named permission, at one decision point, against the actor resolved for that command, button or page request. The managed roles that count for someone carry the permissions: Member and Guest carry member features, the Officer role carries officer permissions, and server managers (Manage Server and Manage Roles) hold every permission. A few belong to everyone in the server. [Who can do what](/tarubot/admin/access/) lists them.
+Each function TaruBot guards checks one named permission, at one decision point, against the actor resolved for that command, button or page request. The managed roles that count for someone carry the permissions: Member and Guest carry member features, the Officer role carries officer permissions, and server managers (Manage Server and Manage Roles) hold every permission except suggesting features and opening mod mail cases, which follow their own Member or Guest role. A few belong to everyone in the server. [Who can do what](/tarubot/admin/access/) lists them.
 
 ## Departures
 

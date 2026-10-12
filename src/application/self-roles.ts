@@ -594,7 +594,7 @@ function auditDetails(
  * Role menu operations that make roles self-assignable (rolemenu.publish): adding options, which
  * takes effect at once in a published category, and publishing. The rest need rolemenu.edit.
  */
-const PUBLISHING_OPS: ReadonlySet<MenuOperation["op"]> = new Set([
+export const PUBLISHING_OPS: ReadonlySet<MenuOperation["op"]> = new Set([
   "options.add",
   "category.setState",
   "menu.publishAll",

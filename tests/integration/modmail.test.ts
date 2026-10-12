@@ -1023,6 +1023,17 @@ describe.skipIf(!url)("mod mail", () => {
       const view = await modmail().caseView(reader, number);
       expect(view).toMatchObject({ audience: "officer", side: "officer", state: "officers" });
       expect(view?.reads).not.toBeNull();
+      // The page offers the reader no reply, close or reopen form; a full officer on someone
+      // else's case, and the member on their own, get them.
+      expect(view?.canRespond).toBe(false);
+      expect(await modmail().caseView(OFFICER, number)).toMatchObject({
+        side: "officer",
+        canRespond: true,
+      });
+      expect(await modmail().caseView(MEMBER, number)).toMatchObject({
+        side: "member",
+        canRespond: true,
+      });
       const refusal = {
         code: "forbidden",
         message: OFFICERS_ONLY,
@@ -1070,7 +1081,10 @@ describe.skipIf(!url)("mod mail", () => {
       // A reader who opened a case of their own answers it as its member, without modmail.respond.
       const own = withoutRespond(person(SECOND_OFFICER.userId, { officer: true, member: true }));
       const mine = await opened(own);
-      expect((await modmail().caseView(own, mine))?.side).toBe("member");
+      expect(await modmail().caseView(own, mine)).toMatchObject({
+        side: "member",
+        canRespond: true,
+      });
       expect(
         (
           await modmail().reply(own, mine, {

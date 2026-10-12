@@ -172,8 +172,9 @@ export function applicationsClosedSpec(extra: readonly FieldSpec[] = []): EmbedS
 /**
  * /apply's pre-form refusal (approved guests#21). It is an expected state, not a failure, so it
  * has no footer and is never reported. `officerHint` is read from the interaction's own
- * permissions (Manage Server), because the pre-form check cannot afford a network lookup; it only
- * adds the commands that open applications, never any access.
+ * permissions (Manage Server and Manage Roles: a server manager), because the pre-form check
+ * cannot afford a network lookup; it only adds the commands that open applications, never any
+ * access.
  */
 export function applicationsClosedReply(options: { readonly officerHint: boolean }): Presented {
   return reply(applicationsClosedSpec(options.officerHint ? [OPEN_APPLICATIONS] : []));
