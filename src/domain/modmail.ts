@@ -10,7 +10,7 @@
  * never the text or the member's name, and TaruBot never reads messages or DMs (no message
  * intents).
  */
-import { can, type Actor } from "./policy.js";
+import { can, holds, type Actor } from "./policy.js";
 
 /** A case's state: waiting on officers, waiting on the member, or closed. */
 export type CaseState = "officers" | "member" | "closed";
@@ -85,7 +85,7 @@ export function caseUrl(origin: string, guildId: string, number: bigint): string
 }
 
 /**
- * Who may open a case (owner decision 5): someone holding the server's Member or Guest role now,
+ * Who may use mod mail as a member (owner decision 5): someone holding the server's Member or Guest role now,
  * while TaruBot holds no Administrator there (the A2 gate, as for My roles). Being an officer is
  * neither needed nor enough: an officer who also holds Member or Guest may open one, an officer
  * with neither may not, and lobby newcomers never can. A Discord time-out doesn't matter: mod mail
@@ -94,8 +94,15 @@ export function caseUrl(origin: string, guildId: string, number: bigint): string
  * /modmail can't run then; the Mod mail page's Open a case form and its replies are how they get
  * through (owner decision of 2026-10-11). The limits still apply.
  */
-export const mayOpen = (actor: Actor): boolean =>
-  can(actor, "modmail.open") && actor.botAdministrator === false;
+export const mayUse = (actor: Actor): boolean =>
+  holds(actor, "modmail.open") && actor.botAdministrator === false;
+
+/**
+ * Whether they may open a new case right now: mayUse, and not paused (2.45.0). A pause on
+ * modmail.open stops new cases only; the person still reads, replies to and closes the cases they
+ * have, which is why those check mayUse.
+ */
+export const mayOpen = (actor: Actor): boolean => mayUse(actor) && can(actor, "modmail.open");
 
 /**
  * Who may read a case: anyone with modmail.inbox in its server (every officer, owner decision 6),
@@ -105,7 +112,7 @@ export const mayOpen = (actor: Actor): boolean =>
  */
 export function mayAccess(actor: Actor, openerId: string): boolean {
   if (can(actor, "modmail.inbox")) return true;
-  return actor.userId === openerId && mayOpen(actor);
+  return actor.userId === openerId && mayUse(actor);
 }
 
 /**
@@ -191,6 +198,7 @@ export type OpenRefusal =
   | "off"
   | "key"
   | "web"
+  | "paused"
   | "open_limit"
   | "daily_limit";
 
@@ -199,7 +207,7 @@ export type OpenRefusal =
  * sits on the dashboard). They name the rule and what to do, never another member, and never
  * which officers are involved.
  */
-export const OPEN_REFUSALS: Readonly<Record<OpenRefusal, string>> = {
+export const OPEN_REFUSALS: Readonly<Record<Exclude<OpenRefusal, "paused">, string>> = {
   not_configured: "TaruBot isn't set up in this server yet, so mod mail isn't available here.",
   not_member:
     "Mod mail is for this server's members and guests. If you've just been given Member or Guest, try again in a minute.",

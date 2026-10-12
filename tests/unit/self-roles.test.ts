@@ -3,13 +3,17 @@
  * pure function with the equal-state rule, what the menu lists, and the one rule set for what may
  * be self-assigned (selfRoleChecker) over invented servers. From 2.40.0, members' choices: what My
  * roles shows one person, which categories a save changed, the merge and equal-state rules, the
- * roles.self job's plan, and the channel-opening roles reconciliation takes (owner decision Q3 B). Any officer may add any role the rules
- * pass (owner decision, 2026-10-09), so the rules take no officer at all. Invented IDs: guild 100
- * (also @everyone's role), TaruBot 900 with its bot role 600, Member 201, Guest 202, Officer 203,
- * FC Leader 204, candidate roles from 300, a moderator role 400, and channels from 700.
+ * roles.self job's plan, the channel-opening roles reconciliation takes (owner decision Q3 B), and
+ * (2.45.0) that a pause on My roles refuses a save before anything is read. Any officer may add
+ * any role the rules pass (owner decision, 2026-10-09), so the rules take no officer at all.
+ * Invented IDs: guild 100 (also @everyone's role), TaruBot 900 with its bot role 600, Member 201,
+ * Guest 202, Officer 203, FC Leader 204, candidate roles from 300, a moderator role 400, and
+ * channels from 700.
  */
 import { describe, expect, test } from "bun:test";
 import { ChannelType as T, PermissionFlagsBits as P } from "discord.js";
+import { SelfRoles } from "../../src/application/self-roles.js";
+import { can, holds, selfServiceAccess } from "../../src/domain/policy.js";
 import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
 import {
   accessLossRemovals,
@@ -56,6 +60,7 @@ import {
   unreadableChannels,
 } from "../../src/domain/self-roles.js";
 import type { VisibilityChannel, VisibilityGuild } from "../../src/domain/visibility.js";
+import { actorOf } from "../fixtures/actors.js";
 
 const GUILD = "100";
 const BOT = "900";
@@ -2339,5 +2344,72 @@ describe("losing Member and Guest (owner decision Q3 B)", () => {
     expect(
       accessLossRemovals(games("published", C.above, C.game), opens, SETTINGS, [C.above, C.game]),
     ).toEqual([C.game]);
+  });
+});
+
+describe("a pause on My roles (2.45.0)", () => {
+  const ENDS = new Date("2026-10-19T12:00:00.000Z");
+  const REASON = "Please stop changing roles back and forth.";
+  /** A member whose use of My roles is paused; TaruBot holds no Administrator here (A2 passes). */
+  const paused = (facts: Parameters<typeof actorOf>[0]["paused"] = undefined) =>
+    actorOf({
+      guildId: "100",
+      userId: "405",
+      manageRoles: false,
+      member: true,
+      botAdministrator: false,
+      paused: facts ?? { "selfroles.use": { until: ENDS, reason: REASON } },
+    });
+  const blocked = {
+    code: "forbidden",
+    message: "Your use of this feature here is paused.",
+    detail: {
+      kind: "scope",
+      scope: "blocked",
+      permission: "selfroles.use",
+      until: ENDS,
+      reason: REASON,
+    },
+  };
+  /** A SelfRoles with nothing behind it: any read of the database or Discord throws a TypeError. */
+  const bare = (): SelfRoles => {
+    const instance: unknown = Object.create(SelfRoles.prototype);
+    if (!(instance instanceof SelfRoles)) throw new Error("Invalid self-roles fixture");
+    return instance;
+  };
+
+  test("the page still opens for a paused member: they hold the permission, they can't use it", () => {
+    const actor = paused();
+    expect(holds(actor, "selfroles.use")).toBe(true);
+    expect(can(actor, "selfroles.use")).toBe(false);
+    expect(selfServiceAccess(actor)).toBe(true);
+  });
+
+  test("a save is refused as paused before anything is read or written", async () => {
+    // The request is never looked at, nor the database or Discord: the refusal comes first.
+    await expect(bare().choose(paused(), { categories: [] })).rejects.toMatchObject(blocked);
+    // A forged POST from a person who is also in a time-out hears about the pause, not the time-out.
+    await expect(
+      bare().choose({ ...paused(), timedOut: true }, { categories: [] }),
+    ).rejects.toMatchObject(blocked);
+  });
+
+  test("the A2 gate is still asked first, so a pause never reveals the page to someone refused it", async () => {
+    // With TaruBot holding Administrator (or unknown), members get the page's own refusal.
+    const { botAdministrator: _, ...unknown } = paused();
+    for (const actor of [{ ...paused(), botAdministrator: true }, unknown])
+      await expect(bare().choose(actor, { categories: [] })).rejects.toMatchObject({
+        code: "forbidden",
+        message: CHOICE_MESSAGES.noAccess,
+      });
+  });
+
+  test("a pause on another feature doesn't stop a save from reaching its first dependency", async () => {
+    // The bare instance has no collaborators, so going past the checks is a TypeError: proof that
+    // nothing refused first.
+    for (const other of [{ "suggest.use": {} }, { "modmail.open": {} }, { "ledger.view": {} }])
+      await expect(bare().choose(paused(other), { categories: [] })).rejects.toBeInstanceOf(
+        TypeError,
+      );
   });
 });

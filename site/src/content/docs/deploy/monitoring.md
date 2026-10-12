@@ -271,13 +271,18 @@ docker compose exec -T postgres psql -U tarubot -d tarubot \
   -c "SELECT guild_id, actor_id, event_at FROM audit WHERE action = 'suggestion.posted' AND target = '#N'"
 ```
 
-Match an unconfirmed attempt by time against the issue's creation. Removing a member's Guest or Member role (a Guest with `/guest revoke`) ends their access to `/suggest`.
+Match an unconfirmed attempt by time against the issue's creation.
+
+**Officers can look the sender up too.** Since 2.45.0, an officer who holds **moderation.view** (the Officer role carries it) can type the issue's number with a `#` into **Find someone** on the dashboard's [Moderation page](/tarubot/admin/moderation/#who-sent-a-suggestion). The lookup reads the same `suggestion.posted` row, for that officer's own server only, so the query above is the operator's way, not the only one. Treat the sender's name as private either way.
+
+**Stopping one member's `/suggest`.** To stop one person without touching their roles, [pause](/tarubot/admin/moderation/) their use of it: an officer runs `/moderate block` with the feature **Suggesting features (/suggest)**, or uses the Moderation page. It ends at the time chosen, or when an officer lifts it, and the member is told why. A paused try costs nothing: it is refused before any limit, GitHub request or audit row, so it counts toward none of the limits above. Removing a member's Guest or Member role (a Guest with `/guest revoke`) ends their access to `/suggest` for good, along with everything else those roles give.
 
 **Failures, and what members see:**
 
 - **The limits, and GitHub's rate limit** on the post or the app's sign-in: "You can suggest again later", with when, logged at info. GitHub's rate limit records nothing.
 - **GitHub didn't confirm the post** (an outage, a timeout, an unreadable answer): "GitHub didn't confirm your suggestion", code `unavailable`, logged at warn. The try is recorded as `suggestion.unconfirmed` and counts toward the limits, so the card asks the member to check GitHub before sending it again. An outage during the app's sign-in reads and counts the same, although nothing was posted.
 - **A refused key, client ID or installation, or a request GitHub rejects:** the unexpected card, and an [issue report](#issue-reports) naming the app's settings. Nothing is recorded, so the member can try again once it's fixed.
+- **Paused for that member:** "Paused for you", naming `/suggest`, with the end and the reason an officer wrote. Nothing is sent, recorded or counted. It is logged at info and never reported.
 - **Switched off, or another server:** "Not available here", logged at info and never reported.
 - **A restart:** a post already at GitHub finishes and records its row before the bot gives up the [writer lease](/tarubot/deploy/operations/#single-database-writer); one still waiting behind it gets "Please wait a moment" ("TaruBot is restarting right now.") and records nothing.
 

@@ -28,11 +28,14 @@ import {
   authorize,
   authorizeOwner,
   can,
+  requireNotPaused,
   requirePermission,
   type AccessFacts,
   type Actor,
+  type Pause,
 } from "../domain/policy.js";
 import type { ManagedRole, PermissionId } from "../domain/rbac.js";
+import { activeBlocks } from "./blocks.js";
 import { linkConfersRank, linkConfersRankSql, rankAccess, rankBacks } from "./rank-policy.js";
 import { accessFacts } from "./access-facts.js";
 import {
@@ -324,7 +327,19 @@ export class Service {
       );
       if (rankBacks(rank.officer)) roles.push("officer");
     }
-    return { ...actor, member, guest, access: accessFor(manager, roles) };
+    // Pauses (2.45.0) are read for everyone but server managers, who can't be paused.
+    const pauses = manager
+      ? undefined
+      : await activeBlocks(this.db.orm, actor.guildId, actor.userId);
+    return { ...actor, member, guest, access: accessFor(manager, roles, pauses) };
+  }
+  /**
+   * The person's active pause on a permission, if any (2.45.0): the one indexed read a pre-form
+   * check makes before a modal opens, where there is no resolved actor yet. Enforcement itself
+   * reads Access.blocked, resolved with the actor.
+   */
+  async pauseOf(guildId: string, userId: string, id: PermissionId): Promise<Pause | undefined> {
+    return (await activeBlocks(this.db.orm, guildId, userId)).get(id);
   }
   /** Read configured state without silently creating a guild for an ordinary/read-only command. */
   async guild(actor: Actor): Promise<GuildRecord> {
@@ -2256,6 +2271,8 @@ export class Service {
         permission,
         "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.",
       );
+    // A pause is reported as one, ahead of the setup, Discord and membership checks below.
+    else requireNotPaused(actor, "ledger.deposit");
     if (!guild.fc_id)
       throw new Failure(
         "setup",
@@ -2497,6 +2514,9 @@ export class Service {
         0,
         { kind: "stale", what: "control" },
       );
+    // A pause on reading the ledger holds for officers too: ledger.audit is what opens it for them,
+    // so the pause must not hide behind it. It is reported as one, before the checks below.
+    requireNotPaused(actor, "ledger.view");
     const target = fcId ?? guild.fc_id;
     if (!target)
       throw new Failure("setup", "No Free Company is linked to this server yet.", 0, {

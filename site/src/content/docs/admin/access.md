@@ -1,6 +1,6 @@
 ---
 title: Who can do what
-description: How TaruBot decides who may use each function, through permissions carried by the roles it manages, how officers are recognized, what needs a server manager, and who can use the dashboard.
+description: How TaruBot decides who may use each function, through permissions carried by the roles it manages, how officers are recognized, what needs a server manager, how one person's use of a feature can be paused, and who can use the dashboard.
 sidebar:
   order: 2
 ---
@@ -15,7 +15,7 @@ TaruBot checks every command, button and dashboard change against the person's c
 | **Officers**, through the Officer role | Every [officer permission](#officer-permissions), plus the ledger and My roles |
 | **Server managers** | Every permission, including the ones [only they](#server-managers) can have, except suggesting features and opening mod mail cases, which follow their own Member or Guest role |
 
-The FC Leader role opens staff channels under onboarding, but carries no TaruBot permission. The permissions each role carries are fixed in this release.
+The FC Leader role opens staff channels under onboarding, but carries no TaruBot permission. The permissions each role carries are fixed in this release. A [pause](#pauses) can take one of the member features away from one person for a while.
 
 ## Officers
 
@@ -41,6 +41,7 @@ The Officer role grants TaruBot's officer permissions only. It carries no Discor
 | Ledger | Record withdrawals, corrections and the opening balance; see ledger details and a previous FC's ledger; read the ledger and record deposits without the membership condition |
 | Mod mail | Read every case and who read it; reply to, close and reopen cases; turn mod mail on or off |
 | Role menu | See the [self-service role menu](/tarubot/admin/self-service-roles/), drafts included; edit it, add roles and publish them |
+| Moderation | See who is [paused](#pauses) and why, and look up who sent a suggestion (**moderation.view**); pause a member's use of a feature and lift pauses, within the limits [below](#pauses) (**moderation.block**) |
 
 For the Role menu, TaruBot doesn't check the officer's own Discord permissions or role position; the menu's checks and where TaruBot's own role sits decide what can be added. A role in a published category is one anyone with Member or Guest can give themselves on My roles.
 
@@ -57,6 +58,16 @@ A **server manager** has both **Manage Server** and **Manage Roles** (the server
 - run [`/setup overrides`](/tarubot/reference/commands/#setup-overrides); its `confirm:true` also needs **Administrator**, or owning the server.
 
 Before TaruBot is set up in a server, only a server manager can start it: the first `/config` change or `/setup onboarding`.
+
+## Pauses
+
+A **pause** (2.45.0) takes one thing away from one person for a while, such as `/suggest` from a member who abuses it, with a reason they're shown. It never changes their roles and never gives anything. [Pausing people](/tarubot/admin/moderation/) is the full guide; the rules that matter here:
+
+- **Nine member features can be paused:** linking characters, roster checks, guest applications, reading the ledger, recording deposits, opening mod mail cases, picking roles on My roles, suggesting features and reporting problems. Officer work (the staff permissions) can't be paused, and neither can what needs no permission at all. An officer's own use of a member feature they hold can be: a pause on reading the ledger or recording deposits stops an officer too, whatever their officer permissions.
+- **Two permissions** govern them, both carried by the Officer role: **moderation.view** sees who is paused and why, and looks up who sent a suggestion; **moderation.block** pauses and lifts. Anyone can read their own pauses.
+- **Server managers can pause anyone** except themselves, other server managers and bots, in any feature. **Officers can pause only people who hold no officer permission,** never mod mail opening (only server managers can pause that), and can change or lift only pauses an officer set.
+- **Server managers can't be paused,** and nobody can pause or lift a pause on themselves.
+- **The paused person is told the feature, the end and the reason, never who set it.** Officers who can see pauses see who set someone else's pause, and an officer who is paused themselves (only a server manager can do that) sees their own like any member.
 
 ## Links that count for rank
 
@@ -78,7 +89,7 @@ When the dashboard is on, its pages check the same permissions, against the pers
 | Who | Pages |
 | --- | --- |
 | Holders of the Member or Guest role | My roles and Mod mail (their own cases), while TaruBot doesn't have Administrator in the server |
-| Officers and server managers | Server configuration, My roles, Role menu, Background work and Mod mail (every case) |
+| Officers and server managers | Server configuration, My roles, Role menu, Background work, Mod mail (every case) and Moderation |
 | Anyone else, including people in the lobby | No signed-in pages; anyone can open the public [status page](/tarubot/use/progress-and-problems/#is-tarubot-up) |
 
 While TaruBot has Administrator in a server, members and guests can't open its pages at all: the pages everyone can reach never run beside a bot that can do anything in the server. Use [`/setup overrides`](/tarubot/reference/commands/#setup-overrides), then remove Administrator once `/config validate` says it's no longer needed. Someone who has just lost Member or Guest can keep viewing for up to a minute, but any change they send is checked again first and refused.

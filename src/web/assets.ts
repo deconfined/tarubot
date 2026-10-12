@@ -16,6 +16,7 @@ import { EFFECTS_CSS } from "./styles/effects.js";
 import { ENTRY_CSS } from "./styles/entry.js";
 import { FORMS_CSS } from "./styles/forms.js";
 import { MEDIA_CSS } from "./styles/media.js";
+import { MODERATION_CSS } from "./styles/moderation.js";
 import { MODMAIL_CSS } from "./styles/modmail.js";
 import { MY_ROLES_CSS } from "./styles/my-roles.js";
 import { PUBLIC_STATUS_CSS } from "./styles/public-status.js";
@@ -123,6 +124,7 @@ const CSS = [
   ROLE_MENU_CSS,
   MY_ROLES_CSS,
   MODMAIL_CSS,
+  MODERATION_CSS,
   PUBLIC_STATUS_CSS,
   MEDIA_CSS,
 ].join("\n");

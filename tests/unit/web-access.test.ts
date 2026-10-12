@@ -124,6 +124,53 @@ describe("admits", () => {
     });
   });
 
+  test("a pause removes a write, not the page: a paused member still opens it; a manager is never paused (2.45.0)", () => {
+    const paused = (id: PageAccess, spec: Partial<ActorSpec> = {}): Actor =>
+      actor({
+        member: true,
+        botAdministrator: false,
+        ...spec,
+        paused: { [id]: { until: null, reason: "Paused for the test." } },
+      });
+    // My roles, mod mail and the ledger stay open to the person whose use is paused, so they can
+    // read what they have and see why they can't change it; the application operations refuse.
+    for (const id of ["selfroles.use", "modmail.open", "ledger.view"] as const) {
+      const person = paused(id);
+      expect(person.access.blocked.has(id)).toBe(true);
+      expect({ id, opens: admits(person, [id]) }).toEqual({ id, opens: true });
+    }
+    expect(selfServiceAccess(paused("selfroles.use"))).toBe(true);
+    // The pause is the only thing that changed: the A2 gate still applies, and a pause on
+    // another feature changes nothing about this one.
+    expect(admits(paused("selfroles.use", { botAdministrator: true }), ["selfroles.use"])).toBe(
+      false,
+    );
+    expect(admits(paused("suggest.use"), ["selfroles.use"])).toBe(true);
+    // The navigation still lists the page.
+    const myRoles = definePage({
+      path: "/g/:guild/my-roles",
+      title: "My roles",
+      access: ["selfroles.use"],
+      requires: [],
+      nav: "My roles",
+      get: () => html`<p>My roles</p>`,
+    });
+    expect(navLinks([myRoles], paused("selfroles.use")).map((link) => link.label)).toEqual([
+      "My roles",
+    ]);
+    // A server manager can't be paused, whatever is on record; a pause on something held by
+    // neither role means nothing.
+    const manager = actor({
+      serverManager: true,
+      manageRoles: true,
+      paused: { "suggest.use": { until: null, reason: "x" } },
+    });
+    expect(manager.access.blocked.size).toBe(0);
+    expect(
+      actor({ paused: { "ledger.view": { until: null, reason: "x" } } }).access.blocked.size,
+    ).toBe(0);
+  });
+
   test("a member-tier permission needs an explicit false for botAdministrator, and the role that carries it", () => {
     // Held roles alone are not access: enrichActor counts the bound roles.
     expect(

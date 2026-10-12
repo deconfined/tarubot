@@ -3,9 +3,9 @@
  * invisible characters normalising removes, the fixed point `clean` reaches on nested markup, a
  * seeded fuzz of the whole pipeline, the exact public example the owner approved, the final
  * check's refusals, who may suggest, where each deployment posts, the settings guard, the
- * workflow guard, how Suggestions translates GitHub's answers, the refusals' log levels, and the
- * shutdown drain (with a fake database; the PostgreSQL behaviour is in
- * tests/integration/persistence.test.ts).
+ * workflow guard, how Suggestions translates GitHub's answers, the refusals' log levels, the
+ * shutdown drain, and that a paused suggester (2.45.0) is refused before any limit read or GitHub
+ * call (with a fake database; the PostgreSQL behaviour is in tests/integration/persistence.test.ts).
  *
  * Invisible characters are written as \u{…} escapes, never literally, so reviewers can see them.
  * Token-shaped samples are assembled at runtime, so secret scanners never see a literal one.
@@ -1016,6 +1016,25 @@ describe("who may suggest (owner decision, 2026-09-25)", () => {
     expect(maySuggest(actorOf({ ...base, member: true, officer: true }))).toBe(true);
   });
 
+  test("a pause on suggest.use (2.45.0) removes the use, not the role", () => {
+    const paused = actorOf({ ...base, member: true, paused: { "suggest.use": {} } });
+    expect(maySuggest(paused)).toBe(false);
+    expect(paused.access.permissions.has("suggest.use")).toBe(true);
+    // Other features' pauses, and a manager's, don't touch it.
+    expect(maySuggest(actorOf({ ...base, member: true, paused: { "issue.use": {} } }))).toBe(true);
+    expect(
+      maySuggest(
+        actorOf({
+          ...base,
+          member: true,
+          serverManager: true,
+          manageRoles: true,
+          paused: { "suggest.use": {} },
+        }),
+      ),
+    ).toBe(true);
+  });
+
   test("officer access alone, a lobby visitor and an unbound role qualify nobody", () => {
     // suggest.use is member-side: an officer or server manager holding neither role is refused.
     expect(
@@ -1118,12 +1137,16 @@ describe("where suggestions go", () => {
 
 /**
  * A pg-shaped fake for Suggestions: limit reads find no rows, and audit inserts are recorded (or
- * fail on demand). A class, so drizzle treats it as a client rather than a config object.
+ * fail on demand). Every statement it is sent is recorded too, so a test can show that a refusal
+ * read nothing. A class, so drizzle treats it as a client rather than a config object.
  */
 class FakePool {
   inserts: unknown[][] = [];
+  /** Every statement, reads and inserts alike, in order. */
+  statements: string[] = [];
   failInserts = false;
   async query(config: { text: string }, params: unknown[] = []) {
+    this.statements.push(config.text);
     if (/^insert/iu.test(config.text)) {
       if (this.failInserts) throw new Error("audit insert failed");
       this.inserts.push(params);
@@ -1160,20 +1183,25 @@ function harness(
     guild: async () => ({ member_role_id: "70001", guest_role_id: "70002" }),
   });
   const creates: { title: string; body: string; labels: readonly string[] }[] = [];
+  /** How many times GitHub's client was asked for: a refusal before the post mints none. */
+  const minted = { count: 0 };
   const target: SuggestionTarget = {
     repository: project.repository,
-    client: async () => ({
-      create: async (title: string, body: string, labels: readonly string[]) => {
-        creates.push({ title, body, labels });
-        const { number } = await create(title, body);
-        return { number, state: "open" as const };
-      },
-    }),
+    client: async () => {
+      minted.count += 1;
+      return {
+        create: async (title: string, body: string, labels: readonly string[]) => {
+          creates.push({ title, body, labels });
+          const { number } = await create(title, body);
+          return { number, state: "open" as const };
+        },
+      };
+    },
   };
   const suggestions = new Suggestions(app, switchedOn ? target : null, (error, operation) => {
     reports.push([error, operation]);
   });
-  return { suggestions, pool, reports, creates };
+  return { suggestions, pool, reports, creates, minted };
 }
 
 describe("posting", () => {
@@ -1217,6 +1245,84 @@ describe("posting", () => {
       detail: { kind: "option", option: "idea" },
     });
     expect(creates).toEqual([]);
+  });
+
+  test("a paused suggester is refused as paused before any limit read, GitHub call or audit row (2.45.0)", async () => {
+    const { suggestions, pool, creates, minted, reports } = harness(async () => ({ number: 1 }));
+    const ends = new Date("2026-10-19T12:00:00.000Z");
+    const reason = "Please wait before sending more suggestions.";
+    const paused = actorOf({ ...MEMBER, paused: { "suggest.use": { until: ends, reason } } });
+    // The pause is reported as one, with the end and the reason, never as a missing role.
+    const error = await suggestions
+      .submit(paused, "An idea long enough to post")
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "forbidden",
+      message: "Your use of this feature here is paused.",
+      detail: { kind: "scope", scope: "blocked", permission: "suggest.use", until: ends, reason },
+    });
+    expect(classifyFailure(error)).toMatchObject({ category: "forbidden", level: "info" });
+    // Nothing downstream ran: no limit read, no audit insert (the fake database was sent no
+    // statement), no GitHub client minted, no issue created, and no private report.
+    expect(pool.statements).toEqual([]);
+    expect(pool.inserts).toEqual([]);
+    expect([minted.count, creates.length, reports.length]).toEqual([0, 0, 0]);
+    // Whatever the text: a pause is reported before the length and the cleaning are looked at.
+    await expect(suggestions.submit(paused, "short")).rejects.toMatchObject({
+      detail: { scope: "blocked" },
+    });
+    expect(pool.statements).toEqual([]);
+    // The same person unpaused posts, so the refusal above was the pause and nothing else.
+    expect(
+      (await suggestions.submit(actorOf({ ...MEMBER }), "An idea long enough to post")).number,
+    ).toBe(1);
+    expect(pool.statements.length).toBeGreaterThan(0);
+    expect([minted.count, creates.length]).toEqual([1, 1]);
+  });
+
+  test("a pause with no end names none, and one on another feature changes nothing", async () => {
+    const { suggestions, creates } = harness(async () => ({ number: 4 }));
+    const forever = actorOf({ ...MEMBER, paused: { "suggest.use": { reason: "Spam." } } });
+    const error = await suggestions
+      .submit(forever, "An idea long enough to post")
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ detail: { scope: "blocked", reason: "Spam." } });
+    expect(Object.hasOwn((error as Failure).detail ?? {}, "until")).toBe(false);
+    // Pausing /issue, mod mail or the ledger doesn't stop /suggest.
+    const other = actorOf({
+      ...MEMBER,
+      paused: { "issue.use": {}, "modmail.open": {}, "ledger.deposit": {} },
+    });
+    expect((await suggestions.submit(other, "An idea long enough to post")).number).toBe(4);
+    expect(creates).toHaveLength(1);
+  });
+
+  test("the allowlist and the off switch are answered before a pause, and a role-less pause is no pause", async () => {
+    const paused = actorOf({ ...MEMBER, paused: { "suggest.use": { reason: "Spam." } } });
+    const on = harness(async () => ({ number: 1 }));
+    // A server outside the allowlist, and the owner's off switch, keep their own wording.
+    await expect(
+      on.suggestions.submit({ ...paused, guildId: "999999999999999999" }, "An idea long enough"),
+    ).rejects.toMatchObject({
+      message: "Suggestions can be sent only from the Free Company server this TaruBot serves.",
+    });
+    const off = harness(async () => ({ number: 1 }), false);
+    await expect(off.suggestions.submit(paused, "An idea long enough")).rejects.toMatchObject({
+      message: "Suggestions are switched off on this TaruBot right now.",
+    });
+    // Someone who holds no Member or Guest role has no suggest.use to pause: the resolver drops
+    // the pause, and they get the ordinary membership card.
+    const outsider = actorOf({
+      ...MEMBER,
+      member: false,
+      roleIds: ["70003"],
+      paused: { "suggest.use": { reason: "Spam." } },
+    });
+    expect(outsider.access.blocked.size).toBe(0);
+    await expect(on.suggestions.submit(outsider, "An idea long enough")).rejects.toMatchObject({
+      detail: { kind: "scope", scope: "membership" },
+    });
+    expect([on.creates, off.creates]).toEqual([[], []]);
   });
 
   test("the off switch and a foreign server are routine refusals, never private reports", async () => {

@@ -20,6 +20,7 @@ import { Database, SESSION_OPTIONS } from "../../src/infrastructure/postgres/dat
 import {
   hashToken,
   PgSessions,
+  RECENT_SIGN_IN_MS,
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
@@ -69,6 +70,8 @@ function scenarios(harness: () => Harness) {
     const { session } = first;
     expect(session.userId).toBe(ALICE);
     expect(session.authenticatedAt).toEqual(session.createdAt);
+    // A new session is a new sign-in (2.45.0), so it counts as a recent one.
+    expect(session.recentSignIn).toBe(true);
     expect(session.lastSeenAt).toEqual(session.createdAt);
     expect(session.expiresAt.getTime() - session.createdAt.getTime()).toBe(SESSION_ABSOLUTE_MS);
     expect(await store.get(first.token)).toEqual(session);
@@ -78,6 +81,29 @@ function scenarios(harness: () => Harness) {
     );
     expect(JSON.stringify(stored)).not.toContain(first.token);
     expect(JSON.stringify(stored)).not.toContain(second.token);
+  });
+
+  test("recentSignIn holds for 15 minutes after the sign-in, whatever the activity since", async () => {
+    const h = harness();
+    const { token, session } = await h.store.create(ALICE);
+    expect(session.recentSignIn).toBe(true);
+    // Use keeps the session alive (and touches it), but never makes the sign-in newer.
+    await h.elapse(RECENT_SIGN_IN_MS - MARGIN);
+    const nearly = await h.store.get(token);
+    expect(nearly?.recentSignIn).toBe(true);
+    await h.elapse(2 * MARGIN);
+    const older = await h.store.get(token);
+    // Still a live session, and still the sign-in it was: only no longer a recent one.
+    expect(older).not.toBeNull();
+    expect(older?.recentSignIn).toBe(false);
+    // The sign-in time never moves forward (PostgreSQL's rows were moved back to pass the time).
+    expect(older?.authenticatedAt.getTime()).toBeLessThanOrEqual(session.authenticatedAt.getTime());
+    expect((await h.store.get(token))?.recentSignIn).toBe(false);
+    // A new sign-in is a new session with a recent one, and doesn't make the old one recent.
+    const next = await h.store.create(ALICE);
+    expect(next.session.recentSignIn).toBe(true);
+    expect((await h.store.get(next.token))?.recentSignIn).toBe(true);
+    expect((await h.store.get(token))?.recentSignIn).toBe(false);
   });
 
   test("last_seen_at is touched at most every SESSION_TOUCH_MS", async () => {
@@ -370,6 +396,19 @@ describe.skipIf(!url)("PgSessions against PostgreSQL", () => {
     );
     expect([...touches]).toEqual([(await storedSeen(harness, token))?.getTime()]);
     expect(await version(token)).not.toBe(due);
+  });
+
+  test("recentSignIn is judged on the database clock too", async () => {
+    const { token } = await store.create(ALICE);
+    // A host clock past the limit changes nothing: the database says the sign-in is recent.
+    setSystemTime(new Date(Date.now() + 2 * RECENT_SIGN_IN_MS));
+    try {
+      expect((await store.get(token))?.recentSignIn).toBe(true);
+    } finally {
+      setSystemTime();
+    }
+    await harness.elapse(RECENT_SIGN_IN_MS + MARGIN);
+    expect((await store.get(token))?.recentSignIn).toBe(false);
   });
 
   test("expiry ignores the process clock", async () => {

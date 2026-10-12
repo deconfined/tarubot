@@ -74,6 +74,7 @@ describe("harnessOptions", () => {
       expect(harnessOptions([`--state-history=${history}`]).states).toEqual({ history });
     for (const modmail of HARNESS_MODMAIL_STATES)
       expect(harnessOptions([`--state-modmail=${modmail}`]).states).toEqual({ modmail });
+    expect(harnessOptions(["--state-moderation=pauses"]).states).toEqual({ moderation: "pauses" });
   });
 
   test("refuses an unknown check level, a misspelt flag and a lone --cert", () => {
@@ -89,6 +90,9 @@ describe("harnessOptions", () => {
     );
     expect(() => harnessOptions(["--state-modmail=busy"])).toThrow(
       "Pass --state-modmail=cases, empty, off, unreadable, nokey, long, limit or quiet.",
+    );
+    expect(() => harnessOptions(["--state-moderation=busy"])).toThrow(
+      "Pass --state-moderation=pauses.",
     );
     expect(() => harnessOptions(["--cert", "cert.pem"])).toThrow("Pass --cert and --key together.");
   });
@@ -344,6 +348,34 @@ describe.skipIf(!ipv6Loopback)("each review state, end to end over loopback", ()
       "[OK]",
     );
     expect(fact(page(configuration), "Last roster error")?.textContent).toContain("rate_limited");
+  });
+
+  test("--state-moderation=pauses: Moderation lists the invented pauses; without it nobody is paused", async () => {
+    const moderation = `/g/${HARNESS_GUILDS.example.id}/moderation`;
+    const none = (await officerPages({}, [moderation]))(moderation);
+    expect(none.querySelectorAll(".mod-person, .mod-done")).toHaveLength(0);
+    expect(none.querySelector(".empty-state p")?.textContent).toBe("Nobody is paused.");
+    const some = (await officerPages({ moderation: "pauses" }, [moderation]))(moderation);
+    // Three people, four active pauses of both levels, and two ended ones.
+    expect(some.querySelectorAll(".mod-people > .mod-person")).toHaveLength(3);
+    expect(some.querySelectorAll(".mod-pause")).toHaveLength(4);
+    expect(some.querySelectorAll(".mod-dones > .mod-done")).toHaveLength(2);
+    expect(
+      [...some.querySelectorAll(".mod-pause__by")].map(
+        (line) => /\((.*)\) on/u.exec(line.textContent ?? "")?.[1],
+      ),
+    ).toEqual(["officer", "officer", "server manager", "server manager"]);
+    // The officer can lift only the officers' two; the manager's two say so.
+    expect(some.querySelectorAll(".mod-pause button.mod-opener")).toHaveLength(2);
+    expect(some.querySelectorAll(".mod-pause__note")).toHaveLength(2);
+    // The server manager account lifts them all, and may pause mod mail.
+    const managed = (await officerPages({ moderation: "pauses" }, [moderation], "manager"))(
+      moderation,
+    );
+    expect(managed.querySelectorAll(".mod-pause button.mod-opener")).toHaveLength(4);
+    expect(
+      managed.querySelectorAll('#mod-pause input[name="feature"]:not([disabled])'),
+    ).toHaveLength(9);
   });
 
   test("--state-roles: each state's banner on My roles, as the member sees it", async () => {

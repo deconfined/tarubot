@@ -63,6 +63,9 @@ export const RELEASE_NOTES: Readonly<Record<string, string>> = {
     "Members and guests can now privately message their officers with /modmail or from TaruBot's dashboard once officers turn it on; the conversation stays on the dashboard.",
   "2.44.0":
     "TaruBot now checks a named permission for each command, button and dashboard page it guards. Manage Server alone no longer makes someone an officer, and only server managers can link the FC, choose TaruBot's roles or remove someone else's character link that counts for FC rank.",
+  // Conditional, as 2.37.0's is: the Moderation page and the sender lookup need the dashboard.
+  "2.45.0":
+    "Officers can now pause one person's use of a feature, such as /suggest, for a set time without touching their roles, using /moderate or the dashboard's new Moderation page. The person is told why, never who set it. Officers can also look up who sent a suggestion.",
 };
 
 /**

@@ -449,7 +449,7 @@ Add TaruBot's own permission entry to each channel it couldn't otherwise see (or
 
 Open the guest application form: two answers of 10 to 300 characters each, which officers review. See [Guest access](/tarubot/use/guest-access/).
 
-**Who can use it:** visitors without a linked character, while the server's guest applications are open.
+**Who can use it:** visitors without a linked character, while the server's guest applications are open. If an officer has paused your use of `/apply`, TaruBot answers with a **Paused for you** card before the form opens.
 
 This command has no options.
 
@@ -547,7 +547,7 @@ Show guest applications, grants, revocations and delivery work.
 
 Record gil put into the FC chest.
 
-**Who can use it:** confirmed FC members and officers.
+**Who can use it:** confirmed FC members and officers, unless their use of the ledger is paused (a pause stops officers too).
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -609,7 +609,7 @@ Record a correction that sets the balance to a new figure. Nothing is overwritte
 
 Show the current balance and whether recent entries have been posted.
 
-**Who can use it:** confirmed FC members and officers. Only officers can name a previous FC with `fc_id`.
+**Who can use it:** confirmed FC members and officers, unless their reading of the ledger is paused (a pause stops officers too). Only officers can name a previous FC with `fc_id`.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -623,7 +623,7 @@ Show the current balance and whether recent entries have been posted.
 
 Show ledger entries, newest first, ten to a page, with **Newer**, **Older** and **Latest** buttons.
 
-**Who can use it:** confirmed FC members and officers. Only officers can name a previous FC with `fc_id`.
+**Who can use it:** confirmed FC members and officers, unless their reading of the ledger is paused (a pause stops officers too). Only officers can name a previous FC with `fc_id`.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -697,11 +697,59 @@ Report a problem to the maintainers of this TaruBot deployment. See [Progress an
 /issue description:My Member role disappeared after I ran /main this morning.
 ```
 
+### /moderate block
+
+Pause one member's use of one feature for a while, without touching their Discord roles. The reply says what was paused and until when, repeats your reason and lists any earlier pause it replaced. The member is told which feature, when it ends and your reason, and never who set it. See [Pausing people](/tarubot/admin/moderation/).
+
+**Who can use it:** officers (the **moderation.block** permission) and server managers. An officer can pause only people who hold no officer permission, can't pause mod mail, and can't change a pause a server manager set. Server managers and bots can't be paused, and nobody pauses themselves. Discord shows the member suggestions only to people who can pause.
+
+| Option | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `member` | Member | Yes | Who to pause. They must be in the server, or someone TaruBot already knows from an earlier time there. |
+| `feature` | Choice | Yes | What to pause, by name: linking characters, roster checks, guest applications, reading the ledger, recording ledger deposits, opening mod mail cases, picking roles on My roles, suggesting features or reporting problems. **All member features** pauses every one of them except mod mail, which only a server manager can pause. |
+| `duration` | Choice | No | 1 hour, 1 day, 1 week, 30 days or Until lifted. The default is 1 week. |
+| `reason` | Text | Yes | Up to 1,000 characters. **The member reads it**, and so do officers who can see pauses. |
+
+```text
+/moderate block member:123456789012345678 feature:Suggesting features (/suggest) duration:1 week reason:Posting the same suggestion again and again
+```
+
+### /moderate lift
+
+End a pause early. The member can use the feature again from their next command, and nobody is sent a message. Lifting a feature that isn't paused changes nothing and says so. See [Pausing people](/tarubot/admin/moderation/#lift-a-pause).
+
+**Who can use it:** officers (the **moderation.block** permission) and server managers. An officer lifts only pauses an officer set: **All member features** leaves a server manager's pauses in place and names them. Nobody lifts a pause on themselves. Choosing **All member features** also needs the **moderation.view** permission, because TaruBot reads the member's pauses first.
+
+| Option | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `member` | Member | Yes | Whose pause to lift. |
+| `feature` | Choice | Yes | The feature to lift, named as for `/moderate block`. **All member features** lifts every pause on the member that you may lift, mod mail included when you are a server manager. |
+| `reason` | Text | Yes | Up to 1,000 characters. Kept in the pause's history, where officers who can see pauses read it; the member isn't shown it. |
+
+```text
+/moderate lift member:123456789012345678 feature:Suggesting features (/suggest) reason:Agreed to follow the rules
+/moderate lift member:123456789012345678 feature:All member features reason:Agreed to follow the rules
+```
+
+### /moderate status
+
+Show what is paused. With no member it shows your own pauses the way a paused member sees them: each feature, when it ends and the reason, and never who set it. With a member it shows their active pauses with who set each one and when, and the newest ended ones with how they ended. See [Pausing people](/tarubot/admin/moderation/#look-at-someones-pauses).
+
+**Who can use it:** anyone, for themselves. Officers who can see pauses (the **moderation.view** permission) and server managers can name another member.
+
+| Option | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `member` | Member | No | Officers only: the member to look up. Leave it out to see your own. |
+
+```text
+/moderate status member:123456789012345678
+```
+
 ### /modmail
 
 Privately message the server's officers. A form opens with a **topic** (up to 100 characters) and a **message** (up to 4,000), and says at the top that all of the server's officers can read it. TaruBot answers with **Case #N opened** and a button to the case on the dashboard, where the conversation continues; officers are pinged with the case number only. The dashboard's Mod mail page opens cases the same way, with **Open a case**. See [Message your officers](/tarubot/use/mod-mail/) and, for officers, [Mod mail](/tarubot/admin/mod-mail/).
 
-**Who can use it:** holders of the server's Member or Guest role, once an officer has turned mod mail on, while TaruBot doesn't have Administrator in the server. Discord takes slash commands away during a time-out, so a member in one can't run `/modmail`; they can still open a case and reply on the dashboard. Each person can have 3 open cases in a server and open 5 in any 24 hours, however they open them. When it can't be used, TaruBot says why before the form opens.
+**Who can use it:** holders of the server's Member or Guest role, once an officer has turned mod mail on, while TaruBot doesn't have Administrator in the server. Discord takes slash commands away during a time-out, so a member in one can't run `/modmail`; they can still open a case and reply on the dashboard. Each person can have 3 open cases in a server and open 5 in any 24 hours, however they open them. When it can't be used, TaruBot says why before the form opens, including a **Paused for you** card with the end and the reason when a server manager has paused your opening of cases.
 
 This command has no options.
 

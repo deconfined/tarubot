@@ -77,6 +77,7 @@ Saving again before TaruBot has finished is fine: the categories you change agai
 ### When you can't save
 
 - **During a Discord time-out**, you can see your roles but can't change them until the time-out ends.
+- **While your use of My roles is paused** by an officer, the page opens and says until when and why, and has no **Save my roles** button. Your roles stay as they are. See [If your use of a feature is paused](/tarubot/use/progress-and-problems/#if-your-use-of-a-feature-is-paused).
 - **While role changes are paused** in the server, or **TaruBot can't read the server's roles** for a moment, the page says so and has no **Save my roles** button.
 - **More than 10 presses of Save my roles in 10 minutes** are refused, including presses that change nothing: "You've sent a lot of saves in a short time, so TaruBot didn't take this one." Wait the time the page gives, then try again. To check on a change, reload the page instead of saving again.
 

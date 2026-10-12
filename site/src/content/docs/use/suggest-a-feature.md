@@ -44,6 +44,8 @@ Every `@` becomes `＠`, so nobody is mentioned on GitHub, and a `#` in the titl
 
 **What's never posted:** your Discord name or ID, the server and its channels and roles, your characters and your FC, and anything else TaruBot stores.
 
+**Who can still find out it was you.** Nothing public names you, but TaruBot keeps privately who sent each suggestion. The people who run this TaruBot can read that, and since 2.45.0 so can officers who can see pauses: they can look up the sender of a suggestion by its number on the dashboard, so they can pause `/suggest` for someone who abuses it. So a suggestion is anonymous to the public, but not to them.
+
 Cleaning can't catch everything typed on purpose, such as a name written out or an ID split up with spaces. Leave names, personal details and security problems out of a suggestion. Report a security problem privately, as the [security policy](https://github.com/deconfined/tarubot/security/policy) explains.
 
 ## Limits
@@ -57,9 +59,10 @@ When a limit is reached, the reply is "You can suggest again later", with when. 
 
 - **"GitHub didn't confirm your suggestion."** TaruBot got no clear answer from GitHub, so the suggestion may or may not have been posted. Check [TaruBot's issues](https://github.com/deconfined/tarubot/issues) before you send it again. The try counts toward your limits either way.
 - **"Not available here"**, saying suggestions are switched off: the people who run TaruBot have paused suggestions for now.
+- **"Paused for you"**, naming `/suggest`: an officer has paused your use of it for a while, and the card says until when and why. Nothing was sent, and it doesn't count toward your limits. See [If your use of a feature is paused](/tarubot/use/progress-and-problems/#if-your-use-of-a-feature-is-paused).
 - **"Please wait a moment"**, saying TaruBot is restarting: nothing was sent. Try again in a minute.
 - **"Something went wrong":** nothing was posted, and the maintainers were told. You can try again later.
 
 ## What happens next
 
-The maintainers read suggestions on GitHub. They may answer, label, close (for example as not planned) or lock an issue. Suggestions go up without review, so anything abusive is removed afterwards, and a member who misuses `/suggest` can lose access to it.
+The maintainers read suggestions on GitHub. They may answer, label, close (for example as not planned) or lock an issue. Suggestions go up without review, so anything abusive is removed afterwards, and an officer can pause a member's use of `/suggest` for a while if they misuse it.

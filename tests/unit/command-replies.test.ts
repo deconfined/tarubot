@@ -14,10 +14,12 @@ import type { APIEmbed } from "discord.js";
 import {
   applicationKey,
   issueReportsKey,
+  moderationKey,
   roleAdministrationKey,
   suggestionsKey,
   synchronizationKey,
 } from "../../src/application/keys.js";
+import { Moderation } from "../../src/application/moderation.js";
 import { RoleAdministration } from "../../src/application/role-administration.js";
 import { Service } from "../../src/application/service.js";
 import { Synchronization } from "../../src/application/synchronization.js";
@@ -43,6 +45,7 @@ import syncCommand from "../../src/commands/synchronization/sync.command.js";
 import channelCommand from "../../src/commands/utility/channel.command.js";
 import { IssueReports } from "../../src/application/issue-reports.js";
 import issueCommand from "../../src/commands/utility/issue.command.js";
+import moderateCommand from "../../src/commands/utility/moderate.command.js";
 import { Suggestions } from "../../src/application/suggestions.js";
 import suggestCommand from "../../src/commands/utility/suggest.command.js";
 import pingCommand from "../../src/commands/utility/ping.command.js";
@@ -72,6 +75,16 @@ import {
   guestReset,
 } from "../fixtures/replies/guests.js";
 import { ENTRY_IDS, LEDGER_RESULTS as L } from "../fixtures/replies/ledger.js";
+import {
+  ALL_MEMBER_FEATURES,
+  blockResult,
+  liftResult,
+  OFFICER_ACTIVE,
+  officerStatus,
+  ownStatus,
+  PAUSED_ID,
+  pause,
+} from "../fixtures/replies/moderation.js";
 import { OVERRIDES_RESULTS, SETUP_PLANS } from "../fixtures/replies/setup.js";
 import { refreshed, RUN_ID, SYNC_RESULTS as SR } from "../fixtures/replies/sync-utility.js";
 import { CHARACTER, GUEST_ID } from "../fixtures/results.js";
@@ -1260,6 +1273,361 @@ test("/config's exactly-one checks are input failures that never reach the servi
 });
 
 // ---------------------------------------------------------------------------------------------
+// /moderate (2.45.0)
+
+/** The person the pauses are on (OFFICER, above, holds the moderation permissions). */
+const PAUSED = `<@${PAUSED_ID}>`;
+
+/**
+ * A prototype-backed Moderation whose block, lift and status return `results[method]` (or throw
+ * it when it is an Error), recording each call as the actor's user ID and the arguments.
+ */
+function stubModeration(results: Readonly<Record<string, unknown>>, calls: Call[] = []) {
+  const moderation: unknown = Object.create(Moderation.prototype);
+  if (!(moderation instanceof Moderation)) throw new Error("Invalid moderation fixture");
+  for (const method of ["block", "lift", "status"] as const)
+    Object.assign(moderation, {
+      [method]: async (actor: Actor, ...args: unknown[]) => {
+        calls.push([method, actor.userId, ...args]);
+        const result = results[method];
+        if (result instanceof Error) throw result;
+        return result;
+      },
+    });
+  return { moderation, calls };
+}
+
+/** Run /moderate's execute directly with a stubbed Moderation service and the actor's viewer. */
+async function runModerate(
+  options: unknown[],
+  actor: Actor,
+  results: Readonly<Record<string, unknown>>,
+  calls: Call[] = [],
+) {
+  const { moderation } = stubModeration(results, calls);
+  await open?.close();
+  const fixture = interactionFixture();
+  open = fixture;
+  const outcome = await moderateCommand.execute?.({
+    client: fixture.client,
+    services: new Services().provide(moderationKey, moderation),
+    allowsGuild: () => true,
+    isStopping: () => false,
+    report: () => {},
+    resolveActor: async () => actor,
+    actor,
+    viewer: viewerOf(actor, "1290000000000000001"),
+    interaction: fixture.slash("moderate", options),
+  });
+  return { outcome, calls };
+}
+
+/** Each /moderate path: its options, actor, stubbed results, expected title and service calls. */
+const MODERATE_PATHS: readonly {
+  readonly options: unknown[];
+  readonly actor: Actor;
+  readonly results: Record<string, unknown>;
+  readonly title: string;
+  readonly calls: Call[];
+}[] = [
+  {
+    // The duration is optional and defaults to a week; a mention names the member.
+    options: [
+      subcommand("block", [
+        text("member", PAUSED),
+        text("feature", "suggest.use"),
+        text("reason", "Posting the same suggestion again and again"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { block: blockResult() },
+    title: "Use paused",
+    calls: [
+      [
+        "block",
+        "400",
+        PAUSED_ID,
+        ["suggest.use"],
+        "1w",
+        "Posting the same suggestion again and again",
+      ],
+    ],
+  },
+  {
+    options: [
+      subcommand("block", [
+        text("member", PAUSED_ID),
+        text("feature", "issue.use"),
+        text("duration", "30d"),
+        text("reason", "Reporting the same problem daily"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { block: blockResult({ permissions: ["issue.use"], duration: "30d" }) },
+    title: "Use paused",
+    calls: [["block", "400", PAUSED_ID, ["issue.use"], "30d", "Reporting the same problem daily"]],
+  },
+  {
+    // "All member features" is everything pausable except mod mail, which only a server manager pauses.
+    options: [
+      subcommand("block", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("duration", "1d"),
+        text("reason", "A cooling-off day"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { block: blockResult({ permissions: ALL_MEMBER_FEATURES, duration: "1d" }) },
+    title: "Use paused",
+    calls: [["block", "400", PAUSED_ID, ALL_MEMBER_FEATURES, "1d", "A cooling-off day"]],
+  },
+  {
+    options: [
+      subcommand("block", [
+        text("member", PAUSED_ID),
+        text("feature", "modmail.open"),
+        text("duration", "forever"),
+        text("reason", "Opening cases without a reason"),
+      ]),
+    ],
+    actor: MANAGER,
+    results: { block: blockResult({ permissions: ["modmail.open"], until: null }) },
+    title: "Use paused",
+    calls: [
+      ["block", "400", PAUSED_ID, ["modmail.open"], "forever", "Opening cases without a reason"],
+    ],
+  },
+  {
+    options: [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "suggest.use"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { lift: liftResult() },
+    title: "Pause lifted",
+    calls: [["lift", "400", PAUSED_ID, ["suggest.use"], "Agreed to follow the rules"]],
+  },
+  {
+    // "All" reads the person's pauses first and lifts every one: a server manager may lift them all.
+    options: [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    actor: MANAGER,
+    results: {
+      status: officerStatus(OFFICER_ACTIVE),
+      lift: liftResult({ lifted: ["suggest.use", "modmail.open"] }),
+    },
+    title: "Pauses lifted",
+    calls: [
+      ["status", "400", PAUSED_ID],
+      ["lift", "400", PAUSED_ID, ["suggest.use", "modmail.open"], "Agreed to follow the rules"],
+    ],
+  },
+  {
+    // An officer's "all" leaves a server manager's pause alone, rather than being refused whole.
+    options: [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { status: officerStatus(OFFICER_ACTIVE), lift: liftResult() },
+    title: "Pause lifted",
+    calls: [
+      ["status", "400", PAUSED_ID],
+      ["lift", "400", PAUSED_ID, ["suggest.use"], "Agreed to follow the rules"],
+    ],
+  },
+  {
+    // Nothing paused (or nothing the officer may lift) never calls lift, which refuses an empty list.
+    options: [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: { status: officerStatus([]) },
+    title: "Nothing to lift",
+    calls: [["status", "400", PAUSED_ID]],
+  },
+  {
+    options: [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    actor: OFFICER,
+    results: {
+      status: officerStatus([
+        pause({
+          permission: "modmail.open",
+          until: null,
+          by: { userId: MANAGER.userId, level: "manager" },
+        }),
+      ]),
+    },
+    title: "Nothing to lift",
+    calls: [["status", "400", PAUSED_ID]],
+  },
+  {
+    // No member option is the person's own status.
+    options: [subcommand("status")],
+    actor: MEMBER,
+    results: { status: ownStatus([pause()]) },
+    title: "What's paused for you",
+    calls: [["status", "400", "400"]],
+  },
+  {
+    options: [subcommand("status", [text("member", PAUSED_ID)])],
+    actor: OFFICER,
+    results: { status: officerStatus(OFFICER_ACTIVE) },
+    title: "Pauses for this member",
+    calls: [["status", "400", PAUSED_ID]],
+  },
+];
+
+test("every /moderate path returns its presenter's one embed and calls its service as parsed", async () => {
+  for (const path of MODERATE_PATHS) {
+    const { outcome, calls } = await runModerate(path.options, path.actor, path.results);
+    if (!(outcome instanceof Presented)) throw new Error("/moderate returned no reply");
+    expect(outcome.options.embeds).toHaveLength(1);
+    expect(outcome.options.embeds[0]?.title).toBe(path.title);
+    expect(outcome.options).not.toHaveProperty("flags");
+    expect(outcome.options.content).toBe("");
+    expect(calls).toEqual(path.calls);
+  }
+});
+
+test("an officer's /moderate lift all names the pauses it left to a server manager", async () => {
+  const { outcome } = await runModerate(
+    [
+      subcommand("lift", [
+        text("member", PAUSED_ID),
+        text("feature", "all"),
+        text("reason", "Agreed to follow the rules"),
+      ]),
+    ],
+    OFFICER,
+    { status: officerStatus(OFFICER_ACTIVE), lift: liftResult() },
+  );
+  if (!(outcome instanceof Presented)) throw new Error("/moderate returned no reply");
+  const left = outcome.options.embeds[0]?.fields?.find((field) => field.name === "Left in place");
+  expect(left?.value).toContain("Opening mod mail cases");
+});
+
+test("/moderate refuses a bad choice or member before any service call", async () => {
+  const block = (extra: unknown[]) => [subcommand("block", [text("reason", "Spam"), ...extra])];
+  const cases: [unknown[], string][] = [
+    [block([text("member", PAUSED_ID), text("feature", "config.view")]), "feature"],
+    [block([text("member", PAUSED_ID), text("feature", "bogus")]), "feature"],
+    [
+      block([text("member", PAUSED_ID), text("feature", "suggest.use"), text("duration", "2w")]),
+      "duration",
+    ],
+    [block([text("member", "Wrenfield"), text("feature", "suggest.use")]), "member"],
+  ];
+  const calls: Call[] = [];
+  for (const [options, option] of cases) {
+    const refused = await runModerate(options, OFFICER, { block: blockResult() }, calls).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(refused).toBeInstanceOf(Failure);
+    expect(refused).toMatchObject({ code: "input", detail: { kind: "option", option } });
+  }
+  expect(calls).toEqual([]);
+});
+
+test("/moderate lift all asks for the lifting permission before reading anyone's pauses", async () => {
+  // A member can't lift: the refusal is about lifting, and the service is never asked who is paused.
+  const { moderation, calls } = stubModeration({ status: officerStatus(OFFICER_ACTIVE) });
+  await open?.close();
+  const fixture = interactionFixture();
+  open = fixture;
+  const error = await Promise.resolve(
+    moderateCommand.execute?.({
+      client: fixture.client,
+      services: new Services().provide(moderationKey, moderation),
+      allowsGuild: () => true,
+      isStopping: () => false,
+      report: () => {},
+      resolveActor: async () => MEMBER,
+      actor: MEMBER,
+      viewer: viewerOf(MEMBER, "1290000000000000001"),
+      interaction: fixture.slash("moderate", [
+        subcommand("lift", [
+          text("member", PAUSED_ID),
+          text("feature", "all"),
+          text("reason", "Agreed to follow the rules"),
+        ]),
+      ]),
+    }),
+  ).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(Failure);
+  expect(error).toMatchObject({ code: "forbidden" });
+  expect(calls).toEqual([]);
+});
+
+test("a member naming someone else on /moderate status is refused before any read", async () => {
+  // Like /guest status: status is for everyone, so the refusal is "your own records", not a
+  // missing officer permission, and the service is never asked.
+  const calls: Call[] = [];
+  const error = await runModerate(
+    [subcommand("status", [text("member", PAUSED_ID)])],
+    MEMBER,
+    { status: ownStatus([]) },
+    calls,
+  ).catch((caught: unknown) => caught);
+  expect(error).toMatchObject({
+    code: "forbidden",
+    detail: { kind: "scope", scope: "owner", permission: "moderation.view" },
+  });
+  expect(calls).toEqual([]);
+  // Naming themselves is the same as naming nobody.
+  const own = await runModerate(
+    [subcommand("status", [text("member", MEMBER.userId)])],
+    MEMBER,
+    { status: ownStatus([]) },
+    calls,
+  );
+  expect(calls).toEqual([["status", "400", "400"]]);
+  expect(own.outcome).toBeInstanceOf(Presented);
+});
+
+test("a service refusal reaches the failure presenter unchanged", async () => {
+  const refusal = new Failure("forbidden", "You can't pause yourself.", 0, {
+    kind: "scope",
+    scope: "self",
+  });
+  const error = await runModerate(
+    [
+      subcommand("block", [
+        text("member", "400"),
+        text("feature", "suggest.use"),
+        text("reason", "Testing"),
+      ]),
+    ],
+    OFFICER,
+    { block: refusal },
+  ).catch((caught: unknown) => caught);
+  expect(error).toBe(refusal);
+});
+
+// ---------------------------------------------------------------------------------------------
 // The whole command surface
 
 /** A raw option payload as the path walk reads it. */
@@ -1308,20 +1676,25 @@ test("the path tables return one embed for every registered command path", async
   const paths = await registeredPaths();
   // 41 in 2.14.0, plus /officer reset and /guest reset (owner decision, 2026-09-24), plus /issue
   // (2.18.0), /config changelog (2.25.0) and /suggest (2.28.0); 2.35.0 split /setup in two,
-  // 2.42.0 added /dashboard and 2.43.0 /modmail.
-  expect(paths).toHaveLength(49);
+  // 2.42.0 added /dashboard, 2.43.0 /modmail and 2.45.0 /moderate block, lift and status.
+  expect(paths).toHaveLength(52);
   // /apply and /modmail open a form, whose refusals and receipts the router, guest-application
   // and modmail tests cover, /version reads GitHub, which version.test stubs, /issue and /suggest
-  // have their own tests below, and dashboard.test runs /dashboard with its service; every other
-  // path is exercised above.
+  // have their own tests below, and dashboard.test runs /dashboard with its service; /moderate's
+  // three paths run through the tests of their own below; every other path is exercised above.
   expect(paths.filter((path) => !covered.has(path))).toEqual([
     "apply",
     "dashboard",
     "issue",
+    "moderate block",
+    "moderate lift",
+    "moderate status",
     "modmail",
     "suggest",
     "version",
   ]);
+  const exercised = new Set(MODERATE_PATHS.map((path) => pathOf(moderateCommand, path.options)));
+  expect([...exercised].sort()).toEqual(["moderate block", "moderate lift", "moderate status"]);
 });
 
 test("every registered command keeps its private default visibility", async () => {

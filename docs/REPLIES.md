@@ -13,6 +13,17 @@ Use [presenters](../src/discord/presenters/) and the [executable catalog](../tes
 - Throw catalog `Failure` values and let the shared failure presenter render them. Add an example for each input option; omit option detail when its value was valid.
 - JSON attachments use the officer-only `details` component and `dataReply()`. Startup plans and plain officer notices are existing exceptions.
 
+## Moderation replies
+
+`/moderate` (2.45.0) follows the same rules, plus these:
+
+- Its replies are always private (`alwaysPrivate`), even under DevBot's public-response override: a reply that names a paused member would tell onlookers about them.
+- Three failure cards cover per-person moderation, all code `forbidden` and tone `error`: **Paused for you** (`forbidden.blocked`), **Not allowed** for pausing a protected person (`forbidden.protected`) and **Not allowed** for pausing or lifting yourself (`forbidden.self`). The first is built from the typed detail (the permission, `until`, `reason`), never from the message text. It names the feature, the end and the reason and never who set the pause. It offers `/modmail` only when the paused permission is a member-tier feature (`suggest.use`, `selfroles.use`, `ledger.view`, `ledger.deposit`, read from `PERMISSIONS[id].tier`); for the baseline features (`/claim`, `/refresh`, `/apply`, `/issue`), whose users may hold neither the Member nor the Guest role, and for `modmail.open` itself it says to ask an officer in the server, and `/moderate status` follows the same rule (`reachOfficers` in `src/discord/presenters/moderation.ts`). `/modmail` and `/apply` show the same card before their form opens (`pausedFormReply`), an expected state with no Code or Ref footer, like their other pre-form refusals. A pause is never the "FC membership needed" card, which says a role is missing. The other two show the service's sentence as written; `tests/unit/replies-moderation.test.ts` keeps the catalog's copy of each in step with the service.
+- A paused person's own status view carries no issuer, even if the row does; an officer's view of someone else names who set each pause and at what level.
+- Reasons are officer-written text the paused person reads. They go through `plain()` and are cut to the house user-text limit inside a field, never the title or description.
+- A lift with nothing to lift is the info `= NO CHANGE` card. None of these cards uses the `‖ PAUSED` marker, which means Discord changes are off.
+- Samples live in `tests/fixtures/replies/moderation.ts` (receipts and status) and `failures.ts` (the three failure cards).
+
 ## Buttons and modals
 
 Use `src/discord/custom-ids.ts`; IDs carry selectors, not authority. Every click reauthorizes the current actor. Messages survive deployments, so retired actions keep answering “out of date” for at least one minor release.

@@ -23,8 +23,10 @@
  * - quiet: cases, but TaruBot can't mention the Officer role in the officer notifications channel
  *   (no Mention Everyone allow there, and the role isn't mentionable), so the settings card warns
  *   that pings notify nobody. Every other state can mention it.
- * Open a case works on the store too, with the real rules (mayOpen, the switch, the limits and the
- * text checks), and a repeat of the same form finds the case it made.
+ * Open a case works on the store too, with the real rules (a pause on modmail.open first, mayUse,
+ * the switch, the limits and the text checks), and a repeat of the same form finds the case it made.
+ * A pause on opening (2.45.0) stops new cases only: the person still lists, reads, answers and
+ * closes the cases they have, as ModMail does (mayUse holds the permission, can doesn't).
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -53,6 +55,7 @@ import {
   MODMAIL_LIMITS,
   mayAccess,
   mayOpen,
+  mayUse,
   type OpenRefusal,
   type Prerequisites,
   REOPENED_STATE,
@@ -62,7 +65,15 @@ import {
   sideIn,
   textProblem,
 } from "../../src/domain/modmail.js";
-import { type Actor, authorize, can, requirePermission } from "../../src/domain/policy.js";
+import {
+  type Actor,
+  authorize,
+  can,
+  holds,
+  pauseOn,
+  requireNotPaused,
+  requirePermission,
+} from "../../src/domain/policy.js";
 import type { OfficerPing } from "../../src/domain/visibility.js";
 import { Failure } from "../../src/domain/values.js";
 
@@ -478,7 +489,8 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
   };
   modmail.mine = async (actor: Actor): Promise<MyCases> => {
     authorize(actor, actor.guildId);
-    if (!mayOpen(actor))
+    // mayUse, not mayOpen: a pause on opening leaves the person their list of cases.
+    if (!mayUse(actor))
       throw new Failure("forbidden", "Mod mail is for this server's members and guests.");
     const mine = store.cases
       .filter((entry) => entry.guildId === actor.guildId && entry.openerId === actor.userId)
@@ -498,8 +510,10 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
   /** Why `actor` can't open a case now, in ModMail.open's order; null when they can. */
   const openRefusal = (actor: Actor): OpenRefusal | null => {
     if (store.key !== "ok") return "key";
-    if (actor.member !== true && actor.guest !== true) return "not_member";
+    if (!holds(actor, "modmail.open")) return "not_member";
     if (actor.botAdministrator !== false) return "administrator";
+    // After the static refusals and before the switch and the limits, as ModMail.openRefusal.
+    if (pauseOn(actor, "modmail.open")) return "paused";
     if (!settingsOf(actor.guildId).enabled) return "off";
     const mine = store.cases.filter(
       (entry) => entry.guildId === actor.guildId && entry.openerId === actor.userId,
@@ -513,6 +527,9 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
   };
   modmail.open = async (actor, input): Promise<OpenOutcome> => {
     authorize(actor, actor.guildId);
+    // A pause is its own refusal, ahead of everything else, a repeat of a form that made a case
+    // included (the real ModMail.open does the same before it reads anything).
+    requireNotPaused(actor, "modmail.open");
     const caseId = input.caseId?.toLowerCase();
     const topic = cleanTopic(input.topic);
     const body = cleanText(input.body);
@@ -532,6 +549,8 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     const bodyError = textProblem(body, MODMAIL_LIMITS.messageChars);
     if (bodyError) return { status: "invalid", field: "message", error: bodyError };
     const refusal = openRefusal(actor);
+    // requireNotPaused above already reported a pause, as the real open() does.
+    if (refusal === "paused") throw new Error("The fake's checks disagree");
     if (refusal) return { status: "refused", reason: refusal };
     if (!mayOpen(actor)) throw new Error("The fake's checks disagree");
     const settings = settingsOf(actor.guildId);

@@ -27,6 +27,7 @@
  * by state and count only: which roles it named is never stored once it ends, so never shown.
  */
 import type { MyRoles, RoleChoiceStatus } from "../../application/self-roles.js";
+import type { Pause } from "../../domain/policy.js";
 import {
   CHOICE_MESSAGES,
   type CategoryChoice,
@@ -220,6 +221,16 @@ export function statusBanner(
     case "dropped":
       return { text: STATUS_TEXT.dropped(status.completedAt), tone: "warning" };
   }
+}
+
+/**
+ * The line for a paused person: when it ends (or that it lasts until someone lifts it) and the
+ * reason they were given, which is untrusted text. Never who paused them (owner decision Q5 A).
+ */
+function pausedText(pause: Pause): SafeHtml {
+  const until =
+    pause.until === null ? html`until someone lifts it` : html`until ${when(pause.until)}`;
+  return html`Your use of My roles is paused ${until}: ${untrusted(pause.reason)}`;
 }
 
 /** Why the form can't be saved now, and the officers' notes, each a constant sentence. */
@@ -630,6 +641,9 @@ function callouts(view: MyRolesView): SafeHtml[] {
   if (!roles.configured) return [...out, callout(CALLOUTS.setup)];
   if (view.officer && roles.unreadableMenu)
     out.push(callout(CALLOUTS.unreadable(roleMenuLink(roles.guildId)), true));
+  // A pause on My roles (2.45.0) keeps the page open, like a time-out: the person sees their roles,
+  // when it ends and the reason they were given (never who set it), and nothing can be saved.
+  if (roles.paused) out.push(callout(pausedText(roles.paused), true));
   if (roles.timedOut) out.push(callout(CHOICE_MESSAGES.timedOut, true));
   // A change parked by the pause already says so in the status banner, so only the locked form's
   // reason is added: the banner alone wouldn't explain the missing Save button.

@@ -14,6 +14,10 @@ import { ASSETS, FONT_FACES, FONTS, NOTICES, STYLESHEET } from "../../src/web/as
 import { html, type SafeHtml } from "../../src/web/html.js";
 import { ICON_NAMES, icon } from "../../src/web/icons.js";
 import { errorPage, type LayoutModel, layout } from "../../src/web/layout.js";
+import { ENTRY_CSS } from "../../src/web/styles/entry.js";
+import { MODERATION_CSS } from "../../src/web/styles/moderation.js";
+import { MODMAIL_CSS } from "../../src/web/styles/modmail.js";
+import { PUBLIC_STATUS_CSS } from "../../src/web/styles/public-status.js";
 import { TOKENS_CSS } from "../../src/web/styles/tokens.js";
 import { notice } from "../../src/web/views/forms.js";
 import { renderHome, renderNoAccess } from "../../src/web/views/servers.js";
@@ -163,6 +167,18 @@ describe("the shell", () => {
 describe("the stylesheet", () => {
   /** The served stylesheet without its comments, which may name what the rules avoid. */
   const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+
+  test("each page's rules are their own module in the list: Moderation's follow Mod mail's, once, and are not the entry pages'", () => {
+    const body = String(STYLESHEET.body);
+    // The sign-in and server list are the first thing anyone sees, and their module is theirs
+    // alone: it carries nothing of a page that officers use.
+    expect(ENTRY_CSS).not.toContain(".mod-");
+    expect(ENTRY_CSS).not.toContain("/* Moderation */");
+    expect(body.split(MODERATION_CSS)).toHaveLength(2);
+    const at = [MODMAIL_CSS, MODERATION_CSS, PUBLIC_STATUS_CSS].map((rules) => body.indexOf(rules));
+    expect(at.every((place) => place > 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+  });
 
   /** A rule body for `selector`, from the first rule that lists it. */
   const ruleFor = (selector: string): string => {
@@ -522,11 +538,21 @@ describe("the stylesheet", () => {
     ];
     expect(named.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
     expect(pointed.map((match) => [match[1], match[2]])).toEqual(pairs.map((pair) => [pair, pair]));
-    // Plus Mod mail's Open a case (2.43.0), the one other anchored panel, in the same block.
-    expect(block).toMatch(/\.anchor-modmail-open \{\s*anchor-name: --modmail-open;\s*\}/u);
-    expect(block).toMatch(/\.anchored-modmail-open \{\s*position-anchor: --modmail-open;\s*\}/u);
-    expect(block.match(/anchor-name:/gu)).toHaveLength(41);
-    expect(block.match(/position-anchor:/gu)).toHaveLength(41);
+    // Plus the other pages' anchored panels, each one button on its page, in the same block: Mod
+    // mail's Open a case (2.43.0) and Moderation's two Pause buttons (2.45.0), the toolbar's and
+    // the finder's result card's. Moderation's Lift panels are one per pause, so they have none.
+    const pageAnchors = ["modmail-open", "moderation-pause", "moderation-pause-found"];
+    for (const name of pageAnchors) {
+      expect(block).toMatch(
+        new RegExp(`\\.anchor-${name} \\{\\s*anchor-name: --${name};\\s*\\}`, "u"),
+      );
+      expect(block).toMatch(
+        new RegExp(`\\.anchored-${name} \\{\\s*position-anchor: --${name};\\s*\\}`, "u"),
+      );
+    }
+    expect(block).not.toContain("moderation-lift");
+    expect(block.match(/anchor-name:/gu)).toHaveLength(43);
+    expect(block.match(/position-anchor:/gu)).toHaveLength(43);
     // From 40rem wide and 30rem tall only: a phone keeps its sheet (the overlay test above pins
     // it), a short screen its near-full panel; nothing here names the phone's or short screen's
     // queries.
@@ -566,9 +592,7 @@ describe("the stylesheet", () => {
         .flatMap((entry) => entry.selectors)
         .filter(Boolean),
     ).toEqual([
-      ...pairs.flatMap((pair) => [`.anchor-${pair}`, `.anchored-${pair}`]),
-      ".anchor-modmail-open",
-      ".anchored-modmail-open",
+      ...[...pairs, ...pageAnchors].flatMap((pair) => [`.anchor-${pair}`, `.anchored-${pair}`]),
       placed,
       unpadded,
       placed,

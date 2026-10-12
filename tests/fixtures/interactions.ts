@@ -46,6 +46,10 @@ export function interactionFixture() {
     bot: false,
     /** The member's permission bitfield in the channel, as Discord sends it with the payload. */
     permissions: "0",
+    /** The role IDs the member holds, as the payload lists them (a pre-form check reads them). */
+    roles: [] as string[],
+    /** TaruBot's own permission bitfield in the channel (app_permissions in the payload). */
+    appPermissions: "0",
   };
   let serial = 10000;
   const user = () => ({
@@ -97,13 +101,13 @@ export function interactionFixture() {
     member: member.guildId
       ? {
           user: user(),
-          roles: [],
+          roles: member.roles,
           joined_at: member.joinedAt,
           permissions: member.permissions,
           flags: 0,
         }
       : undefined,
-    app_permissions: "0",
+    app_permissions: member.appPermissions,
     locale: "en-US",
     guild_locale: "en-US",
     entitlements: [],

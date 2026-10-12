@@ -72,6 +72,7 @@ TaruBot keeps your topic and messages encrypted in its database, with a key kept
 
 - **"Mod mail isn't turned on in this server"** (or a greyed-out **Open a case** saying it's turned off): your officers haven't turned it on, or have turned it off. Cases you already have stay readable on the dashboard, and you can still reply to them.
 - **"No new case right now"** (or a greyed-out **Open a case** naming the limit): you've reached the limit of open cases, or of new cases in 24 hours. Add to an open case on the dashboard.
+- **"Paused for you"** from `/modmail`, before any form opens (or a greyed-out **Open a case** saying opening new cases is paused for you here): a server manager has paused your opening of new cases for a while. The card gives the end and the reason. The cases you already have still work: read them, reply and close them. To reach the officers about the pause, ask one in the server. See [If your use of a feature is paused](/tarubot/use/progress-and-problems/#if-your-use-of-a-feature-is-paused).
 - **`/modmail` doesn't show up or can't be used** while you're in a time-out: use **Open a case** on the dashboard instead.
 - **"This message can't be read with this TaruBot's current key."** shows instead of a message: the server's mod mail key changed. Tell an officer.
 - **A Page not found** for one of your own cases: check you're signed in as yourself, and that you still have the Member or Guest role. A case is also gone once it has been closed for 90 days.

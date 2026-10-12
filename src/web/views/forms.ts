@@ -2,9 +2,11 @@
  * The form view kit (#43): pure templates for the forms pages render, styled by
  * styles/forms.ts. Pages compose these rather than write form markup, so every form gets the same
  * guarantees:
- * - postForm() is the only way to open a form: method="post", a same-origin action, and the
- *   session's form token (sessions.ts's formToken) as its first field, so no POST form can forget
- *   it;
+ * - postForm() is the only way to open a form that changes anything: method="post", a same-origin
+ *   action, and the session's form token (sessions.ts's formToken) as its first field, so no POST
+ *   form can forget it. The one other kind is a lookup, a `method="get"` form that changes nothing
+ *   and so carries no token (Moderation's finder, views/moderation.ts): it writes its own tag, its
+ *   action through href(), and its fields come from this kit like any other;
  * - every control has a visible `<label for>` (or a `<legend>` for a group), an id unique on the
  *   page, its hint and error tied to it with aria-describedby, and aria-invalid when it has an
  *   error; native inputs throughout, so focus, forced colors and assistive technology work

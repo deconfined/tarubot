@@ -3,13 +3,16 @@
  * PostgreSQL. It keeps PgSessions' rules (tests/integration/web-sessions.test.ts runs the same
  * scenarios against both): SHA-256 keys only, idle and absolute expiry with the same boundaries,
  * a touch at most every SESSION_TOUCH_MS, malformed tokens refused before any lookup, user IDs
- * checked like the external_id domain, and at most SESSIONS_PER_USER live sessions per user.
+ * checked like the external_id domain, at most SESSIONS_PER_USER live sessions per user, and
+ * (2.45.0) a recentSignIn judged on the injected clock at every read, as PgSessions judges it on
+ * the database clock: strictly inside RECENT_SIGN_IN_MS of authenticatedAt.
  */
 import { idSchema } from "../../src/domain/values.js";
 import {
   hashToken,
   isSessionToken,
   newSessionToken,
+  RECENT_SIGN_IN_MS,
   SESSION_ABSOLUTE_MS,
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
@@ -42,6 +45,7 @@ export class MemorySessions implements SessionStore {
       userId,
       createdAt: at,
       authenticatedAt: at,
+      recentSignIn: true,
       lastSeenAt: at,
       expiresAt: new Date(at.getTime() + SESSION_ABSOLUTE_MS),
     };
@@ -61,7 +65,7 @@ export class MemorySessions implements SessionStore {
       );
     for (const [ended] of others.slice(SESSIONS_PER_USER - 1)) this.byHash.delete(ended);
     this.byHash.set(key, session);
-    return { token, session };
+    return { token, session: recent(session, at.getTime()) };
   }
 
   async get(token: string): Promise<Session | null> {
@@ -71,10 +75,10 @@ export class MemorySessions implements SessionStore {
     const session = this.byHash.get(key);
     const now = this.now();
     if (!session || !live(session, now)) return null;
-    if (now - session.lastSeenAt.getTime() < SESSION_TOUCH_MS) return session;
+    if (now - session.lastSeenAt.getTime() < SESSION_TOUCH_MS) return recent(session, now);
     const touched = { ...session, lastSeenAt: new Date(now) };
     this.byHash.set(key, touched);
-    return touched;
+    return recent(touched, now);
   }
 
   async delete(token: string): Promise<void> {
@@ -106,8 +110,21 @@ export class MemorySessions implements SessionStore {
 
   /** Every stored row, expired ones included, as web_sessions would hold them. */
   rows(): SessionRow[] {
-    return [...this.byHash].map(([tokenHash, session]) => ({ tokenHash, session }));
+    const now = this.now();
+    return [...this.byHash].map(([tokenHash, session]) => ({
+      tokenHash,
+      session: recent(session, now),
+    }));
   }
+}
+
+/**
+ * The session with recentSignIn as of `now`: PgSessions' `authenticated_at > now() - 15 minutes`,
+ * strict, so a sign-in exactly RECENT_SIGN_IN_MS old is no longer recent. Never kept in the map,
+ * where it would go stale as the clock moves.
+ */
+function recent(session: Session, now: number): Session {
+  return { ...session, recentSignIn: now - session.authenticatedAt.getTime() < RECENT_SIGN_IN_MS };
 }
 
 /** PgSessions' LIVE condition: before the absolute expiry and seen within the idle window. */

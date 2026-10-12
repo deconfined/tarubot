@@ -245,7 +245,7 @@ To recover from a broken or lost database:
    docker compose exec -T postgres rm /tmp/restore.dump
    ```
 
-   Decisions acknowledged after that backup, such as new links, ledger entries, guest decisions and role menu changes, must be recorded again: a restore can't know about them.
+   Decisions acknowledged after that backup, such as new links, ledger entries, guest decisions, role menu changes and pauses, must be recorded again: a restore can't know about them.
 4. If the backup is from an older release, run `migrate.js` as in an update.
 5. If the backup predates an [update post](/tarubot/deploy/monitoring/#update-posts) that went out, raise that server's `changelog_version` to the version it announced, or the post goes out again when the bot starts:
 
@@ -275,6 +275,8 @@ To recover from a broken or lost database:
 8. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`.
 
 The [status page](/tarubot/deploy/monitoring/#public-status-page)'s samples need no step: they hold nothing to replay. Those written after the backup are lost, so the page shows that time as down.
+
+Officers' [pauses](/tarubot/admin/moderation/) need no step either, but the pauses a backup restores can differ from the current ones: a pause lifted since can reappear (unless its own end has passed), and one set since can be missing. Ask an officer to check the Moderation page after the restore and lift or set pauses again as needed.
 
 Discord work the restored database still owes resumes from its durable jobs, apart from the role changes step 7 closed. A restore never undoes Discord changes the bot already made; the next reconciliation brings Discord in line with the restored decisions.
 

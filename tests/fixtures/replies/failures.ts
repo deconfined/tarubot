@@ -9,7 +9,14 @@ import type { Audience } from "../../../src/discord/presenters/audience.js";
 import { failureReply } from "../../../src/discord/presenters/failure.js";
 import { userId } from "../../../src/discord/selectors.js";
 import type { FailureCode, FailureDetail } from "../../../src/domain/failures.js";
-import { authorizeOwner, requirePermission } from "../../../src/domain/policy.js";
+import {
+  accessFor,
+  authorizeOwner,
+  type Pause,
+  pausedFailure,
+  requirePermission,
+} from "../../../src/domain/policy.js";
+import type { PermissionId } from "../../../src/domain/rbac.js";
 import { suggestionAccessRefused } from "../../../src/domain/suggestions.js";
 import { Failure, id, note } from "../../../src/domain/values.js";
 import { ACTORS, at, CHARACTER, GUEST_ID, MEMBER_ID, NOW, REF, VIEWERS } from "../results.js";
@@ -91,6 +98,38 @@ const officerOnly = thrown(() =>
 const managerOnly = thrown(() =>
   requirePermission(ACTORS.officer, ACTORS.officer.guildId, "admin.roles"),
 );
+/** What a pause shows its person (2.45.0): the reason an officer wrote, never who wrote it. */
+const PAUSE_REASON = "Posting the same suggestion again and again";
+/**
+ * A member whose /suggest is paused for three days, and the refusal the real policy check gives
+ * them: the pause arrives as typed detail, ahead of any missing-role card.
+ */
+const PAUSED_MEMBER = {
+  ...ACTORS.member,
+  access: accessFor(
+    false,
+    ["member"],
+    new Map<PermissionId, Pause>([["suggest.use", { until: at(259_200), reason: PAUSE_REASON }]]),
+  ),
+};
+const suggestPaused = thrown(() =>
+  requirePermission(PAUSED_MEMBER, PAUSED_MEMBER.guildId, "suggest.use"),
+);
+/** The sentences the moderation service throws; replies-moderation.test.ts keeps them in step. */
+export const MODERATION_REFUSALS = {
+  manager: "Server managers can't be paused.",
+  mail: "Only a server manager can pause mod mail.",
+  staff: "Only a server manager can pause someone with officer permissions.",
+  bot: "Bots can't be paused.",
+  pauseSelf: "You can't pause yourself.",
+  liftSelf: "You can't lift your own pause.",
+} as const;
+/** A refusal for pausing or lifting someone the actor may not, as the service builds it. */
+const protectedTarget = (message: string) =>
+  failure("forbidden", message, { kind: "scope", scope: "protected" });
+/** A refusal for pausing or lifting oneself. */
+const selfTarget = (message: string) =>
+  failure("forbidden", message, { kind: "scope", scope: "self" });
 /** The approved revision-fence message. */
 const SETTINGS_CHANGED =
   "Server settings changed while this was running, so nothing was saved. Run the command again.";
@@ -109,6 +148,8 @@ const BLOCKED_OFFICER = { tone: "warning", title: "Discord permissions need atte
 const BLOCKED_MEMBER = { tone: "warning", title: "Server setup issue" } as const;
 const UNEXPECTED = { tone: "error", title: "Something went wrong" } as const;
 const CLOSED = { tone: "info", title: "Guest applications are closed" } as const;
+const PAUSED_FOR_YOU = { tone: "error", title: "Paused for you" } as const;
+const NOT_ALLOWED = { tone: "error", title: "Not allowed" } as const;
 
 /** Every failure concept, per audience and the commands that reach it. */
 export const FAILURE_CASES = {
@@ -267,6 +308,99 @@ export const FAILURE_CASES = {
       { kind: "scope", scope: "test_guild" },
     ),
     "/ping",
+  ),
+  // 2.45.0: a pause on one person's use of one feature (owner decision 3). The card names the
+  // feature, the end and the reason, never who set it, and is never the membership card.
+  "forbidden blocked · /suggest · member": card(
+    "forbidden.blocked",
+    "member",
+    PAUSED_FOR_YOU,
+    suggestPaused,
+    "/suggest",
+  ),
+  "forbidden blocked · /suggest until lifted · member": card(
+    "forbidden.blocked",
+    "member",
+    PAUSED_FOR_YOU,
+    pausedFailure("suggest.use", { until: null, reason: PAUSE_REASON }),
+    "/suggest",
+  ),
+  // Opening mod mail is paused: /modmail is not offered as the way out, and cases already open
+  // stay on the dashboard.
+  "forbidden blocked · mod mail form · member": card(
+    "forbidden.blocked",
+    "member",
+    PAUSED_FOR_YOU,
+    pausedFailure("modmail.open", { until: at(86_400), reason: "Opening cases without a reason" }),
+    "modal modmail",
+  ),
+  // A baseline feature (/claim, /refresh, /apply, /issue) is used by lobby newcomers, who can't
+  // use /modmail: the way out is an officer in the server.
+  "forbidden blocked · /claim · member": card(
+    "forbidden.blocked",
+    "member",
+    PAUSED_FOR_YOU,
+    pausedFailure("characters.claim", {
+      until: at(86_400),
+      reason: "Claiming characters that aren't yours",
+    }),
+    "/claim",
+  ),
+  // A server manager may pause an officer's member features, so officers can see the card too.
+  "forbidden blocked · /issue · officer": card(
+    "forbidden.blocked",
+    "officer",
+    PAUSED_FOR_YOU,
+    pausedFailure("issue.use", { until: at(604_800), reason: "Reporting the same problem daily" }),
+    "/issue",
+  ),
+  // /moderate is a mixed root: a member may run status, so the officer refusal names block or lift,
+  // and a member naming someone else on status is told they can read only their own.
+  "forbidden officer · /moderate block · member": card(
+    "forbidden.officer",
+    "member",
+    OFFICERS_ONLY,
+    thrown(() => requirePermission(ACTORS.member, ACTORS.member.guildId, "moderation.block")),
+    "/moderate block",
+  ),
+  "forbidden owner · /moderate status member: · member": card(
+    "forbidden.owner",
+    "member",
+    { tone: "error", title: "Only your own records" },
+    failure(
+      "forbidden",
+      "You can view only your own records. Officers can look up other members.",
+      { kind: "scope", scope: "owner", permission: "moderation.view" },
+    ),
+    "/moderate status",
+  ),
+  "forbidden protected · /moderate block manager · officer": card(
+    "forbidden.protected",
+    "officer",
+    NOT_ALLOWED,
+    protectedTarget(MODERATION_REFUSALS.manager),
+    "/moderate block",
+  ),
+  "forbidden protected · /moderate block mod mail · officer": card(
+    "forbidden.protected",
+    "officer",
+    NOT_ALLOWED,
+    protectedTarget(MODERATION_REFUSALS.mail),
+    "/moderate block",
+  ),
+  "forbidden self · /moderate block · manager": card(
+    "forbidden.self",
+    "manager",
+    NOT_ALLOWED,
+    selfTarget(MODERATION_REFUSALS.pauseSelf),
+    "/moderate block",
+  ),
+  "forbidden self · /moderate lift · officer": card(
+    "forbidden.self",
+    "officer",
+    NOT_ALLOWED,
+    selfTarget(MODERATION_REFUSALS.liftSelf),
+    "/moderate lift",
   ),
 
   // setup -------------------------------------------------------------------------------------

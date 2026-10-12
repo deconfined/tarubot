@@ -518,3 +518,25 @@ export const modmailReads = pgTable("modmail_reads", {
     .default("case"),
   read_at: instant("read_at").notNull().defaultNow(),
 });
+
+/**
+ * One pause on one person's use of one feature (migration 015, 2.45.0), kept as history: a trigger
+ * refuses deletes and every write but the lift, which is written once. Active while it has no
+ * lift and has not ended (expires_at on the database clock). `permission` is a TaruBot permission
+ * id; `reason` is shown to the paused person, never put in the audit table.
+ */
+export const memberBlocks = pgTable("member_blocks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  batch_id: uuid("batch_id").notNull(),
+  guild_id: externalId("guild_id").notNull(),
+  user_id: externalId("user_id").notNull(),
+  permission: text("permission").notNull(),
+  reason: text("reason").notNull(),
+  issuer_level: text("issuer_level", { enum: ["manager", "moderator"] }).notNull(),
+  actor_id: externalId("actor_id").notNull(),
+  created_at: instant("created_at").notNull().defaultNow(),
+  expires_at: instant("expires_at"),
+  lifted_at: instant("lifted_at"),
+  lifted_by: externalId("lifted_by"),
+  lift_reason: text("lift_reason"),
+});

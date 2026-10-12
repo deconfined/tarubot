@@ -44,7 +44,7 @@ import {
   MODMAIL_LIMITS,
   MODMAIL_PING_KIND,
   mayAccess,
-  mayOpen,
+  mayUse,
   NOTIFY_COALESCE_SECONDS,
   type OpenRefusal,
   type PingEvent,
@@ -60,7 +60,16 @@ import {
   textProblem,
   caseUrl,
 } from "../domain/modmail.js";
-import { authorize, can, requirePermission, type Actor } from "../domain/policy.js";
+import {
+  authorize,
+  can,
+  holds,
+  type Pause,
+  pauseOn,
+  requireNotPaused,
+  requirePermission,
+  type Actor,
+} from "../domain/policy.js";
 import { holdsAdministrator } from "../domain/self-roles.js";
 import { type OfficerPing, officerPing } from "../domain/visibility.js";
 import { Failure, stoppingRefusal } from "../domain/values.js";
@@ -68,6 +77,7 @@ import { fieldAad, type ModMailKey, type ModMailCipher } from "../infrastructure
 import { audit, type Connection, orm, type Orm } from "../infrastructure/postgres/database.js";
 import * as t from "../infrastructure/postgres/schema.js";
 import { type Job, scheduleJob } from "../jobs/queue.js";
+import { activeBlocks } from "./blocks.js";
 import type { GuildRecord } from "./records.js";
 import type { Reporter } from "./reporting.js";
 import type { EffectsMode } from "./results.js";
@@ -218,7 +228,7 @@ export interface CaseView {
  */
 export type OpenOutcome =
   | { readonly status: "opened"; readonly number: bigint; readonly url: string | null }
-  | { readonly status: "refused"; readonly reason: OpenRefusal }
+  | { readonly status: "refused"; readonly reason: Exclude<OpenRefusal, "paused"> }
   | { readonly status: "invalid"; readonly field: "topic" | "message"; readonly error: TextError }
   | { readonly status: "conflict" }
   | { readonly status: "already_opened"; readonly number: bigint; readonly url: string | null };
@@ -442,6 +452,12 @@ interface Unreadable {
 }
 
 /**
+ * What openGate refuses with: a plain refusal (never "paused", which carries the pause itself so
+ * the card can show its end and reason), or the person's own pause on opening cases.
+ */
+export type OpenGate = Exclude<OpenRefusal, "paused"> | { readonly paused: Pause };
+
+/**
  * Mod mail for the command, the pages and the officers' switch; main.ts provides one as
  * modmailKey. Nothing here writes to Discord: pings and DMs go through jobs (ModMailNotices).
  */
@@ -599,8 +615,9 @@ export class ModMail {
 
   /**
    * The refusals that need no database: the key, the web, and who may open. `opens` is whether the
-   * person holds modmail.open, which the Member and Guest roles carry: can() for a resolved actor,
-   * the bound roles among the interaction's role IDs for the courtesy check before the form.
+   * person holds modmail.open, which the Member and Guest roles carry: holds() for a resolved
+   * actor (a pause is deliberately not part of it; open() reports one first and openRefusal after
+   * this), the bound roles among the interaction's role IDs for the courtesy check before the form.
    */
   private staticRefusal(opens: boolean, botAdministrator: boolean | undefined) {
     if (this.key.status !== "on") return "key";
@@ -613,16 +630,22 @@ export class ModMail {
   /**
    * /modmail's check before its form opens (the router's beforeModal: a courtesy, never
    * authorization). It has no resolved actor, only what the interaction carried: the member's role
-   * IDs and whether TaruBot holds Administrator in the channel, both free of requests. Two quick
-   * reads decide the rest: the guild's bound roles with the switch, then the limits. The
-   * submission checks everything again in its transaction.
+   * IDs, whether TaruBot holds Administrator in the channel, and whether they are a server manager
+   * (Manage Server and Manage Roles together), all free of requests. Quick reads decide the rest:
+   * the guild's bound roles with the switch, then the person's own pause on opening cases, then the
+   * limits. The pause comes after the refusals that need no database, so a missing key or web,
+   * a non-member and an Administrator bot still read as themselves, and before the switch and the
+   * limits, so a paused person is told so rather than a reason that would hold for anyone. A server
+   * manager can't be paused, so for them the read is skipped. The submission checks everything
+   * again in its transaction, and is what refuses (open() reports a pause first of all).
    */
   async openGate(
     guildId: string,
     userId: string,
     roleIds: readonly string[],
     botAdministrator: boolean,
-  ): Promise<OpenRefusal | null> {
+    manager: boolean,
+  ): Promise<OpenGate | null> {
     if (this.key.status !== "on") return "key";
     if (this.origin === null) return "web";
     const db = this.app.db.orm;
@@ -639,6 +662,11 @@ export class ModMail {
     const holds = (role: string | null) => role !== null && roleIds.includes(role);
     const refusal = this.staticRefusal(holds(row.member) || holds(row.guest), botAdministrator);
     if (refusal) return refusal;
+    // Holding Member or Guest means holding modmail.open, so a pause on it applies.
+    const pause = manager
+      ? undefined
+      : (await activeBlocks(db, guildId, userId)).get("modmail.open");
+    if (pause) return { paused: pause };
     if (row.enabled !== true) return "off";
     const { open, daily } = await this.counts(db, guildId, userId);
     if (open >= MODMAIL_LIMITS.openCases) return "open_limit";
@@ -652,8 +680,9 @@ export class ModMail {
    * open(), read outside a transaction; the submission checks them all again under its locks.
    */
   private async openRefusal(db: Orm, actor: Actor, enabled: boolean): Promise<OpenRefusal | null> {
-    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
+    const refusal = this.staticRefusal(holds(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return refusal;
+    if (pauseOn(actor, "modmail.open")) return "paused";
     if (!enabled) return "off";
     const { open, daily } = await this.counts(db, actor.guildId, actor.userId);
     if (open >= MODMAIL_LIMITS.openCases) return "open_limit";
@@ -749,10 +778,12 @@ export class ModMail {
     // Lowercase, as PostgreSQL stores it: the AAD names the case ID as stored.
     const minted = input.caseId?.toLowerCase();
     if (minted !== undefined && !CANONICAL_UUID.test(minted)) throw outOfDateForm();
-    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
+    // A pause is its own refusal, ahead of every other (it never reads as a missing role).
+    requireNotPaused(actor, "modmail.open");
+    const refusal = this.staticRefusal(holds(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return { status: "refused", reason: refusal };
     const cipher = this.cipher;
-    if (!cipher || !mayOpen(actor)) throw new Error("Mod mail's static checks disagree");
+    if (!cipher || !mayUse(actor)) throw new Error("Mod mail's static checks disagree");
     const topic = cleanTopic(input.topic);
     const body = cleanText(input.body);
     const topicError = textProblem(topic, MODMAIL_LIMITS.topicChars);
@@ -1006,7 +1037,7 @@ export class ModMail {
    */
   async mine(actor: Actor): Promise<MyCases> {
     authorize(actor, actor.guildId);
-    if (!mayOpen(actor))
+    if (!mayUse(actor))
       throw new Failure("forbidden", "Mod mail is for this server's members and guests.");
     const db = this.app.db.orm;
     const c = t.modmailCases;

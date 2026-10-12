@@ -268,4 +268,7 @@ test("compiled output discovers the same module inventory as source", async () =
   // Mod mail (2.43.0): the inbox and the numbered case page.
   expect(pages.has("/g/:guild/modmail")).toBe(true);
   expect(pages.has("/g/:guild/modmail/:number")).toBe(true);
+  // Per-person moderation (2.45.0): /moderate, and the officers' Moderation page.
+  expect(source.has("moderate")).toBe(true);
+  expect(pages.has("/g/:guild/moderation")).toBe(true);
 }, 30000);
