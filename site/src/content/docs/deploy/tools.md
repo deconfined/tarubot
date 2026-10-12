@@ -40,6 +40,16 @@ docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --guil
 
 It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. Register again after an update whose changelog says the commands changed. Until you do, members don't see new commands, and a changed option may get an "out of date" reply.
 
+### candidate-check.js
+
+Checks, offline, that a release would register and start with your settings, before you stop anything. It never reaches Discord or the database, so it is safe beside the running bot.
+
+```sh
+docker compose run --rm --no-deps -T tarubot bun dist/scripts/candidate-check.js VERSION SCHEMA_FILE --global
+```
+
+`VERSION` and `SCHEMA_FILE` (for example `2.45.2` and `015_member_blocks.sql`) are what you expect this image to hold. It checks four parts and prints one line of true/false flags with the first part that failed: **identity** (the image holds that version and schema, and its migrations end there), **config** (your settings pass the bot's own startup validation), **modules** (every command, button and listener loads) and **registration** (the deployment guard accepts the scope, and the commands follow Discord's registration rules, such as required options before optional ones). It exits 0 when everything passes and 1 otherwise, naming the setting or command at fault on its error output, never a value. The upstream deployment runs it before every delivery; a release that fails it is refused while the old bot keeps running.
+
 ### commands.js
 
 Reads command registrations back, and cleans up leftovers. It uses Discord's API only, not the database.
