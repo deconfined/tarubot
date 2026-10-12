@@ -43,11 +43,14 @@ const boxes: HostSandbox[] = [];
 afterAll(() => {
   for (const box of boxes) rmSync(box.directory, { recursive: true, force: true });
 });
-const sandbox = (releases = true, target: HostTarget = "production") => {
-  const box = hostSandbox(releases, target);
+const sandbox = (releases = true, target: HostTarget = "production", seedCurrent = true) => {
+  const box = hostSandbox(releases, target, seedCurrent);
   boxes.push(box);
   return box;
 };
+/** The digest the host's `current` record names: the release the entry would restore. */
+const recordedDigest = (box: HostSandbox) =>
+  JSON.parse(readFileSync(join(box.state, "current"), "utf8")).digest as string;
 const configureWeb = (box: HostSandbox, overrides: Record<string, string> = {}) => {
   const settings = {
     COMPOSE_PROFILES: "web",
@@ -217,6 +220,12 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     // The candidate's offline check runs, in its image, before anything stops.
     expect(actions.indexOf("candidate-present")).toBeLessThan(actions.indexOf("candidate-check"));
     expect(actions.indexOf("candidate-check")).toBeLessThan(actions.indexOf("stop"));
+    // The restore kit is rehearsed before anything stops, and a delivery that works never restores.
+    expect(actions.indexOf("restore-config")).toBeLessThan(actions.indexOf("stop"));
+    expect(actions.indexOf("restore-probe")).toBeLessThan(actions.indexOf("stop"));
+    for (const action of ["restore-up", "restore-observe", "restore-register", "reap"])
+      expect(actions).not.toContain(action);
+    expect(existsSync(join(box.state, "last-run"))).toBe(false);
     expect(actions).toContain("register-global");
     expect(actions).not.toContain("register-guild");
     expect(actions.indexOf("scope-live")).toBeLessThan(actions.indexOf("stop"));
@@ -329,29 +338,78 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     expect(result.code).not.toBe(0);
     expect(result.stdout).toEndWith("result needs-owner\n");
     expect(existsSync(join(box.state, "pending"))).toBe(true);
-    expect(existsSync(join(box.state, "current"))).toBe(false);
+    expect(recordedDigest(box)).toBe(box.live.digest);
     expect(events(box)).not.toContain("backup");
     expect(events(box)).not.toContain("start");
+    // Writers that can't be confirmed stopped are never joined by a restored one.
+    expect(events(box)).not.toContain("restore-up");
+    expect(result.stdout).toContain("reason fence writers=unconfirmed\n");
+    expect(result.stdout).not.toContain("reason restore");
   });
 
-  for (const failure of [
-    "backup",
-    "age",
-    "upload",
-    "migrate",
-    "register",
-    "start",
-    "probe",
-    "restart",
-    "inspect",
-    "restart-policy",
-  ]) {
+  /** The failures before the candidate container exists: the previous release is restored. */
+  for (const failure of ["backup", "age", "upload", "migrate", "register"]) {
+    test(`${failure} failure restores the previous release and says rolled-back`, () => {
+      const box = sandbox();
+      const before = readFileSync(join(box.state, "current"), "utf8");
+      knob(box, failure);
+      const result = deploy(box);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toEndWith("result rolled-back\n");
+      expect(result.stdout).toContain("reason restore outcome=restored\n");
+      expect(result.stdout).not.toContain("result deployed");
+      expect(result.stdout).not.toContain("result needs-owner");
+      expect(result.stderr).toBe("");
+      // The previous release runs again, observed and armed; nothing is pending, `current` is as it was.
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+      expect(readFileSync(join(box.state, "current"), "utf8")).toBe(before);
+      const bot = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
+      expect(bot.State.Running).toBe(true);
+      expect(bot.Config.Labels["org.opencontainers.image.version"]).toBe(box.live.version);
+      expect(bot.HostConfig.RestartPolicy.Name).toBe("unless-stopped");
+      const actions = events(box);
+      expect(actions).not.toContain("start");
+      expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("restore-up"));
+      expect(actions.indexOf("restore-probe", actions.indexOf("stop"))).toBeLessThan(
+        actions.indexOf("restore-up"),
+      );
+      expect(actions.indexOf("restore-up")).toBeLessThan(actions.indexOf("restore-observe"));
+      expect(actions.lastIndexOf("restore-observe")).toBeLessThan(
+        actions.indexOf("restart-policy"),
+      );
+      // Discord was written before the database, so a failure after the registration puts the
+      // previous release's commands back; an earlier failure never touched them.
+      expect(actions.includes("restore-register")).toBe(["register", "migrate"].includes(failure));
+      const lastRun = JSON.parse(readFileSync(join(box.state, "last-run"), "utf8"));
+      expect(lastRun).toMatchObject({
+        run: "1234",
+        result: "rolled-back",
+        step: ["backup", "age", "upload"].includes(failure) ? "backup" : failure,
+        fence: "stopped",
+        head: "accept",
+      });
+      expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
+      // The host is ready for the next delivery: the same release goes through once the cause is fixed.
+      rmSync(join(box.sim, `fail-${failure}`));
+      writeFileSync(join(box.sim, "events"), "");
+      expect(
+        deploy(
+          box,
+          `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+        ).stdout,
+      ).toEndWith("result deployed\n");
+    });
+  }
+
+  /** From the candidate's start on, the writer lease may have been held: fenced, never restored. */
+  for (const failure of ["start", "probe", "restart", "inspect", "restart-policy"]) {
     test(`${failure} failure leaves pending and never restores old code or announces success`, () => {
       const box = sandbox();
       knob(box, failure);
       const result = deploy(box);
       expect(result.code).not.toBe(0);
       expect(result.stdout).toEndWith("result needs-owner\n");
+      expect(result.stdout).toContain("reason restore outcome=skipped cause=candidate-started\n");
       expect(result.stdout).not.toContain("result deployed");
       expect(result.stderr).toBe("");
       expect(JSON.parse(readFileSync(join(box.state, "pending"), "utf8"))).toMatchObject({
@@ -359,21 +417,19 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
         digest: box.target.digest,
         commit: box.target.commit,
       });
-      expect(existsSync(join(box.state, "current"))).toBe(failure === "restart-policy");
+      expect(recordedDigest(box)).toBe(
+        failure === "restart-policy" ? box.target.digest : box.live.digest,
+      );
       expect(
         JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
       ).toBe(false);
       const actions = events(box);
       expect(actions.filter((action) => action === "start").length).toBeLessThanOrEqual(1);
-      if (["backup", "age", "upload"].includes(failure)) {
-        expect(actions).not.toContain("register");
-        expect(actions).not.toContain("migrate");
-      }
-      // A rejected registration stops before the migration; a failed migration follows a
-      // registration that succeeded, so Discord already holds the new commands.
-      if (failure === "register") expect(actions).not.toContain("migrate");
-      if (failure === "migrate") expect(actions).toContain("register");
-      if (["migrate", "register"].includes(failure)) expect(actions).not.toContain("start");
+      expect(actions).not.toContain("restore-up");
+      expect(JSON.parse(readFileSync(join(box.state, "last-run"), "utf8"))).toMatchObject({
+        result: "needs-owner",
+        fence: "stopped",
+      });
       expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
       expect(
         deploy(
@@ -436,7 +492,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
         ]);
         const target = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
         expect(target.HostConfig.RestartPolicy.Name).toBe("no");
-        expect(existsSync(join(box.state, "current"))).toBe(false);
+        expect(recordedDigest(box)).toBe(box.live.digest);
         process.kill(signal);
         rmSync(join(box.sim, "hold-observe"));
         expect(await process.exited).not.toBe(0);
@@ -595,15 +651,27 @@ describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", ()
     }
   }
 
-  for (const failure of [
-    "backup",
-    "upload",
-    "migrate",
-    "register",
-    "start",
-    "probe",
-    "restart-policy",
-  ]) {
+  for (const failure of ["backup", "upload", "migrate", "register"]) {
+    test(`staging ${failure} failure restores the previous release in its target-bound scope`, () => {
+      const box = sandbox(true, "staging");
+      knob(box, failure);
+      const result = deploy(box);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toEndWith("result rolled-back\n");
+      expect(existsSync(join(box.state, "pending"))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
+      ).toBe(true);
+      expect(events(box)).not.toContain("register-global");
+      expect(events(box)).not.toContain("restore-register-global");
+      // The previous set goes back into the same guild the delivery registered in.
+      expect(events(box).includes("restore-register-guild")).toBe(
+        ["register", "migrate"].includes(failure),
+      );
+    });
+  }
+
+  for (const failure of ["start", "probe", "restart-policy"]) {
     test(`staging ${failure} failure fences the writer and retains target-bound pending intent`, () => {
       const box = sandbox(true, "staging");
       knob(box, failure);
@@ -970,13 +1038,358 @@ describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
   });
 });
 
+describe.skipIf(!hostToolsAvailable)("failure-safe delivery: the restore", () => {
+  /** Run the entry in the background, holding it mid-backup until `release` is called. */
+  async function heldInBackup(box: HostSandbox, onHeld: (child: Bun.Subprocess) => Promise<void>) {
+    writeFileSync(join(box.sim, "hold-backup"), "");
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const watcher = watch(box.sim, () => {
+      if (existsSync(join(box.sim, "backup-held"))) reached();
+    });
+    const child = Bun.spawn(["bash", deployScript, box.deploymentTarget], {
+      env: {
+        ...box.environment,
+        SSH_ORIGINAL_COMMAND: `deploy ${box.deploymentTarget} ${box.target.version} ${box.target.commit} ${box.target.digest} 1234`,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      await Promise.race([
+        held,
+        child.exited.then((code) => {
+          throw new Error(`Host exited before the backup was held: ${code}`);
+        }),
+      ]);
+      await onHeld(child);
+      rmSync(join(box.sim, "hold-backup"));
+      return await child.exited;
+    } finally {
+      watcher.close();
+      rmSync(join(box.sim, "hold-backup"), { force: true });
+      child.kill();
+      await child.exited;
+    }
+  }
+  const restoredBox = (box: HostSandbox) => {
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+    const bot = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
+    expect(bot.State.Running).toBe(true);
+    expect(bot.Config.Labels["org.opencontainers.image.version"]).toBe(box.live.version);
+    expect(bot.HostConfig.RestartPolicy.Name).toBe("unless-stopped");
+    expect(recordedDigest(box)).toBe(box.live.digest);
+  };
+
+  test("a cancelled run (TERM) after the boundary still restores the previous release", async () => {
+    const box = sandbox();
+    let output = "";
+    const code = await heldInBackup(box, async (child) => {
+      child.kill("SIGTERM");
+      output = "sent";
+    });
+    expect(output).toBe("sent");
+    expect(code).toBe(143);
+    restoredBox(box);
+    const lastRun = JSON.parse(readFileSync(join(box.state, "last-run"), "utf8"));
+    expect(lastRun).toMatchObject({ result: "rolled-back", step: "backup" });
+  });
+
+  test("a cancelled run's output ends in rolled-back and names the signal", async () => {
+    const box = sandbox();
+    let stdout = "";
+    const child = await (async () => {
+      let captured!: Bun.Subprocess<"ignore", "pipe", "pipe">;
+      await heldInBackup(box, async (c) => {
+        captured = c as typeof captured;
+        c.kill("SIGTERM");
+      });
+      return captured;
+    })();
+    stdout = await new Response(child.stdout).text();
+    expect(stdout).toContain("reason failed step=backup check=backup status=143 signal=TERM\n");
+    expect(stdout).toEndWith(
+      "reason fence writers=stopped\nreason restore outcome=restored\nresult rolled-back\n",
+    );
+  });
+
+  test("a closed channel mid-run does not stop the fence, the restore or the record", async () => {
+    const box = sandbox();
+    const code = await heldInBackup(box, async (child) => {
+      // Cancelling the read side closes the pipe: every later write to the channel fails.
+      await (child.stdout as ReadableStream).cancel();
+      knob(box, "backup");
+    });
+    expect(code).toBe(1);
+    restoredBox(box);
+    expect(JSON.parse(readFileSync(join(box.state, "last-run"), "utf8"))).toMatchObject({
+      result: "rolled-back",
+      step: "backup",
+    });
+  });
+
+  test("a failed restore fences again, last, keeps pending and says which check failed", () => {
+    const box = sandbox();
+    knob(box, "backup");
+    knob(box, "restore-observe");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith(
+      "reason restore outcome=failed check=probe\nreason fence writers=stopped\nresult needs-owner\n",
+    );
+    expect(existsSync(join(box.state, "pending"))).toBe(true);
+    expect(recordedDigest(box)).toBe(box.live.digest);
+    expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
+      false,
+    );
+    // Whatever the restore started is stopped, and the restart policy was never armed.
+    expect(events(box)).not.toContain("restart-policy");
+    expect(events(box).filter((action) => action === "stop").length).toBeGreaterThanOrEqual(2);
+    expect(JSON.parse(readFileSync(join(box.state, "last-run"), "utf8"))).toMatchObject({
+      result: "needs-owner",
+      fence: "stopped",
+    });
+    // A restored bot that failed its check is never left able to restart by itself.
+    expect(
+      JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].HostConfig.RestartPolicy
+        .Name,
+    ).toBe("no");
+  });
+
+  test("one-offs left by killed commands are removed before the restore and again before it starts", () => {
+    const box = sandbox();
+    // Every probe of the previous image leaves a one-off behind, as a probe killed by its timeout
+    // does: the kit's before the stop, and the restore's own after it.
+    writeFileSync(join(box.sim, "probe-leaves-oneoff"), "");
+    knob(box, "backup");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("result rolled-back\n");
+    const actions = events(box);
+    const stopped = actions.indexOf("stop");
+    const reaps = actions
+      .map((action, at) => (action === "reap" ? at : -1))
+      .filter((at) => at > stopped);
+    // Before the probe and again after it, and the bot's lookup then sees one container.
+    expect(reaps.length).toBeGreaterThanOrEqual(2);
+    expect(reaps.at(-1)).toBeLessThan(actions.indexOf("restore-up"));
+    restoredBox(box);
+  });
+
+  test("the previous image's database check gets one retry for a state it can't tell, never for ahead", () => {
+    const blip = sandbox();
+    knob(blip, "backup");
+    // First answer at restore time is unknown, then accept: the retry rescues the restore.
+    writeFileSync(join(blip.sim, "probe-sequence"), "unknown\naccept\n");
+    const rescued = deploy(blip);
+    expect(rescued.stdout).toEndWith("result rolled-back\n");
+    const ahead = sandbox();
+    knob(ahead, "backup");
+    writeFileSync(join(ahead.sim, "probe-sequence"), "ahead\naccept\n");
+    const refused = deploy(ahead);
+    expect(refused.stdout).toContain("reason restore outcome=skipped cause=schema-ahead\n");
+    expect(refused.stdout).toEndWith("result needs-owner\n");
+  });
+
+  test("a restored bot that fails a later sample is fenced, with the check named", () => {
+    const box = sandbox();
+    knob(box, "backup");
+    // Samples 1 to 4 are the sustained observation; the fourth fails.
+    writeFileSync(join(box.sim, "restore-observe-fails-at"), "4");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith(
+      "reason restore outcome=failed check=probe\nreason fence writers=stopped\nresult needs-owner\n",
+    );
+    expect(events(box).filter((action) => action === "restore-observe")).toHaveLength(4);
+    expect(events(box)).not.toContain("restart-policy");
+    expect(existsSync(join(box.state, "pending"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
+      false,
+    );
+  });
+
+  test("a bookkeeping fault after the restored bot is observed never stops it", () => {
+    for (const [knobName, unfinished] of [
+      ["restart-policy", "arm=failed"],
+      ["rm-pending", "pending=kept"],
+    ] as const) {
+      const box = sandbox();
+      knob(box, "backup");
+      knob(box, knobName);
+      const result = deploy(box);
+      expect(result.stdout).toContain(`reason restore outcome=restored ${unfinished}\n`);
+      expect(result.stdout).toEndWith("result needs-owner\n");
+      // Healthy and running, left for the owner with its marker: no second fence.
+      const bot = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
+      expect(bot.State.Running).toBe(true);
+      expect(bot.Config.Labels["org.opencontainers.image.version"]).toBe(box.live.version);
+      expect(existsSync(join(box.state, "pending"))).toBe(true);
+      // The stop step and the first fence, and no second fence of the restored bot.
+      expect(events(box).filter((action) => action === "stop")).toHaveLength(2);
+      expect(recordedDigest(box)).toBe(box.live.digest);
+    }
+  });
+
+  test("a failed run record doesn't stop the restore from completing", () => {
+    const box = sandbox();
+    knob(box, "backup");
+    // last-run.tmp can't be written: the record is best effort, the restore is not.
+    mkdirSync(join(box.state, "last-run.tmp"), { recursive: true });
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("result rolled-back\n");
+    restoredBox(box);
+    expect(existsSync(join(box.state, "last-run"))).toBe(false);
+  });
+
+  test("the kit rehearses the previous image against the host's settings as they are now", () => {
+    const box = sandbox();
+    knob(box, "restore-scope");
+    const result = deploy(box);
+    expect(result.stdout).toContain("reason failed step=pull check=restore-kit");
+    expect(result.stdout).toEndWith("result refused\n");
+    expect(events(box)).not.toContain("stop");
+  });
+
+  test("a restore that registered but can't redo it says Discord may hold the new commands", () => {
+    const box = sandbox();
+    knob(box, "register");
+    knob(box, "restore-register");
+    knob(box, "restore-up");
+    const result = deploy(box);
+    expect(result.stdout).toContain("reason commands state=unknown\n");
+    expect(result.stdout).toEndWith("reason fence writers=stopped\nresult needs-owner\n");
+    // When the restore did put the previous commands back before it failed, it doesn't say so.
+    const redone = sandbox();
+    knob(redone, "register");
+    knob(redone, "restore-up");
+    expect(deploy(redone).stdout).not.toContain("commands state=unknown");
+    // A failure before the registration never says it.
+    const early = sandbox();
+    knob(early, "backup");
+    knob(early, "restore-up");
+    expect(deploy(early).stdout).not.toContain("commands state=unknown");
+  });
+
+  test("a restore needs a recorded release: without one the delivery is refused and nothing stops", () => {
+    const box = sandbox(true, "production", false);
+    const result = deploy(box);
+    expect(result.stdout).toEndWith(
+      "reason refused step=pull code=no-restore-kit\nresult refused\n",
+    );
+    for (const action of ["stop", "backup", "register", "migrate", "start"])
+      expect(events(box)).not.toContain(action);
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+    expect(existsSync(join(box.state, "current"))).toBe(false);
+  });
+
+  test("an already-live request records the release, which is what makes the next upgrade possible", () => {
+    const box = sandbox();
+    expect(deploy(box).stdout).toEndWith("result deployed\n");
+    rmSync(join(box.state, "current"));
+    const again = deploy(
+      box,
+      `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+    );
+    expect(again.stdout).toEndWith("result already-live\n");
+    expect(recordedDigest(box)).toBe(box.target.digest);
+    // The restore kit is for upgrades only: an already-live request never rehearses it.
+    expect(events(box).filter((action) => action === "restore-probe")).toHaveLength(1);
+  });
+
+  test("a rolled-back run on staging restores through the guild-scoped registration", () => {
+    const box = sandbox(true, "staging");
+    knob(box, "migrate");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("result rolled-back\n");
+    restoredBox(box);
+    expect(events(box)).toContain("restore-register-guild");
+  });
+});
+
+/*
+ * The previous image's database check (RESTORE_PROBE), read from the entry exactly as it ships and run
+ * with Bun against invented stand-ins for that image's database module, one per way the exact schema
+ * check can end. The fake docker prints canned answers, so this is what pins the text itself.
+ */
+describe("the previous image's database check", () => {
+  const probeText = (() => {
+    const text = readFileSync(deployScript, "utf8");
+    const marker = "readonly RESTORE_PROBE='";
+    const start = text.indexOf(marker) + marker.length;
+    return text.slice(start, text.indexOf("\n'\n", start)).replaceAll(`'"'"'`, "'");
+  })();
+  const failure = (message: string, code = "schema") =>
+    `Object.assign(new Error(${JSON.stringify(message)}), { name: "Failure", code: ${JSON.stringify(code)} })`;
+  const mismatch =
+    "Schema version/checksum mismatch. Use matching versioned migrations and application image.";
+  function probe(schemaBody: string, constructorBody = "") {
+    const directory = join(sandbox(false).directory, "probe");
+    mkdirSync(join(directory, "dist/src/infrastructure/postgres"), { recursive: true });
+    writeFileSync(
+      join(directory, "dist/src/infrastructure/postgres/database.js"),
+      `export const SCHEMA_VERSION = "015_member_blocks.sql";
+export class Database {
+  constructor(url) { ${constructorBody} }
+  async schema() { ${schemaBody} }
+  async close() { console.error("closed"); }
+}\n`,
+    );
+    const result = Bun.spawnSync([process.execPath, "--no-env-file", "-e", probeText], {
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? "", DATABASE_URL: "postgresql://invented/db" },
+      stdin: "ignore",
+    });
+    return {
+      code: result.exitCode,
+      line: JSON.parse(result.stdout.toString().trim().split("\n").at(-1) ?? "{}"),
+      stderr: result.stderr.toString(),
+    };
+  }
+
+  test("a database its schema check accepts is accept, and the connection is closed", () => {
+    expect(probe("")).toMatchObject({
+      code: 0,
+      line: { state: "accept", schema: "015_member_blocks.sql" },
+      stderr: "closed\n",
+    });
+  });
+  test("the exact-match refusal after a committed migration is ahead", () => {
+    expect(probe(`throw ${failure(mismatch)};`)).toMatchObject({
+      code: 1,
+      line: { state: "ahead", schema: "015_member_blocks.sql" },
+      stderr: "closed\n",
+    });
+  });
+  test("every other way the check can end is unknown", () => {
+    for (const body of [
+      `throw ${failure("Run db:migrate before starting the application.")};`,
+      `throw ${failure(mismatch, "input")};`,
+      `throw ${failure("Schema ok but not this one", "schema")};`,
+      `throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });`,
+      `throw "a string";`,
+    ])
+      expect(probe(body)).toMatchObject({ code: 1, line: { state: "unknown" } });
+    // A constructor that throws is unknown too, with nothing to close.
+    expect(probe("", `throw new Error("bad url");`)).toMatchObject({
+      code: 1,
+      line: { state: "unknown", schema: "015_member_blocks.sql" },
+      stderr: "",
+    });
+  });
+  test("it reads and writes nothing: only schema() and close() of the database are used", () => {
+    expect(probeText).not.toMatch(/\.(query|migrate|transaction|connect)\(/u);
+    expect(probeText.match(/db\.\w+\(/gu)?.sort()).toEqual(["db.close(", "db.schema("]);
+  });
+});
+
 describe.skipIf(!hostToolsAvailable)("offline candidate check (2.45.2)", () => {
   const untouched = (box: HostSandbox) => {
     const actions = events(box);
     for (const action of ["stop", "backup", "register", "migrate", "start"])
       expect(actions).not.toContain(action);
     expect(existsSync(join(box.state, "pending"))).toBe(false);
-    expect(existsSync(join(box.state, "current"))).toBe(false);
+    expect(recordedDigest(box)).toBe(box.live.digest);
     expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
       true,
     );
@@ -1188,7 +1601,7 @@ type FailureScenario = {
   /** A jq filter applied to the new container once Compose has started it. */
   afterStart?: string;
   setup?: (box: HostSandbox) => void;
-  result: "needs-owner" | "refused";
+  result: "needs-owner" | "refused" | "rolled-back";
   reasons: (string | RegExp)[];
 };
 const started =
@@ -1347,34 +1760,152 @@ const failureScenarios: FailureScenario[] = [
     name: "migrate: the migration crashes on database authentication",
     knobs: ["migrate"],
     setup: (box) => writeFileSync(join(box.sim, "migrate-output"), migrationCrash),
-    result: "needs-owner",
+    result: "rolled-back",
     reasons: [
       "reason failed step=migrate check=migrate status=1",
       'reason bot-error msg="uncaught error" type=Error',
       fenced,
+      "reason restore outcome=restored",
+    ],
+  },
+  {
+    name: "migrate: it committed although the run failed, so the previous release can't run",
+    knobs: ["migrate"],
+    setup: (box) => writeFileSync(join(box.sim, "migrate-commits"), ""),
+    result: "needs-owner",
+    reasons: [
+      "reason failed step=migrate check=migrate status=1",
+      fenced,
+      "reason restore outcome=skipped cause=schema-ahead",
+    ],
+  },
+  {
+    name: "migrate: it failed and the previous image's schema check can't tell the state",
+    knobs: ["migrate"],
+    setup: (box) => writeFileSync(join(box.sim, "migrate-unknown"), ""),
+    result: "needs-owner",
+    reasons: [
+      "reason failed step=migrate check=migrate status=1",
+      fenced,
+      "reason restore outcome=skipped cause=db-unknown",
     ],
   },
   {
     name: "register: command registration fails",
     knobs: ["register"],
-    result: "needs-owner",
-    reasons: ["reason failed step=register check=register status=1", fenced],
+    result: "rolled-back",
+    reasons: [
+      "reason failed step=register check=register status=1",
+      fenced,
+      "reason restore outcome=restored",
+    ],
+  },
+  {
+    name: "register: it fails and the previous commands can't be put back",
+    knobs: ["register", "restore-register"],
+    result: "rolled-back",
+    reasons: [
+      "reason failed step=register check=register status=1",
+      fenced,
+      "reason commands state=unknown",
+      "reason restore outcome=restored",
+    ],
   },
   {
     name: "backup: the dump fails",
     knobs: ["backup"],
-    result: "needs-owner",
+    result: "rolled-back",
     reasons: [
       "reason failed step=backup check=backup status=1",
       "reason backup stage=dump",
       fenced,
+      "reason restore outcome=restored",
     ],
   },
   {
     name: "backup: the upload fails",
     knobs: ["upload"],
+    result: "rolled-back",
+    reasons: [
+      "reason failed step=backup check=backup status=1",
+      "reason backup stage=upload",
+      fenced,
+      "reason restore outcome=restored",
+    ],
+  },
+  {
+    name: "restore: the previous release won't start",
+    knobs: ["backup", "restore-up"],
     result: "needs-owner",
-    reasons: ["reason failed step=backup check=backup status=1", "reason backup stage=upload"],
+    reasons: [
+      "reason failed step=backup check=backup status=1",
+      fenced,
+      "reason restore outcome=failed check=restore-up",
+      fenced,
+    ],
+  },
+  {
+    name: "restore: the restored bot never answers its probe",
+    knobs: ["backup", "restore-observe"],
+    result: "needs-owner",
+    reasons: [
+      "reason failed step=backup check=backup status=1",
+      fenced,
+      "reason restore outcome=failed check=probe",
+      fenced,
+    ],
+  },
+  {
+    name: "restore: leftover one-offs can't be removed",
+    knobs: ["backup", "reap"],
+    setup: (box) => writeFileSync(join(box.sim, "probe-leaves-oneoff"), ""),
+    result: "needs-owner",
+    reasons: [
+      "reason failed step=backup check=backup status=1",
+      fenced,
+      "reason restore outcome=failed check=restore-up",
+      fenced,
+    ],
+  },
+  {
+    name: "pull: the host has no recorded release to restore",
+    setup: (box) => rmSync(join(box.state, "current")),
+    result: "refused",
+    reasons: [entryLine, "reason refused step=pull code=no-restore-kit"],
+  },
+  {
+    name: "pull: the recorded release's folder is gone",
+    setup: (box) => {
+      const file = join(box.state, "current");
+      const record = JSON.parse(readFileSync(file, "utf8"));
+      writeFileSync(file, JSON.stringify({ ...record, worktree: join(box.directory, "missing") }));
+    },
+    result: "refused",
+    reasons: [entryLine, "reason failed step=pull check=restore-kit status=1"],
+  },
+  {
+    name: "pull: the recorded release's manifest would restart by itself",
+    knobs: ["restore-restart-config"],
+    result: "refused",
+    reasons: [entryLine, "reason failed step=pull check=restore-kit status=1"],
+  },
+  {
+    name: "pull: the recorded release's manifest can't be rendered",
+    knobs: ["restore-config"],
+    result: "refused",
+    reasons: [entryLine, "reason failed step=pull check=restore-kit status=1"],
+  },
+  {
+    name: "pull: the previous image's schema check refuses the database",
+    setup: (box) => writeFileSync(join(box.sim, "probe-state"), "ahead\n"),
+    result: "refused",
+    reasons: [entryLine, /^reason failed step=pull check=restore-kit status=\d+$/],
+  },
+  {
+    name: "pull: the previous image's schema check never answers",
+    setup: (box) => writeFileSync(join(box.sim, "probe-state"), "noline\n"),
+    result: "refused",
+    reasons: [entryLine, /^reason failed step=pull check=restore-kit status=\d+$/],
   },
   {
     name: "stop: the writer can't be confirmed stopped",
@@ -1616,7 +2147,7 @@ describe.skipIf(!hostToolsAvailable)("public failure reasons", () => {
       ]);
       assertPublic({ stdout, stderr: await new Response(child.stderr).text() }, box);
       expect(existsSync(join(box.state, "pending"))).toBe(true);
-      expect(existsSync(join(box.state, "current"))).toBe(false);
+      expect(recordedDigest(box)).toBe(box.live.digest);
       expect(
         JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
       ).toBe(false);

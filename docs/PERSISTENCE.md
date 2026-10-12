@@ -117,7 +117,7 @@ A restore needs no extra step: the restored table holds the pauses as of the bac
 1. Add a new numbered SQL migration. Never edit, rename or delete an applied migration, including its comments: startup validates checksums.
 2. Update Drizzle mappings and `SCHEMA_VERSION` together.
 3. Test migrated-catalog parity, backfills, constraints, a repeated no-op migrate and application behavior in disposable PostgreSQL. Rehearse against synthetic legacy input and the supplied private fixture when relevant and available.
-4. Follow [the change checklist](../CONTRIBUTING.md#make-a-change) and [deployment](DEPLOYMENT.md). An older image cannot start on a newer schema; crossing a migration is a restore or fix-forward operation, not an ordinary image rollback.
+4. Follow [the change checklist](../CONTRIBUTING.md#make-a-change) and [deployment](DEPLOYMENT.md). An older image cannot start on a newer schema; crossing a migration is a restore or fix-forward operation, not an ordinary image rollback. The deploy entry restores the previous release itself only while the schema is unchanged (a failure before the migration, or a migration that rolled back); once a migration commits, the previous image's exact schema check refuses the database and the host stays fenced for the owner.
 
 ## Coverage
 

@@ -5,12 +5,19 @@ record() { printf '%s\n' "$*" >>"$SIM/events"; }
 fail() { [[ ! -e $SIM/fail-$1 ]]; }
 case $1 in
   ps)
+    # Stopped one-off containers a killed `compose run` left behind: whatever oneoffs lists.
+    if [[ $* == *'oneoff=True'* ]]; then
+      if [[ -f $SIM/oneoffs ]]; then cat "$SIM/oneoffs"; fi
+      exit 0
+    fi
     file=$SIM/container.json
     if [[ $* == *'service=caddy'* ]]; then file=$SIM/proxy.json; fi
     # The bot container vanishes once observation has begun.
     if [[ -e $SIM/fail-gone && -e $SIM/observed && $file == "$SIM/container.json" ]]; then exit 0; fi
     if [[ -f $file ]] && { [[ $2 == -aq ]] || jq -e '.[0].State.Running' "$file" >/dev/null; }; then
       jq -r '.[0].Id' "$file"
+      # A one-off of the bot service is listed beside the bot, as Docker lists it.
+      if [[ $file == "$SIM/container.json" && $2 == -aq && -s $SIM/oneoffs ]]; then cat "$SIM/oneoffs"; fi
     fi
     ;;
   inspect)
@@ -34,6 +41,11 @@ case $1 in
     elif [[ $key == target && -e $SIM/fail-digest ]]; then
       jq '.[0].RepoDigests = []' "$SIM/image.json"
     else cat "$SIM/image.json"; fi
+    ;;
+  rm)
+    record reap
+    fail reap
+    : >"$SIM/oneoffs"
     ;;
   pull) record "pull $2"; fail pull ;;
   update)
@@ -70,16 +82,29 @@ case $1 in
       record scope-live
       "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/live-env.json" "$SIM/live-runtime" "$5" "$6"
     else
-      record observe
+      # The release that owns the container being observed: the restored previous one answers as
+      # the live release, with its own events and knobs.
+      release=target observed=observe probe=probe
+      if [[ $2 == c0ffee000003 ]]; then
+        release=live observed=restore-observe probe=restore-observe
+        # restore-observe-fails-at: the Nth sustained-readiness sample of the restored bot fails.
+        count=$(( $(cat "$SIM/restore-observe-count" 2>/dev/null || echo 0) + 1 ))
+        printf '%s' "$count" >"$SIM/restore-observe-count"
+        if [[ -f $SIM/restore-observe-fails-at && $count == "$(cat "$SIM/restore-observe-fails-at")" ]]; then
+          record restore-observe
+          exit 1
+        fi
+      fi
+      record "$observed"
       touch "$SIM/observed"
-      [[ ${*: -2:1} == $(jq -r .target.version "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
+      [[ ${*: -2:1} == $(jq -r ".$release.version" "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
       # fail-probe: the exec itself fails without a word, as a crashed container would.
-      fail probe
+      fail "$probe"
       # Otherwise run the entry's actual probe against invented package, schema and readiness
       # state (observe.json); the probe's own JSON line is the public diagnostic's input.
       runtime=$SIM/observe-runtime
-      jq -n --slurpfile config "$SIM/config.json" --argjson scenario "$(cat "$SIM/observe.json" 2>/dev/null || echo '{}')" \
-        '{version: ($scenario.version // $config[0].target.version)}' >"$runtime/package.json"
+      jq -n --arg release "$release" --slurpfile config "$SIM/config.json" --argjson scenario "$(cat "$SIM/observe.json" 2>/dev/null || echo '{}')" \
+        '{version: ($scenario.version // $config[0][$release].version)}' >"$runtime/package.json"
       cd "$runtime"
       exec "$BUN_REAL" --no-env-file --preload "$OBSERVE_FIXTURE" -e "$5" "$6" "$7"
     fi
@@ -111,9 +136,24 @@ case $1 in
     [[ $project == tarubot && $env_file == "$HOME/tarubot/.env" ]]
     # Published immutable backup uses the root; updated entries use the release.
     [[ $root == "${manifest%/*}" || $root == "$HOME/tarubot" ]]
-    [[ -f $manifest && ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
+    [[ -f $manifest ]]
+    # The requested release, or the live (previous) one when the entry rehearses or performs a restore.
+    previous=false
+    if [[ ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .live.digest "$SIM/config.json") ]]; then previous=true; fi
+    [[ $previous == true || ${TARUBOT_IMAGE_DIGEST:-} == $(jq -r .target.digest "$SIM/config.json") ]]
     case $1 in
       config)
+        if [[ $previous == true ]]; then
+          # The restore kit's rehearsal of the previous release's manifest (kept apart from the model
+          # of the requested release, which other assertions read).
+          record restore-config
+          fail restore-config
+          "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" "$root" "${profiles[@]}" >"$SIM/compose-previous.json"
+          if [[ -e $SIM/fail-restore-restart-config ]]; then
+            jq '.services.tarubot.restart = "unless-stopped"' "$SIM/compose-previous.json"
+          else cat "$SIM/compose-previous.json"; fi
+          exit 0
+        fi
         record config
         fail config
         "$BUN_REAL" --env-file "$env_file" "$COMPOSE_FIXTURE" "$manifest" "$root" "${profiles[@]}" >"$SIM/compose.json"
@@ -168,15 +208,49 @@ case $1 in
             fi
             printf '%s\n' '{"check":"ok","identity":true,"config":true,"modules":true,"registration":true}'
             ;;
+          *'restore-probe'*)
+            # The previous image's own read-only schema check (marker: restore-probe).
+            [[ $* == *'--pull never'* && $previous == true ]]
+            record restore-probe
+            fail restore-probe
+            state=accept
+            if [[ -f $SIM/probe-state ]]; then state=$(cat "$SIM/probe-state"); fi
+            # probe-sequence: successive answers, one line per call after the kit's own (the first
+            # call, before the stop, always answers accept).
+            if [[ -f $SIM/probe-sequence ]]; then
+              calls=$(( $(cat "$SIM/probe-calls" 2>/dev/null || echo 0) + 1 ))
+              printf '%s' "$calls" >"$SIM/probe-calls"
+              if (( calls > 1 )); then state=$(sed -n "$((calls - 1))p" "$SIM/probe-sequence"); fi
+              if [[ -z $state ]]; then state=accept; fi
+            fi
+            # probe-leaves-oneoff: a probe killed by its timeout leaves its container behind.
+            if [[ -e $SIM/probe-leaves-oneoff ]]; then printf 'feed00000002\n' >"$SIM/oneoffs"; fi
+            if [[ $state == crash ]]; then exit 1; fi
+            if [[ $state == noline ]]; then exit 0; fi
+            printf '{"state":"%s","schema":"001_initial.sql"}\n' "$state"
+            ;;
           *'tarubot bun -e '*)
             [[ $* == *'--pull never'* ]]
             code=${@: -2:1}
+            if [[ $previous == true ]]; then
+              # The restore kit's rehearsal of the previous image against the settings as they are now.
+              record restore-scope
+              fail restore-scope
+              jq '.services.tarubot.environment' "$SIM/compose-previous.json" >"$SIM/previous-env.json"
+              "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/previous-env.json" "$SIM/runtime" "$code" "${@: -1}"
+              exit $?
+            fi
             if [[ $code == *'webSettings'* ]]; then record web-candidate; else record scope-candidate; fi
             jq '.services.tarubot.environment' "$SIM/compose.json" >"$SIM/candidate-env.json"
             "$BUN_REAL" --no-env-file "$SCOPE_FIXTURE" "$SIM/candidate-env.json" "$SIM/runtime" "$code" "${@: -1}"
             ;;
           *backup)
             record backup
+            # hold-backup: block here, mid-backup, until the test removes the file (to signal the entry).
+            if [[ -e $SIM/hold-backup ]]; then
+              touch "$SIM/backup-held"
+              while [[ -e $SIM/hold-backup ]]; do /bin/sleep 0.05; done
+            fi
             fail backup
             printf 'database-plaintext-marker'; printf '%8192s' padding
             ;;
@@ -184,21 +258,27 @@ case $1 in
             [[ $* == *'--pull never'* ]]
             record migrate
             if [[ -e $SIM/fail-migrate && -f $SIM/migrate-output ]]; then cat "$SIM/migrate-output" >&2; fi
+            # migrate-commits: the transaction committed although the run failed (a lost acknowledgement),
+            # so the previous image's schema check now refuses the database; migrate-unknown: it can't tell.
+            if [[ -e $SIM/migrate-commits ]]; then printf 'ahead\n' >"$SIM/probe-state"; fi
+            if [[ -e $SIM/migrate-unknown ]]; then printf 'unknown\n' >"$SIM/probe-state"; fi
             fail migrate
             printf '%s\n' 'Schema ready.'
             ;;
           *register.js*)
             [[ $* == *'--pull never'* ]]
             scope=$(jq -r .deploymentTarget "$SIM/config.json")
+            kind=register
+            if [[ $previous == true ]]; then kind=restore-register; fi
             if [[ $scope == staging ]]; then
               [[ $* == *'--guild '* && $* != *'--global'* && ${*: -1} == $(jq -r .TEST_GUILD_ID "$SIM/candidate-env.json") ]]
-              record register-guild
+              record "$kind-guild"
             else
               [[ $* == *'--global' && $* != *'--guild'* ]]
-              record register-global
+              record "$kind-global"
             fi
-            record register
-            fail register
+            record "$kind"
+            fail "$kind"
             ;;
           *) exit 91 ;;
         esac
@@ -220,12 +300,19 @@ case $1 in
           record proxy-ready
           exit 0
         fi
-        record start
-        jq --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" '[.target | {Id:"c0ffee000002",Image:.id,RestartCount:0,HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}},Config:{Image:("ghcr.io/deconfined/tarubot@"+.digest),Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit,"com.docker.compose.project":"tarubot","com.docker.compose.oneoff":"False"}}}]' "$SIM/config.json" >"$SIM/container.json"
+        release=target id=c0ffee000002 started=start
+        if [[ $previous == true ]]; then release=live id=c0ffee000003 started=restore-up; fi
+        record "$started"
+        jq --arg release "$release" --arg id "$id" --arg restart "${TARUBOT_RESTART_POLICY:-unless-stopped}" '[.[$release] | {Id:$id,Image:.id,RestartCount:0,HostConfig:{RestartPolicy:{Name:$restart}},State:{Running:true,Health:{Status:"healthy"}},Config:{Image:("ghcr.io/deconfined/tarubot@"+.digest),Labels:{"org.opencontainers.image.version":.version,"org.opencontainers.image.revision":.commit,"com.docker.compose.project":"tarubot","com.docker.compose.oneoff":"False"}}}]' "$SIM/config.json" >"$SIM/container.json"
         # after-start.jq: what became of the new container while Compose waited for it.
         if [[ -f $SIM/after-start.jq ]]; then
           jq -f "$SIM/after-start.jq" "$SIM/container.json" >"$SIM/next.json"
           mv "$SIM/next.json" "$SIM/container.json"
+        fi
+        if [[ $previous == true ]]; then
+          touch "$SIM/restored"
+          fail restore-up
+          exit 0
         fi
         touch "$SIM/started"
         fail start

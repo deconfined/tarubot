@@ -66,8 +66,9 @@ reason_value() {
     restore:outcome) allowed='^(restored|skipped|failed)$' ;;
     restore:cause) allowed='^(writers-unconfirmed|no-kit|candidate-started|deadline|schema-ahead|db-unknown)$' ;;
     # The restore's own steps and the observation checks it can fail at, never free text.
-    restore:check) allowed='^(restore-probe|restore-register|restore-up|restore-proxy|gone|inspect|not-running|container-restarted|image-identity|labels|health|identity|schema-checksum|readiness|probe|proxy-inspect|proxy-not-running|proxy-health|proxy-restart-policy)$' ;;
-    restore:proxy) allowed='^failed$' ;;
+    restore:check) allowed='^(restore-probe|restore-register|restore-up|restore-record|restore-proxy|gone|inspect|not-running|container-restarted|image-identity|labels|health|identity|schema-checksum|readiness|probe|proxy-inspect|proxy-not-running|proxy-health|proxy-restart-policy)$' ;;
+    restore:proxy | restore:arm) allowed='^failed$' ;;
+    restore:pending) allowed='^kept$' ;;
     commands:state) allowed='^unknown$' ;;
     candidate:part) allowed='^(identity|config|modules|registration)$' ;;
     accepted:state) allowed='^running$' ;;
@@ -216,6 +217,13 @@ restore_note() {
   cause=$(reason_value restore cause)
   check=$(reason_value restore check)
   case $outcome:$cause in
+    restored:*)
+      # Running and observed, but the host couldn't finish recording it.
+      if [[ $(reason_value restore arm) == failed ]]; then
+        note+=" Its restart policy could not be enabled."
+      elif [[ $(reason_value restore pending) == kept ]]; then
+        note+=" Its pending marker could not be cleared."
+      fi ;;
     failed:*) note+=" Restoring the previous release also failed${check:+ at its $check check}." ;;
     skipped:writers-unconfirmed) note+=" The previous release was not restored because the entry couldn't confirm every writer stopped." ;;
     skipped:no-kit) note+=" The previous release was not restored because the host had no usable record of it." ;;
@@ -267,7 +275,10 @@ failure_message() {
             echo "The host reported '${result#result }', but the SSH session ended abnormally; check the running release and pending marker on the host before any new delivery." ;;
           'result refused') echo "${cause:+Likely cause: $cause }The host refused this delivery before stopping the writer, so nothing changed. Its private log on the host, if this run wrote one, is $log; see $reasons_doc. Fix the cause, then re-run or dispatch again." ;;
           'result needs-owner')
-            if [[ $(reason_value accepted state) == running ]]; then
+            if [[ $(reason_value restore outcome) == restored ]]; then
+              # The previous release runs again and was observed, but the host kept its marker.
+              echo "${cause:+Likely cause: $cause }The host restored the previous release and it is running, but it kept its pending marker.$(restore_note) Check the host before any new delivery. Its private log on the host is $log; see $reasons_doc."
+            elif [[ $(reason_value accepted state) == running ]]; then
               arm=''
               if [[ $(reason_value accepted arm) == failed ]]; then arm=", but its restart policy couldn't be enabled and"; else arm=', but'; fi
               echo "${cause:+Likely cause: $cause }The host reports that the new release passed observation and is running$arm it kept its pending marker; reconcile on the host before any new delivery. Its private log on the host is $log; see $reasons_doc."

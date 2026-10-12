@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# The real rm, except that the pending marker can be made undeletable (the rm-pending knob).
+if [[ -e ${SIM:-/nonexistent}/fail-rm-pending && $* == *"/pending"* ]]; then exit 1; fi
+if [[ -x /usr/bin/rm ]]; then exec /usr/bin/rm "$@"; fi
+exec /bin/rm "$@"
