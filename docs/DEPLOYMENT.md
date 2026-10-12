@@ -14,9 +14,9 @@ The forced entry performs routine upgrades of an **existing healthy Compose base
 2. **Build and publish:** `publish.yml`'s release gate validates the version, then proves the pushed merge commit carries exactly a pull-request head tree whose CI passed every check and the in-image suite on native AMD64 and ARM64. The ruleset's up-to-date requirement makes that the normal case; a direct push, a dispatch or any other tree runs reusable `ci.yml` in full instead. `publish-platform.yml` then builds each runtime image on its native runner (compilation only; the suite isn't run again), and one index of both digests is tagged only while the version is absent. `scan.yml` scans both exact runtime child digests. Existing published version tags are never overwritten. A failed candidate is not an authorized release.
 3. **Attest:** the exact build-returned index digest receives GitHub build provenance from `publish.yml` on `main`. Fixable high/critical findings, scanner/registry errors and expired exceptions block signing/promotion. The default exception policy is empty; an exception needs exact reviewed finding fields, a reason/issue and an expiry within 30 days. `latest` advances only after attestation.
 4. **Approve and deliver:** publication calls reusable `deploy.yml` with `target=production`. Exactly one job uses the `production` environment and requests the owner's approval. The repository variable `DEPLOY_ENABLED` must be exactly `true`; a skipped deployment proves nothing about the host. Optional staging rehearsal is a separate owner-requested dispatch with `target=staging` and independent `STAGING_DEPLOY_ENABLED`; it is not an additional routine production gate. Admission validates the source commit's version/main ancestry and the selected target's protection policy before and after queue/approval, then verifies the exact attestation identity, source commit and `refs/heads/main` before DNSSEC-authenticated SSH.
-5. **Host mutation:** one strict SSH request invokes the owner-installed forced command: `deploy <target> <version> <commit> <sha256:digest> <request-id>`. The request ID is the GitHub run ID followed by the three-digit run attempt (run 37786755126, attempt 1, sends `37786755126001`), so each attempt gets its own release worktree. The entry requires a single fixed target argument in the owner's `authorized_keys` command and refuses a different requested target before filesystem access. The host serializes with flock, fetches the exact commit into an isolated worktree, pulls the exact digest and verifies image version/revision labels. It refuses downgrades and any different digest or commit for the same version.
-6. **Writer boundary:** persist target-bound pending state **before stopping the bot**. Stop the writer, take an encrypted offsite database/settings backup, migrate with the exact new image, register commands globally for production or only in DevBot's declared guild for staging, start that image with automatic restart disabled and observe sustained readiness plus exact digest/version/schema/writer identity. Retain the info logs `Modules loaded` and `Database writer lease acquired` with their exact text.
-7. **Record:** durable accepted identity/worktree state is recorded only after observation. Only then enable the routine `unless-stopped` restart policy and clear pending. A failure after the pending boundary, including backup, migration, registration, startup, observation or restart-policy failure, leaves pending state for owner reconciliation. There is no automatic rollback. An uncatchable loss can leave a process running; inspect its actual state. A stale pending marker can survive after durable acceptance, but an unaccepted target cannot automatically restart.
+5. **Host mutation:** one strict SSH request invokes the owner-installed forced command: `deploy <target> <version> <commit> <sha256:digest> <request-id>`. The request ID is the GitHub run ID followed by the three-digit run attempt (run 37786755126, attempt 1, sends `37786755126001`), so each attempt gets its own release worktree. The entry requires a single fixed target argument in the owner's `authorized_keys` command and refuses a different requested target before filesystem access. The host serializes with flock, fetches the exact commit into an isolated worktree, pulls the exact digest and verifies image version/revision labels. It refuses downgrades and any different digest or commit for the same version. With the host's own settings, the new image then runs its offline check (`dist/scripts/candidate-check.js`, from 2.45.2): the version and schema it holds, the bot's startup validation of those settings, every module loading, and Discord's registration rules for the command set. It reaches neither Discord nor the database, so a release the host or Discord would refuse is turned away here, while the old bot still runs. An image without the script is delivered without the check.
+6. **Writer boundary:** persist target-bound pending state **before stopping the bot**. Stop the writer, take an encrypted offsite database/settings backup, register commands globally for production or only in DevBot's declared guild for staging, migrate with the exact new image, start that image with automatic restart disabled and observe sustained readiness plus exact digest/version/schema/writer identity. Discord is written before the database (2026-10-12): a command set Discord rejects, as 2.45.0's `/moderate block` was, then stops the delivery with the schema unchanged, where the previous release can still run, instead of after a migration it can no longer start on. The cost is that a migration which then fails leaves Discord holding the new release's commands beside the old schema; the recovery steps register the previous release's set again before restarting it. Retain the info logs `Modules loaded` and `Database writer lease acquired` with their exact text.
+7. **Record:** durable accepted identity/worktree state is recorded only after observation. Only then enable the routine `unless-stopped` restart policy and clear pending. A failure after the pending boundary, including backup, registration, migration, startup, observation or restart-policy failure, leaves pending state for owner reconciliation. There is no automatic rollback. An uncatchable loss can leave a process running; inspect its actual state. A stale pending marker can survive after durable acceptance, but an unaccepted target cannot automatically restart.
 
 An unchanged version does not publish another image or deploy a maintenance commit. A maintenance fix may finish a release whose tag was never published, but cannot replace an existing tag. Re-running a failed Publish or Deploy run retries it for real. Publication resumes only with this commit's own tagged index, never another commit's release. A delivery re-validates, and proceeds only if GitHub held this attempt's own delivery job for the owner's approval: it finds its deployment and requires that it began `waiting`, so an earlier attempt's approval is never reused. Re-run all jobs and a fresh dispatch both ask again. Each attempt sends its own request ID (the run ID followed by the three-digit attempt), so the host entry starts a fresh worktree, and decides: `already-live`, `refused` while its lock or a pending marker holds the host, or a deployment. A refusal before the writer boundary changes nothing: fix its cause, then re-run or dispatch again. After `needs-owner`, reconcile on the host and clear pending first (below), then use a fresh owner-requested Deploy dispatch with explicit target, version, full commit and digest; never re-run that run. A failed delivery says where it stopped: before the host was reached (runner, validating resolver, DNSSEC/SSHFP host key, name resolution, connection or key refusal), the host's forced command, or the host entry's own result, with the entry's fixed-shape reasons, a plain-words likely cause and the path of its private host log ([reading a failed delivery](#reading-a-failed-delivery)). A published image or successful SSH exit alone is not live acceptance.
 
@@ -155,15 +155,15 @@ Every reason line has one shape, which the entry (`public_reason` in `ops/deploy
 | `fence writers=stopped` or `fence writers=unconfirmed` | After the writer boundary, whether the entry confirmed every bot container stopped. `unconfirmed` needs a look at the host now |
 | `restore outcome=<restored, skipped or failed>` with `cause=<cause>`, `check=<check>`, `proxy=failed` | Reserved, as `rolled-back` is. Whether the entry tried to restore the previous release after a failure. A `skipped` restore names why: `writers-unconfirmed`, `no-kit`, `candidate-started`, `deadline`, `schema-ahead` (the database already moved past what the previous release accepts) or `db-unknown`. `failed` names the check that failed, and `proxy=failed` says the dashboard proxy may still use the new release's configuration |
 | `commands state=unknown` | Reserved. The Discord command set may still be the new release's after a rollback; register from the running release |
-| `candidate part=<identity, config, modules or registration>` | Reserved. Which part of the new release's own offline check refused it, before anything stopped |
+| `candidate part=<identity, config, modules or registration>` | Which part of the new release's own offline check refused it, before anything stopped. The problem text names settings and commands and stays in the private log. `candidate check=absent` is noted on a later failure when the image has no such check |
 | `accepted state=running` with `arm=failed` | Reserved. With `needs-owner`: the new release passed observation and is running but the entry kept `pending`; `arm=failed` says its restart policy could not be enabled |
 
 Checks by step:
 
 - **preflight:** `entry-identity`, `entry-syntax`, `host-tools`, `settings-file`, `settings-mode`, `host-lock`, `live-writer`, `live-inspect`, `live-health`, `live-labels`, `live-image`, `live-digest`, `live-scope`, `version-order`.
 - **fetch:** `git-fetch`, `commit-missing`, `commit-not-on-main`, `worktree-exists`, `worktree-add`, `package-version`, `migrations`.
-- **pull:** `image-pull`, `image-inspect`, `image-identity`, `compose-config`, `compose-model`, `candidate-scope`, `web-settings`, `proxy-files`, `proxy-pull`, `proxy-config`, and `pending-write` at the boundary. Reserved for failure-safe deliveries: `candidate-check` and `restore-kit`.
-- **stop, backup, migrate, register:** `stop-writers`, `backup`, `migrate`, `register`.
+- **pull:** `image-pull`, `image-inspect`, `image-identity`, `compose-config`, `compose-model`, `candidate-scope`, `web-settings`, `proxy-files`, `proxy-pull`, `proxy-config`, and `pending-write` at the boundary. `candidate-check` (the offline check in the new image; a failure is a `refused` result before anything stops). Reserved for failure-safe deliveries: `restore-kit`.
+- **stop, backup, register, migrate:** `stop-writers`, `backup`, `register`, `migrate`.
 - **start:** `compose-up` (Compose's 180-second `--wait`; the container facts tell an exit from a container still `starting` or `unhealthy`), `start-container`, `start-restart-policy`, `proxy-start`, `proxy-container`, `proxy-stop`.
 - **observe:** `gone`, `inspect`, `not-running`, `container-restarted`, `image-identity`, `labels`, `health`, `identity`, `schema-checksum`, `readiness`, `probe` (the probe couldn't run in the container), and for bundled Caddy `proxy-inspect`, `proxy-not-running`, `proxy-health`, `proxy-restart-policy`. An `already-live` request also uses `live-image-id`, `record-write` and `enable-restart`.
 - **record:** `record-write`, `proxy-enable-restart`, `enable-restart`, `pending-clear`.
@@ -234,15 +234,16 @@ Managed PITR, where configured and proven, is another recovery source, not a sub
 
 Use this when a delivery ended `needs-owner` (it stopped after the writer boundary, so the bot is stopped and `pending` is set), or when a later delivery was `refused` because the host has no healthy running bot. After a `needs-owner` the next delivery is first refused as `pending-present`; once the marker is cleared the refusals read `live-writer-count` or `live-health` ([the reasons](#reading-a-failed-delivery)). A refusal on a healthy host changed nothing: fix its cause and deliver again; none of this applies, except `pending-present`, which can also be only a stale marker (see the last row of the table in step 2).
 
-The steps use the entry's own commands (`ops/deploy.sh`, from `pending-write` onward) in the same order, so a recovery ends in the state a successful delivery leaves. They omit the scope comparison with the live container (a failed host has none) and do not repeat the entry's Compose-model, web-settings and bundled-proxy checks or its per-sample image-ID and identity/schema probe; each tool, `backup.sh` and the bot's own startup check repeat parts of them, but an invalid `WEB_PUBLIC_ORIGIN` or a port clash is not caught before the start. They are for the owner, on the host. Nothing here runs from a workflow or an agent session.
+The steps use the entry's own commands (`ops/deploy.sh`, from `pending-write` onward) in the same order (stop, backup, register, migrate, start, observe, record), so a recovery ends in the state a successful delivery leaves. They omit the scope comparison with the live container (a failed host has none) and do not repeat the entry's offline candidate check, Compose-model, web-settings and bundled-proxy checks or its per-sample image-ID and identity/schema probe; each tool, `backup.sh` and the bot's own startup check repeat parts of them, but an invalid `WEB_PUBLIC_ORIGIN` or a port clash is not caught before the start. They are for the owner, on the host. Nothing here runs from a workflow or an agent session.
 
 Rules that hold for every step:
 
 - **One writer, ever.** Never start a second bot, and never start one while another container of the `tarubot` service runs. Step 2 stops a bot that is running and unaccepted, as the entry's fence does.
 - **An image starts only on a schema it accepts.** The bot compares the database's last migration with its own and refuses with `Schema version/checksum mismatch` otherwise, so an old release cannot be started after a newer migration committed. Step 4 asks the database, read-only, which case you are in. Never run `migrate.js` to find out.
-- **Never delete `pending` or `current` to get past a refusal.** Step 9 replaces `current` and removes `pending` only after step 8 observed the new container (or, for a stale marker, `stale_marker=yes`), and keeps timestamped copies.
+- **Commands follow the release you start.** Discord holds one command set, and the entry registers it before it migrates. A registration that succeeds before a migration that fails leaves Discord holding the failed release's commands beside the old schema, and a registration that timed out may have applied too. So step 6 always registers the set of the release you are about to start, the recorded one included, and steps 7 and 8 refuse until it has succeeded in this shell.
+- **Never delete `pending` or `current` to get past a refusal.** Step 10 replaces `current` and removes `pending` only after step 9 observed the new container (or, for a stale marker, `stale_marker=yes`), and keeps timestamped copies.
 - **No downgrade, no different build of the same version.** Step 3 applies the entry's rule: the version must not be below `current.version`, and an equal version must be the same commit and digest.
-- **Run it all in one `tmux` (or `screen`) session with a clean environment.** The entry turns a dropped connection into a failure and fences the writer before it exits; a plain SSH session does not, and a drop in the middle of step 7 would leave a started, unaccepted bot running without the host lock. After a drop, `tmux attach -t recovery` resumes the session (`screen -S recovery` and `screen -r recovery` do the same, and the shell must be bash, as the blocks use bash features). The clean environment keeps shell variables such as `DATABASE_URL`, `COMPOSE_PROFILES` or `LOG_LEVEL` from overriding the host's settings file, as they do not for the forced command:
+- **Run it all in one `tmux` (or `screen`) session with a clean environment.** The entry turns a dropped connection into a failure and fences the writer before it exits; a plain SSH session does not, and a drop in the middle of step 8 would leave a started, unaccepted bot running without the host lock. After a drop, `tmux attach -t recovery` resumes the session (`screen -S recovery` and `screen -r recovery` do the same, and the shell must be bash, as the blocks use bash features). The clean environment keeps shell variables such as `DATABASE_URL`, `COMPOSE_PROFILES` or `LOG_LEVEL` from overriding the host's settings file, as they do not for the forced command:
 
   ```sh
   tmux new -s recovery 'env -i HOME="$HOME" PATH="$PATH" TERM="$TERM" LC_ALL=C bash --noprofile --norc'
@@ -270,7 +271,7 @@ ref=ghcr.io/deconfined/tarubot@$digest
 worktree=$STATE/releases/recovery-$commit   # a failed delivery's own worktree is named <request>-<commit>; see step 3
 
 # The entry's own helpers. TARUBOT_RESTART_POLICY=no keeps an unaccepted container from
-# restarting by itself; step 9 arms the restart policy. Nothing here reads standard input.
+# restarting by itself; step 10 arms the restart policy. Nothing here reads standard input.
 compose() {
   TARUBOT_IMAGE_DIGEST=$digest TARUBOT_RESTART_POLICY=no timeout --kill-after=10 300 docker compose \
     --project-name tarubot --project-directory "$worktree" --env-file "$ROOT/.env" \
@@ -295,6 +296,10 @@ stop_writers() {
 # starts with it.
 held() { [ "${locked:-no}" = yes ] && flock -n 9; }
 locked=no
+# Step 5 sets backed_up and step 6 sets registered, each to the digest of the release it was done
+# for, only after its block succeeded. Step 7 and step 8 refuse without the current digest in them,
+# so a marker left by an earlier attempt or another release never counts.
+backed_up=no; registered=no
 if [[ $version =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ \
    && $commit =~ ^[0-9a-f]{40}$ && $digest =~ ^sha256:[0-9a-f]{64}$ \
    && $request =~ ^[1-9][0-9]{0,19}$ && $target =~ ^(production|staging)$ ]]; then
@@ -321,14 +326,15 @@ docker ps -a --filter label=com.docker.compose.project=tarubot --filter label=co
 | Last step shown | What is true | Do |
 | --- | --- | --- |
 | `preflight`, `fetch`, `pull` with `result refused` | Nothing changed. The reasons say why. `live-writer-count` and `live-health` mean the host has no healthy running bot; `pending-present` means only that a marker exists (the bot may be healthy: see the last row) | Fix the cause. For a stopped host, the stop block below, then step 3 with the release that matches the database |
+| `pull` with `result refused`, reasons `failed step=pull check=candidate-check status=1` and `candidate part=<identity, config, modules or registration>` | The new release's own offline check refused it before anything stopped: the old bot still runs, the schema and Discord's commands are untouched, and `pending` was never written. The reason names only the part; the problem text (a setting or a command name) is only in the private host log. (`status=2` means bad arguments and names no part.) | Nothing to recover. Fix the release in source (for `config`, the host's settings), then deliver again |
 | `pull` with `result needs-owner` (check `pending-write`) | The boundary was set before the marker was written (the marker may be missing if that write itself failed), so the fence ran as for any failure past the boundary and the old bot was stopped (`fence writers=unconfirmed` means it could not confirm that: `docker ps` first) | As `stop` |
-| `stop`, `backup` | The bot is stopped (or `fence writers=unconfirmed`), the schema is the old one, nothing was registered | The stop block below, then step 3 chooses between restarting the recorded release and going forward |
-| `migrate` | A migration is one transaction, so the schema is either the old head or the new one. The acknowledgement may have been lost, so do not assume which | The stop block, then steps 3 and 4 tell you; then as `backup` (old) or `register` (new) |
-| `register` | If the release had a migration the schema is the new head, and the recorded release cannot start on it. A rejected registration (HTTP 400) changed nothing in Discord, but another failure may have committed | The stop block, then steps 3, 4 and 6 (read the inventory before registering again) |
-| `start`, `observe`, `record` | The entry's fence has stopped the container (the writer boundary stays set until the last line of `record`), so it is down. The schema and commands are the new ones | The stop block, then steps 3, 4, 6 and 7. For the same release the failed delivery installed, `worktree` can be `$(jq -er .worktree "$STATE/pending")` |
-| Nothing failed: one healthy bot whose version, commit and digest equal `current`, **and** a leftover `pending` whose version, commit and digest are the same as `current`'s | Only the marker is stale. (If `pending` names a different or newer release, a newer delivery crossed the boundary and ended `fence writers=unconfirmed`: the schema or commands may be new, so treat it as the `stop` row after `docker ps`) | **Do not stop the bot.** Run step 1 with `current`'s `version`, `commit` and `digest` and `request` set to its `run`; then `worktree=$(jq -er .worktree "$STATE/current"); stale_marker=yes`; then step 9 only |
+| `stop`, `backup` | The bot is stopped (or `fence writers=unconfirmed`), the schema is the old one, nothing was registered (the backup comes first, so a failed backup changed nothing in Discord either) | The stop block below, then step 3 chooses between restarting the recorded release and going forward |
+| `register` | The bot is stopped and the backup is taken. The schema is still the old head, whatever the release brings, because register runs before migrate. A rejected registration (HTTP 400) changed nothing in Discord, but a timeout or a lost reply may have applied it. The recorded release can start on this schema, but if the failed registration may have applied, Discord holds the failed release's commands and the recorded release's own set must be registered first | The stop block, then steps 3 and 4. To bring the recorded release back, start step 3 with its three lines; once step 4 says SAME, continue at step 6, which registers the recorded release's set (do not skip it), then steps 8 to 10. A fixed, published release instead: step 1 with its values, then step 3 onward |
+| `migrate` | Discord already holds the failed release's commands, because register came first and succeeded. A migration is one transaction, so the schema is either the old head (it rolled back) or the new one (only its acknowledgement was lost); do not assume which | The stop block, then steps 3 and 4 with the failed release's values tell you which head the database has. **Old head** (OLDER): go forward again with steps 5, 6 and 7, or bring the recorded release back (start step 3 with its three lines; once step 4 says SAME, step 6 registers its set again, then steps 8 to 10). **New head** (SAME): forward only, steps 6 and 8 to 10; the recorded release cannot start on it |
+| `start`, `observe`, `record` | The entry's fence has stopped the container (the writer boundary stays set until the last line of `record`), so it is down. The schema and commands are the new ones | The stop block, then steps 3, 4, 6 and 8. For the same release the failed delivery installed, `worktree` can be `$(jq -er .worktree "$STATE/pending")` |
+| Nothing failed: one healthy bot whose version, commit and digest equal `current`, **and** a leftover `pending` whose version, commit and digest are the same as `current`'s | Only the marker is stale. (If `pending` names a different or newer release, a newer delivery crossed the boundary and ended `fence writers=unconfirmed`: the schema or commands may be new, so treat it as the `stop` row after `docker ps`) | **Do not stop the bot.** Run step 1 with `current`'s `version`, `commit` and `digest` and `request` set to its `run`; then `worktree=$(jq -er .worktree "$STATE/current"); stale_marker=yes`; then step 10 only |
 
-Keep the evidence, then stop any bot that is still running or restarting. Run this block only for the rows above that say the stop block. It refuses while a healthy bot runs, because stopping an accepted bot is the outage this runbook exists to end; set `stop_healthy=yes` first only when the row tells you to stop it. A running, unaccepted bot is an unaccepted writer (a bot whose restart policy is still `unless-stopped` meeting a schema it refuses restarts every few seconds), and the entry's fence stops writers before anything else. Step 7 replaces the container with `--force-recreate`, and its `docker logs` go with it, so the log is saved first.
+Keep the evidence, then stop any bot that is still running or restarting. Run this block only for the rows above that say the stop block. It refuses while a healthy bot runs, because stopping an accepted bot is the outage this runbook exists to end; set `stop_healthy=yes` first only when the row tells you to stop it. A running, unaccepted bot is an unaccepted writer (a bot whose restart policy is still `unless-stopped` meeting a schema it refuses restarts every few seconds), and the entry's fence stops writers before anything else. Step 8 replaces the container with `--force-recreate`, and its `docker logs` go with it, so the log is saved first.
 
 ```sh
 (
@@ -352,13 +358,15 @@ rc=$?; [ "$rc" -eq 0 ] || echo "STOP: a bot may still be running; check docker p
 
 Create the release's worktree, pull its exact image and apply the entry's identity and order checks. For the same release the failed delivery was installing, set `worktree=$(jq -er .worktree "$STATE/pending")` first and the block reuses it after checking it is that commit and clean. Otherwise it creates `recovery-<commit>` and never touches a failed delivery's directory.
 
-To bring back the **recorded** release instead (a failure that left the schema unchanged), run these three lines first, then the block below, then step 4; when step 4 says SAME, continue at step 6 (step 5 is skipped). They reset all of the release's variables from `current`, not only the digest:
+To bring back the **recorded** release instead (possible only while the schema is unchanged: a failure at `stop`, `backup` or `register`, or at `migrate` when step 4, run for the failed release, said OLDER), run these three lines first, then the block below, then step 4; when step 4 says SAME, continue at step 6 (steps 5 and 7 are skipped). They reset all of the release's variables from `current`, not only the digest, and clear the step 5 and 6 markers:
 
 ```sh
 version=$(jq -er .version "$STATE/current"); commit=$(jq -er .commit "$STATE/current")
 digest=$(jq -er .digest "$STATE/current"); worktree=$(jq -er .worktree "$STATE/current")
-ref=ghcr.io/deconfined/tarubot@$digest
+ref=ghcr.io/deconfined/tarubot@$digest; backed_up=no; registered=no
 ```
+
+On this path **step 6 is mandatory whenever the failed delivery got as far as its own `register` step** (its last `step` was `register` or later). The failed delivery's registration may have applied even when it was reported as failed (a timeout or a lost reply), so Discord can hold the failed release's command set, and the recorded release would then run beside commands it does not declare. Step 6 registers the recorded release's set again; step 8 refuses until it has. Do not skip it because the schema is unchanged.
 
 If `current` is missing there is no recorded floor for the downgrade rule: set `floor=<the last version that ran on this host>` before the block, which then compares against it. With a floor only the version order is enforced; an equal version of a different build cannot be told apart.
 
@@ -424,8 +432,8 @@ compose run --rm --no-deps --pull never -T tarubot bun -e '
     }
     if (head === SCHEMA_VERSION) await db.schema(SCHEMA_VERSION);
     const verdict = head === SCHEMA_VERSION ? "SAME: this release accepts the database"
-      : head === "none" ? "NONE: the database has no migrations (step 5)"
-      : head < SCHEMA_VERSION ? "OLDER: the migration of this release is still pending (step 5)"
+      : head === "none" ? "NONE: the database has no migrations (steps 5 to 7)"
+      : head < SCHEMA_VERSION ? "OLDER: the migration of this release is still pending (steps 5 to 7)"
       : "NEWER: this release is too old to start on this database";
     console.log("database head:", head, "| this release:", SCHEMA_VERSION, "|", verdict);
   } finally {
@@ -434,15 +442,16 @@ compose run --rm --no-deps --pull never -T tarubot bun -e '
 rc=$?; [ "$rc" -eq 0 ] || echo "STOP: the schema check failed (a checksum mismatch prints Schema version/checksum mismatch); do not continue"
 ```
 
-- **SAME**: the migration is done and its checksum matches. Go to step 6.
-- **OLDER** or **NONE**: this release's migration has not run. Go to step 5.
+- **SAME**: the migration is done and its checksum matches. Go to step 6; there is no step 5 or step 7.
+- **OLDER** or **NONE**: this release's migration has not run. Go to step 5 (backup), then step 6 (register), then step 7 (migrate), in that order.
 - **NEWER**: this release is too old for this database. Start a newer release; never an older one.
 
-### 5. Back up and migrate, only when step 4 said OLDER or NONE
+### 5. Back up, only when step 4 said OLDER or NONE
 
-No bot may be running (the stop block in step 2 stopped it): `migrate.js` waits 90 seconds for a stopping bot to release the writer lease and then refuses. Take the encrypted backup exactly as the entry does, with the lock you hold (`TARUBOT_HOST_LOCK_HELD=true` makes `backup.sh` use file descriptor 9), and migrate only if it succeeded. Look for `backup ok: tarubot-<stamp>` in its output.
+The entry's order after the stop is backup, register, migrate, so a failed backup changes nothing in Discord and a rejected registration changes nothing in the database. No bot may be running (the stop block in step 2 stopped it). Take the encrypted backup exactly as the entry does, with the lock you hold (`TARUBOT_HOST_LOCK_HELD=true` makes `backup.sh` use file descriptor 9). Look for `backup ok: tarubot-<stamp>` in its output. The block clears `backed_up` first and sets it, to this release's digest, only when the backup exited 0; step 7 refuses without it.
 
 ```sh
+backed_up=no
 (
   set -Eeuo pipefail
   trap 'echo "FAILED: $BASH_COMMAND" >&2' ERR
@@ -453,25 +462,22 @@ No bot may be running (the stop block in step 2 stopped it): `migrate.js` waits 
   COMPOSE_PROFILES=$profiles TARUBOT_ROOT=$ROOT TARUBOT_COMPOSE_FILE=$worktree/docker-compose.$target.yml \
     TARUBOT_IMAGE_DIGEST=$digest TARUBOT_HOST_LOCK_HELD=true \
     timeout --kill-after=10 900 bash "$worktree/ops/backup.sh" "$target" </dev/null
-  compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
-  echo "OK: backed up and migrated"
+  echo "OK: backed up"
 )
-rc=$?; [ "$rc" -eq 0 ] || echo "STOP: the backup or the migration failed. Run step 4 again to see which head the database has before anything else"
+rc=$?
+if [ "$rc" -eq 0 ]; then backed_up=$digest; else echo "STOP: the backup failed; do not register or migrate"; fi
 ```
 
-Skip this step when step 4 said SAME: the delivery completed the migration, and a backup taken now is not a pre-migration backup, because it captures the new schema. Re-run step 4 afterwards; it must say SAME.
+Skip this step, and step 7, when step 4 said SAME: the delivery completed the migration, and a backup taken now is not a pre-migration backup, because it captures the new schema.
 
 ### 6. Register the commands and read the inventory
 
-Registration replaces the whole command set in one request, so a request Discord rejects changes nothing. Read first, because a failure can leave the outcome uncertain: if the first inventory is clean, registration already committed and the second command is not needed. Production registers the global scope; staging registers only DevBot's declared guild: set `devbot_guild=<that guild's ID>` (it is `TEST_GUILD_ID` in the host's settings, the guild DevBot's profile declares in `src/config/deployment.ts`) before the block.
+Always, whichever way step 4 went, and with the variables of the release you are about to start: the candidate's on the way forward, the recorded release's after the three lines in step 3. Discord holds one command set, and the bot you start must find its own there. Registration replaces the whole set in one request, so a request Discord rejects changes nothing, but a timeout or a lost reply may have applied it; registering again is safe. So the block registers unconditionally, then reads Discord back with `commands.js list`. That compares the command and subcommand paths and the default permissions with the release's declarations (not every option detail) and exits 2 unless the inventory is clean: the declared scope matches exactly, every other scope is empty, and every scope is readable (a 403 or a permission mismatch also exits 2). It needs no database. Leftover guild-scoped commands make it exit 2 and are not caused by this step.
+
+Production registers the global scope; staging registers only DevBot's declared guild: set `devbot_guild=<that guild's ID>` (it is `TEST_GUILD_ID` in the host's settings, the guild DevBot's profile declares in `src/config/deployment.ts`) before the block. The block clears `registered` first and sets it, to this release's digest, only when both commands succeeded; step 7 and step 8 refuse without it.
 
 ```sh
-compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/commands.js list; echo "inventory exit=$?"
-```
-
-`commands.js list` compares Discord with the release's declarations and exits 2 unless the inventory is clean: the declared scope matches exactly, every other scope is empty, and every scope is readable (a 403 or a permission mismatch also exits 2). It needs no database. Leftover guild-scoped commands make it exit 2 and are not caused by this step. If it exited 0 skip the next block; otherwise:
-
-```sh
+registered=no
 (
   set -Eeuo pipefail
   trap 'echo "FAILED: $BASH_COMMAND" >&2' ERR
@@ -484,18 +490,46 @@ compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/commands.js 
   compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/commands.js list
   echo "OK: registered and the inventory is clean"
 )
-rc=$?; [ "$rc" -eq 0 ] || echo "STOP: registration or the inventory check failed; read the message before anything else"
+rc=$?
+if [ "$rc" -eq 0 ]; then registered=$digest; else echo "STOP: registration or the inventory check failed; read the message before anything else"; fi
 ```
 
-A `register.js` error names the command and option Discord refused (for example `APPLICATION_COMMAND_OPTIONS_REQUIRED_INVALID`); that is a release defect to fix in source, not on the host. If the release cannot register, the recorded release can still start only when the schema is unchanged (step 3), and Discord then still holds the command set of whichever registration last succeeded.
+A `register.js` error names the command and option Discord refused (for example `APPLICATION_COMMAND_OPTIONS_REQUIRED_INVALID`); that is a release defect to fix in source, not on the host. When the release cannot register, nothing was migrated: the schema is still the old head, so the recorded release can still start on it. Start step 3 with its three lines, run step 3's block and step 4 (it must say SAME), then run this step again with the recorded release's variables. A rejected request (HTTP 400) changed nothing in Discord, but a timeout or a lost reply may have applied the failed set, and this step registers the recorded release's own set over it. Discord otherwise still holds the command set of whichever registration last succeeded.
 
-### 7. Start exactly one writer
+### 7. Migrate, only when step 4 said OLDER or NONE
 
-If anything in this block fails, the block saves the container's log and stops it, as the entry's fence does, because a failed `compose up --wait` can leave a running, unaccepted bot.
+Only after step 5's backup and step 6's registration both succeeded in this shell, for this release: the block prints `STOP` and runs nothing unless `backed_up` and `registered` hold its digest. No bot may be running: `migrate.js` waits 90 seconds for a stopping bot to release the writer lease and then refuses. The migration is one transaction. If it fails, or you cannot tell whether it finished, run step 4 again before anything else: the database is at the old head if it rolled back and at this release's head if only the acknowledgement was lost, and Discord already holds this release's commands either way (the table in step 2 says what to do next).
 
 ```sh
 if ! held; then
   echo "STOP: the host lock is not held (step 1)"
+elif [ "${backed_up:-no}" != "$digest" ]; then
+  echo "STOP: no migration without this release's backup from this shell: run step 5 first"
+elif [ "${registered:-no}" != "$digest" ]; then
+  echo "STOP: no migration before this release's commands are registered: run step 6 first"
+else
+  (
+    set -Eeuo pipefail
+    trap 'echo "FAILED: $BASH_COMMAND" >&2' ERR
+    compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
+    echo "OK: migrated"
+  )
+  rc=$?
+  [ "$rc" -eq 0 ] || echo "STOP: the migration failed or its result is unknown. Run step 4 again to see which head the database has before anything else"
+fi
+```
+
+Run step 4 again afterwards; it must say SAME.
+
+### 8. Start exactly one writer
+
+The block refuses unless step 6 registered this release's commands in this shell, so the bot never starts beside another release's set. If anything in it fails, the block saves the container's log and stops it, as the entry's fence does, because a failed `compose up --wait` can leave a running, unaccepted bot.
+
+```sh
+if ! held; then
+  echo "STOP: the host lock is not held (step 1)"
+elif [ "${registered:-no}" != "$digest" ]; then
+  echo "STOP: this release's commands are not registered: run step 6 first"
 else
   (
     set -Eeuo pipefail
@@ -521,11 +555,11 @@ else
 fi
 ```
 
-`--wait` can take up to 3 minutes. This step does not touch the bundled proxy; step 9 covers it.
+`--wait` can take up to 3 minutes. This step does not touch the bundled proxy; step 10 covers it.
 
-### 8. Observe
+### 9. Observe
 
-Sustained readiness, not one good sample, like the entry's `observe`: the same container, no restarts, the exact image, `healthy` and a ready writer, four times ten seconds apart. (The entry also compares the image ID and the commit label each time; steps 3 and 7 already pinned both for this container.)
+Sustained readiness, not one good sample, like the entry's `observe`: the same container, no restarts, the exact image, `healthy` and a ready writer, four times ten seconds apart. (The entry also compares the image ID and the commit label each time; steps 3 and 8 already pinned both for this container.)
 
 ```sh
 observed=
@@ -568,7 +602,7 @@ fi
 
 `Modules loaded` (how many commands, components and events the release declares) and `Database writer lease acquired` are info-level lines the repository keeps stable, but the current `ops/deploy.sh` does not read them: it judges a release by health, the readiness probe and the schema checksum, and reads only error-level records for its failure reasons. Here they are quick evidence. A `LOG_LEVEL` of `warn` or above hides them without anything being wrong. Then check the behavior privately in Discord (`/version`, and a command the release added or changed). Only then record.
 
-### 9. Record the release, arm the restart policy and clear pending
+### 10. Record the release, arm the restart policy and clear pending
 
 This is what the entry's `record` step does, in its order. The version, commit and digest come from the running container, which is what lets the next delivery's preflight (it compares `current` with the live container) accept it; `target`, `request` and `worktree` are the ones you set, and the block checks the worktree is that commit. The old files are kept under timestamped names.
 
@@ -579,7 +613,7 @@ This is what the entry's `record` step does, in its order. The version, commit a
   held
   cid=$(bot_ids)
   [[ $cid =~ ^[0-9a-f]{12,64}$ ]]
-  # Step 8 observed this container, or the table's last row (a stale marker) set stale_marker=yes.
+  # Step 9 observed this container, or the table's last row (a stale marker) set stale_marker=yes.
   [ "${observed:-}" = "$cid" ] || [ "${stale_marker:-no}" = yes ]
   [ -d "$worktree/migrations" ]
   docker inspect "$cid" | jq -e --arg ref "$ref" --arg env "TARUBOT_ENVIRONMENT=$target" '.[0]
@@ -637,7 +671,7 @@ rc=$?; [ "$rc" -eq 0 ] || echo "STOP: nothing past the failing command was done;
 
 If the block stopped, fix the cause and run it again; it is safe to repeat. If `pending` names another target it stops before changing anything: reconcile that first. A proxy running while the host's settings no longer select it is stopped by the next delivery of a new version, not here. Deliveries refuse with `lock-held` while a shell still holds the lock, so release it when you are done.
 
-**If step 9 stopped at the proxy check** (the settings select the bundled proxy and it is stopped or unhealthy, usually because the failed delivery died while recreating it), recreate it with the entry's commands (`ops/deploy.sh`, `proxy-files` to `proxy-config` and `proxy-start`), then repeat step 9. Neither `already-live` (step 10) nor a running proxy from an older release does this: a proxy keeps the old release's Caddyfile and offline page until a delivery of a new version recreates it.
+**If step 10 stopped at the proxy check** (the settings select the bundled proxy and it is stopped or unhealthy, usually because the failed delivery died while recreating it), recreate it with the entry's commands (`ops/deploy.sh`, `proxy-files` to `proxy-config` and `proxy-start`), then repeat step 10. Neither `already-live` (step 11) nor a running proxy from an older release does this: a proxy keeps the old release's Caddyfile and offline page until a delivery of a new version recreates it.
 
 ```sh
 (
@@ -650,7 +684,7 @@ If the block stopped, fix the cause and run it again; it is safe to repeat. If `
   compose pull caddy
   compose run --rm --no-deps --pull never -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
   compose up --detach --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 caddy
-  echo "OK: proxy recreated; repeat step 9"
+  echo "OK: proxy recreated; repeat step 10"
 )
 rc=$?; [ "$rc" -eq 0 ] || echo "STOP: the proxy could not be recreated; the bot is unaffected, read the output"
 ```
@@ -661,9 +695,9 @@ When the block printed `OK: recorded; pending cleared`, release the host lock.
 exec 9>&-; locked=no
 ```
 
-### 10. Prove routine delivery works again
+### 11. Prove routine delivery works again
 
-Before the next real release, dispatch Deploy once with the recovered release's `target`, `version`, `commit` and `digest` (**Actions → Deploy → Run workflow → main**, then approve the environment). The entry finds the live container already matches, observes it twice and reports `already-live` without migrating or registering, which proves its preflight accepts the host again. It refuses `live-digest` if `current` does not match the running container, and `live-reference` if the container was not created from the digest reference; both mean step 7 or step 9 went differently than described, so look before retrying.
+Before the next real release, dispatch Deploy once with the recovered release's `target`, `version`, `commit` and `digest` (**Actions → Deploy → Run workflow → main**, then approve the environment). The entry finds the live container already matches, observes it twice and reports `already-live` without migrating or registering, which proves its preflight accepts the host again. It refuses `live-digest` if `current` does not match the running container, and `live-reference` if the container was not created from the digest reference; both mean step 8 or step 10 went differently than described, so look before retrying.
 
 ### When a container will not start
 
@@ -672,14 +706,14 @@ Before the next real release, dispatch Deploy once with the recovered release's 
 | Message or sign | Meaning | What to do |
 | --- | --- | --- |
 | `Schema version/checksum mismatch. Use matching versioned migrations and application image.` | The database's last migration is not this image's. Most often an old release met a migrated database | Step 4 says which way; start the release whose migration head the database has, never an older one |
-| `Run db:migrate before starting the application.` | `schema_migrations` does not exist: the database was never migrated | Step 5, with a backup first |
-| `A TaruBot writer (database process N) holds the writer lease, so … migration(s) were not applied` | A bot is running while `migrate.js` waited its 90 seconds (the default; the host's settings do not change it) | The stop block in step 2; run step 5 again |
+| `Run db:migrate before starting the application.` | `schema_migrations` does not exist: the database was never migrated | Steps 5 to 7: backup first, then register, then migrate |
+| `A TaruBot writer (database process N) holds the writer lease, so … migration(s) were not applied` | A bot is running while `migrate.js` waited its 90 seconds (the default; the host's settings do not change it) | The stop block in step 2; then run steps 5 and 7 again (a new backup, since a writer may have written) |
 | `migrate.js` fails with a statement timeout | Another migration runner holds the migration lock, or one migration statement ran past the 15 second statement limit | Find the other runner (`docker ps -a`, a second shell); do not start another. A slow statement is a release defect |
 | Readiness stays `ready: false` with `writerLease: false` | A previous writer still holds the lease: a container you did not stop, or a database session not yet closed | `docker ps -a` for another `tarubot` container; the lease frees when its process exits |
 | `backup busy` | Something else holds `host.lock` and the backup was started without the held-lock flag | Run step 5's command from the shell that holds the lock; do not release the lock to run it |
 | `backup.sh` exits 1 and prints nothing | `TARUBOT_HOST_LOCK_HELD=true` is set but file descriptor 9 is not `host.lock` (a new shell, or `exec 9>&-` already ran) | Redo step 1 in this shell; the lock must be taken in the shell you run step 5 from |
-| `lock-held` in a Deploy log | Your recovery shell, a scheduled backup or another delivery holds `host.lock` | Finish step 9 (`exec 9>&-`), or wait for the backup |
-| The container restarts every few seconds | Its restart policy is `unless-stopped` and it exits at startup | The stop block in step 2 stops it and keeps its log; then step 7 replaces it |
+| `lock-held` in a Deploy log | Your recovery shell, a scheduled backup or another delivery holds `host.lock` | Finish step 10 (`exec 9>&-`), or wait for the backup |
+| The container restarts every few seconds | Its restart policy is `unless-stopped` and it exits at startup | The stop block in step 2 stops it and keeps its log; then step 6 (register), and step 8 replaces it |
 
 ## Pending recovery, rotation and host loss
 
