@@ -12,7 +12,7 @@ import { viewerOf, type Viewer } from "../discord/presenters/audience.js";
 import { failureReply, rendersInPlace } from "../discord/presenters/failure.js";
 import { Presented } from "../discord/presenters/reply.js";
 import { classifyFailure } from "../domain/failures.js";
-import { authorize, type Actor } from "../domain/policy.js";
+import { NO_ACCESS, requireAnyPermission, type Actor } from "../domain/policy.js";
 import { Failure } from "../domain/values.js";
 import type { Command } from "./command.js";
 import { rendersSourceInPlace, type AcknowledgeMode, type Component } from "./component.js";
@@ -227,7 +227,7 @@ export class InteractionRouter {
       const actor = await this.context.resolveActor(interaction.guildId, interaction.user.id);
       // The viewer comes before authorization so a refused member still gets member wording.
       progress.viewer = viewerOf(actor, interaction.id);
-      authorize(actor, interaction.guildId, module.access);
+      requireAnyPermission(actor, interaction.guildId, module.permissions);
       // Separate lookups retain precise interaction types without casting a handler union.
       let result: unknown;
       if (interaction.isChatInputCommand()) {
@@ -378,7 +378,6 @@ export class InteractionRouter {
       const base: Actor = {
         guildId: interaction.guildId,
         userId: interaction.user.id,
-        officer: interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
         manageRoles: interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles) ?? false,
         serverManager: interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
         roleIds: interaction.inCachedGuild()
@@ -386,9 +385,11 @@ export class InteractionRouter {
           : interaction.inRawGuild()
             ? interaction.member.roles
             : [],
+        // Fails closed until enrichActor reads the server's managed roles (2.44.0).
+        access: NO_ACCESS,
       };
       const actor = this.context.enrichActor ? await this.context.enrichActor(base) : base;
-      authorize(actor, actor.guildId, module.access);
+      requireAnyPermission(actor, actor.guildId, module.permissions);
       await interaction.respond(
         (await module.autocomplete({ ...this.context, actor, interaction })).slice(0, 25),
       );

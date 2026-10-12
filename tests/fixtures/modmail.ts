@@ -1,8 +1,9 @@
 /**
  * Mod mail for the web harness (2.43.0): a prototype-backed ModMail over an in-memory store, applying
  * the real rules from src/domain/modmail.ts (who may see a case, sides, states, signing, limits and
- * text checks), so the pages' forms can be tried end to end without a database or a key. Every case,
- * name and message is invented.
+ * text checks) and ModMail's own permission checks (2.44.0: modmail.settings, modmail.inbox,
+ * modmail.read_log and, on the officer side, modmail.respond), so the pages' forms can be tried end
+ * to end without a database or a key. Every case, name and message is invented.
  *
  * --state-modmail picks what the store starts with (the default is off, with no cases, so the pages
  * the other tests rely on keep their navigation):
@@ -61,7 +62,7 @@ import {
   sideIn,
   textProblem,
 } from "../../src/domain/modmail.js";
-import { type Actor, authorize } from "../../src/domain/policy.js";
+import { type Actor, authorize, can, requirePermission } from "../../src/domain/policy.js";
 import type { OfficerPing } from "../../src/domain/visibility.js";
 import { Failure } from "../../src/domain/values.js";
 
@@ -415,11 +416,11 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
   };
   modmail.enabledIn = async (guildId: string) => settingsOf(guildId).enabled;
   modmail.settings = async (actor: Actor) => {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.settings");
     return settings(actor);
   };
   modmail.toggle = async (actor, request): Promise<ToggleOutcome> => {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.settings");
     const stored = settingsOf(actor.guildId);
     if (stored.enabled === request.enabled) return { status: "unchanged" };
     if (stored.revision !== request.revision) return { status: "conflict" };
@@ -453,7 +454,7 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     }
   };
   modmail.inbox = async (actor: Actor, filter: InboxFilter): Promise<Inbox> => {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.inbox");
     const mine = store.cases.filter((entry) => entry.guildId === actor.guildId);
     const counts = { officers: 0, member: 0, closed: 0 };
     for (const entry of mine) counts[entry.state] += 1;
@@ -476,8 +477,8 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     };
   };
   modmail.mine = async (actor: Actor): Promise<MyCases> => {
-    authorize(actor, actor.guildId, "user");
-    if (!mayAccess({ ...actor, officer: false }, actor.userId))
+    authorize(actor, actor.guildId);
+    if (!mayOpen(actor))
       throw new Failure("forbidden", "Mod mail is for this server's members and guests.");
     const mine = store.cases
       .filter((entry) => entry.guildId === actor.guildId && entry.openerId === actor.userId)
@@ -511,7 +512,7 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     return null;
   };
   modmail.open = async (actor, input): Promise<OpenOutcome> => {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const caseId = input.caseId?.toLowerCase();
     const topic = cleanTopic(input.topic);
     const body = cleanText(input.body);
@@ -555,11 +556,11 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     return { status: "opened", number: settings.lastNumber, url: null };
   };
   modmail.caseView = async (actor: Actor, number: bigint): Promise<CaseView | null> => {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const found = caseOf(actor, number);
     if (!found) return null;
     const side = sideIn(found.openerId, actor.userId);
-    const audience = actor.officer ? "officer" : "member";
+    const audience = can(actor, "modmail.inbox") ? "officer" : "member";
     const at = now();
     const recent = found.reads.find(
       (read) =>
@@ -579,11 +580,11 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
       createdAt: entry.createdAt,
       ...(entry.kind === "message" && { body: readable ? (entry.body ?? null) : null }),
     }));
-    // Newest first, as the read log query orders them.
-    const reads =
-      audience === "officer"
-        ? [...found.reads].sort((a, b) => b.readAt.getTime() - a.readAt.getTime()).slice(0, 50)
-        : null;
+    // Newest first, as the read log query orders them; only with modmail.read_log.
+    const readLog = can(actor, "modmail.read_log");
+    const reads = readLog
+      ? [...found.reads].sort((a, b) => b.readAt.getTime() - a.readAt.getTime()).slice(0, 50)
+      : null;
     const ids = [
       found.openerId,
       ...entries.flatMap((entry) =>
@@ -611,14 +612,15 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
       entries,
       messages,
       reads,
-      readCount: audience === "officer" ? found.reads.length : 0,
+      readCount: readLog ? found.reads.length : 0,
       names: namesFor(ids),
       canReply: readable && messages < MODMAIL_LIMITS.messagesPerCase,
+      canRespond: side === "member" || can(actor, "modmail.respond"),
       keyProblem: !readable,
     };
   };
   modmail.reply = async (actor, number, input): Promise<ReplyOutcome | null> => {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const found = caseOf(actor, number);
     if (!found) return null;
     if (store.key !== "ok")
@@ -626,6 +628,9 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     const body = cleanText(input.body);
     const problem = textProblem(body, MODMAIL_LIMITS.messageChars);
     if (problem) return { status: "invalid", reason: problem };
+    const side = sideIn(found.openerId, actor.userId);
+    // As ModMail.reply: reading every case isn't answering them; the opener's side needs no more.
+    if (side === "officer") requirePermission(actor, actor.guildId, "modmail.respond");
     const existing = store.cases
       .flatMap((entry) => entry.entries.map((row) => ({ entry, row })))
       .find(({ row }) => row.id === input.messageId);
@@ -640,7 +645,6 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
       MODMAIL_LIMITS.messagesPerCase
     )
       return { status: "invalid", reason: "case_full" };
-    const side = sideIn(found.openerId, actor.userId);
     const signedAs = side === "officer" ? (input.signing ?? "name") : null;
     const at = now();
     if (found.state === "closed") {
@@ -686,10 +690,11 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     revision: bigint,
     to: "close" | "reopen",
   ): StateOutcome | null => {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const found = caseOf(actor, number);
     if (!found) return null;
     const side = sideIn(found.openerId, actor.userId);
+    if (side === "officer") requirePermission(actor, actor.guildId, "modmail.respond");
     if (to === "reopen" && side === "member")
       throw new Failure("forbidden", "Reply to your case to reopen it.");
     if ((to === "close") === (found.state === "closed")) return { status: "unchanged" };

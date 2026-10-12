@@ -23,8 +23,9 @@ import guestReview from "../../src/components/guest-review.component.js";
 import ledger from "../../src/components/ledger.component.js";
 import sync from "../../src/components/sync.component.js";
 import verify from "../../src/components/verify.component.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, can } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture, type RecordedRequest } from "../fixtures/interactions.js";
 import { CHARACTER_RESULTS as R } from "../fixtures/replies/characters.js";
 import { CONFIG_RESULTS as C } from "../fixtures/replies/configuration.js";
@@ -34,8 +35,8 @@ import { RUN_ID, SYNC_RESULTS as SR } from "../fixtures/replies/sync-utility.js"
 import { at, CHARACTER } from "../fixtures/results.js";
 
 /** Actors the fixture member (user 400 in guild 100) resolves as. */
-const MEMBER: Actor = { guildId: "100", userId: "400", officer: false, manageRoles: false };
-const OFFICER: Actor = { ...MEMBER, officer: true };
+const MEMBER: Actor = actorOf({ guildId: "100", userId: "400", manageRoles: false });
+const OFFICER: Actor = actorOf({ ...MEMBER, officer: true });
 
 /** One recorded service call: the method, the actor's user ID and the remaining arguments. */
 type Call = [string, string, ...unknown[]];
@@ -283,7 +284,8 @@ function ledgerHarness(actors: readonly Actor[], read: (history: boolean) => unk
   if (!(app instanceof Service)) throw new Error("Invalid application fixture");
   Object.assign(app, {
     ledgerRead: async (caller: Actor, ...args: unknown[]) => {
-      calls.push(["ledgerRead", caller.officer ? "officer" : "member", ...args]);
+      // ledger.audit is what the service reads officer detail by (2.44.0).
+      calls.push(["ledgerRead", can(caller, "ledger.audit") ? "officer" : "member", ...args]);
       return read(args[2] === true);
     },
   });
@@ -474,7 +476,8 @@ function guestSyncHarness(actor: Actor) {
   Object.assign(app, {
     syncStatus: async (caller: Actor, run: string | null) => {
       calls.push(["syncStatus", caller.userId, run]);
-      return caller.officer ? SR.officer : run ? SR.run : SR.memberAttention;
+      // sync.view_all widens the listing to everyone's work, as the service does.
+      return can(caller, "sync.view_all") ? SR.officer : run ? SR.run : SR.memberAttention;
     },
     guestStatus: async (caller: Actor, owner: string) => {
       calls.push(["guestStatus", caller.userId, owner]);

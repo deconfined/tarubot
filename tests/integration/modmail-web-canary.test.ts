@@ -40,6 +40,7 @@ import { loadPages } from "../../src/web/pages.js";
 import { createWebApp } from "../../src/web/server.js";
 import { formToken, PgSessions } from "../../src/web/sessions.js";
 import { webSettings } from "../../src/web/settings.js";
+import { actorOf } from "../fixtures/actors.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const SCHEMA = "modmail_web_canary_it";
@@ -76,16 +77,20 @@ describe.skipIf(!url)("mod mail plaintext through the web app and reporter", () 
   const confined = new URL(url);
   confined.searchParams.set("options", `${SESSION_OPTIONS} -c search_path=${SCHEMA}`);
   const db = new Database(confined.toString());
-  const member: Actor = {
+  const member: Actor = actorOf({
     guildId: GUILD,
     userId: "723456789012345821",
-    officer: false,
     manageRoles: false,
     member: true,
     guest: false,
     botAdministrator: false,
-  };
-  const officer: Actor = { ...member, userId: "723456789012345822", officer: true, member: false };
+  });
+  const officer: Actor = actorOf({
+    ...member,
+    userId: "723456789012345822",
+    officer: true,
+    member: false,
+  });
   /** Every Discord port call, as JSON. */
   const discordCalls: string[] = [];
   const unused = async (): Promise<never> => {

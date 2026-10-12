@@ -24,7 +24,6 @@ export default defineCommand({
       .setMinLength(SUGGESTION_MIN)
       .setMaxLength(SUGGESTION_MAX),
   ),
-  access: "user",
   requires: [suggestionsKey],
   async execute({ interaction, actor, services }) {
     return suggestionReply(

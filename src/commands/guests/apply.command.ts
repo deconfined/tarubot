@@ -14,9 +14,14 @@ export default defineCommand({
   // The submission path (Service.apply) still refuses on its own.
   async beforeModal({ guildId, interaction, services }) {
     if (await services.get(applicationKey).guestApplicationsOpen(guildId)) return null;
-    // Manage Server comes with the interaction payload, so the officer hint costs no request.
+    // Discord permissions come with the interaction payload, so the hint costs no request. It
+    // shows to server managers, who can run both commands it names; officers through the Officer
+    // role can't be told from the payload, and the hint grants nothing either way.
     return applicationsClosedReply({
-      officerHint: interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
+      officerHint:
+        interaction.memberPermissions?.has(
+          PermissionFlagsBits.ManageGuild | PermissionFlagsBits.ManageRoles,
+        ) ?? false,
     });
   },
   modal: guestApplicationModal,

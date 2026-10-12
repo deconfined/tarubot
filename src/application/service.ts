@@ -23,8 +23,17 @@ import type { PoolClient } from "pg";
 import type { Configuration } from "../config/env.js";
 import { project } from "../config/project.js";
 import { newerVersion } from "../domain/changelog.js";
-import { authorize, authorizeRoleManager, type AccessFacts, type Actor } from "../domain/policy.js";
-import { rankAccess } from "./rank-policy.js";
+import {
+  accessFor,
+  authorize,
+  authorizeOwner,
+  can,
+  requirePermission,
+  type AccessFacts,
+  type Actor,
+} from "../domain/policy.js";
+import type { ManagedRole, PermissionId } from "../domain/rbac.js";
+import { linkConfersRank, linkConfersRankSql, rankAccess, rankBacks } from "./rank-policy.js";
 import { accessFacts } from "./access-facts.js";
 import {
   type EntryRef,
@@ -166,6 +175,19 @@ const membershipNeeded = (): Failure =>
     { kind: "scope", scope: "membership" },
   );
 
+/**
+ * Ledger access for a confirmed FC member without ledger.view or ledger.deposit (2.44.0): those
+ * come with the Member role, which TaruBot gives after a roster check, so the remedy differs from
+ * membershipNeeded's. The detail names the permission, so the reply can say so.
+ */
+const memberRoleNeeded = (permission: "ledger.view" | "ledger.deposit"): Failure =>
+  new Failure(
+    "forbidden",
+    "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.",
+    0,
+    { kind: "scope", scope: "membership", permission },
+  );
+
 /** The applicant's join changed while the form was open, so the form's join context is stale. */
 const joinChanged = (): Failure =>
   new Failure(
@@ -184,14 +206,9 @@ const applicationNotFound = (id: string): Failure =>
     { kind: "resource", resource: "application", id },
   );
 
-/** Guest decisions, grants and revocations are officer-only, with the approved wording. */
-function authorizeGuestDecision(actor: Actor): void {
-  if (!actor.officer)
-    throw new Failure("forbidden", "Only officers can decide guest access.", 0, {
-      kind: "scope",
-      scope: "officer",
-    });
-  authorize(actor, actor.guildId, "officer");
+/** Guest decisions, grants and revocations keep their approved wording. */
+function authorizeGuestDecision(actor: Actor, id: "guests.decide" | "guests.manage"): void {
+  requirePermission(actor, actor.guildId, id, "Only officers can decide guest access.");
 }
 
 /** Whole seconds until a limit lifts, for Failure.retryAfter; zero when unknown or already past. */
@@ -226,6 +243,41 @@ export type CharacterQuery =
   | { readonly id: string }
   | { readonly name: string; readonly world: string };
 
+/** Each /ledger operation's permission. */
+export const LEDGER_PERMISSION: Readonly<Record<string, PermissionId>> = {
+  deposit: "ledger.deposit",
+  withdraw: "ledger.withdraw",
+  initialize: "ledger.initialize",
+  adjust: "ledger.adjust",
+};
+
+/** The fixed refusal for /unassign of a link that counts for rank. */
+const RANK_LINK_REMOVAL =
+  "Removing a link the member verified, an imported link or a server manager's assignment needs Discord's Manage Server and Manage Roles permissions, because it can count for FC rank. Bot officer access isn't enough.";
+
+/** The guild columns /config sets directly, each behind the permission that may change it. */
+const CONFIG_FIELDS = [
+  "fc_id",
+  "member_role_id",
+  "guest_role_id",
+  "officer_role_id",
+  "leader_role_id",
+  "ledger_channel_id",
+  "officer_notifications_channel_id",
+  "changelog_channel_id",
+] as const;
+
+export const CONFIG_PERMISSION: Readonly<Record<(typeof CONFIG_FIELDS)[number], PermissionId>> = {
+  fc_id: "admin.fc",
+  member_role_id: "admin.roles",
+  guest_role_id: "admin.roles",
+  officer_role_id: "admin.roles",
+  leader_role_id: "admin.roles",
+  ledger_channel_id: "config.channels",
+  officer_notifications_channel_id: "config.officer_channel",
+  changelog_channel_id: "config.channels",
+};
+
 /** Guild-scoped operations reused by slash commands, components, and operational workflows. */
 export class Service {
   /** Dependencies are injected so persistence tests can control Discord/Lodestone outcomes. */
@@ -236,12 +288,19 @@ export class Service {
     readonly config: Configuration,
   ) {}
   /**
-   * Add what the active guild row says about the actor's held roles: `member` and `guest` (2.40.0)
-   * when they hold the bound Member or Guest role now (owner decision Q6 A: the held role, as
-   * Discord shows it and Dyno keyed on), and delegated bot-only officer authority, which grants no
-   * Discord server permission. The row is read for every actor, server managers included, so the
-   * two flags are always set: one primary-key read per resolution. No row (TaruBot not set up
-   * there) or an unbound role leaves the flag false.
+   * Resolve what the actor may do here (2.44.0, RBAC): the managed roles that count for them and
+   * the permissions those carry, plus `member` and `guest` (2.40.0) when they hold the bound Member
+   * or Guest role now (owner decision Q6 A: the held role, as Discord shows it and Dyno keyed on).
+   * - A server manager (Manage Server and Manage Roles) holds every permission implicitly and
+   *   skips the rank read. Manage Server alone grants nothing (owner decision Q2 A, 2026-10-12).
+   * - The Officer role counts only while held and backed by TaruBot's evidence (rankBacks): a
+   *   manager's grant, or a trusted confirmed character with the officer rank, or one whose rank
+   *   the roster didn't carry; never one only waiting for its first roster, and never after a
+   *   revocation. A role given by hand alone counts for nothing.
+   * - FC Leader carries no bot permission in this release (TEMPLATES_V1), so it isn't resolved.
+   * The row is read for every actor, so the flags are always set: one primary-key read per
+   * resolution, plus the rank read for an Officer-role holder. No row (TaruBot not set up there)
+   * or an unbound role leaves the flag false and the role uncounted.
    */
   async enrichActor(actor: Actor): Promise<Actor> {
     const [guild] = await this.db.orm
@@ -250,24 +309,26 @@ export class Service {
       .where(and(eq(t.guilds.id, actor.guildId), eq(t.guilds.active, true)));
     const held = (role: string | null | undefined): boolean =>
       role !== null && role !== undefined && actor.roleIds?.includes(role) === true;
-    const enriched: Actor = {
-      ...actor,
-      member: held(guild?.member_role_id),
-      guest: held(guild?.guest_role_id),
-    };
-    if (actor.serverManager ?? actor.officer) return enriched;
-    if (!guild?.officer_role_id || !held(guild.officer_role_id)) return enriched;
-    const access = await rankAccess(
-      this.db,
-      guild,
-      actor.userId,
-      this.config.ROSTER_INTERVAL_SECONDS,
-    );
-    return { ...enriched, officer: !access.revoked && access.officer !== "no" };
+    const member = held(guild?.member_role_id);
+    const guest = held(guild?.guest_role_id);
+    const manager = actor.serverManager === true && actor.manageRoles;
+    const roles: ManagedRole[] = [];
+    if (member) roles.push("member");
+    if (guest) roles.push("guest");
+    if (!manager && guild?.officer_role_id && held(guild.officer_role_id)) {
+      const rank = await rankAccess(
+        this.db,
+        guild,
+        actor.userId,
+        this.config.ROSTER_INTERVAL_SECONDS,
+      );
+      if (rankBacks(rank.officer)) roles.push("officer");
+    }
+    return { ...actor, member, guest, access: accessFor(manager, roles) };
   }
   /** Read configured state without silently creating a guild for an ordinary/read-only command. */
   async guild(actor: Actor): Promise<GuildRecord> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const [row] = await this.db.orm
       .select()
       .from(t.guilds)
@@ -330,7 +391,7 @@ export class Service {
   }
   /** Return only self-owned links unless the caller is an officer in this same guild. */
   async characters(actor: Actor, owner: string): Promise<CharactersResult> {
-    authorize(actor, actor.guildId, "user", owner);
+    authorizeOwner(actor, actor.guildId, owner);
     await this.guild(actor);
     return {
       characters: await this.db.orm
@@ -366,7 +427,7 @@ export class Service {
    * reconciliation uses; no Discord call is made.
    */
   async guestStatus(actor: Actor, owner: string): Promise<GuestStatusView> {
-    authorize(actor, actor.guildId, "user", owner);
+    authorizeOwner(actor, actor.guildId, owner);
     const guild = await this.guild(actor);
     const facts = await accessFacts(this.db.orm, guild, owner, this.config.ROSTER_INTERVAL_SECONDS);
     return {
@@ -479,6 +540,8 @@ export class Service {
    */
   async syncStatus(actor: Actor, run: string | null): Promise<SyncStatusView> {
     const guild = await this.guild(actor);
+    // sync.view_all widens what is listed; it never refuses (members see their own work).
+    const all = can(actor, "sync.view_all");
     const db = this.db.orm,
       child = alias(t.jobs, "child");
     const totals = db
@@ -530,7 +593,7 @@ export class Service {
       .where(
         and(
           eq(t.syncRuns.guild_id, actor.guildId),
-          actor.officer ? undefined : eq(t.syncRuns.requester_id, actor.userId),
+          all ? undefined : eq(t.syncRuns.requester_id, actor.userId),
           run ? eq(t.syncRuns.id, run) : undefined,
         ),
       )
@@ -544,7 +607,7 @@ export class Service {
           eq(t.links.guild_id, actor.guildId),
           eq(t.links.active, true),
           eq(t.links.character_id, sql`${t.jobs.payload}->>'characterId'`),
-          actor.officer ? undefined : eq(t.links.user_id, actor.userId),
+          all ? undefined : eq(t.links.user_id, actor.userId),
         ),
       );
     // A failure whose work succeeded afterwards under the same dedupe key is history, not a problem
@@ -583,14 +646,12 @@ export class Service {
           or(
             and(
               eq(t.jobs.guild_id, actor.guildId),
-              actor.officer ? undefined : eq(t.jobs.user_id, actor.userId),
+              all ? undefined : eq(t.jobs.user_id, actor.userId),
             ),
             and(
               isNull(t.jobs.guild_id),
               or(
-                actor.officer && guild.fc_id
-                  ? eq(sql`${t.jobs.payload}->>'fcId'`, guild.fc_id)
-                  : sql`false`,
+                all && guild.fc_id ? eq(sql`${t.jobs.payload}->>'fcId'`, guild.fc_id) : sql`false`,
                 exists(ownProfile),
               ),
             ),
@@ -625,7 +686,7 @@ export class Service {
    * handlers pass their context's reporter.
    */
   async validate(actor: Actor, report?: (error: unknown) => void): Promise<ConfigurationReport> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "config.view");
     const guild = await this.guild(actor);
     const capabilities: Record<string, string> = {};
     for (const [field, value] of Object.entries(guild)) {
@@ -723,7 +784,7 @@ export class Service {
    * IDs, which SQL cannot see, and builds the labels; this is an officer-only private read.
    */
   async applicationChoices(actor: Actor): Promise<ApplicationChoiceRow[]> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "guests.decide");
     return this.db.orm
       .select({
         id: t.guestApplications.id,
@@ -747,7 +808,7 @@ export class Service {
     owner: string,
     query: string,
   ): Promise<{ name: string; value: string }[]> {
-    authorize(actor, actor.guildId, "user", owner);
+    authorizeOwner(actor, actor.guildId, owner);
     query = query.replaceAll("%", "\\%").replaceAll("_", "\\_");
     const rows =
       kind === "verify"
@@ -779,6 +840,10 @@ export class Service {
                 eq(t.links.guild_id, actor.guildId),
                 eq(t.links.user_id, owner),
                 eq(t.links.active, true),
+                // /unassign offers someone without admin.links only the links they may remove.
+                owner !== actor.userId && !can(actor, "admin.links")
+                  ? not(linkConfersRankSql)
+                  : undefined,
                 or(ilike(t.characters.name, `%${query}%`), ilike(t.characters.id, `%${query}%`)),
               ),
             )
@@ -854,22 +919,14 @@ export class Service {
     value: string | null,
     options: { adoptHolders?: boolean } = {},
   ): Promise<ConfigChange> {
-    authorize(actor, actor.guildId, "officer");
-    const fields = [
-      "fc_id",
-      "member_role_id",
-      "guest_role_id",
-      "officer_role_id",
-      "leader_role_id",
-      "ledger_channel_id",
-      "officer_notifications_channel_id",
-      "changelog_channel_id",
-    ] as const;
+    authorize(actor, actor.guildId);
     // The guest review channel has its own method, which changes it with the applications switch.
-    const column = fields.find((candidate) => candidate === field);
+    const column = CONFIG_FIELDS.find((candidate) => candidate === field);
     // Unreachable from /config, whose subcommands name only allowlisted fields.
     if (!column) throw new Failure("input", "Invalid configuration field.");
-    if (field === "officer_role_id" || field === "leader_role_id") authorizeRoleManager(actor);
+    // Linking the FC and binding any access role are fixed (2.44.0): each decides who holds
+    // Member, Guest, Officer or FC Leader, and rebinding strips the old role from every holder.
+    requirePermission(actor, actor.guildId, CONFIG_PERMISSION[column]);
     const bindsOfficer = field === "officer_role_id" && value !== null;
     if (options.adoptHolders !== undefined && !bindsOfficer)
       throw new Failure(
@@ -888,8 +945,6 @@ export class Service {
       .where(eq(t.guilds.id, actor.guildId));
     if (existing?.access_policy_enabled && field.endsWith("role_id") && value === null)
       throw new Failure("input", ONBOARDING_ROLES, 0, { kind: "option", option: "role" });
-    if (existing?.access_policy_enabled && field.endsWith("role_id")) authorizeRoleManager(actor);
-    if (field === "fc_id" && existing?.officer_rank_key) authorizeRoleManager(actor);
     let fc: CompanyIdentity | undefined;
     if (field === "fc_id" && value) {
       if (existing?.fc_id === value) return { status: "unchanged", field: "fc_id", value };
@@ -939,7 +994,6 @@ export class Service {
       const previous = saved[column];
       // A concurrent setup may have enabled channel gating after the remote role preflight.
       if (saved.access_policy_enabled && field.endsWith("role_id")) {
-        authorizeRoleManager(actor);
         if (!value)
           throw new Failure("input", ONBOARDING_ROLES, 0, { kind: "option", option: "role" });
         if (!existing?.access_policy_enabled) throw new Failure("conflict", SETTINGS_CHANGED);
@@ -1144,7 +1198,7 @@ export class Service {
     actor: Actor,
     change: { readonly channel?: string | null; readonly enabled?: boolean },
   ): Promise<GuestApplicationsResult> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "config.guest_applications");
     // Validate the channel that will take applications once this saves: a newly named one, or the
     // stored one when this call switches them on (imports keep the legacy channel unvalidated).
     // Switching off or unsetting never validates, so a deleted channel can't block closing.
@@ -1235,7 +1289,7 @@ export class Service {
    * until both do.
    */
   async configureOfficerRank(actor: Actor, rank: string | null): Promise<OfficerRankResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.ranks");
     await this.guild(actor);
     if (rank !== null) rank = note(rank, "rank");
     return this.db.transaction(async (client) => {
@@ -1283,7 +1337,7 @@ export class Service {
    * queued pass completes as skipped, a running pass is fenced before its next write).
    */
   async configureRoleLayout(actor: Actor, enabled: boolean): Promise<RoleLayoutResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.roles");
     // An active, configured guild only; this setting never creates a guild implicitly.
     const guild = await this.guild(actor);
     // A blocked or out-of-reach role names itself: the gateway's failure carries its role detail.
@@ -1333,10 +1387,14 @@ export class Service {
       };
     });
   }
-  /** Matching the stored ID prevents stale unlink requests; all historical/account data survives. */
+  /**
+   * Matching the stored ID prevents stale unlink requests; all historical/account data survives.
+   * Server managers only, whatever is configured (2.44.0): with no FC linked nobody is an FC
+   * member, so the next pass removes Member from every holder.
+   */
   async unlinkCompany(actor: Actor, fcId: string): Promise<FcUnlinkResult> {
-    authorize(actor, actor.guildId, "officer");
-    if ((await this.guild(actor)).officer_rank_key) authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.fc");
+    await this.guild(actor);
     return this.db.transaction(async (client) => {
       const db = orm(client);
       const [updated] = await db
@@ -1605,6 +1663,7 @@ export class Service {
    * (rosterCharacter) is already stored by the roster read that listed it.
    */
   async claim(actor: Actor, identity: CharacterIdentity, read = true): Promise<ClaimResult> {
+    requirePermission(actor, actor.guildId, "characters.claim");
     const guild = await this.guild(actor);
     const member = await this.discord.member(actor.guildId, actor.userId);
     if (!member || member.bot) throw notCurrentMember();
@@ -1725,6 +1784,7 @@ export class Service {
    * which keeps the claim valid until its expiry.
    */
   async verify(actor: Actor, characterId: string): Promise<VerifyResult> {
+    requirePermission(actor, actor.guildId, "characters.claim");
     const guild = await this.guild(actor);
     const identity = await this.lodestone.profile(characterId, true);
     const character = { id: identity.id, name: identity.name, world: identity.world };
@@ -1828,13 +1888,14 @@ export class Service {
     identity: CharacterIdentity,
     reason: string,
   ): Promise<AssignResult> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "characters.assign");
     const guild = await this.guild(actor);
     reason = note(reason, "reason");
     const member = await this.discord.member(actor.guildId, owner);
     if (!member || member.bot) throw memberNotFound(owner);
-    // Delegated officers may vouch for membership, but cannot indirectly appoint officers.
-    const officerAuthority = (actor.serverManager ?? actor.officer) && actor.manageRoles;
+    // Delegated officers may vouch for membership, but cannot indirectly appoint officers or the
+    // FC Leader: only a link made with admin.links counts for rank (rank-policy.ts).
+    const officerAuthority = can(actor, "admin.links");
     return this.db.transaction(async (client) => {
       await ensureUser(client, actor.guildId, owner, member.joinedAt);
       await this.storeCharacter(client, identity);
@@ -1876,7 +1937,8 @@ export class Service {
     character: string,
     reason?: string,
   ): Promise<UnlinkResult> {
-    authorize(actor, actor.guildId, owner === actor.userId ? "user" : "officer");
+    if (owner === actor.userId) authorize(actor, actor.guildId);
+    else requirePermission(actor, actor.guildId, "characters.unassign");
     const guild = await this.guild(actor);
     if (owner !== actor.userId || reason !== undefined) reason = note(reason ?? "", "reason");
     return this.db.transaction(async (client) => {
@@ -1892,7 +1954,12 @@ export class Service {
         .where(eq(t.characters.id, character))
         .for("update");
       const [link] = await db
-        .select({ id: t.links.id, user_id: t.links.user_id })
+        .select({
+          id: t.links.id,
+          user_id: t.links.user_id,
+          provenance: t.links.provenance,
+          source: t.links.source,
+        })
         .from(t.links)
         .where(
           and(
@@ -1911,6 +1978,11 @@ export class Service {
           0,
           { kind: "resource", resource: "link", id: character },
         );
+      // Removing someone else's link that counts for rank takes what /assign can't give (owner
+      // decision Q4 A): without admin.links, one officer could unseat another officer or the FC
+      // Leader. Checked on the locked row, so the provenance can't change underneath.
+      if (owner !== actor.userId && linkConfersRank(link.provenance, link.source))
+        requirePermission(actor, actor.guildId, "admin.links", RANK_LINK_REMOVAL);
       const ended = await this.endLink(client, actor.guildId, owner, character, link.id);
       await audit(client, actor.guildId, actor.userId, "character.unlink", link.id, {
         reason: reason ?? null,
@@ -2174,16 +2246,16 @@ export class Service {
   ): Promise<LedgerReceipt> {
     const guild = await this.guild(actor);
     noteText = note(noteText);
-    if (operation !== "deposit") {
-      if (!actor.officer)
-        throw new Failure(
-          "forbidden",
-          "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.",
-          0,
-          { kind: "scope", scope: "officer" },
-        );
-      authorize(actor, actor.guildId, "officer");
-    }
+    const permission = LEDGER_PERMISSION[operation];
+    // Unreachable from /ledger, whose subcommands name only these operations.
+    if (!permission) throw new Failure("input", "Invalid ledger operation.");
+    if (operation !== "deposit")
+      requirePermission(
+        actor,
+        actor.guildId,
+        permission,
+        "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.",
+      );
     if (!guild.fc_id)
       throw new Failure(
         "setup",
@@ -2219,8 +2291,17 @@ export class Service {
         .for("share");
       if (!current || current.revision !== guild.revision)
         throw new Failure("conflict", SETTINGS_CHANGED);
-      if (!actor.officer && !(await this.memberEligible(client, current, actor.userId)))
-        throw membershipNeeded();
+      // A deposit needs confirmed FC membership (memberEligible, checked here under the settings
+      // fence) unless the actor may audit the ledger, and ledger.deposit, which the Member and
+      // Officer roles carry. Membership is checked first, so its remedy comes first.
+      if (operation === "deposit") {
+        if (
+          !can(actor, "ledger.audit") &&
+          !(await this.memberEligible(client, current, actor.userId))
+        )
+          throw membershipNeeded();
+        if (!can(actor, "ledger.deposit")) throw memberRoleNeeded("ledger.deposit");
+      }
       const [account] = await db
         .select()
         .from(t.ledgerAccounts)
@@ -2422,16 +2503,19 @@ export class Service {
         kind: "setup",
         missing: "fc",
       });
-    if (target !== guild.fc_id) {
-      if (!actor.officer)
-        throw new Failure("forbidden", "Only officers can view a previous FC's ledger.", 0, {
-          kind: "scope",
-          scope: "officer",
-        });
-      authorize(actor, actor.guildId, "officer");
+    if (target !== guild.fc_id)
+      requirePermission(
+        actor,
+        actor.guildId,
+        "ledger.audit",
+        "Only officers can view a previous FC's ledger.",
+      );
+    // Reading the current FC's ledger needs confirmed FC membership and ledger.view, or
+    // ledger.audit, which sees every ledger without either condition.
+    if (!can(actor, "ledger.audit")) {
+      if (!(await this.memberEligible(this.db.pool, guild, actor.userId))) throw membershipNeeded();
+      if (!can(actor, "ledger.view")) throw memberRoleNeeded("ledger.view");
     }
-    if (!actor.officer && !(await this.memberEligible(this.db.pool, guild, actor.userId)))
-      throw membershipNeeded();
     const db = this.db.orm;
     const [account] = await db
       .select()
@@ -2583,6 +2667,7 @@ export class Service {
     const submitted = guestApplicationInput.safeParse(input);
     if (!submitted.success)
       throw new Failure("input", "Both answers need 10–300 characters. Run /apply again.");
+    requirePermission(actor, actor.guildId, "guests.apply");
     const guild = await this.guild(actor);
     // Closed while switched off (imports start that way; owner decisions 2026-09-23 and -24), or
     // without a review channel or a Guest role. The visitor always gets the pre-modal refusal's
@@ -2748,7 +2833,7 @@ export class Service {
     reason: string | null = null,
     messageId?: string,
   ): Promise<DecisionResult> {
-    authorizeGuestDecision(actor);
+    authorizeGuestDecision(actor, "guests.decide");
     await this.guild(actor);
     if (reason !== null) reason = note(reason, "reason");
     const [preliminary] = await this.db.orm
@@ -2958,7 +3043,7 @@ export class Service {
     reason: string,
     key: string,
   ): Promise<GuestActionResult> {
-    authorizeGuestDecision(actor);
+    authorizeGuestDecision(actor, "guests.manage");
     const guild = await this.guild(actor);
     reason = note(reason, "reason");
     const member = await this.discord.member(actor.guildId, user);
@@ -3049,7 +3134,7 @@ export class Service {
    * With nothing to remove it changes nothing and audits nothing.
    */
   async guestReset(actor: Actor, user: string, reason: string): Promise<GuestResetResult> {
-    authorizeGuestDecision(actor);
+    authorizeGuestDecision(actor, "guests.manage");
     const guild = await this.guild(actor);
     reason = note(reason, "reason");
     const member = await this.discord.member(actor.guildId, user);

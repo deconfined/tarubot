@@ -50,6 +50,7 @@ import { viewerOf } from "../../src/discord/presenters/audience.js";
 import { Presented } from "../../src/discord/presenters/reply.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture, type RecordedRequest } from "../fixtures/interactions.js";
 import { CHARACTER_RESULTS as R, TARGET_ID, TOKEN } from "../fixtures/replies/characters.js";
 import {
@@ -76,8 +77,13 @@ import { refreshed, RUN_ID, SYNC_RESULTS as SR } from "../fixtures/replies/sync-
 import { CHARACTER, GUEST_ID } from "../fixtures/results.js";
 
 /** The fixture's interaction user (400 in guild 100), as a member and as a server manager. */
-const MEMBER: Actor = { guildId: "100", userId: "400", officer: false, manageRoles: false };
-const MANAGER: Actor = { ...MEMBER, officer: true, manageRoles: true, serverManager: true };
+const MEMBER: Actor = actorOf({ guildId: "100", userId: "400", manageRoles: false });
+const MANAGER: Actor = actorOf({
+  ...MEMBER,
+  officer: true,
+  manageRoles: true,
+  serverManager: true,
+});
 /** The first interaction ID a fresh fixture assigns: /ledger's idempotency key. */
 const INTERACTION_ID = "10001";
 
@@ -567,7 +573,7 @@ test("the history cursor option describes an entry number", () => {
 // Guests, synchronization and utilities
 
 /** An officer of the fixture guild without Manage Roles. */
-const OFFICER: Actor = { ...MEMBER, officer: true };
+const OFFICER: Actor = actorOf({ ...MEMBER, officer: true });
 const B = ApplicationCommandOptionType.Boolean;
 
 /** Each guest, sync and utility command path: options, actor, stubbed result, title and call. */
@@ -810,6 +816,7 @@ test("/refresh passes the service's refusals through to the failure presenter", 
   const refused = new Failure("forbidden", "Only officers can force a refresh.", 0, {
     kind: "scope",
     scope: "officer",
+    permission: "roster.refresh_force",
   });
   const { app } = stubService({});
   const error = await run(

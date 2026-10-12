@@ -21,7 +21,7 @@ const obsolete = (): Failure =>
 
 export default defineComponent({
   prefix: "details",
-  access: "officer",
+  permissions: ["members.view", "ledger.audit", "sync.view_all"],
   requires: [applicationKey],
   // The file always arrives as a new reply, so the officer view it came from stays visible.
   acknowledge: "reply",

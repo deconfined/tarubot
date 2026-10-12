@@ -83,6 +83,7 @@ import {
   startHarness,
 } from "../fixtures/web-dev.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
+import { actorOf } from "../fixtures/actors.js";
 import { type StatusFixture, statusFixture } from "../fixtures/status-samples.js";
 import { configGuild, configReport } from "../fixtures/replies/configuration.js";
 import { HOSTILE_INPUT, KIT_DEFAULTS, KIT_ERRORS, kitForm } from "../fixtures/web-forms.js";
@@ -282,7 +283,7 @@ function resolver(
         kind: "scope",
         scope: "current_member",
       });
-    return {
+    return actorOf({
       guildId,
       userId,
       officer: userId === OFFICER || userId === SECOND_OFFICER,
@@ -291,7 +292,7 @@ function resolver(
       guest: userId === GUEST,
       botAdministrator: administrator.now,
       timedOut: userId === TIMED_OUT,
-    };
+    });
   };
 }
 
@@ -326,7 +327,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const formPage = definePage({
     path: "/g/:guild/form",
     title: "Form",
-    access: ["officer"],
+    access: ["config.view"],
     requires: [],
     nav: "Form",
     get: ({ formToken: token }) =>
@@ -345,7 +346,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const kitPage = definePage({
     path: "/g/:guild/kit",
     title: "Kit",
-    access: ["officer"],
+    access: ["config.view"],
     requires: [],
     get: ({ url, formToken: token }) =>
       html`${notice(url, KIT_NOTICES)}${kitForm(url.pathname, token)}`,
@@ -378,7 +379,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const limitedPage = definePage({
     path: "/g/:guild/limited",
     title: "Limited",
-    access: ["officer"],
+    access: ["config.view"],
     requires: [],
     get: () => html`<p>Limited</p>`,
     async post(context, form) {
@@ -391,7 +392,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const undeclaredPage = definePage({
     path: "/g/:guild/undeclared",
     title: "Undeclared",
-    access: ["officer"],
+    access: ["config.view"],
     requires: [],
     get: ({ services }) => {
       services.get(applicationKey);
@@ -403,7 +404,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const picksPage = definePage({
     path: "/g/:guild/picks",
     title: "Picks",
-    access: ["member", "guest", "officer"],
+    access: ["selfroles.use"],
     requires: [],
     nav: "Picks",
     get: ({ actor }) => html`<p>Picks for ${actor.timedOut ? "a timed-out viewer" : "you"}</p>`,
@@ -1166,7 +1167,7 @@ describe("the Role menu (2.39.0)", () => {
     }
   });
 
-  test("a member without the officer flag is 403 on GET and POST, and the menu is never read", async () => {
+  test("a member without rolemenu.view is 403 on GET and POST, and the menu is never read", async () => {
     const w = await world();
     const { token } = await w.sessions.create(MEMBER);
     const cookie = `tarubot=${token}`;

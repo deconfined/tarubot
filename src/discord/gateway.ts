@@ -16,7 +16,7 @@ import type { Collection, Guild, GuildMember, PresenceData, Role } from "discord
 import { permissionKeys, permissionLabel, POSTING_PERMISSIONS } from "../domain/permissions.js";
 import { Failure, normalized } from "../domain/values.js";
 import type { VisibilityGuild } from "../domain/visibility.js";
-import type { Actor, ActorResolution } from "../domain/policy.js";
+import { type Actor, type ActorResolution, NO_ACCESS } from "../domain/policy.js";
 import type {
   ApplicationRecord,
   DirectMessage,
@@ -154,12 +154,13 @@ export class DiscordGateway implements DiscordPort {
     return {
       guildId,
       userId,
-      officer: member.permissions.has(PermissionFlagsBits.ManageGuild),
       manageRoles: member.permissions.has(PermissionFlagsBits.ManageRoles),
       serverManager: member.permissions.has(PermissionFlagsBits.ManageGuild),
       roleIds: [...member.roles.cache.keys()],
       botAdministrator: me ? me.permissions.has(PermissionFlagsBits.Administrator) : true,
       timedOut: member.isCommunicationDisabled(),
+      // Fails closed until Service.enrichActor reads the server's managed roles (2.44.0).
+      access: NO_ACCESS,
     };
   }
   /** Only explicit unknown-member/user responses mean departure; network failures propagate. */

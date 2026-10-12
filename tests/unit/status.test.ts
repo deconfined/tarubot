@@ -110,9 +110,12 @@ describe("decisive decisions (the held-role fix)", () => {
       }
   });
 
-  test("rankDecisive: no always, yes with a grant or fresh evidence, unknown never", () => {
-    expect(rankDecisive("unknown", true)).toBe(false);
-    expect(rankDecisive("unknown", false, true)).toBe(false);
+  test("rankDecisive: no always, yes with a grant or fresh evidence, unreadable and unresolved never", () => {
+    // 2.44.0 splits 2.43.0's "unknown" in two; both keep whatever is held, so neither is decisive.
+    for (const state of ["unreadable", "unresolved"] as const) {
+      expect(rankDecisive(state, true)).toBe(false);
+      expect(rankDecisive(state, false, true)).toBe(false);
+    }
     expect(rankDecisive("no", false)).toBe(true);
     expect(rankDecisive("no", true, true)).toBe(true);
     expect(rankDecisive("yes", false, true)).toBe(true);

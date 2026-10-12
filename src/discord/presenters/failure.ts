@@ -488,18 +488,24 @@ function forbiddenView(s: Situation): FailureView {
         fields: [
           {
             name: "How to qualify",
-            // /suggest (2.28.0) also accepts guests, so its steps lead to either role.
+            // /suggest (2.28.0) also accepts guests, so its steps lead to either role. A confirmed
+            // member refused the ledger for want of the Member role (2.44.0) needs that role.
             value: (s.scope.root === "suggest"
               ? [
                   "1. Link your character with /claim and /verify, or ask an officer to /assign it.",
                   "2. TaruBot then gives you the Guest role, or the Member role once a roster check finds the character in the Free Company.",
                   "3. An officer can also give you guest access with /guest grant.",
                 ]
-              : [
-                  "1. Link your character with /claim and /verify, or ask an officer to /assign it.",
-                  "2. Make sure that character is in the Free Company on the Lodestone.",
-                  "3. Once a roster check confirms you, try again. /refresh can start one.",
-                ]
+              : s.detail?.kind === "scope" && s.detail.permission?.startsWith("ledger.")
+                ? [
+                    "1. TaruBot gives confirmed FC members the Member role after a roster check. /refresh can start one; then try again.",
+                    "2. If this server has no Member role, or TaruBot's role changes are paused, ask an officer or a server manager.",
+                  ]
+                : [
+                    "1. Link your character with /claim and /verify, or ask an officer to /assign it.",
+                    "2. Make sure that character is in the Free Company on the Lodestone.",
+                    "3. Once a roster check confirms you, try again. /refresh can start one.",
+                  ]
             ).join("\n"),
           },
         ],

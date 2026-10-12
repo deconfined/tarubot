@@ -3,6 +3,7 @@
  * level an interaction reports it at. Pure apart from `instanceof` checks against SDK error types;
  * replies, logs and job diagnostics all key on the code here and never pattern-match message text.
  */
+import type { PermissionId } from "./rbac.js";
 import { DiscordAPIError, HTTPError, RateLimitError } from "discord.js";
 import { Failure } from "./values.js";
 
@@ -210,7 +211,12 @@ export interface FailureCharacter {
  * The presenter still decides per audience what to show (members never see an ownership owner).
  */
 export type FailureDetail =
-  | { readonly kind: "scope"; readonly scope: ForbiddenScope }
+  | {
+      readonly kind: "scope";
+      readonly scope: ForbiddenScope;
+      /** The TaruBot permission that refused (2.44.0), when a permission check did. */
+      readonly permission?: PermissionId;
+    }
   | { readonly kind: "setup"; readonly missing: SetupPiece }
   | {
       readonly kind: "resource";

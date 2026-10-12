@@ -5,6 +5,7 @@
 import { expect, test } from "bun:test";
 import type { AutocompleteContext } from "../../src/bot/command.js";
 import { completeMember, focusedOption } from "../../src/discord/autocomplete.js";
+import { actorOf } from "../fixtures/actors.js";
 
 // Invented user IDs for the owner, an officer and a visitor (the visitor's has 19 digits).
 const OWNER = "300000000000000001";
@@ -44,12 +45,12 @@ function context(
 ): AutocompleteContext {
   const cached = options.cached ?? CACHED;
   return {
-    actor: {
+    actor: actorOf({
       guildId: "1040379370159743139",
       userId: options.userId ?? OWNER,
       officer: options.officer ?? true,
       manageRoles: false,
-    },
+    }),
     interaction: {
       options: {
         getFocused: (full?: boolean) => (full ? { name: "member", value: typed } : typed),
@@ -148,7 +149,7 @@ function commandContext(
   const base = context(typed, { officer, userId: officer ? OWNER : VISITOR });
   return {
     ...base,
-    actor: { ...base.actor, officer, manageRoles: officer },
+    actor: actorOf({ ...base.actor, officer, manageRoles: officer }),
     interaction: {
       ...base.interaction,
       options: {

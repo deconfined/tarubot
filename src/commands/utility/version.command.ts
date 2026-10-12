@@ -16,7 +16,6 @@ export default defineCommand({
         .setMinValue(1)
         .setMaxValue(MAX_COMMIT_COUNT),
   ),
-  access: "user",
   requires: [versionInformationKey],
   async execute({ interaction, services }) {
     return versionReply(

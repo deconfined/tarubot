@@ -34,6 +34,7 @@ import { Database, SESSION_OPTIONS } from "../../src/infrastructure/postgres/dat
 import * as t from "../../src/infrastructure/postgres/schema.js";
 import { dispatcher } from "../../src/jobs/dispatch.js";
 import type { Job } from "../../src/jobs/queue.js";
+import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture } from "../fixtures/interactions.js";
 import { eq } from "drizzle-orm";
 
@@ -76,16 +77,20 @@ describe.skipIf(!url)("mod mail plaintext through the router and reporter", () =
   const fixture = interactionFixture();
   fixture.member.guildId = GUILD;
   fixture.member.userId = "723456789012345811";
-  const member: Actor = {
+  const member: Actor = actorOf({
     guildId: GUILD,
     userId: fixture.member.userId,
-    officer: false,
     manageRoles: false,
     member: true,
     guest: false,
     botAdministrator: false,
-  };
-  const officer: Actor = { ...member, userId: "723456789012345801", officer: true, member: false };
+  });
+  const officer: Actor = actorOf({
+    ...member,
+    userId: "723456789012345801",
+    officer: true,
+    member: false,
+  });
   /** Every Discord port call, as JSON. */
   const discordCalls: string[] = [];
   const unused = async (): Promise<never> => {

@@ -5,7 +5,7 @@ import { completeMember } from "../../discord/autocomplete.js";
 import { command, string } from "../../discord/options.js";
 import { charactersReply } from "../../discord/presenters/characters.js";
 import { userId } from "../../discord/selectors.js";
-import { authorize } from "../../domain/policy.js";
+import { authorizeOwner, can } from "../../domain/policy.js";
 
 export default defineCommand({
   data: command("characters", "List local characters and verification provenance").addStringOption(
@@ -20,7 +20,7 @@ export default defineCommand({
   async execute({ actor, viewer, interaction, services }) {
     const option = interaction.options.getString("member");
     const owner = userId(option ?? actor.userId);
-    authorize(actor, actor.guildId, "user", owner);
+    authorizeOwner(actor, actor.guildId, owner);
     // The officer layout needs the member option, so an officer's own /characters stays personal.
     return charactersReply(await services.get(applicationKey).characters(actor, owner), viewer, {
       owner,
@@ -28,5 +28,5 @@ export default defineCommand({
     });
   },
   // Members may read only their own links, so they are offered only themselves.
-  autocomplete: (context) => completeMember(context, !context.actor.officer),
+  autocomplete: (context) => completeMember(context, !can(context.actor, "members.view")),
 });

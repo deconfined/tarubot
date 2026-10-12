@@ -67,7 +67,7 @@ interface LayoutFrame {
   readonly guild?: ServerIdentity & {
     readonly nav: readonly NavLink[];
     /**
-     * Who is viewing, for the side navigation's note (server.ts sets it from actor.officer):
+     * Who is viewing, for the side navigation's note (server.ts sets it from isStaff):
      * officers configure, members and guests have their own pages. Omitted, the officers' note.
      */
     readonly audience?: Audience;

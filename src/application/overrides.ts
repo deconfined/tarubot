@@ -30,7 +30,7 @@ import {
   VOICE_DENY_MASK,
 } from "../domain/permissions.js";
 import type { Actor } from "../domain/policy.js";
-import { authorizeRoleManager } from "../domain/policy.js";
+import { requirePermission } from "../domain/policy.js";
 import { Failure } from "../domain/values.js";
 import {
   analyseVisibility,
@@ -294,7 +294,7 @@ export class ChannelOverrides {
 
   /** The dry run (confirm false) or the real run (true); see the module comment. */
   async run(actor: Actor, confirm: boolean): Promise<OverridesResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.setup");
     const guild = await this.app.guild(actor);
     const effectsMode = this.app.effectsMode(guild);
     // Onboarding writes TaruBot's channel access itself (its channel pass), for both kinds of run.

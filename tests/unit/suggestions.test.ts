@@ -21,7 +21,7 @@ import {
 import { configuration, type Configuration } from "../../src/config/env.js";
 import { deployments } from "../../src/config/deployment.js";
 import { project } from "../../src/config/project.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, NO_ACCESS } from "../../src/domain/policy.js";
 import {
   assertPublic,
   clean,
@@ -40,6 +40,7 @@ import { classifyFailure } from "../../src/domain/failures.js";
 import { Failure } from "../../src/domain/values.js";
 import { GitHubIssues } from "../../src/infrastructure/github/issues.js";
 import { orm } from "../../src/infrastructure/postgres/database.js";
+import { actorOf } from "../fixtures/actors.js";
 
 /** The whole public pipeline for one raw idea, as Suggestions.submit runs it. */
 function pipeline(raw: string, version = "2.28.0") {
@@ -1000,33 +1001,40 @@ describe("the final check", () => {
 });
 
 describe("who may suggest (owner decision, 2026-09-25)", () => {
-  const roles = { member_role_id: "70001", guest_role_id: "70002" };
-  const actor = (roleIds?: readonly string[]): Pick<Actor, "roleIds"> =>
-    roleIds === undefined ? {} : { roleIds };
+  // suggest.use (2.44.0) comes from the bound Member and Guest roles the actor holds now, which
+  // Service.enrichActor reads fresh from Discord into `member` and `guest`.
+  const base = { guildId: "1", userId: "2", manageRoles: false };
 
   test("holding the Member or the Guest role qualifies", () => {
-    expect(maySuggest(actor(["70001"]), roles)).toBe(true);
-    expect(maySuggest(actor(["70002"]), roles)).toBe(true);
-    expect(maySuggest(actor(["123", "70001", "70002"]), roles)).toBe(true);
+    expect(maySuggest(actorOf({ ...base, member: true }))).toBe(true);
+    expect(maySuggest(actorOf({ ...base, guest: true }))).toBe(true);
+    expect(maySuggest(actorOf({ ...base, member: true, guest: true }))).toBe(true);
+    // A server manager or an officer qualifies through their own Member role, as before.
+    expect(
+      maySuggest(actorOf({ ...base, member: true, serverManager: true, manageRoles: true })),
+    ).toBe(true);
+    expect(maySuggest(actorOf({ ...base, member: true, officer: true }))).toBe(true);
   });
 
   test("officer access alone, a lobby visitor and an unbound role qualify nobody", () => {
-    // maySuggest reads only roles: an officer or server manager holding neither is refused.
-    const officer: Actor = {
-      guildId: "1",
-      userId: "2",
-      officer: true,
-      manageRoles: true,
-      serverManager: true,
-      roleIds: ["70003"],
-    };
-    expect(maySuggest(officer, roles)).toBe(false);
-    expect(maySuggest(actor([]), roles)).toBe(false);
-    expect(maySuggest(actor(), roles)).toBe(false);
-    expect(maySuggest(actor(["70001"]), { member_role_id: null, guest_role_id: "70002" })).toBe(
-      false,
-    );
-    expect(maySuggest(actor(["70001"]), { member_role_id: null, guest_role_id: null })).toBe(false);
+    // suggest.use is member-side: an officer or server manager holding neither role is refused.
+    expect(
+      maySuggest(
+        actorOf({
+          ...base,
+          officer: true,
+          manageRoles: true,
+          serverManager: true,
+          roleIds: ["70003"],
+        }),
+      ),
+    ).toBe(false);
+    expect(maySuggest(actorOf({ ...base, officer: true, roleIds: ["70003"] }))).toBe(false);
+    expect(maySuggest(actorOf({ ...base, roleIds: [] }))).toBe(false);
+    expect(maySuggest(actorOf(base))).toBe(false);
+    // An unbound role is no Member role: enrichment leaves `member` false for its holders.
+    expect(maySuggest(actorOf({ ...base, roleIds: ["70001"], member: false }))).toBe(false);
+    expect(maySuggest({ access: NO_ACCESS })).toBe(false);
   });
 });
 
@@ -1126,13 +1134,13 @@ class FakePool {
 }
 
 /** A member of the production FC server holding its Member role. */
-const MEMBER: Actor = {
+const MEMBER: Actor = actorOf({
   guildId: deployments.production.guilds[0],
   userId: "400000000000000001",
-  officer: false,
   manageRoles: false,
   roleIds: ["70001"],
-};
+  member: true,
+});
 
 /**
  * Suggestions over the fake database, a scripted GitHub and a recording reporter; with
@@ -1197,7 +1205,10 @@ describe("posting", () => {
       suggestions.submit({ ...MEMBER, guildId: "999999999999999999" }, "An idea long enough"),
     ).rejects.toMatchObject({ code: "forbidden", detail: undefined });
     await expect(
-      suggestions.submit({ ...MEMBER, roleIds: ["70003"], officer: true }, "An idea long enough"),
+      suggestions.submit(
+        actorOf({ ...MEMBER, roleIds: ["70003"], member: false, officer: true }),
+        "An idea long enough",
+      ),
     ).rejects.toMatchObject({ code: "forbidden", detail: { kind: "scope", scope: "membership" } });
     await expect(
       suggestions.submit(MEMBER, "short\u{200B}\u{200B}\u{200B}\u{200B}\u{200B}"),

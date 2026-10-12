@@ -4,7 +4,6 @@ import { parseHTML } from "linkedom";
 import type { ConfigurationReport, EffectsMode } from "../../src/application/results.js";
 import { Service } from "../../src/application/service.js";
 import { CHECK } from "../../src/discord/presenters/style.js";
-import type { Actor } from "../../src/domain/policy.js";
 import { EMPTY_NAMES, type WebNames } from "../../src/web/mentions.js";
 import { STYLESHEET } from "../../src/web/assets.js";
 import { validateConfiguration } from "../../src/web/pages/configuration.page.js";
@@ -17,13 +16,14 @@ import {
   fcRow,
   ROLE,
 } from "../fixtures/replies/configuration.js";
+import { actorOf } from "../fixtures/actors.js";
 
 const GUILD = "100000000000000001";
 const OTHER_GUILD = "100000000000000002";
 const USER = "200000000000000001";
 const CHECKED_AT = new Date("2026-10-07T12:30:42.000Z");
 const ROSTER_AT = new Date("2026-10-07T12:10:32.000Z");
-const OFFICER: Actor = { guildId: GUILD, userId: USER, officer: true, manageRoles: false };
+const OFFICER = actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: false });
 const ignore = (_error: unknown): void => {};
 
 /** Only the costly validation is controlled; the real page memo and authorization run unchanged. */
@@ -80,9 +80,17 @@ describe("configuration validation memo", () => {
       calls++;
       return release.promise;
     });
-    const denied = { ...OFFICER, officer: false };
-    const refusal = { code: "forbidden", detail: { kind: "scope", scope: "officer" } };
+    const denied = actorOf({ ...OFFICER, officer: false, member: true });
+    const refusal = {
+      code: "forbidden",
+      detail: { kind: "scope", scope: "officer", permission: "config.view" },
+    };
     await expect(validateConfiguration(app, denied, ignore)).rejects.toMatchObject(refusal);
+    // Manage Server without Manage Roles grants nothing (2.44.0, owner decision Q2 A).
+    const serverManagerOnly = actorOf({ ...OFFICER, officer: false, serverManager: true });
+    await expect(validateConfiguration(app, serverManagerOnly, ignore)).rejects.toMatchObject(
+      refusal,
+    );
     expect(calls).toBe(0);
     const allowed = validateConfiguration(app, OFFICER, ignore);
     await Promise.resolve();

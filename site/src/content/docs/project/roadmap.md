@@ -15,6 +15,8 @@ TaruBot's major versions are planned outcomes, not release numbers: their featur
 
 Self-service roles shipped in two releases: the officers' role menu in 2.39.0, the first officer action on the web, and members' and guests' My roles page in 2.40.0, the first member action. Other officer actions come later, and their version isn't decided yet.
 
+**Permissions and moderation:** 2.44.0 gives every TaruBot function a named [permission](/tarubot/admin/access/), carried only by the roles TaruBot manages. Next come pausing one person's use of a feature (such as `/suggest`), choosing on the dashboard which permissions each role carries, starting from named templates, and roles that follow the FC's in-game ranks. Their versions aren't decided yet.
+
 **Sequence:** stable bot with an officer view → member self-service → private support → expanded character features.
 
 ## Continuity across versions

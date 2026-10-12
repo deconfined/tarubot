@@ -4,7 +4,7 @@
  * (setup and planSetup) and /setup overrides (overrides, delegated to ChannelOverrides).
  */
 import type { Actor } from "../domain/policy.js";
-import { authorizeRoleManager } from "../domain/policy.js";
+import { requirePermission } from "../domain/policy.js";
 import { Failure, normalized, note } from "../domain/values.js";
 import { audit, ensureUser, orm, type Orm } from "../infrastructure/postgres/database.js";
 import { and, eq, sql } from "drizzle-orm";
@@ -98,7 +98,7 @@ export class RoleAdministration {
     officerRank: string | null,
     channels: { lobby: string | null; officers: string | null } = { lobby: null, officers: null },
   ): Promise<SetupPlan> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.setup");
     prefix = prefix.trim();
     if (prefix.length > 50)
       throw new Failure("input", "The role prefix can be at most 50 characters.", 0, {
@@ -258,7 +258,7 @@ export class RoleAdministration {
     officerRank: string | null,
     channels: { lobby: string | null; officers: string | null } = { lobby: null, officers: null },
   ): Promise<SetupResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.setup");
     prefix = prefix.trim();
     if (prefix.length > 50)
       throw new Failure("input", "The role prefix can be at most 50 characters.", 0, {
@@ -551,7 +551,7 @@ export class RoleAdministration {
     grant: boolean,
     reason: string,
   ): Promise<OfficerOverrideResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.grants");
     reason = note(reason, "reason");
     const guild = await this.app.guild(actor);
     // The bound role must still be one this manager and the bot may assign.
@@ -616,7 +616,7 @@ export class RoleAdministration {
    * left. With no override it changes nothing and audits nothing.
    */
   async officerReset(actor: Actor, user: string, reason: string): Promise<OfficerResetResult> {
-    authorizeRoleManager(actor);
+    requirePermission(actor, actor.guildId, "admin.grants");
     reason = note(reason, "reason");
     const guild = await this.app.guild(actor);
     // Like grant and revoke: the bound role must still be one this manager and the bot may assign,

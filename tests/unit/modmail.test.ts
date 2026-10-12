@@ -2,8 +2,9 @@
  * Mod mail's pure parts (2.43.0): the rules in src/domain/modmail.ts, /modmail's form and its
  * submission binding, the Discord messages (none carries the text or names the member), the
  * gateway's one role ping, the views each audience gets, the job kinds' labels and the readiness
- * flag. Database behavior is in tests/integration/modmail.test.ts and the pages end to end in
- * modmail-web.test.ts. Invented IDs; keys from readable phrases.
+ * flag, and the permission checks (2.44.0) on the web harness's fake. Database behavior is in
+ * tests/integration/modmail.test.ts and the pages end to end in modmail-web.test.ts. Invented
+ * IDs; keys from readable phrases.
  */
 import { describe, expect, test } from "bun:test";
 import { ButtonStyle, ComponentType, DiscordAPIError } from "discord.js";
@@ -57,7 +58,7 @@ import {
   UNREADABLE_TEXT,
   VISIBILITY_NOTICE,
 } from "../../src/domain/modmail.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, can, OFFICERS_ONLY } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import type { html } from "../../src/web/html.js";
 import { navLinks } from "../../src/web/layout.js";
@@ -72,6 +73,8 @@ import {
   WEB_OPEN_REFUSALS,
   waited,
 } from "../../src/web/views/modmail.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
+import { harnessModMail, modmailStore } from "../fixtures/modmail.js";
 import { buttonsOf, expectHouseStyle, onlyEmbed } from "../fixtures/replies.js";
 import { configGuild, configReport } from "../fixtures/replies/configuration.js";
 import { interactionFixture } from "../fixtures/interactions.js";
@@ -84,16 +87,31 @@ const ORIGIN = "https://tarubot.example.org";
 const CANARY = "canary-plaintext-modmail-5e2b";
 const ZERO_CASE = "00000000-0000-4000-8000-000000000000";
 
-const actor = (userId: string, facts: Partial<Actor> = {}): Actor => ({
-  guildId: GUILD,
-  userId,
-  officer: false,
-  manageRoles: false,
-  member: false,
-  guest: false,
-  botAdministrator: false,
-  ...facts,
-});
+const actor = (userId: string, facts: Partial<ActorSpec> = {}): Actor =>
+  actorOf({
+    guildId: GUILD,
+    userId,
+    manageRoles: false,
+    member: false,
+    guest: false,
+    botAdministrator: false,
+    ...facts,
+  });
+
+/** A server manager: Manage Server with Manage Roles. */
+const MANAGER = { serverManager: true, manageRoles: true } as const;
+
+/**
+ * Someone who reads every case but may not answer them: the Officer role's template less
+ * modmail.respond. No role carries that set in 2.44.0; stored sets (2.46.0) can, so the
+ * application checks it on its own.
+ */
+const reader = (userId: string, facts: Partial<ActorSpec> = {}): Actor => {
+  const officer = actor(userId, { ...facts, officer: true });
+  const permissions = new Set(officer.access.permissions);
+  permissions.delete("modmail.respond");
+  return { ...officer, access: { ...officer.access, permissions } };
+};
 
 describe("the rules", () => {
   test("who may open: Member or Guest now, without Administrator for TaruBot; time-outs don't matter", () => {
@@ -104,6 +122,9 @@ describe("the rules", () => {
     expect(mayOpen(actor(OFFICER, { officer: true }))).toBe(false);
     expect(mayOpen(actor(OFFICER, { officer: true, member: true }))).toBe(true);
     expect(mayOpen(actor(MEMBER, { member: true, botAdministrator: true }))).toBe(false);
+    // Opening a case is member-side: a server manager opens one only through their own role.
+    expect(mayOpen(actor(OFFICER, MANAGER))).toBe(false);
+    expect(mayOpen(actor(OFFICER, { ...MANAGER, guest: true }))).toBe(true);
     // Unknown counts as holding Administrator (A2 fails closed).
     const { botAdministrator: _, ...unknown } = actor(MEMBER, { member: true });
     expect(mayOpen(unknown)).toBe(false);
@@ -115,6 +136,11 @@ describe("the rules", () => {
     expect(mayAccess(actor(SECOND, { member: true }), MEMBER)).toBe(false);
     expect(mayAccess(actor(MEMBER), MEMBER)).toBe(false);
     expect(mayAccess(actor(MEMBER, { guest: true, botAdministrator: true }), MEMBER)).toBe(false);
+    // Reading every case is modmail.inbox, whoever holds it; answering is checked apart.
+    expect(mayAccess(actor(OFFICER, MANAGER), MEMBER)).toBe(true);
+    expect(mayAccess(reader(SECOND), MEMBER)).toBe(true);
+    // Manage Server alone is no officer (Q2 A).
+    expect(mayAccess(actor(OFFICER, { serverManager: true }), MEMBER)).toBe(false);
   });
 
   test("sides and states: the opener is the member side; a reply waits on the other side", () => {
@@ -173,6 +199,96 @@ describe("the rules", () => {
 
   test("the job kinds have member-facing labels and carry no member in their keys", () => {
     for (const kind of MODMAIL_JOB_KINDS) expect(JOB_KIND[kind]?.label).toStartWith("Mod mail");
+  });
+});
+
+describe("answering a case needs modmail.respond on the officer side only (2.44.0, the web harness's fake)", () => {
+  const NOW = Date.parse("2026-10-12T12:00:00.000Z");
+  const people = {
+    guild: GUILD,
+    officer: OFFICER,
+    member: MEMBER,
+    guest: "200000000000000003",
+    timedOut: "200000000000000004",
+  };
+  /** The harness's cases state: #1 the member's, closed; #2 the member's, waiting on officers. */
+  const fake = () =>
+    harnessModMail(modmailStore("cases", people, NOW), {
+      people,
+      names: new Map(),
+      administrator: () => false,
+      effectsMode: "live",
+      now: () => NOW,
+    });
+  const refusal = {
+    code: "forbidden",
+    message: OFFICERS_ONLY,
+    detail: { kind: "scope", scope: "officer", permission: "modmail.respond" },
+  };
+
+  test("a reader without it reads every case, but is refused replying, closing and reopening", async () => {
+    const service = fake();
+    const someone = reader(SECOND);
+    expect([can(someone, "modmail.inbox"), can(someone, "modmail.respond")]).toEqual([true, false]);
+    expect((await service.inbox(someone, "open")).cases.length).toBeGreaterThan(0);
+    const view = await service.caseView(someone, 2n);
+    expect(view).toMatchObject({ audience: "officer", side: "officer", state: "officers" });
+    const revision = view?.revision ?? 0n;
+    await expect(
+      service.reply(someone, 2n, { messageId: ZERO_CASE, body: "An answer", signing: "name" }),
+    ).rejects.toMatchObject(refusal);
+    await expect(service.close(someone, 2n, revision)).rejects.toMatchObject(refusal);
+    await expect(
+      service.reopen(someone, 1n, (await service.caseView(someone, 1n))?.revision ?? 0n),
+    ).rejects.toMatchObject(refusal);
+    // Nothing was written: the thread and the states are as they were.
+    const after = await service.caseView(someone, 2n);
+    expect([after?.revision, after?.state, after?.messages]).toEqual([
+      revision,
+      "officers",
+      view?.messages,
+    ]);
+    expect((await service.caseView(someone, 1n))?.state).toBe("closed");
+    // An officer, whose role carries it, answers the same case.
+    expect(
+      await service.reply(actor(OFFICER, { officer: true }), 2n, {
+        messageId: ZERO_CASE,
+        body: "An answer",
+        signing: "name",
+      }),
+    ).toEqual({ status: "saved", messageId: ZERO_CASE });
+  });
+
+  test("the opener's own side needs nothing more than reading their case", async () => {
+    const service = fake();
+    // The member's role carries no modmail.respond, and their own case is theirs to answer.
+    const member = actor(MEMBER, { member: true });
+    expect(can(member, "modmail.respond")).toBe(false);
+    expect(
+      await service.reply(member, 2n, { messageId: ZERO_CASE, body: "More detail", signing: null }),
+    ).toEqual({ status: "saved", messageId: ZERO_CASE });
+    expect(
+      await service.close(member, 2n, (await service.caseView(member, 2n))?.revision ?? 0n),
+    ).toEqual({ status: "saved" });
+    // A reader without modmail.respond who opened a case of their own answers it as its member.
+    const own = reader(SECOND, { member: true });
+    const opened = await service.open(own, { topic: "My own case", body: "From the member side" });
+    if (opened.status !== "opened") throw new Error(`Expected opened, got ${opened.status}`);
+    expect((await service.caseView(own, opened.number))?.side).toBe("member");
+    expect(
+      await service.reply(own, opened.number, {
+        messageId: "00000000-0000-4000-8000-000000000001",
+        body: "One more thing",
+        signing: null,
+      }),
+    ).toEqual({ status: "saved", messageId: "00000000-0000-4000-8000-000000000001" });
+    expect(
+      await service.close(
+        own,
+        opened.number,
+        (await service.caseView(own, opened.number))?.revision ?? 0n,
+      ),
+    ).toEqual({ status: "saved" });
   });
 });
 
@@ -392,6 +508,7 @@ describe("the views", () => {
     names,
     canReply: true,
     keyProblem: false,
+    canRespond: true,
   };
   const memberView: CaseView = {
     ...officerView,
@@ -835,7 +952,12 @@ describe("/config validate and the configuration page", () => {
 });
 
 describe("the web framework's numbered pages and conditional navigation (2.43.0)", () => {
-  const base = { title: "T", access: ["officer"] as const, requires: [], get: () => "" as never };
+  const base = {
+    title: "T",
+    access: ["modmail.inbox"] as const,
+    requires: [],
+    get: () => "" as never,
+  };
 
   test("a path may end in /:number; such a page links with its number and stays out of the navigation", () => {
     const numbered = definePage({ ...base, path: "/g/:guild/things/:number" });

@@ -7,7 +7,7 @@ sidebar:
 
 TaruBot keeps an exact record of the gil in the Free Company chest. People record what they put in and take out; TaruBot doesn't read the chest itself. Every entry is permanent and numbered, and each one is posted to the server's ledger channel.
 
-The ledger is for **confirmed FC members**: you need a linked character that an accepted roster lists in the FC. Officers can always use it.
+The ledger is for **confirmed FC members**: you need the server's Member role and a linked character that an accepted roster lists in the FC. TaruBot gives you the Member role after a roster check confirms that character. Officers can always use it.
 
 ## Record a deposit
 

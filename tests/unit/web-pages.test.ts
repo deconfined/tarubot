@@ -25,7 +25,7 @@ import {
 import { Service } from "../../src/application/service.js";
 import { ServiceKey, Services } from "../../src/bot/services.js";
 import { project } from "../../src/config/project.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, isStaff } from "../../src/domain/policy.js";
 import {
   CHOICE_MESSAGES,
   choiceMenu,
@@ -40,7 +40,7 @@ import {
 } from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
-import { PAGE_ACCESS } from "../../src/web/access.js";
+import { isPermissionId } from "../../src/domain/rbac.js";
 import { FAVICON, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
 import { FORM_TOKEN_FIELD, problemOf } from "../../src/web/http.js";
@@ -91,6 +91,7 @@ import {
   SECOND_CATEGORY,
   SECOND_MENU,
 } from "../fixtures/web-dev.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
@@ -186,7 +187,7 @@ describe("definePage", () => {
   const base = {
     path: "/g/:guild/status",
     title: "Status",
-    access: ["officer"],
+    access: ["sync.view_all"],
     requires: [],
     get: () => html``,
   } as const;
@@ -211,15 +212,13 @@ describe("definePage", () => {
   });
 
   test("keeps declared access in order without duplicates, and service keys as given", () => {
-    expect(definePage({ ...base, access: ["manager", "officer", "manager"] }).access).toEqual([
-      "manager",
-      "officer",
-    ]);
-    // 2.40.0: members and guests (My roles declares both, and officer).
-    expect(definePage({ ...base, access: ["member", "guest", "officer"] }).access).toEqual([
-      "member",
-      "guest",
-      "officer",
+    expect(
+      definePage({ ...base, access: ["admin.roles", "config.view", "admin.roles"] }).access,
+    ).toEqual(["admin.roles", "config.view"]);
+    // 2.44.0: TaruBot permission ids of any tier (Mod mail declares a staff and a member one).
+    expect(definePage({ ...base, access: ["modmail.inbox", "modmail.open"] }).access).toEqual([
+      "modmail.inbox",
+      "modmail.open",
     ]);
     const key = new ServiceKey("number", (value): value is number => typeof value === "number");
     expect(definePage({ ...base, requires: [key] }).requires).toEqual([key]);
@@ -254,13 +253,14 @@ describe("definePage", () => {
       [{ title: 42 }, "A page needs a title."],
       [{ access: undefined }, "A page must declare access"],
       [{ access: [] }, "A page must declare access"],
-      [
-        { access: ["operator"] },
-        "A page must declare access, any of: officer, manager, member, guest.",
-      ],
-      [{ access: ["officer", "operator"] }, "A page must declare access"],
-      [{ access: ["Member"] }, "A page must declare access"],
-      [{ access: "officer" }, "A page must declare access"],
+      [{ access: ["operator"] }, "A page must declare access: one or more TaruBot permission ids."],
+      [{ access: ["config.view", "operator"] }, "A page must declare access"],
+      // 2.43.0's flags are no permission ids.
+      [{ access: ["officer"] }, "A page must declare access"],
+      [{ access: ["member", "guest"] }, "A page must declare access"],
+      [{ access: ["Config.View"] }, "A page must declare access"],
+      [{ access: ["toString"] }, "A page must declare access"],
+      [{ access: "config.view" }, "A page must declare access"],
       [{ access: null }, "A page must declare access"],
       [{ requires: undefined }, "A page must declare the services it requires"],
       [{ requires: "application" }, "A page must declare the services it requires"],
@@ -304,7 +304,12 @@ describe("loadPages", () => {
       expect(page.path).toBe(path);
       expect(PAGE_PATH.test(path)).toBe(true);
       expect(page.access.length).toBeGreaterThan(0);
-      for (const flag of page.access) expect(PAGE_ACCESS).toContain(flag);
+      for (const id of page.access)
+        expect({ path, id, known: isPermissionId(id) }).toEqual({
+          path,
+          id,
+          known: true,
+        });
       expect(page.requires.every((key) => key instanceof ServiceKey)).toBe(true);
     }
   });
@@ -435,7 +440,7 @@ describe("the shell and /", () => {
   });
 
   test("a server page shows its name isolated and the navigation with the current page", async () => {
-    const officer: Actor = { guildId: GUILD, userId: USER, officer: true, manageRoles: false };
+    const officer = actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: false });
     const pages = await loadPages();
     const nav = navLinks(pages.values(), officer, "/g/:guild/status");
     const name = HOSTILE[1] ?? "";
@@ -895,11 +900,20 @@ describe("Status", () => {
     ],
   };
 
-  /** The discovered page reads prototype-backed services without writing or fetching Discord. */
-  async function statusPage(sync: SyncStatusView) {
+  /** Who Status is rendered for unless a test names someone else: an officer. */
+  const officer = actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: false });
+
+  /**
+   * The discovered page reads prototype-backed services without writing or fetching Discord.
+   * `onRead` hears every syncStatus call.
+   */
+  async function statusPage(sync: SyncStatusView, actor: Actor = officer, onRead = () => {}) {
     const app: unknown = Object.create(Service.prototype);
     if (!(app instanceof Service)) throw new Error("Invalid application fixture");
-    app.syncStatus = async () => sync;
+    app.syncStatus = async () => {
+      onRead();
+      return sync;
+    };
     const gateway: unknown = Object.create(DiscordGateway.prototype);
     if (!(gateway instanceof DiscordGateway)) throw new Error("Invalid gateway fixture");
     Object.defineProperty(gateway, "client", { value: { guilds: { cache: new Map() } } });
@@ -939,7 +953,6 @@ describe("Status", () => {
     });
     const page = (await loadPages()).get("/g/:guild/status");
     if (!page) throw new Error("Status page not discovered");
-    const actor: Actor = { guildId: GUILD, userId: USER, officer: true, manageRoles: false };
     const session: Session = {
       userId: USER,
       createdAt: at,
@@ -990,6 +1003,30 @@ describe("Status", () => {
     );
     return parseHTML(`<html><body>${markup}</body></html>`).document;
   }
+
+  test("the page declares sync.view_all and checks it again itself, before reading any work", async () => {
+    expect((await loadPages()).get("/g/:guild/status")?.access).toEqual(["sync.view_all"]);
+    // syncStatus only scopes what it lists by sync.view_all, so the page refuses first (2.44.0):
+    // a member reaching the handler reads nothing.
+    let reads = 0;
+    const member = actorOf({
+      guildId: GUILD,
+      userId: USER,
+      manageRoles: false,
+      member: true,
+      botAdministrator: false,
+    });
+    const refused = await statusPage(view, member, () => reads++).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(Failure);
+    expect(refused instanceof Failure && refused.detail).toEqual({
+      kind: "scope",
+      scope: "officer",
+      permission: "sync.view_all",
+    });
+    expect(reads).toBe(0);
+    await statusPage(view, officer, () => reads++);
+    expect(reads).toBe(1);
+  });
 
   test("keeps health words and failure states in one featured read-only panel", async () => {
     const document = inspect((await statusPage(view)).markup);
@@ -1449,7 +1486,7 @@ describe("Status", () => {
 });
 
 describe("Role menu (2.39.0)", () => {
-  const officer: Actor = { guildId: GUILD, userId: USER, officer: true, manageRoles: false };
+  const officer = actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: false });
   const path = `/g/${GUILD}/role-menu`;
   const NEW_ID = "3c1d2e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
   const names = guildNames(harnessGateway(), GUILD);
@@ -1508,7 +1545,7 @@ describe("Role menu (2.39.0)", () => {
 
   test("the page module: officers only, its two services, and a budget of 120 POSTs", async () => {
     const page = (await loadPages()).get("/g/:guild/role-menu");
-    expect(page?.access).toEqual(["officer"]);
+    expect(page?.access).toEqual(["rolemenu.view"]);
     expect(page?.requires).toEqual([selfRolesKey, gatewayKey]);
     expect(page?.postLimit).toBe(120);
     expect(page?.nav).toBe("Role menu");
@@ -2833,17 +2870,18 @@ describe("My roles (2.40.0)", () => {
   const MY_ROLES = "/g/:guild/my-roles";
 
   /** Someone admitted to My roles here, as actor resolution makes them: a member by default. */
-  const person = (userId: string, overrides: Partial<Actor> = {}, guildId = GUILD): Actor => ({
-    guildId,
-    userId,
-    officer: false,
-    manageRoles: false,
-    member: true,
-    guest: false,
-    botAdministrator: false,
-    timedOut: false,
-    ...overrides,
-  });
+  const person = (userId: string, overrides: Partial<ActorSpec> = {}, guildId = GUILD): Actor =>
+    actorOf({
+      guildId,
+      userId,
+      officer: false,
+      manageRoles: false,
+      member: true,
+      guest: false,
+      botAdministrator: false,
+      timedOut: false,
+      ...overrides,
+    });
   const member = person(HARNESS_ACCOUNTS.member.id);
   const guest = person(HARNESS_ACCOUNTS.guest.id, { member: false, guest: true });
   const officer = person(HARNESS_ACCOUNTS.officer.id, { officer: true });
@@ -2886,13 +2924,13 @@ describe("My roles (2.40.0)", () => {
             id: roles.guildId,
             name: "Example FC",
             nav: navLinks((await loadPages()).values(), viewer, MY_ROLES),
-            audience: viewer.officer ? "officer" : "member",
+            audience: isStaff(viewer) ? "officer" : "member",
           },
           ...(options.refused && { error: true }),
         },
         renderMyRoles({
           roles,
-          officer: viewer.officer,
+          officer: isStaff(viewer),
           action: path,
           token: TOKEN,
           url: new URL(options.url ?? path, "https://example.org"),
@@ -2951,7 +2989,7 @@ describe("My roles (2.40.0)", () => {
   test("the page module: members, guests and officers, SelfRoles alone, a budget of 10 POSTs", async () => {
     const pages = await loadPages();
     const page = pages.get(MY_ROLES);
-    expect(page?.access).toEqual(["member", "guest", "officer"]);
+    expect(page?.access).toEqual(["selfroles.use"]);
     // Every member and guest reaches this page's code, so it can reach no other service.
     expect(page?.requires).toEqual([selfRolesKey]);
     // Nor can the service it gets write to Discord: the roles.self job's write lives on
@@ -2976,13 +3014,12 @@ describe("My roles (2.40.0)", () => {
     }
     expect(navLinks(pages.values(), { ...member, botAdministrator: true })).toEqual([]);
     // Unknown (TaruBot's own member isn't cached) counts as holding it.
-    const unknown: Actor = {
+    const unknown = actorOf({
       guildId: GUILD,
       userId: member.userId,
-      officer: false,
       manageRoles: false,
       member: true,
-    };
+    });
     expect(navLinks(pages.values(), unknown)).toEqual([]);
   });
 
@@ -4034,12 +4071,9 @@ describe("My roles (2.40.0)", () => {
   });
 
   test("the Role menu's lead links to My roles, with its address to share", async () => {
-    const editor = await harnessSelfRoles().editor({
-      guildId: GUILD,
-      userId: USER,
-      officer: true,
-      manageRoles: false,
-    });
+    const editor = await harnessSelfRoles().editor(
+      actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: false }),
+    );
     const markup = await render(
       renderRoleMenu({
         editor,

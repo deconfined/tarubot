@@ -2,7 +2,7 @@
 import { z } from "zod";
 import {
   accessDecisive,
-  authorize,
+  requirePermission,
   departure,
   desiredAccess,
   type AccessFacts,
@@ -109,16 +109,14 @@ export class Synchronization {
    * and whether Discord changes are paused.
    */
   async refresh(actor: Actor, force: boolean): Promise<RefreshResult> {
-    if (force) {
-      if (!actor.officer)
-        throw new Failure(
-          "forbidden",
-          "Only officers can force a refresh. Run /refresh without force: it refreshes when the roster is due and otherwise uses recent data.",
-          0,
-          { kind: "scope", scope: "officer" },
-        );
-      authorize(actor, actor.guildId, "officer");
-    }
+    requirePermission(actor, actor.guildId, "roster.refresh");
+    if (force)
+      requirePermission(
+        actor,
+        actor.guildId,
+        "roster.refresh_force",
+        "Only officers can force a refresh. Run /refresh without force: it refreshes when the roster is due and otherwise uses recent data.",
+      );
     const guild = await this.app.guild(actor);
     if (!guild.fc_id)
       throw new Failure(

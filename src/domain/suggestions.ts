@@ -29,7 +29,7 @@
  *   start of one, fewer than eight groups with no `::` (`2001:db8:1234`), which can't be told apart
  *   from dates, scores and slices (`2025:09:25`, `2000:1500:1200`, `data[2000:3000:10]`).
  */
-import type { Actor } from "./policy.js";
+import { can, type Actor } from "./policy.js";
 import { BODY_LIMIT, fenced, SECRET_PATTERNS } from "./reports.js";
 import { Failure } from "./values.js";
 
@@ -412,19 +412,12 @@ export function assertPublic(text: string, title: string, body: string): void {
 
 /**
  * Who may suggest (owner decision, 2026-09-25): anyone with server access, meaning they hold the
- * server's bound Member or Guest role right now (the actor's roles are read fresh from Discord).
- * Officer access alone doesn't qualify: officers qualify through their Member role, and a server
- * manager holding neither role is refused. An unbound role qualifies nobody.
+ * server's bound Member or Guest role right now (the actor's roles are read fresh from Discord),
+ * through suggest.use, which those roles carry (2.44.0). Officer access alone doesn't qualify:
+ * officers qualify through their Member role, and suggest.use is member-side, so a server manager
+ * holding neither role is refused. An unbound role qualifies nobody.
  */
-export function maySuggest(
-  actor: Pick<Actor, "roleIds">,
-  roles: { readonly member_role_id: string | null; readonly guest_role_id: string | null },
-): boolean {
-  const held = actor.roleIds ?? [];
-  return [roles.member_role_id, roles.guest_role_id].some(
-    (role) => role !== null && held.includes(role),
-  );
-}
+export const maySuggest = (actor: Pick<Actor, "access">): boolean => can(actor, "suggest.use");
 
 /** The refusal for someone without server access; it shows the membership card. */
 export const suggestionAccessRefused = (): Failure =>

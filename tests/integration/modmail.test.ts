@@ -21,7 +21,7 @@ import type { Reporter } from "../../src/application/reporting.js";
 import { Service } from "../../src/application/service.js";
 import type { Configuration } from "../../src/config/env.js";
 import { MODMAIL_LIMITS, pingKey, dmKey } from "../../src/domain/modmail.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, OFFICERS_ONLY } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import { loadVisibilityRecords } from "../../src/application/visibility-records.js";
 import {
@@ -42,6 +42,7 @@ import type { GuildAccess } from "../../src/application/guild-access.js";
 import type { Synchronization } from "../../src/application/synchronization.js";
 import { dispatcher } from "../../src/jobs/dispatch.js";
 import { type Job, jobOutcome } from "../../src/jobs/queue.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const SCHEMA = "modmail_it";
@@ -80,22 +81,32 @@ const CONFIG: Configuration = {
 const keyFor = (phrase: string): ModMailKey =>
   readModMailKey(createHash("sha256").update(phrase).digest().toString("base64"));
 
-const person = (userId: string, facts: Partial<Actor> = {}): Actor => ({
-  guildId: GUILD,
-  userId,
-  officer: false,
-  manageRoles: false,
-  member: false,
-  guest: false,
-  botAdministrator: false,
-  ...facts,
-});
+const person = (userId: string, facts: Partial<ActorSpec> = {}): Actor =>
+  actorOf({
+    guildId: GUILD,
+    userId,
+    manageRoles: false,
+    member: false,
+    guest: false,
+    botAdministrator: false,
+    ...facts,
+  });
 const OFFICER = person("723456789012345801", { officer: true });
 const SECOND_OFFICER = person("723456789012345802", { officer: true });
 const MEMBER = person("723456789012345811", { member: true });
 const OTHER_MEMBER = person("723456789012345812", { member: true });
 const GUEST = person("723456789012345813", { guest: true });
 const LOBBY = person("723456789012345814");
+
+/**
+ * `actor` less modmail.respond: reads every case but may not answer them. No role carries that
+ * set in 2.44.0; stored sets (2.46.0) can, so ModMail checks it on its own.
+ */
+const withoutRespond = (actor: Actor): Actor => {
+  const permissions = new Set(actor.access.permissions);
+  permissions.delete("modmail.respond");
+  return { ...actor, access: { ...actor.access, permissions } };
+};
 
 describe.skipIf(!url)("mod mail", () => {
   if (!url) return;
@@ -306,7 +317,9 @@ describe.skipIf(!url)("mod mail", () => {
         reason: "administrator",
       });
       // An officer who also holds Member may open one; a member in a time-out may too (appeals).
-      expect((await open({ ...SECOND_OFFICER, member: true })).status).toBe("opened");
+      expect(
+        (await open(person(SECOND_OFFICER.userId, { officer: true, member: true }))).status,
+      ).toBe("opened");
       expect((await open({ ...OTHER_MEMBER, timedOut: true })).status).toBe("opened");
       expect(await open(MEMBER, modmail(readModMailKey("")))).toEqual({
         status: "refused",
@@ -832,7 +845,8 @@ describe.skipIf(!url)("mod mail", () => {
         OTHER_MEMBER,
         GUEST,
         LOBBY,
-        { ...MEMBER, member: false },
+        // The opener after losing the Member role: access follows the roles held now.
+        person(MEMBER.userId),
         { ...MEMBER, botAdministrator: true },
       ]) {
         expect(await modmail().caseView(outsider, number)).toBeNull();
@@ -1000,6 +1014,89 @@ describe.skipIf(!url)("mod mail", () => {
         modmail().close(SECOND_OFFICER, number, current),
       ]);
       expect(both.map((outcome) => outcome?.status).sort()).toEqual(["saved", "unchanged"]);
+    });
+
+    test("reading every case isn't answering them: the officer side needs modmail.respond, the opener's doesn't (2.44.0)", async () => {
+      await enable();
+      const number = await opened(MEMBER);
+      const reader = withoutRespond(SECOND_OFFICER);
+      const view = await modmail().caseView(reader, number);
+      expect(view).toMatchObject({ audience: "officer", side: "officer", state: "officers" });
+      expect(view?.reads).not.toBeNull();
+      // The page offers the reader no reply, close or reopen form; a full officer on someone
+      // else's case, and the member on their own, get them.
+      expect(view?.canRespond).toBe(false);
+      expect(await modmail().caseView(OFFICER, number)).toMatchObject({
+        side: "officer",
+        canRespond: true,
+      });
+      expect(await modmail().caseView(MEMBER, number)).toMatchObject({
+        side: "member",
+        canRespond: true,
+      });
+      const refusal = {
+        code: "forbidden",
+        message: OFFICERS_ONLY,
+        detail: { kind: "scope", scope: "officer", permission: "modmail.respond" },
+      };
+      await expect(
+        modmail().reply(reader, number, {
+          messageId: "00000000-0000-4000-8000-000000000901",
+          body: "An answer",
+          signing: "name",
+        }),
+      ).rejects.toMatchObject(refusal);
+      await expect(
+        modmail().close(reader, number, (await caseRow(number)).revision),
+      ).rejects.toMatchObject(refusal);
+      // Nothing changed and nothing was queued: the case still waits, with only the open's ping.
+      const id = (await caseRow(number)).id;
+      expect((await caseRow(number)).state).toBe("officers");
+      expect((await jobRows()).map((job) => job.key)).toEqual([pingKey(id)]);
+      await modmail().close(OFFICER, number, (await caseRow(number)).revision);
+      await expect(
+        modmail().reopen(reader, number, (await caseRow(number)).revision),
+      ).rejects.toMatchObject(refusal);
+      expect((await caseRow(number)).state).toBe("closed");
+      // No line of the reader's in the thread.
+      const authors = await db.orm
+        .select({ author: t.modmailMessages.author_id })
+        .from(t.modmailMessages)
+        .where(eq(t.modmailMessages.author_id, reader.userId));
+      expect(authors).toEqual([]);
+      // The opener holds no modmail.respond and answers their own case: the reply reopens it.
+      expect(MEMBER.access.permissions.has("modmail.respond")).toBe(false);
+      expect(
+        (
+          await modmail().reply(MEMBER, number, {
+            messageId: "00000000-0000-4000-8000-000000000902",
+            body: "Reopening it myself",
+            signing: null,
+          })
+        )?.status,
+      ).toBe("saved");
+      expect(await modmail().close(MEMBER, number, (await caseRow(number)).revision)).toEqual({
+        status: "saved",
+      });
+      // A reader who opened a case of their own answers it as its member, without modmail.respond.
+      const own = withoutRespond(person(SECOND_OFFICER.userId, { officer: true, member: true }));
+      const mine = await opened(own);
+      expect(await modmail().caseView(own, mine)).toMatchObject({
+        side: "member",
+        canRespond: true,
+      });
+      expect(
+        (
+          await modmail().reply(own, mine, {
+            messageId: "00000000-0000-4000-8000-000000000903",
+            body: "One more thing",
+            signing: null,
+          })
+        )?.status,
+      ).toBe("saved");
+      expect(await modmail().close(own, mine, (await caseRow(mine)).revision)).toEqual({
+        status: "saved",
+      });
     });
 
     test("a member can't reopen past the open limit, and a case holds at most 500 messages", async () => {

@@ -25,7 +25,7 @@ import {
 } from "../../src/discord/presenters/guests.js";
 import { DISCORD_LIMITS, HOUSE_LIMITS } from "../../src/discord/presenters/style.js";
 import type { FailureCode, FailureDetail } from "../../src/domain/failures.js";
-import { authorize, type Actor } from "../../src/domain/policy.js";
+import { authorizeOwner, type Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import {
   buttonsOf,
@@ -767,7 +767,7 @@ describe("guest failures render as their approved concepts", () => {
   test("status, decision and review refusals", () => {
     let owner: unknown;
     try {
-      authorize(ACTORS.member, ACTORS.member.guildId, "user", GUEST_ID);
+      authorizeOwner(ACTORS.member, ACTORS.member.guildId, GUEST_ID);
     } catch (error) {
       owner = error;
     }

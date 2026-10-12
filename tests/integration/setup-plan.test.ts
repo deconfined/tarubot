@@ -22,6 +22,7 @@ import { Failure } from "../../src/domain/values.js";
 import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
 import { Database, SESSION_OPTIONS } from "../../src/infrastructure/postgres/database.js";
 import * as t from "../../src/infrastructure/postgres/schema.js";
+import { actorOf } from "../fixtures/actors.js";
 import { discordAccessFixture } from "../fixtures/discord-access.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -63,13 +64,12 @@ const LODESTONE = {
   }),
 } as unknown as Lodestone;
 
-const MANAGER: Actor = {
+const MANAGER: Actor = actorOf({
   guildId: GUILD,
   userId: OWNER,
-  officer: true,
   manageRoles: true,
   serverManager: true,
-};
+});
 /** @everyone may not view. */
 const PRIVATE = () => [
   { id: GUILD, type: OverwriteType.Role, allow: "0", deny: String(P.ViewChannel) },
@@ -354,7 +354,7 @@ describe.skipIf(!url)("/setup onboarding's dry run", () => {
 
   test("the caller's own refusals stay thrown", async () => {
     await expect(
-      administration.planSetup({ ...MANAGER, manageRoles: false }, "", null, null),
+      administration.planSetup(actorOf({ ...MANAGER, manageRoles: false }), "", null, null),
     ).rejects.toMatchObject({ code: "forbidden", detail: { kind: "scope", scope: "manager" } });
     await expect(
       administration.planSetup(MANAGER, "x".repeat(51), null, null),

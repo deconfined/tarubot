@@ -110,7 +110,8 @@ describe("/dashboard", () => {
 
   test("is open to every member, private, needs only the dashboard service and has no options", () => {
     expect(dashboardCommand.name).toBe("dashboard");
-    expect(dashboardCommand.access).toBe("user");
+    // No permissions: any human member of the server (2.44.0; "user" access before).
+    expect(dashboardCommand.permissions).toEqual([]);
     expect(dashboardCommand.ephemeral).toBe(true);
     expect(dashboardCommand.requires).toEqual([dashboardKey]);
     const data = dashboardCommand.toJSON();

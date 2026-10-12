@@ -178,10 +178,17 @@ export function interactionFixture() {
       return value;
     },
     /**
-     * An autocomplete request for `name`, typing `value` into its focused string option. Its
-     * respond() posts the interaction callback, so failNext("post", …) makes the answer fail.
+     * An autocomplete request for `name`, typing `value` into its focused string option, inside
+     * `subcommand` when given (/officer grant's member). Its respond() posts the interaction
+     * callback, so failNext("post", …) makes the answer fail.
      */
-    autocomplete(name: string, option = "query", value = "") {
+    autocomplete(name: string, option = "query", value = "", subcommand?: string) {
+      const focused = {
+        type: ApplicationCommandOptionType.String,
+        name: option,
+        value,
+        focused: true,
+      };
       const interaction: unknown = Reflect.construct(AutocompleteInteraction, [
         client,
         {
@@ -191,9 +198,16 @@ export function interactionFixture() {
             id: "700",
             name,
             type: 1,
-            options: [
-              { type: ApplicationCommandOptionType.String, name: option, value, focused: true },
-            ],
+            options:
+              subcommand === undefined
+                ? [focused]
+                : [
+                    {
+                      type: ApplicationCommandOptionType.Subcommand,
+                      name: subcommand,
+                      options: [focused],
+                    },
+                  ],
           },
         },
       ]);

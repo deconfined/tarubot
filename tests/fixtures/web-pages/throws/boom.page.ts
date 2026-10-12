@@ -11,7 +11,7 @@ export const THROWN = "non-error secret 9f1 that must never reach a page";
 export default definePage({
   path: "/g/:guild/boom",
   title: "Boom",
-  access: ["officer"],
+  access: ["config.view"],
   requires: [],
   get: () => {
     throw THROWN;

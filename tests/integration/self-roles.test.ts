@@ -7,7 +7,10 @@
  * pass deletes finished ones after 30 days; and that the pass's statements about them, 2.40.0's
  * 7-day expiry included, plan through migration 012's partial indexes. Role choices as 2.40.0
  * queues and applies them, and the rest of their privacy, are in self-role-choices.test.ts. Any
- * officer may make every change, with no Discord permission check (owner decision, 2026-10-09).
+ * officer may make every change, with no Discord permission check (owner decision, 2026-10-09):
+ * the Officer role's template holds all three role menu permissions. One by one (2.44.0), shaping
+ * the menu needs rolemenu.view and rolemenu.edit, adding roles and publishing need
+ * rolemenu.publish, and My roles shows drafts only with rolemenu.view.
  * The Discord port records every call: web edits read Discord, never write to it. Confined to its
  * own schema, self_roles_it, with invented IDs.
  */
@@ -30,7 +33,8 @@ import { Service } from "../../src/application/service.js";
 import { Synchronization } from "../../src/application/synchronization.js";
 import type { Configuration } from "../../src/config/env.js";
 import type { ApiRole } from "../../src/domain/permissions.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, OFFICERS_ONLY } from "../../src/domain/policy.js";
+import type { PermissionId } from "../../src/domain/rbac.js";
 import { EMPTY_MENU, type MenuOperation, SELF_ROLE_MESSAGES } from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
 import type { VisibilityChannel, VisibilityGuild } from "../../src/domain/visibility.js";
@@ -38,6 +42,7 @@ import type { Lodestone } from "../../src/infrastructure/lodestone/client.js";
 import { Database, SESSION_OPTIONS } from "../../src/infrastructure/postgres/database.js";
 import * as t from "../../src/infrastructure/postgres/schema.js";
 import { enqueue } from "../../src/jobs/queue.js";
+import { actorOf } from "../fixtures/actors.js";
 import { FakeGuildAccess } from "../fixtures/guild-access.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -80,27 +85,39 @@ const CONFIG: Configuration = {
 };
 
 /** The server manager: Manage Server and Manage Roles. */
-const MANAGER: Actor = {
+const MANAGER: Actor = actorOf({
   guildId: GUILD,
   userId: "723456789012345601",
   officer: true,
   manageRoles: true,
   serverManager: true,
-};
+});
 /** A delegated officer (the Officer role with rank access): no Discord permissions at all. */
-const DELEGATED: Actor = {
+const DELEGATED: Actor = actorOf({
   guildId: GUILD,
   userId: "723456789012345602",
   officer: true,
   manageRoles: false,
   serverManager: false,
-};
-const MEMBER: Actor = {
+});
+const MEMBER: Actor = actorOf({
   guildId: GUILD,
   userId: "723456789012345603",
   officer: false,
   manageRoles: false,
-};
+});
+/**
+ * Someone holding exactly `permissions`, built by hand: no managed role's template gives these
+ * combinations today, but a stored permission set (2.46.0) may.
+ */
+const holding = (userId: string, ...permissions: PermissionId[]): Actor => ({
+  guildId: GUILD,
+  userId,
+  manageRoles: false,
+  serverManager: false,
+  botAdministrator: false,
+  access: { manager: false, roles: [], permissions: new Set(permissions) },
+});
 
 const role = (id: string, position: number, permissions = 0n, managed = false): ApiRole => ({
   id,
@@ -539,6 +556,99 @@ describe.skipIf(!url)("self-service role menu writes", () => {
     await expect(
       edit({ ...DELEGATED, guildId: "666666666666666793" }, 3n, create(OTHER_CATEGORY)),
     ).rejects.toMatchObject({ code: "setup" });
+  });
+
+  test("shaping the menu needs rolemenu.view and rolemenu.edit; adding roles and publishing need rolemenu.publish", async () => {
+    const refusedFor = (permission: PermissionId) => ({
+      code: "forbidden",
+      message: OFFICERS_ONLY,
+      detail: { kind: "scope", scope: "officer", permission },
+    });
+    // Viewing and editing without publishing: the editor opens, and a category is created and
+    // reshaped, which changes nothing anyone can pick.
+    const editor = holding("723456789012345604", "rolemenu.view", "rolemenu.edit");
+    expect((await selfRoles.editor(editor)).configured).toBeTrue();
+    saved(await edit(editor, 1n, create()));
+    saved(
+      await edit(editor, 2n, {
+        op: "category.edit",
+        categoryId: CATEGORY,
+        name: "Pronouns",
+        description: "Pick one",
+        max: 1,
+      }),
+    );
+    // Each operation that makes roles self-assignable is refused before Discord is read or
+    // anything is written: adding options (live at once in a published category), publishing one
+    // category, and publishing every draft.
+    calls = [];
+    const publishing: MenuOperation[] = [
+      add([ROLE.pronoun]),
+      { op: "category.setState", categoryId: CATEGORY, state: "published" },
+      { op: "menu.publishAll" },
+    ];
+    for (const operation of publishing)
+      await expect(edit(editor, 3n, operation)).rejects.toMatchObject(
+        refusedFor("rolemenu.publish"),
+      );
+    expect(calls).toEqual([]);
+    expect((await stored())?.revision).toBe(3n);
+    expect((await audits()).map((row) => row.target)).toEqual(["category.create", "category.edit"]);
+    // Editing and publishing without rolemenu.view: no editor, and no edit of either kind.
+    const blind = holding("723456789012345605", "rolemenu.edit", "rolemenu.publish");
+    await expect(selfRoles.editor(blind)).rejects.toMatchObject(refusedFor("rolemenu.view"));
+    await expect(edit(blind, 3n, create(OTHER_CATEGORY))).rejects.toMatchObject(
+      refusedFor("rolemenu.view"),
+    );
+    await expect(edit(blind, 3n, add([ROLE.pronoun]))).rejects.toMatchObject(
+      refusedFor("rolemenu.view"),
+    );
+    // Viewing alone opens the editor and changes nothing.
+    const viewer = holding("723456789012345606", "rolemenu.view");
+    expect((await selfRoles.editor(viewer)).revision).toBe(3n);
+    await expect(edit(viewer, 3n, create(OTHER_CATEGORY))).rejects.toMatchObject(
+      refusedFor("rolemenu.edit"),
+    );
+    // The Member role carries no role menu permission.
+    const member = actorOf({ ...MEMBER, member: true, botAdministrator: false });
+    await expect(selfRoles.editor(member)).rejects.toMatchObject(refusedFor("rolemenu.view"));
+    await expect(edit(member, 3n, create(OTHER_CATEGORY))).rejects.toMatchObject(
+      refusedFor("rolemenu.view"),
+    );
+    expect((await stored())?.revision).toBe(3n);
+    expect(await audits()).toHaveLength(2);
+    // An officer's template holds all three: the same add goes through.
+    expect(await edit(DELEGATED, 3n, add([ROLE.pronoun]))).toEqual({
+      status: "saved",
+      revision: 4n,
+    });
+  });
+
+  test("My roles shows a draft only to someone holding rolemenu.view", async () => {
+    saved(await edit(DELEGATED, 1n, create()));
+    saved(await edit(DELEGATED, 2n, add([ROLE.pronoun])));
+    const shown = async (actor: Actor) =>
+      (await selfRoles.view(actor)).categories.map((category) => [category.id, category.state]);
+    // Beside selfroles.use: with rolemenu.view the draft, the menu's only category, is listed;
+    // without it the page is empty, even for staff holding another officer permission.
+    const member = actorOf({ ...MEMBER, member: true, botAdministrator: false });
+    expect(await shown(holding(MEMBER.userId, "selfroles.use", "rolemenu.view"))).toEqual([
+      [CATEGORY, "draft"],
+    ]);
+    expect(await shown(holding(MEMBER.userId, "selfroles.use"))).toEqual([]);
+    expect(await shown(holding(MEMBER.userId, "selfroles.use", "config.view"))).toEqual([]);
+    // Through the templates: an officer sees it, a Member-role holder doesn't.
+    expect(await shown(DELEGATED)).toEqual([[CATEGORY, "draft"]]);
+    expect(await shown(member)).toEqual([]);
+    // Published, everyone with My roles sees it.
+    saved(
+      await edit(DELEGATED, 3n, {
+        op: "category.setState",
+        categoryId: CATEGORY,
+        state: "published",
+      }),
+    );
+    expect(await shown(member)).toEqual([[CATEGORY, "published"]]);
   });
 
   test("a menu this build can't read is never edited; any officer may reset it, audited", async () => {

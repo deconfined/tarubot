@@ -53,6 +53,7 @@ import {
   discordAccessFixture,
   discordError,
 } from "../fixtures/discord-access.js";
+import { actorOf } from "../fixtures/actors.js";
 import { onlyEmbed } from "../fixtures/replies.js";
 import { VIEWERS } from "../fixtures/results.js";
 
@@ -105,13 +106,8 @@ function provisioner(): RoleProvisioner {
 }
 
 /** A server manager; the owner (300) or someone without Administrator (301). */
-const actor = (userId = OWNER): Actor => ({
-  guildId: GUILD,
-  userId,
-  officer: true,
-  manageRoles: true,
-  serverManager: true,
-});
+const actor = (userId = OWNER): Actor =>
+  actorOf({ guildId: GUILD, userId, manageRoles: true, serverManager: true });
 
 /** @everyone may not view: a private area. */
 const PRIVATE = () => [

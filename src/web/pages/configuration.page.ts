@@ -1,7 +1,7 @@
 /** Read-only server configuration and live resource health, for this server's officers. */
 import { applicationKey, gatewayKey } from "../../application/keys.js";
 import type { Service } from "../../application/service.js";
-import { authorize, type Actor } from "../../domain/policy.js";
+import { requirePermission, type Actor } from "../../domain/policy.js";
 import { guildNames } from "../mentions.js";
 import { definePage } from "../page.js";
 import { type CheckedConfiguration, renderConfiguration } from "../views/configuration.js";
@@ -24,7 +24,7 @@ export async function validateConfiguration(
   report: (error: unknown) => void,
 ): Promise<CheckedConfiguration> {
   const guildId = actor.guildId;
-  authorize(actor, guildId, "officer");
+  requirePermission(actor, guildId, "config.view");
   let servers = validationMemo.get(service);
   if (!servers) {
     servers = new Map();
@@ -60,7 +60,7 @@ export async function validateConfiguration(
 export default definePage({
   path: "/g/:guild/configuration",
   title: "Server configuration",
-  access: ["officer"],
+  access: ["config.view"],
   requires: [applicationKey, gatewayKey],
   nav: "Server configuration",
   icon: "settings",

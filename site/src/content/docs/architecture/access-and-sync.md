@@ -32,11 +32,15 @@ Access is recomputed from the evidence, never accumulated. For each member, Taru
 - any character with confirmed membership in the linked FC gives **Member**;
 - any such character holding the configured officer rank adds **Officer**, unless its link came from an assignment by an officer without server-manager authority;
 - if none is in the FC, the member gets **Guest**: automatically from a trusted link (while evidence is fresh), from former membership, or from a durable grant;
-- the linked FC's leader character gives **FC Leader**.
+- the linked FC's leader character gives **FC Leader**, with the same exception as Officer.
 
 Overrides sit on top: an officer's Guest **revocation** suppresses every kind of Guest access, and a manager's officer **grant** or **revocation** overrides the rank. FC membership always gives Member, even with Guest revoked.
 
-When evidence is **uncertain**, such as a stale roster or a link not yet checked against one, TaruBot never adds a new automatic role, but keeps roles a member already holds. Explicit grants and revocations still apply.
+When evidence is **uncertain**, such as a stale roster or a link not yet checked against one, TaruBot never adds a new automatic role, but keeps roles a member already holds. Explicit grants and revocations still apply. A kept Officer role gives officer permissions only once a roster confirms the rank, or the roster lists the character without rank details.
+
+## Permissions
+
+Each function TaruBot guards checks one named permission, at one decision point, against the actor resolved for that command, button or page request. The managed roles that count for someone carry the permissions: Member and Guest carry member features, the Officer role carries officer permissions, and server managers (Manage Server and Manage Roles) hold every permission except suggesting features and opening mod mail cases, which follow their own Member or Guest role. A few belong to everyone in the server. [Who can do what](/tarubot/admin/access/) lists them.
 
 ## Departures
 

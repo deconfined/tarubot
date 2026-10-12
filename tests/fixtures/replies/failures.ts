@@ -9,7 +9,7 @@ import type { Audience } from "../../../src/discord/presenters/audience.js";
 import { failureReply } from "../../../src/discord/presenters/failure.js";
 import { userId } from "../../../src/discord/selectors.js";
 import type { FailureCode, FailureDetail } from "../../../src/domain/failures.js";
-import { authorize, authorizeRoleManager } from "../../../src/domain/policy.js";
+import { authorizeOwner, requirePermission } from "../../../src/domain/policy.js";
 import { suggestionAccessRefused } from "../../../src/domain/suggestions.js";
 import { Failure, id, note } from "../../../src/domain/values.js";
 import { ACTORS, at, CHARACTER, GUEST_ID, MEMBER_ID, NOW, REF, VIEWERS } from "../results.js";
@@ -83,10 +83,14 @@ function card(
   return reply;
 }
 
-/** The generic officer refusal, from the real policy check. */
-const officerOnly = thrown(() => authorize(ACTORS.member, ACTORS.member.guildId, "officer"));
-/** The manager refusal, from the real policy check for an officer without Manage Roles. */
-const managerOnly = thrown(() => authorizeRoleManager(ACTORS.officer));
+/** The generic officer refusal, from the real policy check for a staff permission. */
+const officerOnly = thrown(() =>
+  requirePermission(ACTORS.member, ACTORS.member.guildId, "config.view"),
+);
+/** The manager refusal, from the real policy check of a fixed permission for an officer. */
+const managerOnly = thrown(() =>
+  requirePermission(ACTORS.officer, ACTORS.officer.guildId, "admin.roles"),
+);
 /** The approved revision-fence message. */
 const SETTINGS_CHANGED =
   "Server settings changed while this was running, so nothing was saved. Run the command again.";
@@ -150,10 +154,13 @@ export const FAILURE_CASES = {
     "forbidden.officer",
     "member",
     OFFICERS_ONLY,
-    failure(
-      "forbidden",
-      "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.",
-      { kind: "scope", scope: "officer" },
+    thrown(() =>
+      requirePermission(
+        ACTORS.member,
+        ACTORS.member.guildId,
+        "ledger.withdraw",
+        "Only officers can record withdrawals, opening balances and corrections. Members can record deposits with /ledger deposit.",
+      ),
     ),
     "/ledger withdraw",
   ),
@@ -161,7 +168,7 @@ export const FAILURE_CASES = {
     "forbidden.owner",
     "member",
     { tone: "error", title: "Only your own records" },
-    thrown(() => authorize(ACTORS.member, ACTORS.member.guildId, "user", GUEST_ID)),
+    thrown(() => authorizeOwner(ACTORS.member, ACTORS.member.guildId, GUEST_ID)),
     "/characters",
   ),
   "forbidden manager · /config roles officer · officer": card(

@@ -1,4 +1,5 @@
 /** Custom-ID namespaces let buttons, menus, and modals be extended without router edits. */
+import { modulePermissions, type PermissionId } from "../domain/rbac.js";
 import { MessageFlags } from "discord.js";
 import type { MessageComponentInteraction, ModalSubmitInteraction } from "discord.js";
 import type { Viewer } from "../discord/presenters/audience.js";
@@ -26,7 +27,12 @@ export type AcknowledgeMode = "reply" | "update";
 /** A namespace owns all custom IDs beginning with prefix followed by a colon. */
 export interface ComponentOptions {
   readonly prefix: string;
-  readonly access?: "user" | "officer";
+  /**
+   * The permissions that admit this module at the router, any-of (2.44.0, RBAC); none means any
+   * human member. A coarse first gate, also applied to autocomplete: each service still checks the
+   * exact permission its operation needs.
+   */
+  readonly permissions?: readonly PermissionId[];
   readonly requires?: readonly ServiceKey<unknown>[];
   /**
    * Replies stay private even under DevBot's public-response override (2.43.0), as the command
@@ -64,7 +70,7 @@ const isAsyncFunction = (value: unknown): boolean =>
 /** Validated component definition; payload-specific authorization stays in its handler. */
 export class Component {
   readonly prefix: string;
-  readonly access: "user" | "officer";
+  readonly permissions: readonly PermissionId[];
   readonly requires: readonly ServiceKey<unknown>[];
   readonly acknowledge: NonNullable<ComponentOptions["acknowledge"]>;
   readonly alwaysPrivate: boolean;
@@ -86,7 +92,7 @@ export class Component {
         "A component's acknowledge option must be 'reply', 'update' or a synchronous function.",
       );
     this.prefix = options.prefix;
-    this.access = options.access ?? "user";
+    this.permissions = modulePermissions(options.permissions);
     this.requires = options.requires ?? [];
     this.acknowledge = options.acknowledge ?? "reply";
     this.alwaysPrivate = options.alwaysPrivate === true;

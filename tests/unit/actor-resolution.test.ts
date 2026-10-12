@@ -10,6 +10,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { Collection, PermissionFlagsBits as P, PermissionsBitField } from "discord.js";
 import type { Guild } from "discord.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
+import { NO_ACCESS } from "../../src/domain/policy.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
@@ -86,15 +87,16 @@ test("light mode makes exactly one Discord request: the member, forced", async (
   const { gateway, requests } = gatewayWith();
   const actor = await gateway.actor(GUILD, USER, "light");
   expect(requests).toEqual([`member ${USER} forced`]);
+  // Access fails closed until Service.enrichActor reads the server's managed roles (2.44.0).
   expect(actor).toEqual({
     guildId: GUILD,
     userId: USER,
-    officer: false,
     manageRoles: false,
     serverManager: false,
     roleIds: [ROLE.member],
     botAdministrator: false,
     timedOut: false,
+    access: NO_ACCESS,
   });
 });
 
@@ -148,13 +150,21 @@ test("timedOut follows the member's Discord time-out; officer facts are unchange
     timedOut: true,
     roleIds: [ROLE.member, ROLE.pronoun],
   });
-  const officer = gatewayWith({ member: { permissions: P.ManageGuild | P.ManageRoles } });
-  expect(await officer.gateway.actor(GUILD, USER, "light")).toMatchObject({
-    officer: true,
-    serverManager: true,
-    manageRoles: true,
-    timedOut: false,
-  });
+  // The gateway reports the Discord flags only: even a server manager starts with NO_ACCESS, and
+  // Service.enrichActor decides what they make (both together: a server manager).
+  for (const [permissions, serverManager, manageRoles] of [
+    [P.ManageGuild | P.ManageRoles, true, true],
+    [P.ManageGuild, true, false],
+    [P.ManageRoles, false, true],
+  ] as const) {
+    const manager = gatewayWith({ member: { permissions } });
+    expect(await manager.gateway.actor(GUILD, USER, "light")).toMatchObject({
+      serverManager,
+      manageRoles,
+      timedOut: false,
+      access: NO_ACCESS,
+    });
+  }
 });
 
 test("a bot account is refused in either mode, after the one member request", async () => {

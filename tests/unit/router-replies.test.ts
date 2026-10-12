@@ -15,16 +15,22 @@ import {
   SlashCommandBuilder,
 } from "discord.js";
 import type { APIEmbed } from "discord.js";
+import { applicationKey, roleAdministrationKey } from "../../src/application/keys.js";
+import { RoleAdministration } from "../../src/application/role-administration.js";
+import { Service } from "../../src/application/service.js";
 import { defineCommand } from "../../src/bot/command.js";
 import { Component, defineComponent, type ComponentOptions } from "../../src/bot/component.js";
 import type { BotContext } from "../../src/bot/context.js";
 import { InteractionRouter } from "../../src/bot/router.js";
 import { Services } from "../../src/bot/services.js";
+import officerCommand from "../../src/commands/configuration/officer.command.js";
+import setupCommand from "../../src/commands/configuration/setup.command.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import { dataReply, reply, type Presented } from "../../src/discord/presenters/reply.js";
 import type { ReportOptions } from "../../src/domain/failures.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
+import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture, type RecordedRequest } from "../fixtures/interactions.js";
 import { discordError } from "../fixtures/replies/failures.js";
 import { CHARACTER, at } from "../fixtures/results.js";
@@ -37,8 +43,9 @@ interface Report {
 }
 
 /** Actors the fixture member can resolve as. */
-const MEMBER: Actor = { guildId: "100", userId: "400", officer: false, manageRoles: false };
-const OFFICER: Actor = { ...MEMBER, officer: true };
+const MEMBER: Actor = actorOf({ guildId: "100", userId: "400", manageRoles: false });
+const OFFICER: Actor = actorOf({ ...MEMBER, officer: true });
+const MANAGER: Actor = actorOf({ ...MEMBER, serverManager: true, manageRoles: true });
 
 /** The failure a command or component throws next; tests set it per case. */
 let next: unknown = new Error("unset");
@@ -125,7 +132,7 @@ let executions = 0;
 const components: readonly Component[] = [
   defineComponent({
     prefix: "secure",
-    access: "officer",
+    permissions: ["config.view"],
     execute: () => {
       executions++;
       return reply({ tone: "info", title: "Secret" });
@@ -152,7 +159,7 @@ const components: readonly Component[] = [
   }),
   defineComponent({
     prefix: "details",
-    access: "officer",
+    permissions: ["members.view", "ledger.audit", "sync.view_all"],
     execute: ({ viewer }) => dataReply(viewer, "sample", { amount: 10005000n }),
   }),
 ];
@@ -763,6 +770,127 @@ test("autocomplete for an option this release doesn't declare suggests nothing",
     expect(fixture.requests.at(-1)?.body).toMatchObject({
       data: { choices: [{ name: "Example", value: "1" }] },
     });
+  } finally {
+    await fixture.close();
+  }
+});
+
+/**
+ * The real /setup and /officer behind the router (2.44.0): both declare only fixed permissions, so
+ * everyone but a server manager is refused at the router with the manager card, before any
+ * service runs, and /officer's member suggestions follow the same gate. `reached` records every
+ * call that got past it.
+ */
+function managerHarness(actor: Actor) {
+  const fixture = interactionFixture();
+  const reports: Report[] = [];
+  const reached: string[] = [];
+  const administration: unknown = Object.create(RoleAdministration.prototype);
+  if (!(administration instanceof RoleAdministration))
+    throw new Error("Invalid role administration fixture");
+  Object.assign(administration, {
+    overrides: async () => {
+      reached.push("overrides");
+      throw new Failure("input", "Reached the service.");
+    },
+  });
+  const app: unknown = Object.create(Service.prototype);
+  if (!(app instanceof Service)) throw new Error("Invalid application fixture");
+  const router = new InteractionRouter(
+    {
+      client: fixture.client,
+      services: new Services()
+        .provide(applicationKey, app)
+        .provide(roleAdministrationKey, administration),
+      allowsGuild: () => true,
+      isStopping: () => false,
+      resolveActor: async (guildId, userId) => ({ ...actor, guildId, userId }),
+      // Autocomplete builds its actor from the payload; this enrichment gives it the same access.
+      enrichActor: async (base) => ({ ...base, access: actor.access }),
+      report: (error, operation, options) => reports.push({ error, operation, options }),
+    },
+    new Map([
+      [setupCommand.name, setupCommand],
+      [officerCommand.name, officerCommand],
+    ]),
+    new Map(),
+  );
+  return { fixture, reports, reached, router };
+}
+
+test("/setup refuses everyone but server managers at the router with the manager card", async () => {
+  const overrides = [{ type: ApplicationCommandOptionType.Subcommand, name: "overrides" }];
+  for (const [label, actor, missing] of [
+    ["a member", MEMBER, "Manage Server and Manage Roles"],
+    ["an officer", OFFICER, "Manage Server and Manage Roles"],
+    // Q2 A: Manage Server without Manage Roles grants nothing.
+    ["Manage Server alone", actorOf({ ...MEMBER, serverManager: true }), "Manage Roles"],
+  ] as const) {
+    const { fixture, reports, reached, router } = managerHarness(actor);
+    try {
+      const interaction = fixture.slash("setup", overrides);
+      await router.handle(interaction);
+      expect(reached, label).toEqual([]);
+      const embed = embedOf(fixture.requests.at(-1));
+      expect(embed, label).toMatchObject({
+        title: "Server managers only",
+        footer: { text: `Code forbidden · Ref ${interaction.id}` },
+      });
+      expect(embed.fields?.find((field) => field.name === "Missing permission")?.value).toBe(
+        missing,
+      );
+      expect(
+        reports.map((report) => report.error),
+        label,
+      ).toEqual([
+        expect.objectContaining({
+          code: "forbidden",
+          detail: { kind: "scope", scope: "manager", permission: "admin.setup" },
+        }),
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }
+  // A server manager passes the router; the service decides from there.
+  const { fixture, reached, router } = managerHarness(MANAGER);
+  try {
+    await router.handle(fixture.slash("setup", overrides));
+    expect(reached).toEqual(["overrides"]);
+    expect(embedOf(fixture.requests.at(-1)).title).toBe("Check your input");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("/officer member suggestions are for server managers only", async () => {
+  const pasted = "300000000000000001";
+  for (const actor of [MEMBER, OFFICER, actorOf({ ...MEMBER, serverManager: true })]) {
+    const { fixture, reports, router } = managerHarness(actor);
+    try {
+      await router.handle(fixture.autocomplete("officer", "member", pasted, "grant"));
+      expect(fixture.requests.at(-1)?.body).toMatchObject({ data: { choices: [] } });
+      expect(reports).toEqual([
+        {
+          error: expect.objectContaining({
+            code: "forbidden",
+            detail: { kind: "scope", scope: "manager", permission: "admin.grants" },
+          }),
+          operation: expect.any(String),
+          options: { level: "info", scope: "autocomplete /officer" },
+        },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  }
+  const { fixture, reports, router } = managerHarness(MANAGER);
+  try {
+    await router.handle(fixture.autocomplete("officer", "member", pasted, "grant"));
+    expect(fixture.requests.at(-1)?.body).toMatchObject({
+      data: { choices: [{ name: `User ID ${pasted}`, value: pasted }] },
+    });
+    expect(reports).toEqual([]);
   } finally {
     await fixture.close();
   }

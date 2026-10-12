@@ -1,13 +1,20 @@
 /**
  * Who may open a web page (#43, D2–D4, D17): the admits() matrix over the actors slash commands
- * resolve, members and guests included with the A2 gate (2.40.0), the 60-second GET memo and the
- * fresh resolution every POST and sign-in uses, each use's resolution mode (light for GETs and
- * sign-in, full for POSTs), gone actors as "not admitted", the server list and the server
- * navigation. definePage's validation, access included, is in web-pages.test.ts.
+ * resolve, members and guests included with the A2 gate (2.40.0), pages declaring TaruBot
+ * permission ids (2.44.0, RBAC), the 60-second GET memo and the fresh resolution every POST and
+ * sign-in uses, each use's resolution mode (light for GETs and sign-in, full for POSTs), gone
+ * actors as "not admitted", the server list and the server navigation. definePage's validation,
+ * access included, is in web-pages.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { DiscordAPIError } from "discord.js";
-import { type Actor, type ActorResolution, selfServiceAccess } from "../../src/domain/policy.js";
+import {
+  type Actor,
+  type ActorResolution,
+  isStaff,
+  NO_ACCESS,
+  selfServiceAccess,
+} from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import {
   ACTOR_MEMO_MS,
@@ -21,32 +28,33 @@ import {
 import { html } from "../../src/web/html.js";
 import { navLinks } from "../../src/web/layout.js";
 import { definePage, type Page } from "../../src/web/page.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
 
 /** An actor as main.ts's resolver returns it: gateway.actor, then Service.enrichActor. */
-const actor = (overrides: Partial<Actor> = {}): Actor => ({
-  guildId: GUILD,
-  userId: USER,
-  officer: false,
-  manageRoles: false,
-  serverManager: false,
-  roleIds: [],
-  ...overrides,
-});
+const actor = (spec: Partial<ActorSpec> = {}): Actor =>
+  actorOf({
+    guildId: GUILD,
+    userId: USER,
+    manageRoles: false,
+    serverManager: false,
+    roleIds: [],
+    ...spec,
+  });
 
 /** The actors the matrix covers, named by how they got (or lost) their authority. */
 const ACTORS = {
   // Manage Server and Manage Roles: a server manager.
-  manager: actor({ officer: true, serverManager: true, manageRoles: true }),
-  // Manage Server alone: an officer, but not allowed to change officer authority.
-  serverManagerOnly: actor({ officer: true, serverManager: true }),
-  // The Officer role with rank access (enrichActor set officer); no Discord permissions.
+  manager: actor({ serverManager: true, manageRoles: true }),
+  // Manage Server alone grants nothing (2.44.0, owner decision Q2 A; it made an officer before).
+  serverManagerOnly: actor({ serverManager: true }),
+  // The Officer role with rank access (enrichActor counted it); no Discord permissions.
   roleOfficer: actor({ officer: true, roleIds: ["300"] }),
   // The Officer role with Manage Roles but not Manage Server: still not a manager.
   roleOfficerManageRoles: actor({ officer: true, manageRoles: true, roleIds: ["300"] }),
-  // The Officer role whose rank access was revoked (enrichActor left officer false).
+  // The Officer role whose rank access was revoked (enrichActor didn't count it).
   revokedOfficer: actor({ roleIds: ["300"] }),
   // In the server with neither access role (a lobby newcomer, an ex-member, a revoked guest).
   lobby: actor({ botAdministrator: false }),
@@ -60,60 +68,103 @@ const ACTORS = {
   guestAdministratorUnknown: actor({ guest: true }),
   // An officer who holds Member too, while TaruBot holds Administrator: officers are unaffected.
   officerMemberWhileAdministrator: actor({ officer: true, member: true, botAdministrator: true }),
-  // An actor from before serverManager existed: officer stands in for it.
-  legacyManager: { guildId: GUILD, userId: USER, officer: true, manageRoles: true },
+  // An actor that doesn't say whether it holds Manage Server: officer no longer stands in for it
+  // (2.44.0), so it is the officer it is and no manager.
+  managerUnknown: actorOf({ guildId: GUILD, userId: USER, officer: true, manageRoles: true }),
 } satisfies Record<string, Actor>;
 
 describe("admits", () => {
-  test("every flag over the actor matrix", () => {
+  test("each kind of permission over the actor matrix", () => {
     const matrix = Object.fromEntries(
       Object.entries(ACTORS).map(([name, value]) => [
         name,
         {
-          officer: admits(value, ["officer"]),
-          manager: admits(value, ["manager"]),
-          member: admits(value, ["member"]),
-          guest: admits(value, ["guest"]),
+          // A staff permission (the officers' pages), a fixed one (server managers only), a
+          // member-tier one the Member and Officer roles carry, and a member-side one the Member
+          // and Guest roles carry, which server managers don't hold implicitly.
+          staff: admits(value, ["config.view"]),
+          fixed: admits(value, ["admin.roles"]),
+          ledger: admits(value, ["ledger.view"]),
+          openModMail: admits(value, ["modmail.open"]),
+          myRoles: admits(value, ["selfroles.use"]),
           selfService: selfServiceAccess(value),
         },
       ]),
     );
-    const none = { officer: false, manager: false, member: false, guest: false };
+    const none = {
+      staff: false,
+      fixed: false,
+      ledger: false,
+      openModMail: false,
+      myRoles: false,
+      selfService: false,
+    };
+    const officer = { ...none, staff: true, ledger: true, myRoles: true, selfService: true };
     expect(matrix).toEqual({
-      manager: { ...none, officer: true, manager: true, selfService: true },
-      serverManagerOnly: { ...none, officer: true, selfService: true },
-      roleOfficer: { ...none, officer: true, selfService: true },
-      roleOfficerManageRoles: { ...none, officer: true, selfService: true },
-      revokedOfficer: { ...none, selfService: false },
-      lobby: { ...none, selfService: false },
-      member: { ...none, member: true, selfService: true },
-      guest: { ...none, guest: true, selfService: true },
-      timedOutMember: { ...none, member: true, selfService: true },
-      memberWhileAdministrator: { ...none, selfService: false },
-      guestAdministratorUnknown: { ...none, selfService: false },
-      officerMemberWhileAdministrator: { ...none, officer: true, selfService: true },
-      legacyManager: { ...none, officer: true, manager: true, selfService: true },
+      manager: { ...officer, fixed: true },
+      serverManagerOnly: none,
+      roleOfficer: officer,
+      roleOfficerManageRoles: officer,
+      revokedOfficer: none,
+      lobby: none,
+      member: { ...none, ledger: true, openModMail: true, myRoles: true, selfService: true },
+      guest: { ...none, openModMail: true, myRoles: true, selfService: true },
+      timedOutMember: {
+        ...none,
+        ledger: true,
+        openModMail: true,
+        myRoles: true,
+        selfService: true,
+      },
+      memberWhileAdministrator: none,
+      guestAdministratorUnknown: none,
+      // Staff pass the A2 gate, so their Member role's member-tier permissions admit them too.
+      officerMemberWhileAdministrator: { ...officer, openModMail: true },
+      managerUnknown: officer,
     });
   });
 
-  test("member and guest need an explicit false for botAdministrator, and their own role", () => {
-    // Held roles alone are not the flags: enrichActor sets them from the bound roles.
-    expect(admits(actor({ roleIds: ["400"], botAdministrator: false }), ["member", "guest"])).toBe(
-      false,
-    );
-    // Holding Guest doesn't open a Member-only page, nor Member a Guest-only one.
-    expect(admits(ACTORS.guest, ["member"])).toBe(false);
-    expect(admits(ACTORS.member, ["guest"])).toBe(false);
-    expect(admits(ACTORS.guest, ["member", "guest"])).toBe(true);
+  test("a member-tier permission needs an explicit false for botAdministrator, and the role that carries it", () => {
+    // Held roles alone are not access: enrichActor counts the bound roles.
+    expect(
+      admits(actor({ roleIds: ["400"], botAdministrator: false }), [
+        "selfroles.use",
+        "modmail.open",
+      ]),
+    ).toBe(false);
+    // The Guest role carries no ledger permission; the Member role does.
+    expect(admits(ACTORS.guest, ["ledger.view"])).toBe(false);
+    expect(admits(ACTORS.member, ["ledger.view"])).toBe(true);
+    expect(admits(ACTORS.guest, ["ledger.view", "modmail.open"])).toBe(true);
+    // A server manager holds member-tier permissions without the A2 gate, but not the member-side
+    // ones, which follow their own Member or Guest role.
+    const managerWhileAdministrator = actor({
+      serverManager: true,
+      manageRoles: true,
+      botAdministrator: true,
+    });
+    expect(admits(managerWhileAdministrator, ["selfroles.use"])).toBe(true);
+    expect(admits(managerWhileAdministrator, ["modmail.open"])).toBe(false);
+    expect(admits(actor({ ...ACTORS.manager, member: true }), ["modmail.open"])).toBe(true);
   });
 
-  test("flags are any-of; no flags, or a flag this release doesn't know, admits no one", () => {
-    expect(admits(ACTORS.roleOfficer, ["manager", "officer"])).toBe(true);
-    expect(admits(ACTORS.member, ["manager", "officer"])).toBe(false);
-    expect(admits(ACTORS.member, ["officer", "member"])).toBe(true);
+  test("ids are any-of; none, or an id this release doesn't know, admits no one", () => {
+    expect(admits(ACTORS.roleOfficer, ["admin.roles", "config.view"])).toBe(true);
+    expect(admits(ACTORS.member, ["admin.roles", "config.view"])).toBe(false);
+    expect(admits(ACTORS.member, ["config.view", "selfroles.use"])).toBe(true);
     expect(admits(ACTORS.manager, [])).toBe(false);
-    for (const flag of ["operator", "toString", "__proto__"])
-      expect(admits(ACTORS.manager, [flag as PageAccess])).toBe(false);
+    // 2.43.0's flags are no permission ids, so they admit no one now.
+    for (const id of ["officer", "manager", "member", "guest", "operator", "toString", "__proto__"])
+      expect(admits(ACTORS.manager, [id as PageAccess])).toBe(false);
+  });
+
+  test("admission reads the actor's access, not its Discord facts", () => {
+    // Access computed by enrichActor is the whole answer: Manage Server and Manage Roles on an
+    // actor whose access says otherwise (resolution that skipped enrichment) admit nothing.
+    const unenriched: Actor = { ...ACTORS.manager, access: NO_ACCESS };
+    expect(admits(unenriched, ["config.view"])).toBe(false);
+    expect(admits(unenriched, ["admin.roles"])).toBe(false);
+    expect(isStaff(unenriched)).toBe(false);
   });
 });
 
@@ -160,7 +211,9 @@ describe("AccessResolver", () => {
     let now = 1_000;
     const fake = resolver((guildId, userId) => actor({ guildId, userId, officer: true }));
     const access = new AccessResolver(fake.resolve, { now: () => now });
-    expect(await access.actor(GUILD, USER, "get")).toMatchObject({ officer: true });
+    expect(await access.actor(GUILD, USER, "get")).toMatchObject({
+      access: { roles: ["officer"] },
+    });
     now += ACTOR_MEMO_MS - 1;
     await access.actor(GUILD, USER, "get");
     expect(fake.calls).toHaveLength(1);
@@ -176,7 +229,7 @@ describe("AccessResolver", () => {
     const answers = await Promise.all(
       Array.from({ length: 10 }, () => access.actor(GUILD, USER, "get")),
     );
-    expect(answers.every((answer) => answer?.officer === true)).toBe(true);
+    expect(answers.every((answer) => answer !== null && isStaff(answer))).toBe(true);
     expect(fake.calls).toHaveLength(1);
     // An outage is shared the same way, and then forgotten, so the next GET asks again.
     const outage = resolver(() => new Error("network down"));
@@ -208,11 +261,13 @@ describe("AccessResolver", () => {
       let officer = true;
       const fake = resolver(() => actor({ officer }));
       const access = new AccessResolver(fake.resolve, { now: () => 0 });
-      expect(await access.actor(GUILD, USER, "get")).toMatchObject({ officer: true });
+      const officers = { access: { roles: ["officer"] } };
+      const nobody = { access: { roles: [] } };
+      expect(await access.actor(GUILD, USER, "get")).toMatchObject(officers);
       // Demoted in Discord: the next POST or sign-in sees it at once, and so does every GET after.
       officer = false;
-      expect(await access.actor(GUILD, USER, fresh)).toMatchObject({ officer: false });
-      expect(await access.actor(GUILD, USER, "get")).toMatchObject({ officer: false });
+      expect(await access.actor(GUILD, USER, fresh)).toMatchObject(nobody);
+      expect(await access.actor(GUILD, USER, "get")).toMatchObject(nobody);
       expect({ fresh, calls: fake.calls.length }).toEqual({ fresh, calls: 2 });
     }
   });
@@ -350,10 +405,10 @@ const testPage = (path: string, access: readonly PageAccess[], nav?: string): Pa
   });
 
 describe("listServers", () => {
-  const STATUS = testPage("/g/:guild/status", ["officer"], "Status");
-  const ROLES = testPage("/g/:guild/roles", ["manager"], "Roles");
-  const AUDIT = testPage("/g/:guild/audit", ["manager", "officer"]);
-  const PICKS = testPage("/g/:guild/picks", ["member", "guest", "officer"], "Picks");
+  const STATUS = testPage("/g/:guild/status", ["sync.view_all"], "Status");
+  const ROLES = testPage("/g/:guild/roles", ["admin.roles"], "Roles");
+  const AUDIT = testPage("/g/:guild/audit", ["admin.roles", "config.view"]);
+  const PICKS = testPage("/g/:guild/picks", ["selfroles.use"], "Picks");
   const guilds = (count: number): WebGuild[] =>
     Array.from({ length: count }, (_, index) => ({
       id: String(100000000000000000n + BigInt(index)),
@@ -366,7 +421,7 @@ describe("listServers", () => {
     const fake = resolver((guildId) => {
       if (guildId === officerAt.id) return actor({ guildId, officer: true, roleIds: ["300"] });
       if (guildId === managerAt.id)
-        return actor({ guildId, officer: true, serverManager: true, manageRoles: true });
+        return actor({ guildId, serverManager: true, manageRoles: true });
       if (guildId === memberAt.id) return actor({ guildId });
       return discordError(10007, 404);
     });
@@ -456,10 +511,10 @@ describe("listServers", () => {
 describe("navLinks", () => {
   test("lists the admitted pages that have a label, in path order, marking the current one", () => {
     const pages = [
-      testPage("/g/:guild/status", ["officer"], "Status"),
-      testPage("/g/:guild/roles", ["manager"], "Roles"),
-      testPage("/g/:guild/audit", ["officer"], "Audit"),
-      testPage("/g/:guild/hidden", ["officer"]),
+      testPage("/g/:guild/status", ["sync.view_all"], "Status"),
+      testPage("/g/:guild/roles", ["admin.roles"], "Roles"),
+      testPage("/g/:guild/audit", ["config.view"], "Audit"),
+      testPage("/g/:guild/hidden", ["config.view"]),
     ];
     expect(navLinks(pages, ACTORS.roleOfficer, "/g/:guild/status")).toEqual([
       { href: `/g/${GUILD}/audit`, label: "Audit", current: false },
@@ -468,10 +523,10 @@ describe("navLinks", () => {
     expect(navLinks(pages, ACTORS.member)).toEqual([]);
   });
 
-  test("members and guests see only the pages their flag opens; officers see those too", () => {
+  test("members and guests see only the pages their permissions open; officers see those too", () => {
     const pages = [
-      testPage("/g/:guild/status", ["officer"], "Status"),
-      testPage("/g/:guild/picks", ["member", "guest", "officer"], "Picks"),
+      testPage("/g/:guild/status", ["sync.view_all"], "Status"),
+      testPage("/g/:guild/picks", ["selfroles.use"], "Picks"),
     ];
     const picks = { href: `/g/${GUILD}/picks`, label: "Picks", current: false };
     for (const viewer of [ACTORS.member, ACTORS.guest, ACTORS.timedOutMember])

@@ -7,6 +7,7 @@ import { InteractionRouter } from "../../src/bot/router.js";
 import { Services } from "../../src/bot/services.js";
 import { reply } from "../../src/discord/presenters/reply.js";
 import { interactionFixture } from "../fixtures/interactions.js";
+import { NO_ACCESS } from "../../src/domain/policy.js";
 
 test("the selected development guild overrides private command/component defaults", () => {
   expect(replyAcknowledgement("123", true, "123")).toEqual({});
@@ -37,8 +38,8 @@ test("an in-place update never sets or changes visibility, in or outside the tes
         resolveActor: async (guildId, userId) => ({
           guildId,
           userId,
-          officer: false,
           manageRoles: false,
+          access: NO_ACCESS,
         }),
         report: () => {},
       },

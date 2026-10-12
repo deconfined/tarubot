@@ -1,5 +1,6 @@
 /** Status (#43, ADR D9): this server's background work and the bot's health, for officers. */
 import { applicationKey, gatewayKey, lifecycleKey } from "../../application/keys.js";
+import { requirePermission } from "../../domain/policy.js";
 import { definePage } from "../page.js";
 import { guildNames } from "../mentions.js";
 import { processStatus, renderStatus } from "../views/status.js";
@@ -7,13 +8,14 @@ import { processStatus, renderStatus } from "../views/status.js";
 export default definePage({
   path: "/g/:guild/status",
   title: "Background work",
-  access: ["officer"],
+  access: ["sync.view_all"],
   requires: [applicationKey, lifecycleKey, gatewayKey],
   nav: "Background work",
   icon: "activity",
   async get({ actor, guildId, services }) {
-    // syncStatus authorizes the actor again at the application boundary, as REQUIREMENTS.md asks
-    // of commands and buttons ("reauthorize the current actor").
+    // Authorize again at the page, as REQUIREMENTS.md asks of commands and buttons ("reauthorize
+    // the current actor"): syncStatus itself only scopes what it lists by sync.view_all.
+    requirePermission(actor, guildId, "sync.view_all");
     const sync = await services.get(applicationKey).syncStatus(actor, null);
     return renderStatus({
       process: processStatus(services.get(lifecycleKey).status()),

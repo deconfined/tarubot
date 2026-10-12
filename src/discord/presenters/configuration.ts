@@ -1482,7 +1482,8 @@ const ROLE_FIELDS = {
     label: "Officer",
     article: "an",
     saved: (role: string) => `${role} is now the bot-managed Officer role.`,
-    cleared: "Delegated officer access ends: only people with Manage Server count as officers.",
+    cleared:
+      "Delegated officer access ends: only server managers (Manage Server and Manage Roles) can use officer functions.",
   },
   leader_role_id: {
     label: "FC Leader",

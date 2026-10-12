@@ -898,3 +898,59 @@ describe("/suggest's cards (2.28.0)", () => {
     expect(github.fields?.[0]?.name).toBe("Try again");
   });
 });
+
+describe("the ledger's Member-role card (2.44.0)", () => {
+  const MEMBERSHIP = "The FC ledger is for confirmed members of this server's Free Company.";
+  const MEMBER_ROLE =
+    "The FC ledger is for confirmed members of this server's Free Company who hold its Member role.";
+  /** The service's ledger refusals: the Member-role one names the permission; membership doesn't. */
+  const refusal = (permission?: "ledger.view" | "ledger.deposit") =>
+    permission
+      ? new Failure("forbidden", MEMBER_ROLE, 0, { kind: "scope", scope: "membership", permission })
+      : new Failure("forbidden", MEMBERSHIP, 0, { kind: "scope", scope: "membership" });
+  const MEMBER_ROLE_STEPS = [
+    "1. TaruBot gives confirmed FC members the Member role after a roster check. /refresh can start one; then try again.",
+    "2. If this server has no Member role, or TaruBot's role changes are paused, ask an officer or a server manager.",
+  ].join("\n");
+  const ROSTER_STEPS = [
+    "1. Link your character with /claim and /verify, or ask an officer to /assign it.",
+    "2. Make sure that character is in the Free Company on the Lodestone.",
+    "3. Once a roster check confirms you, try again. /refresh can start one.",
+  ].join("\n");
+
+  test("a confirmed member without ledger.view or ledger.deposit is led to the Member role", () => {
+    const cases = [
+      ["ledger.deposit", "/ledger deposit"],
+      ["ledger.view", "/ledger balance"],
+      ["ledger.view", "/ledger history"],
+    ] as const;
+    for (const [permission, scope] of cases) {
+      const embed = expectFailure(render(refusal(permission), { viewer: VIEWERS.member, scope }), {
+        code: "forbidden",
+        ref: REF,
+        tone: "warning",
+        title: "FC membership needed",
+      });
+      expect(embed.description).toBe(`${MEMBER_ROLE} Nothing was changed.`);
+      expect(embed.fields).toEqual([{ name: "How to qualify", value: MEMBER_ROLE_STEPS }]);
+    }
+  });
+
+  test("the plain membership card keeps its link and roster steps, and /suggest its own", () => {
+    for (const scope of ["/ledger deposit", "/ledger balance"]) {
+      const embed = expectFailure(render(refusal(), { viewer: VIEWERS.member, scope }), {
+        code: "forbidden",
+        ref: REF,
+        tone: "warning",
+        title: "FC membership needed",
+      });
+      expect(embed.description).toBe(`${MEMBERSHIP} Nothing was changed.`);
+      expect(embed.fields).toEqual([{ name: "How to qualify", value: ROSTER_STEPS }]);
+    }
+    const suggest = onlyEmbed(FAILURE_CASES["forbidden membership · /suggest · member"].render());
+    expect(suggest.fields?.map((item) => item.name)).toEqual(["How to qualify"]);
+    expect(suggest.fields?.[0]?.value).toContain("the Guest role, or the Member role");
+    expect(suggest.fields?.[0]?.value).not.toContain("TaruBot gives confirmed FC members");
+    expect(suggest.fields?.[0]?.value).not.toBe(ROSTER_STEPS);
+  });
+});
