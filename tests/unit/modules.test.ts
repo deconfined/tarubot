@@ -2,11 +2,13 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { Client, Events, ModalBuilder, SlashCommandBuilder } from "discord.js";
 import { Command, defineCommand } from "../../src/bot/command.js";
+import { Component, defineComponent } from "../../src/bot/component.js";
 import type { BotContext } from "../../src/bot/context.js";
 import { bindEvents, loadCommands, loadComponents, loadEvents } from "../../src/bot/discovery.js";
 import { InteractionRouter } from "../../src/bot/router.js";
 import { ServiceKey, Services } from "../../src/bot/services.js";
 import { viewerOf } from "../../src/discord/presenters/audience.js";
+import { NO_ACCESS } from "../../src/domain/policy.js";
 import { Presented, reply } from "../../src/discord/presenters/reply.js";
 import { loadPages } from "../../src/web/pages.js";
 
@@ -23,8 +25,8 @@ function context(client: Client, services = new Services()): BotContext {
     resolveActor: async (guildId, userId) => ({
       guildId,
       userId,
-      officer: false,
       manageRoles: false,
+      access: NO_ACCESS,
     }),
     report: () => {},
   };
@@ -157,10 +159,39 @@ test("events support multiple subscribers, once semantics, failure containment a
   }
 });
 
+test("module permissions are TaruBot permission ids, checked at definition (2.44.0)", () => {
+  const data = new SlashCommandBuilder().setName("gated").setDescription("Contract fixture");
+  const execute = () => reply({ tone: "info", title: "Ready" });
+  const declared = defineCommand({ data, execute, permissions: ["config.view", "admin.fc"] });
+  expect(declared.permissions).toEqual(["config.view", "admin.fc"]);
+  expect(Object.isFrozen(declared.permissions)).toBe(true);
+  expect(defineCommand({ data, execute }).permissions).toEqual([]);
+  expect(
+    defineComponent({ prefix: "gated", execute, permissions: ["guests.decide"] }).permissions,
+  ).toEqual(["guests.decide"]);
+  // Discovered modules are untyped at runtime: 2.43.0's access levels and unknown ids must fail
+  // at startup rather than admit or refuse oddly.
+  for (const permissions of ["officer", ["officer"], ["config.everything"]]) {
+    expect(() => Reflect.construct(Command, [{ data, execute, permissions }])).toThrow(
+      "A module's permissions must be TaruBot permission ids.",
+    );
+    expect(() => Reflect.construct(Component, [{ prefix: "gated", execute, permissions }])).toThrow(
+      "A module's permissions must be TaruBot permission ids.",
+    );
+  }
+  // An immediate modal opens before any service runs, so it may declare no permission.
+  const modal = () => new ModalBuilder().setCustomId("gated").setTitle("Gated");
+  expect(defineCommand({ data, modal, permissions: [] }).permissions).toEqual([]);
+  expect(() =>
+    Reflect.construct(Command, [{ data, modal, permissions: ["guests.apply"] }]),
+  ).toThrow("Immediate modal commands must be unprivileged; authorize submissions instead.");
+});
+
 test("component discovery owns custom-ID namespaces independently", async () => {
   const components = await loadComponents(new URL("components/", fixtures));
   expect([...components.keys()]).toEqual(["fixture"]);
-  expect(components.get("fixture")?.access).toBe("user");
+  // Declaring no permissions admits any human member of the guild (2.44.0).
+  expect(components.get("fixture")?.permissions).toEqual([]);
   // Components acknowledge with a new reply unless they choose to update their message.
   expect(components.get("fixture")?.acknowledge).toBe("reply");
 });
@@ -175,7 +206,7 @@ test("duplicate component prefixes fail discovery instead of shadowing a namespa
 test("discovered fixtures answer with presenter replies and receive a viewer", async () => {
   const client = new Client({ intents: [] });
   try {
-    const actor = { guildId: "100", userId: "400", officer: false, manageRoles: false };
+    const actor = { guildId: "100", userId: "400", manageRoles: false, access: NO_ACCESS };
     const viewer = viewerOf(actor, "1290000000000000001");
     const runtime = { ...context(client), actor, viewer };
     const second = (await loadCommands(new URL("valid/", fixtures))).get("fixture-second");

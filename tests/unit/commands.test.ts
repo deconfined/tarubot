@@ -1,7 +1,7 @@
 /** Snapshot the declared feature surface through real discovery, including nested subcommands. */
 import { expect, test } from "bun:test";
 import { ApplicationCommandOptionType, InteractionContextType } from "discord.js";
-import { loadCommands } from "../../src/bot/discovery.js";
+import { loadCommands, loadComponents } from "../../src/bot/discovery.js";
 import { applicationKey } from "../../src/application/keys.js";
 import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
@@ -17,6 +17,7 @@ import { viewerOf } from "../../src/discord/presenters/audience.js";
 import { cursor, entryRef, userId, uuid } from "../../src/discord/selectors.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure, lodestoneId } from "../../src/domain/values.js";
+import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture } from "../fixtures/interactions.js";
 import { configChange, layoutOn } from "../fixtures/replies/configuration.js";
 
@@ -108,6 +109,39 @@ test("command inventory exactly matches the declared public surface", async () =
   );
 });
 
+test("the router's permission gates are pinned (2.44.0)", async () => {
+  // Any-of, a coarse first gate: each service still checks the exact permission. Every module not
+  // listed admits any human member of the guild, and its service decides.
+  const gated = (modules: ReadonlyMap<string, { permissions: readonly string[] }>) =>
+    Object.fromEntries(
+      [...modules]
+        .filter(([, module]) => module.permissions.length)
+        .map(([name, module]) => [name, module.permissions]),
+    );
+  expect(gated(await loadCommands())).toEqual({
+    assign: ["characters.assign"],
+    unassign: ["characters.unassign"],
+    // Any part of /config admits it, so officers reach show, validate and the channels.
+    config: [
+      "config.view",
+      "config.channels",
+      "config.officer_channel",
+      "config.guest_applications",
+      "admin.fc",
+      "admin.roles",
+      "admin.ranks",
+    ],
+    // Server managers only: the router refuses everyone else with the manager card.
+    officer: ["admin.grants"],
+    setup: ["admin.setup"],
+  });
+  expect(gated(await loadComponents())).toEqual({
+    config: ["config.view"],
+    details: ["members.view", "ledger.audit", "sync.view_all"],
+    guest: ["guests.decide"],
+  });
+});
+
 test("every member option suggests server members (owner decision, 2026-09-24)", async () => {
   interface Option {
     type: number;
@@ -169,7 +203,13 @@ test("/config role_layout and /config roles officer adopt_holders reach the serv
   };
   const replies: unknown[] = [];
   const fixture = interactionFixture();
-  const actor: Actor = { guildId: "100", userId: "400", officer: true, manageRoles: true };
+  // Binding access roles and the role layout take a server manager (admin.roles, 2.44.0).
+  const actor: Actor = actorOf({
+    guildId: "100",
+    userId: "400",
+    serverManager: true,
+    manageRoles: true,
+  });
   const run = async (options: unknown[], resolved?: unknown) => {
     const reply = await configCommand.execute?.({
       client: fixture.client,
@@ -179,7 +219,7 @@ test("/config role_layout and /config roles officer adopt_holders reach the serv
       report: () => {},
       resolveActor: async () => actor,
       actor,
-      // The router derives the viewer from the same actor; these officers render officer views.
+      // The router derives the viewer from the same actor; a server manager renders manager views.
       viewer: viewerOf(actor, "1290000000000000001"),
       interaction: fixture.slash("config", options, resolved),
     });
@@ -370,7 +410,7 @@ test("commands reject malformed IDs with an option detail before any service cal
   // /assign reads the configuration before parsing its member option.
   Object.assign(app, { guild: async () => ({}) });
   const fixture = interactionFixture();
-  const actor: Actor = { guildId: "100", userId: "400", officer: true, manageRoles: true };
+  const actor: Actor = actorOf({ guildId: "100", userId: "400", officer: true, manageRoles: true });
   const S = ApplicationCommandOptionType;
   const text = (name: string, value: string) => ({ type: S.String, name, value });
   const sub = (name: string, options: unknown[]) => [{ type: S.Subcommand, name, options }];

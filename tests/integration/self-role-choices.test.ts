@@ -49,6 +49,7 @@ import {
   type QueueEvent,
   requeueParked,
 } from "../../src/jobs/queue.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
 import { FakeGuildAccess } from "../fixtures/guild-access.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -324,19 +325,23 @@ describe.skipIf(!url)("members' role choices", () => {
     (event) => events.push(event),
   );
 
-  /** A member, guest or officer as a POST resolves them: their roles from the fake Discord now. */
-  const actor = (userId: string, extra: Partial<Actor> = {}): Actor => ({
-    guildId: GUILD,
-    userId,
-    officer: false,
-    manageRoles: false,
-    roleIds: [...(held.get(userId) ?? [])],
-    member: userId === USER.member,
-    guest: userId === USER.guest,
-    botAdministrator: false,
-    timedOut: false,
-    ...extra,
-  });
+  /**
+   * A member, guest or officer as a POST resolves them: their roles from the fake Discord now, and
+   * the access those flags give (actorOf).
+   */
+  const actor = (userId: string, extra: Partial<ActorSpec> = {}): Actor =>
+    actorOf({
+      guildId: GUILD,
+      userId,
+      officer: false,
+      manageRoles: false,
+      roleIds: [...(held.get(userId) ?? [])],
+      member: userId === USER.member,
+      guest: userId === USER.guest,
+      botAdministrator: false,
+      timedOut: false,
+      ...extra,
+    });
   const save = (userId: string, ...categories: CategoryChoice[]) =>
     selfRoles.choose(actor(userId), { categories } satisfies RoleChoiceRequest);
   /** Every roles.self row, oldest first. */

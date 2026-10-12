@@ -65,7 +65,7 @@ export default defineCommand({
         )
         .addBooleanOption((option) => option.setName("confirm").setDescription(CONFIRM)),
     ),
-  access: "officer",
+  permissions: ["admin.setup"],
   requires: [applicationKey, roleAdministrationKey],
   async execute({ actor, viewer, interaction, services }) {
     const administration = services.get(roleAdministrationKey);

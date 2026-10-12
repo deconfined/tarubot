@@ -22,7 +22,7 @@ const obsolete = (): Failure =>
 
 export default defineComponent({
   prefix: "config",
-  access: "officer",
+  permissions: ["config.view"],
   requires: [applicationKey],
   // A pure read re-rendered in place; the router still replies instead unless the view is private
   // or belongs to the presser, so a click never rewrites someone else's public test-guild view.

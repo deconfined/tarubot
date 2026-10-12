@@ -30,7 +30,7 @@ Members normally link their own characters with a Lodestone token. Officers can 
 - Assigning a character the member already has linked changes nothing and says so.
 
 :::note[Assignments and officer access]
-The character's in-game rank counts for officer access only when the assigning officer is a server manager (Manage Server and Manage Roles). An assignment by an officer who holds only the Officer role gives membership, never officer access, so one officer can't appoint another indirectly. The reply says so when an assignment can't grant officer access.
+The character's in-game rank counts for officer access, or the FC Leader role, only when the assigning officer is a server manager (Manage Server and Manage Roles). An assignment by any other officer gives membership, never officer access or FC Leader, so one officer can't appoint another indirectly. The reply says so when an assignment can't grant officer access.
 :::
 
 ## Remove a link
@@ -44,6 +44,7 @@ The character's in-game rank counts for officer access only when the assigning o
 - `character` suggests the chosen member's linked characters.
 - It works for members who have left the server: paste their user ID into `member`.
 - It works while the Lodestone is down, because it uses stored data.
+- Only a server manager can remove a link that counts for rank: one the member verified, an imported one, or one a server manager assigned. Officers can remove the links other officers assigned. Members can always remove their own with `/unclaim`.
 - The member's roles are rechecked. If it was their main character, TaruBot puts back the nickname they had before it changed theirs, when it can.
 
 The ended link stays in the member's history.

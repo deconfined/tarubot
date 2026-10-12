@@ -29,7 +29,12 @@ import {
   RoleAdministration,
   type RoleProvisioner,
 } from "../../src/application/role-administration.js";
-import { rankAccess, desiredRankRole } from "../../src/application/rank-policy.js";
+import {
+  desiredRankRole,
+  linkConfersRank,
+  linkConfersRankSql,
+  rankAccess,
+} from "../../src/application/rank-policy.js";
 import { Synchronization } from "../../src/application/synchronization.js";
 import type {
   ApplicationRecord,
@@ -40,7 +45,7 @@ import type {
 } from "../../src/application/records.js";
 import type { Configuration } from "../../src/config/env.js";
 import type { Actor } from "../../src/domain/policy.js";
-import { desiredAccess } from "../../src/domain/policy.js";
+import { desiredAccess, isStaff } from "../../src/domain/policy.js";
 import { Failure, json } from "../../src/domain/values.js";
 import { audit, Database, ensureUser, orm } from "../../src/infrastructure/postgres/database.js";
 import { Lodestone } from "../../src/infrastructure/lodestone/client.js";
@@ -64,6 +69,7 @@ import { announceChangelog } from "../../src/jobs/queue.js";
 import { notesSince } from "../../src/domain/changelog.js";
 import { GuildAccess } from "../../src/application/guild-access.js";
 import { NEW_GUILD_ROW } from "../../src/application/guild-defaults.js";
+import { actorOf, type ActorSpec } from "../fixtures/actors.js";
 import { FakeGuildAccess } from "../fixtures/guild-access.js";
 import { discordAccessFixture } from "../fixtures/discord-access.js";
 import { interactionFixture } from "../fixtures/interactions.js";
@@ -274,12 +280,13 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
   const sync = new Synchronization(service);
   const accessPort = new FakeGuildAccess();
   const access = new GuildAccess(service, accessPort);
-  const actor: Actor = {
+  /** A server manager in the imported guild: Manage Server and Manage Roles, so every permission. */
+  const actor: Actor = actorOf({
     guildId: guild,
     userId: "999999999999999990",
-    officer: true,
     manageRoles: true,
-  };
+    serverManager: true,
+  });
   beforeAll(async () => {
     // A fresh schema verifies migration installation as well as import publication.
     await db.query("DROP SCHEMA public CASCADE");
@@ -451,7 +458,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     );
   });
   test("hash-only verification survives a new service instance and concurrent completion", async () => {
-    const self = { ...actor, userId: "90004", officer: false, manageRoles: false };
+    const self = actorOf({ ...actor, userId: "90004", serverManager: false, manageRoles: false });
     const identity = {
       id: "77777778",
       name: "Verified Character",
@@ -488,7 +495,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).toBe(false);
   });
   test("concurrent applications and opposing decisions have one durable outcome", async () => {
-    const applicant = { ...actor, userId: "90005", officer: false, manageRoles: false };
+    const applicant = actorOf({
+      ...actor,
+      userId: "90005",
+      serverManager: false,
+      manageRoles: false,
+    });
     const input = await applicationInput(applicant);
     const applications = await Promise.all([
       service.apply(applicant, input),
@@ -609,7 +621,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(desiredAccess(await sync.facts(currentGuild, member)).member).toBe(true);
     await expect(
       service.ledger(
-        { ...actor, userId: historicalOwner, officer: false },
+        // Holding the Member role: only the confirmed roster evidence is missing.
+        actorOf({ ...actor, userId: historicalOwner, serverManager: false, member: true }),
         "deposit",
         1,
         "Needs confirmed roster evidence",
@@ -813,7 +826,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       guest: true,
     });
     await db.query("UPDATE guilds SET effects_enabled=true WHERE id=$1", [guild]);
-    const self = { ...actor, userId: historicalOwner, officer: false };
+    const self = actorOf({ ...actor, userId: historicalOwner, serverManager: false });
     await service.preferences(self, identity.id, true);
     const reconcile = async () => {
       const key = await enqueue(
@@ -1012,6 +1025,15 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     );
     const original = await service.guild(actor);
     expect(await service.memberEligible(db.pool, original, owner)).toBe(true);
+    // Confirmed membership reads the ledger through the Member role's ledger.view; holding only
+    // Guest, which doesn't carry it, the same person is refused (2.44.0).
+    const inGuild = actorOf({ guildId: guild, userId: owner, manageRoles: false, member: true });
+    expect(await service.ledgerRead(inGuild, null, null, false)).toMatchObject({
+      account: { fc_id: fc },
+    });
+    await expect(
+      service.ledgerRead(actorOf({ ...inGuild, member: false, guest: true }), null, null, false),
+    ).rejects.toMatchObject({ code: "forbidden", detail: { kind: "scope", scope: "membership" } });
     const otherGuild = "777777777777777777";
     await db.query("INSERT INTO guilds(id,fc_id,ledger_channel_id) VALUES($1,$2,'777888999')", [
       otherGuild,
@@ -1025,13 +1047,15 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       "Second guild opening",
       randomUUID(),
     );
-    const visitor: Actor = {
+    // The owner holds the Member role there too, so only this guild's roster evidence is missing.
+    const visitor: Actor = actorOf({
       ...actor,
       guildId: otherGuild,
       userId: owner,
-      officer: false,
+      serverManager: false,
       manageRoles: false,
-    };
+      member: true,
+    });
     const second = await service.guild(visitor);
     expect(await service.memberEligible(db.pool, second, owner)).toBe(false);
     await expect(service.ledgerRead(visitor, null, null, false)).rejects.toMatchObject({
@@ -1041,11 +1065,11 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(await service.characters(visitor, owner)).toEqual({ characters: [] });
     const balance = z
       .object({ account: z.object({ balance: z.bigint() }) })
-      .parse(await service.ledgerRead({ ...visitor, officer: true }, null, null, false));
+      .parse(await service.ledgerRead(actorOf({ ...visitor, officer: true }), null, null, false));
     expect(balance.account.balance).toBe(42n);
   });
   test("obsolete join context cancels pending review and forged message identity is rejected", async () => {
-    const applicant = { ...actor, userId: "90006", officer: false };
+    const applicant = actorOf({ ...actor, userId: "90006", serverManager: false });
     const application = z
       .object({ id: z.string() })
       .parse(await service.apply(applicant, await applicationInput(applicant)));
@@ -1066,7 +1090,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).toBe("cancelled");
   });
   test("rejoining replaces an obsolete pending application", async () => {
-    const actorInGuild = { ...actor, userId: "90007", officer: false };
+    const actorInGuild = actorOf({ ...actor, userId: "90007", serverManager: false });
     const opened = await applicationInput(actorInGuild);
     const old = z.object({ id: z.string() }).parse(await service.apply(actorInGuild, opened));
     const member = members.get(actorInGuild.userId);
@@ -1207,12 +1231,11 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         data: { embeds: [{ footer: expect.anything() }] },
       });
       // A form opened earlier, or a forged submission, is refused again at submission.
-      const applicant: Actor = {
+      const applicant: Actor = actorOf({
         guildId: closedGuild,
         userId: visitor.id,
-        officer: false,
         manageRoles: false,
-      };
+      });
       await expect(
         service.apply(applicant, await applicationInput(applicant)),
       ).rejects.toMatchObject({ code: "setup", message: GUEST_APPLICATIONS_CLOSED });
@@ -1383,7 +1406,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await db.orm.delete(t.jobs).where(eq(t.jobs.id, key));
   });
   test("application operations enforce officer and target-owner authorization", async () => {
-    const ordinary = { ...actor, officer: false, manageRoles: false };
+    const ordinary = actorOf({ ...actor, serverManager: false, manageRoles: false });
     // Each refusal names its rule in the scope detail; officer-only actions and another member's
     // records are refused differently, and nothing matches on message text.
     const officerOnly = { code: "forbidden", detail: { kind: "scope", scope: "officer" } };
@@ -1402,7 +1425,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await expect(service.applicationChoices(ordinary)).rejects.toMatchObject(officerOnly);
   });
   test("sync status includes child delivery work and protects other requesters' runs", async () => {
-    const requestor = { ...actor, userId: "90007", officer: false };
+    const requestor = actorOf({ ...actor, userId: "90007", serverManager: false });
     const requested = await sync.refresh(requestor, false);
     expect(requested).toMatchObject({
       forced: false,
@@ -1651,7 +1674,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [previewKey]);
   });
   test("replacement, tuple binding and expiry prevent invalid proof completion", async () => {
-    const owner = { ...actor, userId: "90013", officer: false };
+    const owner = actorOf({ ...actor, userId: "90013", serverManager: false });
     const identity = {
       id: "77777782",
       name: "Proof Fixture",
@@ -1695,7 +1718,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       .object({ id: z.string() })
       .parse(
         await service.apply(
-          { ...actor, userId: owner, officer: false },
+          actorOf({ ...actor, userId: owner, serverManager: false }),
           await applicationInput({ ...actor, userId: owner }),
         ),
       );
@@ -1778,7 +1801,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     };
     const administration = new RoleAdministration(service, provisioner, access);
     await expect(
-      administration.setup({ ...manager, serverManager: false }, "DevBot", fc, "Officer"),
+      administration.setup(
+        actorOf({ ...manager, officer: true, serverManager: false }),
+        "DevBot",
+        fc,
+        "Officer",
+      ),
     ).rejects.toThrow("Manage Server");
     const first = z
       .object({ roleLayout: z.string() })
@@ -1837,16 +1865,16 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const officerRole = configured.officer_role_id;
     if (!officerRole) throw new Error("Missing officer role");
     await administration.officer(manager, "90030", true, "Manual officer fixture");
-    const base: Actor = {
+    // As gateway.actor resolves someone holding the Officer role: no access until enrichActor.
+    const base: Actor = actorOf({
       guildId: setupGuild,
       userId: "90030",
-      officer: false,
       serverManager: false,
       manageRoles: false,
       roleIds: [officerRole],
-    };
+    });
     const delegated = await service.enrichActor(base);
-    expect(delegated.officer).toBe(true);
+    expect(isStaff(delegated)).toBe(true);
     await expect(
       administration.officer(
         { ...delegated, manageRoles: true },
@@ -1913,9 +1941,9 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect((await rankAccess(db, configured, "90031", 21600)).leader).toBe("yes");
     expect((await rankAccess(db, configured, "90032", 21600)).officer).toBe("yes");
     expect((await rankAccess(db, configured, "90033", 21600)).officer).toBe("no");
-    expect((await service.enrichActor({ ...base, userId: "90032" })).officer).toBe(true);
+    expect(isStaff(await service.enrichActor({ ...base, userId: "90032" }))).toBe(true);
     await administration.officer(manager, "90032", false, "Rank override fixture");
-    expect((await service.enrichActor({ ...base, userId: "90032" })).officer).toBe(false);
+    expect(isStaff(await service.enrichActor({ ...base, userId: "90032" }))).toBe(false);
     const revoked = await rankAccess(db, configured, "90032", 21600);
     expect(desiredRankRole(revoked.officer, true, true)).toBe(false);
     // Like grant and revoke, a manager below the Officer role is refused and the revoke stands.
@@ -1936,7 +1964,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       provisioner.validateRole = validateRole;
     }
     expect(refusals).toEqual([[configured.id, configured.officer_role_id, manager.userId, false]]);
-    expect((await service.enrichActor({ ...base, userId: "90032" })).officer).toBe(false);
+    expect(isStaff(await service.enrichActor({ ...base, userId: "90032" }))).toBe(false);
     // /officer reset removes the revoke, so the in-game rank decides again; a second reset has
     // nothing to remove (owner decision, 2026-09-24).
     expect(await administration.officerReset(manager, "90032", "Rank decides")).toMatchObject({
@@ -1944,14 +1972,18 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       previous: "revoked",
       rankConfigured: true,
     });
-    expect((await service.enrichActor({ ...base, userId: "90032" })).officer).toBe(true);
+    expect(isStaff(await service.enrichActor({ ...base, userId: "90032" }))).toBe(true);
     expect(await administration.officerReset(manager, "90032", "Again")).toMatchObject({
       status: "unchanged",
       effects: "unchanged",
       previous: null,
     });
     await expect(
-      administration.officerReset({ ...manager, serverManager: false }, "90032", "Not allowed"),
+      administration.officerReset(
+        actorOf({ ...manager, officer: true, serverManager: false }),
+        "90032",
+        "Not allowed",
+      ),
     ).rejects.toMatchObject({ code: "forbidden" });
     await service.configureOfficerRank(manager, null);
     expect((await rankAccess(db, await service.guild(manager), "90030", 21600)).manualOfficer).toBe(
@@ -2016,7 +2048,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await service.guestAction(actor, user, false, "Welcome back", randomUUID());
     expect((await service.guestStatus(actor, user)).grants).toHaveLength(1);
     await expect(
-      service.guestReset({ ...actor, officer: false, serverManager: false }, user, "No"),
+      service.guestReset(actorOf({ ...actor, serverManager: false }), user, "No"),
     ).rejects.toMatchObject({ code: "forbidden" });
   });
 
@@ -2270,10 +2302,10 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         .where(and(eq(t.jobs.guild_id, layoutGuild), eq(t.jobs.kind, "roles.layout")));
     // Officer-only actors and managers without Manage Roles cannot change presentation.
     await expect(
-      app.configureRoleLayout({ ...manager, serverManager: false }, true),
+      app.configureRoleLayout(actorOf({ ...manager, officer: true, serverManager: false }), true),
     ).rejects.toMatchObject({ code: "forbidden" });
     await expect(
-      app.configureRoleLayout({ ...manager, manageRoles: false }, true),
+      app.configureRoleLayout(actorOf({ ...manager, manageRoles: false }), true),
     ).rejects.toMatchObject({ code: "forbidden" });
     unmanageable = "73003";
     await expect(app.configureRoleLayout(manager, true)).rejects.toMatchObject({
@@ -2442,6 +2474,23 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       .where(and(eq(t.jobs.guild_id, guildId), eq(t.jobs.kind, "roles.layout")));
 
   test("a server first configured by /config starts with the role layout off until a manager opts in", async () => {
+    // Only a server manager starts a new server's configuration (2.44.0): with no guild row no
+    // role counts, and Manage Server without Manage Roles is nothing (owner decision Q2 A).
+    const serverOnly = await service.enrichActor(
+      actorOf({
+        guildId: "666666666666666650",
+        userId: "76500",
+        manageRoles: false,
+        serverManager: true,
+      }),
+    );
+    await expect(service.configure(serverOnly, "ledger_channel_id", "76501")).rejects.toMatchObject(
+      {
+        code: "forbidden",
+        detail: { kind: "scope", scope: "officer", permission: "config.channels" },
+      },
+    );
+    expect(await db.query("SELECT id FROM guilds WHERE id='666666666666666650'")).toHaveLength(0);
     // CFG-07 as of 2.35.0: the first save inserts NEW_GUILD_ROW, whichever setting it saves, and
     // never relies on the column default (still on, schema 010). Before 2.35.0 the role save
     // below would also have queued a layout pass.
@@ -2595,9 +2644,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const skipper: Actor = { ...actor, guildId: skipping, serverManager: true };
     // Manager authority is unchanged: binding the Officer role still needs Manage Server.
     await expect(
-      app.configure({ ...skipper, serverManager: false }, "officer_role_id", officerRole, {
-        adoptHolders: false,
-      }),
+      app.configure(
+        actorOf({ ...skipper, officer: true, serverManager: false }),
+        "officer_role_id",
+        officerRole,
+        { adoptHolders: false },
+      ),
     ).rejects.toMatchObject({ code: "forbidden" });
     // The option belongs to an Officer role binding only.
     await expect(
@@ -2687,7 +2739,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const administration = new RoleAdministration(service, provisioner, access);
     // Manager authority is unchanged even though no role is bound yet.
     await expect(
-      administration.officer({ ...manager, serverManager: false }, exception, true, "Exception"),
+      administration.officer(
+        actorOf({ ...manager, officer: true, serverManager: false }),
+        exception,
+        true,
+        "Exception",
+      ),
     ).rejects.toThrow("Manage Server");
     // No role is bound, so the grant is only recorded; there is nothing to apply yet.
     expect(
@@ -2705,16 +2762,17 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(before.officer_role_id).toBeNull();
     // Without a bound role the override confers no authority (Service.enrichActor).
     expect(
-      (
-        await service.enrichActor({
-          guildId,
-          userId: exception,
-          officer: false,
-          serverManager: false,
-          manageRoles: false,
-          roleIds: [officerRole],
-        })
-      ).officer,
+      isStaff(
+        await service.enrichActor(
+          actorOf({
+            guildId,
+            userId: exception,
+            serverManager: false,
+            manageRoles: false,
+            roleIds: [officerRole],
+          }),
+        ),
+      ),
     ).toBe(false);
     // Nothing to reconcile yet: an unbound role is skipped, so the holder keeps the Discord role.
     expect(await reconcileIn(guildId, exception, true)).toMatchObject({ add: [], remove: [] });
@@ -2742,16 +2800,17 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     });
     // Once bound, the exception holds bot-officer authority through the role.
     expect(
-      (
-        await service.enrichActor({
-          guildId,
-          userId: exception,
-          officer: false,
-          serverManager: false,
-          manageRoles: false,
-          roleIds: [officerRole],
-        })
-      ).officer,
+      isStaff(
+        await service.enrichActor(
+          actorOf({
+            guildId,
+            userId: exception,
+            serverManager: false,
+            manageRoles: false,
+            roleIds: [officerRole],
+          }),
+        ),
+      ),
     ).toBe(true);
     // A later grant against the bound role is queued as before.
     expect(await administration.officer(manager, holder, true, "Second exception")).toMatchObject({
@@ -2864,7 +2923,11 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       "all four roles",
     );
     await expect(
-      service.configure({ ...fixture.manager, serverManager: false }, "guest_role_id", "81110"),
+      service.configure(
+        actorOf({ ...fixture.manager, officer: true, serverManager: false }),
+        "guest_role_id",
+        "81110",
+      ),
     ).rejects.toThrow("Manage Server");
     await restarted.reconcile(fixture.guild.id, async () => {});
     const voice = fixture.remote.channels.find((channel) => channel.id === "81004");
@@ -3402,7 +3465,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).toEqual([]);
     await expect(
       service.apply(
-        { ...fixture.manager, userId: firstUser, officer: false, serverManager: false },
+        actorOf({ ...fixture.manager, userId: firstUser, serverManager: false }),
         await applicationInput({ ...fixture.manager, userId: firstUser }),
       ),
     ).rejects.toMatchObject({ code: "eligible" });
@@ -3471,7 +3534,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await reconcile(secondUser);
     expect(current.roles).toContain(fixture.guild.guest_role_id ?? "");
     await service.unclaim(
-      { ...fixture.manager, userId: secondUser, officer: false },
+      actorOf({ ...fixture.manager, userId: secondUser, serverManager: false }),
       secondUser,
       second.id,
     );
@@ -3660,7 +3723,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     await service.assign(fixture.manager, "95003", outside("88000005"), "Registered visitor");
     await service.assign(fixture.manager, "95003", outside("88000006"), "Registered visitor alt");
     // A bot-only officer can vouch for membership but cannot make anyone an officer.
-    const botOfficer = { ...fixture.manager, userId: "95090", serverManager: false };
+    const botOfficer = actorOf({
+      ...fixture.manager,
+      userId: "95090",
+      officer: true,
+      serverManager: false,
+    });
     await service.assign(botOfficer, "95004", officerC, "Bot-only officer assignment");
     for (const user of ["95001", "95002", "95003", "95004"])
       await reconcileIn(fixture.guild.id, user);
@@ -3782,7 +3850,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
   test("onboarding-disabled reconciliation supersedes a pending application once the applicant registers", async () => {
     const fixture = await accessFixture("666666666666666685", null, false);
-    const applicant = { ...fixture.manager, userId: "95006", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "95006", serverManager: false });
     const pending = await service.apply(applicant, await applicationInput(applicant));
     const review = and(
       eq(t.jobs.kind, "guest.review"),
@@ -5029,7 +5097,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const interactions = interactionFixture();
     interactions.member.guildId = fixture.guild.id;
     interactions.member.userId = "96001";
-    const applicant = { ...fixture.manager, userId: "96001", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "96001", serverManager: false });
     const input = await applicationInput(applicant);
     let review: ApplicationRecord | undefined;
     const reviewPort: DiscordPort = {
@@ -5179,7 +5247,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
   test("invalid answers and raced departure/newer presence cannot publish stale applications", async () => {
     const fixture = await accessFixture("96010");
-    const applicant = { ...fixture.manager, userId: "96011", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "96011", serverManager: false });
     const input = await applicationInput(applicant);
     for (const introduction of ["  ", "x".repeat(301), "invalid text\0", "broken text\ud800"]) {
       await expect(service.apply(applicant, { ...input, introduction })).rejects.toMatchObject({
@@ -5219,7 +5287,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
   test("denial cooldown, database answer constraints and legacy form-less reviews remain durable", async () => {
     const fixture = await accessFixture("96020");
-    const applicant = { ...fixture.manager, userId: "96021", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "96021", serverManager: false });
     const input = await applicationInput(applicant);
     const application = await service.apply(applicant, input);
     // Another guild's application is simply not found here.
@@ -5259,7 +5327,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
   test("verification supersedes form approval and remains automatic unless explicitly revoked", async () => {
     const fixture = await accessFixture("96030");
-    const applicant = { ...fixture.manager, userId: "96031", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "96031", serverManager: false });
     const input = await applicationInput(applicant);
     const pending = await service.apply(applicant, input);
     await service.assign(
@@ -5296,7 +5364,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
   test("form answers, submission audit and outbox roll back together on publication failure", async () => {
     const fixture = await accessFixture("96040");
-    const applicant = { ...fixture.manager, userId: "96041", officer: false, serverManager: false };
+    const applicant = actorOf({ ...fixture.manager, userId: "96041", serverManager: false });
     await db.query(
       "CREATE FUNCTION reject_test_guest_review() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.kind='guest.review' AND NEW.guild_id='96040' THEN RAISE EXCEPTION 'injected review publication failure'; END IF; RETURN NEW; END $$",
     );
@@ -5369,7 +5437,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
   test("character results carry identity, main-character and roster evidence, and recoded failures", async () => {
     const guildId = "888888888888888801";
     const manager = await displayGuild(guildId, "9230000000000098001");
-    const self: Actor = { guildId, userId: "98001", officer: false, manageRoles: false };
+    const self: Actor = actorOf({ guildId, userId: "98001", manageRoles: false });
     const claimed = await service.claim(self, character("77980001", "Claimed Character"));
     if (claimed.status !== "pending") throw new Error("Expected a new token");
     proof = claimed.token;
@@ -5580,10 +5648,207 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).toMatchObject({ status: "assigned", primary: false, firstLink: false });
   });
 
+  /**
+   * 2.44.0 (RBAC): a configured guild of its own with a server manager and a delegated officer,
+   * someone whose Officer role counts (rank or a grant) but who has no Manage Server.
+   */
+  async function rbacGuild(guildId: string, fcId: string) {
+    const manager = await displayGuild(guildId, fcId);
+    const delegated = actorOf({ ...manager, userId: "98070", officer: true, serverManager: false });
+    return { manager, delegated };
+  }
+  /** The refusal of a fixed permission: server managers only, naming the permission. */
+  const managersOnly = (permission: string) => ({
+    code: "forbidden",
+    detail: { kind: "scope", scope: "manager", permission },
+  });
+
+  test("/unassign of a link that counts for rank, and its autocomplete, need a server manager (2.44.0)", async () => {
+    const { manager, delegated } = await rbacGuild("888888888888888815", "9230000000000098015");
+    const guildId = manager.guildId;
+    const owner: Actor = actorOf({ guildId, userId: "98071", manageRoles: false });
+    // A link the owner verified, one a manager assigned, an imported one, and one a delegated
+    // officer assigned: only the last can't count for rank.
+    const claimed = await service.claim(owner, character("77980701", "Verified Link"));
+    if (claimed.status !== "pending") throw new Error("Expected a new token");
+    proof = claimed.token;
+    await service.verify(owner, "77980701");
+    await service.assign(manager, owner.userId, character("77980702", "Manager Link"), "In game");
+    await db.orm
+      .insert(t.characters)
+      .values({ id: "77980703", name: "Imported Link", world: "Diabolos" });
+    await db.orm.insert(t.links).values({
+      guild_id: guildId,
+      user_id: owner.userId,
+      character_id: "77980703",
+      provenance: "imported_link",
+    });
+    await service.assign(delegated, owner.userId, character("77980704", "Vouched Link"), "Vouched");
+    const all = ["77980701", "77980702", "77980703", "77980704"];
+    const offered = async (viewer: Actor) =>
+      (await service.autocomplete(viewer, "character", owner.userId, ""))
+        .map((choice) => choice.value)
+        .sort();
+    // Without admin.links, /unassign offers only the links it may remove; a manager is offered
+    // every one, and so is the owner for their own /unclaim.
+    expect(await offered(delegated)).toEqual(["77980704"]);
+    expect(await offered(manager)).toEqual(all);
+    expect(await offered(owner)).toEqual(all);
+    // Removing a link that counts for rank is refused as fixed, naming admin.links, and the link
+    // stays active.
+    for (const id of ["77980701", "77980702", "77980703"])
+      await expect(
+        service.unclaim(delegated, owner.userId, id, "Not theirs to remove"),
+      ).rejects.toMatchObject({
+        ...managersOnly("admin.links"),
+        message: expect.stringContaining("Manage Server and Manage Roles"),
+      });
+    const active = async () =>
+      (
+        await db.orm
+          .select({ character: t.links.character_id })
+          .from(t.links)
+          .where(and(eq(t.links.guild_id, guildId), eq(t.links.active, true)))
+      )
+        .map((row) => row.character)
+        .sort();
+    expect(await active()).toEqual(all);
+    // A delegated officer's assignment they may remove; a manager may remove any link.
+    expect(
+      await service.unclaim(delegated, owner.userId, "77980704", "Vouched in error"),
+    ).toMatchObject({ status: "unlinked", owner: owner.userId, reason: "Vouched in error" });
+    expect(
+      await service.unclaim(manager, owner.userId, "77980701", "Manager removal"),
+    ).toMatchObject({ status: "unlinked", owner: owner.userId });
+    expect(await active()).toEqual(["77980702", "77980703"]);
+  });
+
+  test("linking or unlinking the FC and binding roles need a server manager, rank or none (2.44.0)", async () => {
+    const fcId = "9230000000000098016";
+    const { manager, delegated } = await rbacGuild("888888888888888816", fcId);
+    // No officer rank is chosen; 2.43.0 let any officer unlink the FC then.
+    expect((await service.guild(manager)).officer_rank_key).toBeNull();
+    await expect(service.unlinkCompany(delegated, fcId)).rejects.toMatchObject(
+      managersOnly("admin.fc"),
+    );
+    await expect(
+      service.configure(delegated, "fc_id", "9230000000000098099"),
+    ).rejects.toMatchObject(managersOnly("admin.fc"));
+    for (const field of ["member_role_id", "guest_role_id", "officer_role_id", "leader_role_id"])
+      await expect(service.configure(delegated, field, "98199")).rejects.toMatchObject(
+        managersOnly("admin.roles"),
+      );
+    await expect(service.configureRoleLayout(delegated, true)).rejects.toMatchObject(
+      managersOnly("admin.roles"),
+    );
+    // Choosing a channel stays officer work.
+    expect(await service.configure(delegated, "ledger_channel_id", "98203")).toMatchObject({
+      status: "saved",
+    });
+    expect(await service.guild(manager)).toMatchObject({ fc_id: fcId, member_role_id: "98101" });
+    expect(await service.unlinkCompany(manager, fcId)).toMatchObject({ status: "unlinked" });
+  });
+
+  test("FC Leader comes only from a link that counts for rank (2.44.0)", async () => {
+    const fcId = "9230000000000098017";
+    const { manager, delegated } = await rbacGuild("888888888888888817", fcId);
+    const user = "98072";
+    const leader = {
+      id: "77980711",
+      name: "Leader Character",
+      world: "Diabolos",
+      dc: "Crystal",
+      fcId,
+      fcRankName: "Master",
+      isFcLeader: true,
+    };
+    // A delegated officer vouches for the FC leader's character.
+    expect(await service.assign(delegated, user, leader, "Delegated assignment")).toMatchObject({
+      status: "assigned",
+      officerAuthority: false,
+    });
+    lodestone.rosterValue = {
+      company: {
+        id: fcId,
+        name: "Display Company",
+        tag: "DISP",
+        world: "Diabolos",
+        dc: "Crystal",
+        count: 1,
+      },
+      members: [leader],
+      startedAt: new Date(Date.now() - 1000),
+      observedAt: new Date(),
+      pages: 1,
+    };
+    await db.query(
+      "UPDATE free_companies SET last_attempt_at=now()-interval '61 seconds' WHERE id=$1",
+      [fcId],
+    );
+    const job = await leased(await enqueue(db.pool, "roster", `roster:${fcId}`, { fcId }));
+    await sync.roster(job, async () => {});
+    await db.query("UPDATE jobs SET status='succeeded' WHERE id=$1", [job.id]);
+    const configured = await service.guild(manager);
+    // Confirmed on the roster as its leader, but the link can't confer rank.
+    expect(
+      await db.query<{ state: string }>(
+        "SELECT state FROM membership WHERE guild_id=$1 AND character_id=$2",
+        [configured.id, leader.id],
+      ),
+    ).toEqual([{ state: "present" }]);
+    expect((await rankAccess(db, configured, user, 21600)).leader).toBe("no");
+    // The same character assigned by a server manager makes them FC Leader.
+    await service.unclaim(delegated, user, leader.id, "Reassigned by a manager");
+    expect(await service.assign(manager, user, leader, "Manager assignment")).toMatchObject({
+      status: "assigned",
+      officerAuthority: true,
+    });
+    expect((await rankAccess(db, configured, user, 21600)).leader).toBe("yes");
+  });
+
+  test("linkConfersRank agrees with linkConfersRankSql for every provenance (2.44.0)", async () => {
+    const guildId = "888888888888888818";
+    const user = "98073";
+    await db.orm.insert(t.guilds).values({ id: guildId });
+    await db.orm.insert(t.users).values({ id: user }).onConflictDoNothing();
+    await db.orm.insert(t.guildUsers).values({ guild_id: guildId, user_id: user, present: true });
+    const cases = [
+      { provenance: "profile_token", source: {}, confers: true },
+      { provenance: "imported_link", source: {}, confers: true },
+      { provenance: "officer_assignment", source: { officerAuthority: true }, confers: true },
+      { provenance: "officer_assignment", source: { officerAuthority: false }, confers: false },
+      // An /assign without the recorded flag is no evidence of authority.
+      { provenance: "officer_assignment", source: {}, confers: false },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      const id = `7798072${index}`;
+      await db.orm
+        .insert(t.characters)
+        .values({ id, name: `Provenance ${index}`, world: "Diabolos" });
+      await db.orm.insert(t.links).values({
+        guild_id: guildId,
+        user_id: user,
+        character_id: id,
+        provenance: entry.provenance,
+        source: entry.source,
+      });
+    }
+    // Each row as stored, read the way /unassign reads it, beside the SQL rankAccess and
+    // autocomplete use.
+    const rows = await db.orm
+      .select({ provenance: t.links.provenance, source: t.links.source, sql: linkConfersRankSql })
+      .from(t.links)
+      .where(eq(t.links.guild_id, guildId))
+      .orderBy(t.links.character_id);
+    expect(
+      rows.map((row) => ({ sql: row.sql, code: linkConfersRank(row.provenance, row.source) })),
+    ).toEqual(cases.map((entry) => ({ sql: entry.confers, code: entry.confers })));
+  });
+
   test("claim limits carry retry timing and which limit refused", async () => {
     const guildId = "888888888888888802";
     await displayGuild(guildId, "9230000000000098002");
-    const claimant: Actor = { guildId, userId: "98003", officer: false, manageRoles: false };
+    const claimant: Actor = actorOf({ guildId, userId: "98003", manageRoles: false });
     for (const index of [1, 2, 3, 4, 5])
       await service.claim(claimant, character(`7798001${index}`, `Claim ${index}`));
     let own: unknown;
@@ -5793,7 +6058,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).rejects.toMatchObject({ code: "stale", detail: { kind: "stale", what: "control" } });
     await expect(
       service.ledgerRead(
-        { ...officer, userId: "98011", officer: false, serverManager: false },
+        actorOf({ ...officer, userId: "98011", serverManager: false }),
         "9230000000000098999",
         null,
         true,
@@ -5913,7 +6178,9 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(await service.guestApplicationsOpen(guildId)).toBe(false);
     // Only officers configure it, and configure() no longer takes the review channel.
     await expect(
-      service.configureGuestApplications({ ...officer, officer: false }, { enabled: false }),
+      service.configureGuestApplications(actorOf({ ...officer, serverManager: false }), {
+        enabled: false,
+      }),
     ).rejects.toMatchObject({ code: "forbidden" });
     await expect(
       service.configure(officer, "guest_application_channel_id", "98202"),
@@ -6099,7 +6366,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     expect(await service.guestApplicationsOpen(guildId)).toBe(true);
     await db.orm.update(t.guilds).set({ guest_role_id: null }).where(eq(t.guilds.id, guildId));
     expect(await service.guestApplicationsOpen(guildId)).toBe(false);
-    const visitor: Actor = { guildId, userId: "98021", officer: false, manageRoles: false };
+    const visitor: Actor = actorOf({ guildId, userId: "98021", manageRoles: false });
     await expect(service.apply(visitor, await applicationInput(visitor))).rejects.toMatchObject({
       code: "setup",
       message: GUEST_APPLICATIONS_CLOSED,
@@ -6110,7 +6377,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
   test("guest results carry outcomes, decisions and the facts behind the status view", async () => {
     const guildId = "888888888888888805";
     const manager = await displayGuild(guildId, "9230000000000098006");
-    const applicant: Actor = { guildId, userId: "98030", officer: false, manageRoles: false };
+    const applicant: Actor = actorOf({ guildId, userId: "98030", manageRoles: false });
     const first = await service.apply(applicant, await applicationInput(applicant));
     expect(first).toMatchObject({ outcome: "created", effectsMode: "live", state: "pending" });
     expect(await service.apply(applicant, await applicationInput(applicant))).toMatchObject({
@@ -6294,7 +6561,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       present: false,
     });
     // Refresh: force is officer-only, a missing FC is a setup gap, and a run is always recorded.
-    const member: Actor = { guildId, userId: "98042", officer: false, manageRoles: false };
+    const member: Actor = actorOf({ guildId, userId: "98042", manageRoles: false });
     await expect(sync.refresh(member, true)).rejects.toMatchObject({
       code: "forbidden",
       detail: { kind: "scope", scope: "officer" },
@@ -6330,7 +6597,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).toMatchObject({ status: "recorded", effectsMode: "deployment_disabled" });
     expect(
       await disabled.apply(
-        { guildId: live.guildId, userId: "98050", officer: false, manageRoles: false },
+        actorOf({ guildId: live.guildId, userId: "98050", manageRoles: false }),
         await applicationInput({ ...live, userId: "98050" }),
       ),
     ).toMatchObject({ outcome: "created", effectsMode: "deployment_disabled" });
@@ -6498,7 +6765,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const guildId = "888888888888888886";
     const fcId = "9230000000000098086";
     await displayGuild(guildId, fcId);
-    const self: Actor = { guildId, userId: "98086", officer: false, manageRoles: false };
+    const self: Actor = actorOf({ guildId, userId: "98086", manageRoles: false });
     await db.orm.insert(t.characters).values([
       { id: "77980861", name: "Listed Character", world: "Diabolos", dc: "Crystal" },
       { id: "77980862", name: "Departed Character", world: "Diabolos", dc: "Crystal" },
@@ -6606,7 +6873,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     logs.write(JSON.stringify({ level: 30, msg: "TaruBot ready" }));
     const reports = new IssueReports(config, db, lodestone, logs, github);
     reports.useStatus(() => ({ ready: true, writerLease: true }));
-    const reporter: Actor = { ...actor, userId: "90031", officer: false };
+    const reporter: Actor = actorOf({ ...actor, userId: "90031", serverManager: false });
     const submitted = await reports.user(
       reporter,
       "reporter",
@@ -7399,15 +7666,20 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     return { suggestions, target, reports };
   }
 
-  /** A person in `guildId` holding `roleIds`, with no officer or manager flags unless given. */
-  const suggester = (userId: string, roleIds: string[], extra: Partial<Actor> = {}): Actor => ({
-    guildId: canaryGuild,
-    userId,
-    officer: false,
-    manageRoles: false,
-    roleIds,
-    ...extra,
-  });
+  /**
+   * A person in the canary server holding `roleIds`, with no officer or manager flags unless given.
+   * Holding the canary's Member or Guest role sets the flag, as Service.enrichActor would.
+   */
+  const suggester = (userId: string, roleIds: string[], extra: Partial<ActorSpec> = {}): Actor =>
+    actorOf({
+      guildId: canaryGuild,
+      userId,
+      manageRoles: false,
+      roleIds,
+      member: roleIds.includes(CANARY_MEMBER_ROLE),
+      guest: roleIds.includes(CANARY_GUEST_ROLE),
+      ...extra,
+    });
 
   /** The suggestion audit rows, oldest first. */
   const suggestionRows = () =>
@@ -7515,9 +7787,10 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     // Outside the allowlist, even a configured server's manager is refused, with no scope.
     const manager = suggester("300000000000000002", ["76101"], {
       guildId: foreignGuild,
-      officer: true,
       manageRoles: true,
       serverManager: true,
+      // 76101 is the foreign server's bound Member role.
+      member: true,
     });
     const foreign = await suggestions.submit(manager, idea("foreign")).catch((error) => error);
     expect(foreign).toMatchObject({ code: "forbidden", detail: undefined });
@@ -7542,11 +7815,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     for (const actor of [
       suggester("300000000000000005", []),
       suggester("300000000000000006", [CANARY_OFFICER_ROLE], { officer: true }),
-      suggester("300000000000000007", [], {
-        officer: true,
-        manageRoles: true,
-        serverManager: true,
-      }),
+      suggester("300000000000000007", [], { manageRoles: true, serverManager: true }),
     ])
       await expect(suggestions.submit(actor, idea("refused"))).rejects.toMatchObject({
         code: "forbidden",
@@ -7757,8 +8026,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
    */
   describe("changelog posts", () => {
     const reserved = (n: number) => `66666666666666672${n}`;
-    /** An officer of a reserved guild, for /config changes there. */
-    const officerOf = (guildId: string): Actor => ({ ...actor, guildId });
+    /** A server manager of a reserved guild, for /config changes there: a first /config needs one. */
+    const managerOf = (guildId: string): Actor => ({ ...actor, guildId });
     /** Notes for releases before, at and after the running version. */
     const NOTES = {
       "2.0.0": "Already announced.",
@@ -7805,9 +8074,9 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
 
     test("setting a channel sets the baseline; moving and unsetting keep it; a higher one stays", async () => {
       const guildId = reserved(0);
-      const officer = officerOf(guildId);
+      const manager = managerOf(guildId);
       // First set (onboarding off): the running version, audited, with no audience lookup.
-      const first = await service.configure(officer, "changelog_channel_id", "82001");
+      const first = await service.configure(manager, "changelog_channel_id", "82001");
       expect(first).toMatchObject({ status: "saved", field: "changelog_channel_id" });
       expect(first.status === "saved" && first.audience).toBeUndefined();
       expect(await stored(guildId)).toEqual({ channel: "82001", version: project.version });
@@ -7818,17 +8087,17 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       expect(audits[0]?.details).toEqual({ value: "82001", baseline: project.version });
       // Moving the channel keeps the stored version; unsetting keeps it too.
       await db.query("UPDATE guilds SET changelog_version='2.1.0' WHERE id=$1", [guildId]);
-      await service.configure(officer, "changelog_channel_id", "82002");
+      await service.configure(manager, "changelog_channel_id", "82002");
       expect(await stored(guildId)).toEqual({ channel: "82002", version: "2.1.0" });
-      await service.configure(officer, "changelog_channel_id", null);
+      await service.configure(manager, "changelog_channel_id", null);
       expect(await stored(guildId)).toEqual({ channel: null, version: "2.1.0" });
       // Setting it again raises the baseline: releases while it was unset are never posted.
-      await service.configure(officer, "changelog_channel_id", "82001");
+      await service.configure(manager, "changelog_channel_id", "82001");
       expect(await stored(guildId)).toEqual({ channel: "82001", version: project.version });
       // A higher stored version (an operator's, or a newer release's) is never lowered.
-      await service.configure(officer, "changelog_channel_id", null);
+      await service.configure(manager, "changelog_channel_id", null);
       await db.query("UPDATE guilds SET changelog_version='99.0.0' WHERE id=$1", [guildId]);
-      await service.configure(officer, "changelog_channel_id", "82001");
+      await service.configure(manager, "changelog_channel_id", "82001");
       expect(await stored(guildId)).toEqual({ channel: "82001", version: "99.0.0" });
     });
 
@@ -8027,7 +8296,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       expect((await stored(guildId))?.version).toBe("2.0.0");
       // Saving the same channel again (after fixing its permissions) requeues the blocked post,
       // and keeps the baseline, since a channel was already set.
-      const change = await service.configure(officerOf(guildId), "changelog_channel_id", "82001");
+      const change = await service.configure(managerOf(guildId), "changelog_channel_id", "82001");
       expect(change).toMatchObject({ status: "saved", rebound: true });
       expect(change.status === "saved" && change.requeued).toBeGreaterThanOrEqual(1);
       expect((await jobRow(jobId))?.status).toBe("queued");
@@ -8122,8 +8391,12 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     const JOINED = new Date("2026-01-01T00:00:00Z");
     const STALE =
       "UPDATE free_companies SET last_successful_roster_at=now()-interval '7 hours' WHERE id=$1";
-    /** An officer, and a server manager, of a reserved guild. */
-    const officerOf = (guildId: string): Actor => ({ ...actor, guildId });
+    /**
+     * A delegated officer, and a server manager, of a reserved guild. Linking the FC, binding the
+     * access roles and removing a link that counts for rank need the manager (2.44.0).
+     */
+    const officerOf = (guildId: string): Actor =>
+      actorOf({ ...actor, guildId, officer: true, serverManager: false });
     const managerOf = (guildId: string): Actor => ({ ...actor, guildId, serverManager: true });
     /** A guild with its own FC (or none), the four roles bound, the channel given and effects on. */
     async function statusGuild(
@@ -8364,7 +8637,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       // A Member rebind while the roster is stale strips the old role and can't add the new one:
       // not decisive, so not recorded.
       await db.query(STALE, [fcId]);
-      await service.configure(officerOf(guildId), "member_role_id", "82421");
+      await service.configure(managerOf(guildId), "member_role_id", "82421");
       await reconcileIn(guildId, user);
       expect(members.get(user)?.roles).toEqual([]);
       expect((await statusOf(guildId, user))?.state?.announced.member).toBe(true);
@@ -8373,7 +8646,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       await reconcileIn(guildId, user);
       expect(members.get(user)?.roles).toEqual(["82421"]);
       // With fresh evidence a rebind keeps the value.
-      await service.configure(officerOf(guildId), "member_role_id", "82431");
+      await service.configure(managerOf(guildId), "member_role_id", "82431");
       await reconcileIn(guildId, user);
       expect(members.get(user)?.roles).toEqual(["82431"]);
       expect(await waiting(guildId)).toEqual([]);
@@ -8494,7 +8767,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         await statusMember(guildId, user, [characters[index] ?? ""]);
       await publishRoster(fcId, roster);
       for (const user of users) await reconcileIn(guildId, user);
-      await service.unlinkCompany(officerOf(guildId), fcId);
+      await service.unlinkCompany(managerOf(guildId), fcId);
       for (const user of users) await reconcileIn(guildId, user);
       expect(await waiting(guildId)).toEqual(users);
       await elapse(guildId);
@@ -8510,7 +8783,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       // The relink comes after the FC's last roster went out of date (with a fresh one, the same
       // post would come at once): until a new roster, nothing is decisive.
       await db.query(STALE, [fcId]);
-      expect(await service.configure(officerOf(guildId), "fc_id", fcId)).toMatchObject({
+      expect(await service.configure(managerOf(guildId), "fc_id", fcId)).toMatchObject({
         status: "saved",
       });
       for (const user of users) await reconcileIn(guildId, user);
@@ -8567,8 +8840,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       await statusMember(guildId, user, [character]);
       await publishRoster(fcId, [fcMember(character, fcId)]);
       await reconcileIn(guildId, user);
-      await service.configure(officerOf(guildId), "member_role_id", null);
-      await service.configure(officerOf(guildId), "guest_role_id", null);
+      await service.configure(managerOf(guildId), "member_role_id", null);
+      await service.configure(managerOf(guildId), "guest_role_id", null);
       await reconcileIn(guildId, user);
       expect((await statusOf(guildId, user))?.state?.announced).toEqual({
         member: null,
@@ -8577,11 +8850,11 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         leader: false,
       });
       // The member's only character is unlinked while Member and Guest are unbound.
-      await service.unclaim(officerOf(guildId), user, character, "Moved to another FC");
+      await service.unclaim(managerOf(guildId), user, character, "Moved to another FC");
       await reconcileIn(guildId, user);
       expect(await waiting(guildId)).toEqual([]);
-      await service.configure(officerOf(guildId), "member_role_id", "82471");
-      await service.configure(officerOf(guildId), "guest_role_id", "82472");
+      await service.configure(managerOf(guildId), "member_role_id", "82471");
+      await service.configure(managerOf(guildId), "guest_role_id", "82472");
       await reconcileIn(guildId, user);
       // FC history keeps Guest; both values are the new baseline, taken silently.
       const rebound = await statusOf(guildId, user);
@@ -8733,7 +9006,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         member: false,
         guest: true,
       });
-      await service.unlinkCompany(officerOf(guildId), fcId);
+      await service.unlinkCompany(managerOf(guildId), fcId);
       for (const user of [...linked, ...former]) await reconcileIn(guildId, user);
       expect(await waiting(guildId)).toHaveLength(107);
       await elapse(guildId);
@@ -9137,14 +9410,14 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         characters.map((character) => fcMember(character, fcId)),
       );
       for (const user of users) await reconcileIn(guildId, user);
-      await service.unlinkCompany(officerOf(guildId), fcId);
+      await service.unlinkCompany(managerOf(guildId), fcId);
       for (const user of users) await reconcileIn(guildId, user);
       await elapse(guildId);
       await runStatus(guildId);
       // `/config fc unlink` keeps the membership rows, and the FC's last roster is still fresh, so
       // the relink's repair pass decides Member again with no new roster: the post comes one
       // window after the relink, not after the next roster.
-      expect(await service.configure(officerOf(guildId), "fc_id", fcId)).toMatchObject({
+      expect(await service.configure(managerOf(guildId), "fc_id", fcId)).toMatchObject({
         status: "saved",
       });
       for (const user of users) await reconcileIn(guildId, user);

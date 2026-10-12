@@ -139,7 +139,14 @@ import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import { effectsPaused } from "../../src/domain/failures.js";
 import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
-import { type Actor, authorize, selfServiceAccess } from "../../src/domain/policy.js";
+import {
+  type Actor,
+  authorize,
+  can,
+  isStaff,
+  requirePermission,
+  selfServiceAccess,
+} from "../../src/domain/policy.js";
 import {
   applyOperation,
   botManagesRoles,
@@ -151,6 +158,7 @@ import {
   EMPTY_MENU,
   holdsAdministrator,
   type MenuFieldError,
+  type MenuOperation,
   mergeChoice,
   menuRoleIds,
   planSelfRoles,
@@ -176,6 +184,7 @@ import type {
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import type { WebGuild } from "../../src/web/access.js";
 import { startWeb, type WebOptions, type WebServer } from "../../src/web/server.js";
+import { actorOf } from "./actors.js";
 import { type DiscordAccount, FakeDiscord } from "./discord-oauth.js";
 import { MemorySessions } from "./web-sessions.js";
 import {
@@ -387,7 +396,7 @@ function harnessActor(guildId: string, userId: string, states: HarnessStates): A
   ];
   const member = holdsMember.includes(userId);
   const guest = userId === accounts.guest.id;
-  return {
+  return actorOf({
     guildId,
     userId,
     officer,
@@ -403,7 +412,7 @@ function harnessActor(guildId: string, userId: string, states: HarnessStates): A
     // The same snapshot Role menu reads, so its Administrator banner and this refusal agree.
     botAdministrator: holdsAdministrator(harnessSnapshot(guildId, states)),
     timedOut: userId === accounts.timedOut.id,
-  };
+  });
 }
 
 /** The resolver main.ts builds from gateway.actor and enrichActor, answered from invented data. */
@@ -1288,6 +1297,16 @@ function jobStatus(job: HarnessJob | undefined, now: number): RoleChoiceStatus |
 }
 
 /**
+ * The Role menu operations that make roles self-assignable, which need rolemenu.publish rather than
+ * rolemenu.edit: SelfRoles.edit's PUBLISHING_OPS (2.44.0).
+ */
+const PUBLISHING_OPS: ReadonlySet<MenuOperation["op"]> = new Set([
+  "options.add",
+  "category.setState",
+  "menu.publishAll",
+]);
+
+/**
  * The SelfRoles service over invented data: editor() and edit() as src/application/self-roles.ts
  * has them, with an in-memory menu per server in `menus` instead of PostgreSQL and the invented
  * snapshot instead of Discord. The order of checks and the outcomes are the real operation's: an
@@ -1313,7 +1332,7 @@ export function harnessSelfRoles(
   const settings = HARNESS_MENU_SETTINGS;
   const saved = (guildId: string): HarnessMenu => savedMenu(guildId, states, menus);
   roles.editor = async (actor: Actor): Promise<SelfRoleEditor> => {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "rolemenu.view");
     const { menu, revision } = saved(actor.guildId);
     const snapshot = harnessSnapshot(actor.guildId, states);
     return {
@@ -1331,9 +1350,14 @@ export function harnessSelfRoles(
     };
   };
   roles.edit = async (actor, request): Promise<SelfRoleEditOutcome> => {
-    authorize(actor, actor.guildId, "officer");
-    const entry = saved(actor.guildId);
     const { operation } = request;
+    requirePermission(actor, actor.guildId, "rolemenu.view");
+    requirePermission(
+      actor,
+      actor.guildId,
+      PUBLISHING_OPS.has(operation.op) ? "rolemenu.publish" : "rolemenu.edit",
+    );
+    const entry = saved(actor.guildId);
     const current = entry.menu;
     if (!current && operation.op !== "menu.reset")
       return { status: "conflict", reason: "unreadable" };
@@ -1438,7 +1462,7 @@ export function harnessSelfRoles(
   };
   /** SelfRoles' refusal for anyone without self-service access. */
   const admitted = (actor: Actor): void => {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     if (!selfServiceAccess(actor)) throw new Failure("forbidden", CHOICE_MESSAGES.noAccess);
   };
   roles.view = async (actor: Actor): Promise<MyRoles> => {
@@ -1459,14 +1483,14 @@ export function harnessSelfRoles(
             held: [...heldBy(actor.guildId, actor.userId)],
             waiting: job && WAITING.has(job.status) ? job.payload : null,
             check: selfRoleChecker(snapshot, settings),
-            officer: actor.officer,
+            officer: can(actor, "rolemenu.view"),
           })
         : [],
       status: jobStatus(job, people.now()),
       effectsMode,
       timedOut,
       canSave: effectsMode === "live" && !timedOut,
-      administrator: actor.officer ? holdsAdministrator(snapshot) : null,
+      administrator: isStaff(actor) ? holdsAdministrator(snapshot) : null,
       roleNames: menuRoleNames(menu, snapshot),
     };
   };

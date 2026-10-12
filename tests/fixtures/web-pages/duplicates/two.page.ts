@@ -5,7 +5,7 @@ import { definePage } from "../../../../src/web/page.js";
 export default definePage({
   path: "/g/:guild/twin",
   title: "Twin",
-  access: ["officer"],
+  access: ["config.view"],
   requires: [],
   get: () => html`<p>Twin fixture</p>`,
 });

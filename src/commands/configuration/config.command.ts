@@ -144,10 +144,19 @@ for (const name of ["show", "validate"])
 
 export default defineCommand({
   data,
-  access: "officer",
+  // Any part of /config admits it; each subcommand's service checks its own permission.
+  permissions: [
+    "config.view",
+    "config.channels",
+    "config.officer_channel",
+    "config.guest_applications",
+    "admin.fc",
+    "admin.roles",
+    "admin.ranks",
+  ],
   requires: [applicationKey],
   async execute({ actor, viewer, interaction, services, report }) {
-    authorize(actor, actor.guildId, "officer");
+    authorize(actor, actor.guildId);
     const app = services.get(applicationKey);
     const options = interaction.options;
     const sub = options.getSubcommand(true);

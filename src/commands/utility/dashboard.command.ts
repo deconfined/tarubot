@@ -6,7 +6,6 @@ import { dashboardReply } from "../../discord/presenters/utility.js";
 
 export default defineCommand({
   data: command("dashboard", "Get a link to TaruBot's dashboard"),
-  access: "user",
   requires: [dashboardKey],
   execute({ services }) {
     return dashboardReply(services.get(dashboardKey).origin);

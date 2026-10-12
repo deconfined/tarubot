@@ -11,7 +11,7 @@ import {
   guestStatusReply,
 } from "../../discord/presenters/guests.js";
 import { userId, uuid } from "../../discord/selectors.js";
-import { authorize } from "../../domain/policy.js";
+import { authorizeOwner, can, requirePermission } from "../../domain/policy.js";
 
 const data = command("guest", "Guest applications, grants, and revocations");
 for (const name of ["approve", "deny"])
@@ -88,7 +88,7 @@ export default defineCommand({
         viewer,
       );
     // A member naming someone else is refused here ('Only your own records'), before any read.
-    authorize(actor, actor.guildId, "user", owner);
+    authorizeOwner(actor, actor.guildId, owner);
     return guestStatusReply(await app.guestStatus(actor, owner), viewer, {
       owner,
       memberOption: memberOption !== null,
@@ -99,11 +99,11 @@ export default defineCommand({
     if (focusedOption(context) === "member") {
       // Grant and revoke are officer-only; a member's /guest status covers only themselves.
       const status = interaction.options.getSubcommand(true) === "status";
-      if (!status) authorize(actor, actor.guildId, "officer");
-      return completeMember(context, status && !actor.officer);
+      if (!status) requirePermission(actor, actor.guildId, "guests.manage");
+      return completeMember(context, status && !can(actor, "members.view"));
     }
     // Mixed permission groups cannot rely on root command defaults to protect completion.
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "guests.decide");
     const rows = await services.get(applicationKey).applicationChoices(actor);
     // Filter in-process on what the label shows (C12): the applicant's cached display name (no
     // network call inside Discord's autocomplete window), their user ID, and the application ID,

@@ -27,7 +27,14 @@
  * Discord: the job does, under the writer lease, after checking every role again.
  */
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
-import { authorize, selfServiceAccess, type Actor } from "../domain/policy.js";
+import {
+  authorize,
+  can,
+  isStaff,
+  requirePermission,
+  selfServiceAccess,
+  type Actor,
+} from "../domain/policy.js";
 import {
   accessLossRemovals,
   applyOperation,
@@ -584,6 +591,16 @@ function auditDetails(
 }
 
 /**
+ * Role menu operations that make roles self-assignable (rolemenu.publish): adding options, which
+ * takes effect at once in a published category, and publishing. The rest need rolemenu.edit.
+ */
+const PUBLISHING_OPS: ReadonlySet<MenuOperation["op"]> = new Set([
+  "options.add",
+  "category.setState",
+  "menu.publishAll",
+]);
+
+/**
  * The Role menu's operations and My roles' (editor, edit, view, choose); main.ts provides one as
  * selfRolesKey. Nothing here writes to Discord: a member's saved choices reach it only through
  * RoleChoiceJob, in the job worker.
@@ -602,7 +619,7 @@ export class SelfRoles {
    * Discord request): the menu, its revision, every role's verdict and the banners' facts.
    */
   async editor(actor: Actor): Promise<SelfRoleEditor> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "rolemenu.view");
     const db = this.app.db.orm;
     const [guild] = await db
       .select()
@@ -634,9 +651,15 @@ export class SelfRoles {
    * the rule set on it, re-checked against the bound and retired roles under the locks.
    */
   async edit(actor: Actor, request: SelfRoleEditRequest): Promise<SelfRoleEditOutcome> {
-    authorize(actor, actor.guildId, "officer");
-    if (this.isStopping()) throw stoppingRefusal();
     const { operation } = request;
+    // Adding roles and publishing make roles self-assignable; the rest only shapes the menu.
+    requirePermission(actor, actor.guildId, "rolemenu.view");
+    requirePermission(
+      actor,
+      actor.guildId,
+      PUBLISHING_OPS.has(operation.op) ? "rolemenu.publish" : "rolemenu.edit",
+    );
+    if (this.isStopping()) throw stoppingRefusal();
     const guildId = actor.guildId;
     let snapshot: VisibilityGuild | null = null;
     if (operation.op === "options.add") {
@@ -757,7 +780,7 @@ export class SelfRoles {
    * back to the actor's; the newest waiting change is overlaid, so a second save builds on it.
    */
   async view(actor: Actor): Promise<MyRoles> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     if (!selfServiceAccess(actor)) throw noAccess();
     const db = this.app.db.orm;
     const guildId = actor.guildId;
@@ -780,7 +803,7 @@ export class SelfRoles {
             held,
             waiting,
             check: snapshot ? selfRoleChecker(snapshot, settings) : null,
-            officer: actor.officer,
+            officer: can(actor, "rolemenu.view"),
           })
         : [];
     const effectsMode = this.app.effectsMode(guild ?? { effects_enabled: false });
@@ -796,7 +819,7 @@ export class SelfRoles {
       effectsMode,
       timedOut,
       canSave: guild !== undefined && snapshot !== null && effectsMode === "live" && !timedOut,
-      administrator: actor.officer && snapshot ? holdsAdministrator(snapshot) : null,
+      administrator: isStaff(actor) && snapshot ? holdsAdministrator(snapshot) : null,
       roleNames: menuRoleNames(stored.menu, snapshot),
     };
   }
@@ -809,7 +832,7 @@ export class SelfRoles {
    * new choice ever waits on a pause.
    */
   async choose(actor: Actor, request: RoleChoiceRequest): Promise<RoleChoiceOutcome> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     if (!selfServiceAccess(actor)) throw noAccess();
     // Discord blocks reactions during a time-out too, so this matches Dyno (owner decision Q6).
     if (actor.timedOut === true) throw new Failure("forbidden", CHOICE_MESSAGES.timedOut);

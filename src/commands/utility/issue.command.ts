@@ -19,7 +19,6 @@ export default defineCommand({
         .setMinLength(10)
         .setMaxLength(1000),
   ),
-  access: "user",
   requires: [issueReportsKey],
   async execute({ interaction, actor, services }) {
     return issueReply(

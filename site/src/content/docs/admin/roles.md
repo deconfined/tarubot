@@ -14,7 +14,7 @@ Access comes from a member's **trusted links**: characters they verified with a 
 TaruBot looks at all of a member's linked characters together:
 
 - any character with **confirmed membership** in the linked FC gives **Member**;
-- any such character holding the configured **officer rank** adds **Officer**, unless the link came from a delegated officer's assignment (see [Who can do what](/tarubot/admin/access/#delegated-officers-and-assign));
+- any such character holding the configured **officer rank** adds **Officer**, and the FC leader's character adds **FC Leader**, unless the link came from an assignment by an officer who isn't a server manager (see [Who can do what](/tarubot/admin/access/#links-that-count-for-rank));
 - a member whose linked characters are all outside the FC gets **Guest**. With no FC linked, any trusted link is enough for Guest.
 
 This applies in every server, with or without onboarding. Onboarding only adds channel visibility on top of these roles; a server without `/setup onboarding` gets no channel changes.

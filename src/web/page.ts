@@ -8,7 +8,8 @@
 import type { Reporter } from "../application/reporting.js";
 import { ServiceKey, type Services } from "../bot/services.js";
 import type { Actor } from "../domain/policy.js";
-import { PAGE_ACCESS, type PageAccess } from "./access.js";
+import type { PageAccess } from "./access.js";
+import { isPermissionId } from "../domain/rbac.js";
 import type { SafeHtml } from "./html.js";
 import { ICON_NAMES, type IconName } from "./icons.js";
 import { POST_WINDOW_MS } from "./limits.js";
@@ -90,7 +91,7 @@ export interface PageOptions {
   readonly path: string;
   /** The `<title>` and the page's one `<h1>`. */
   readonly title: string;
-  /** Required, any-of, non-empty, from PAGE_ACCESS. */
+  /** Required, any-of, non-empty: TaruBot permission ids (src/domain/rbac.ts). */
   readonly access: readonly PageAccess[];
   /** Service keys checked with services.require() when the web starts. */
   readonly requires: readonly ServiceKey<unknown>[];
@@ -171,9 +172,9 @@ export class Page {
     if (
       !Array.isArray(options.access) ||
       options.access.length === 0 ||
-      !options.access.every((flag) => (PAGE_ACCESS as readonly unknown[]).includes(flag))
+      !options.access.every((id) => isPermissionId(id))
     )
-      throw new Error(`A page must declare access, any of: ${PAGE_ACCESS.join(", ")}.`);
+      throw new Error("A page must declare access: one or more TaruBot permission ids.");
     if (
       !Array.isArray(options.requires) ||
       !options.requires.every((key) => key instanceof ServiceKey)

@@ -87,7 +87,7 @@ async function render(context: PageContext, refused?: CaseRefusal) {
 export default definePage({
   path: MODMAIL_CASE_PATH,
   title: "Mod mail case",
-  access: ["member", "guest", "officer"],
+  access: ["modmail.inbox", "modmail.open"],
   requires: [modmailKey],
   // Private text: someone removed or demoted loses the page on their next request (no memo).
   freshActor: true,

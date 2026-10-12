@@ -12,6 +12,7 @@ import type {
   RosterEvidence,
 } from "../../src/application/results.js";
 import type { Actor } from "../../src/domain/policy.js";
+import { actorOf } from "./actors.js";
 import { viewerOf, type Audience, type Viewer } from "../../src/discord/presenters/audience.js";
 
 /** The mockups' "current time": every <t:…> in the approved cards is rendered against it. */
@@ -28,29 +29,31 @@ export const GUEST_ID = "234567890123456789";
 /** The interaction reference failure footers carry. */
 export const REF = "1290000000000000001";
 
-/** Actors for each audience, as the router resolves them. */
+/**
+ * Actors for each audience, as the router resolves them (2.44.0): an officer counts through the
+ * Officer role (officer: true), a manager through Manage Server and Manage Roles together.
+ */
 export const ACTORS: Readonly<Record<Audience, Actor>> = {
-  member: {
+  member: actorOf({
     guildId: GUILD_ID,
     userId: MEMBER_ID,
-    officer: false,
     manageRoles: false,
     serverManager: false,
-  },
-  officer: {
+  }),
+  officer: actorOf({
     guildId: GUILD_ID,
     userId: OFFICER_ID,
     officer: true,
     manageRoles: false,
     serverManager: false,
-  },
-  manager: {
+  }),
+  manager: actorOf({
     guildId: GUILD_ID,
     userId: OFFICER_ID,
     officer: true,
     manageRoles: true,
     serverManager: true,
-  },
+  }),
 };
 
 /** The viewer each audience's replies are rendered for. */

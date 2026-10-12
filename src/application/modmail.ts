@@ -60,7 +60,7 @@ import {
   textProblem,
   caseUrl,
 } from "../domain/modmail.js";
-import { authorize, type Actor } from "../domain/policy.js";
+import { authorize, can, requirePermission, type Actor } from "../domain/policy.js";
 import { holdsAdministrator } from "../domain/self-roles.js";
 import { type OfficerPing, officerPing } from "../domain/visibility.js";
 import { Failure, stoppingRefusal } from "../domain/values.js";
@@ -199,6 +199,12 @@ export interface CaseView {
   readonly names: CaseNames;
   /** Replies can be sent: the key is valid and the case is under its message limit. */
   readonly canReply: boolean;
+  /**
+   * The viewer may write here at all (2.44.0): the opener's side always may; the officer side
+   * needs modmail.respond, so someone who may only read every case gets no reply, close or reopen
+   * form.
+   */
+  readonly canRespond: boolean;
   /** The key is missing or invalid, so nothing new can be written or read. */
   readonly keyProblem: boolean;
 }
@@ -489,7 +495,7 @@ export class ModMail {
 
   /** The officers' settings card. */
   async settings(actor: Actor): Promise<ModMailSettings> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.settings");
     const db = this.app.db.orm;
     const guild = await this.guildRow(db, actor.guildId);
     const [row] = await db
@@ -525,7 +531,7 @@ export class ModMail {
     actor: Actor,
     request: { readonly enabled: boolean; readonly revision: bigint },
   ): Promise<ToggleOutcome> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.settings");
     if (this.isStopping()) throw stoppingRefusal();
     return this.app.db.transaction(async (client) => {
       const db = orm(client);
@@ -591,12 +597,16 @@ export class ModMail {
     return { open: row?.open ?? 0, daily: row?.daily ?? 0 };
   }
 
-  /** The refusals that need no database: the key, the web, and who may open. */
-  private staticRefusal(actor: Pick<Actor, "member" | "guest" | "botAdministrator">) {
+  /**
+   * The refusals that need no database: the key, the web, and who may open. `opens` is whether the
+   * person holds modmail.open, which the Member and Guest roles carry: can() for a resolved actor,
+   * the bound roles among the interaction's role IDs for the courtesy check before the form.
+   */
+  private staticRefusal(opens: boolean, botAdministrator: boolean | undefined) {
     if (this.key.status !== "on") return "key";
     if (this.origin === null) return "web";
-    if (actor.member !== true && actor.guest !== true) return "not_member";
-    if (actor.botAdministrator !== false) return "administrator";
+    if (!opens) return "not_member";
+    if (botAdministrator !== false) return "administrator";
     return null;
   }
 
@@ -627,11 +637,7 @@ export class ModMail {
       .where(and(eq(t.guilds.id, guildId), eq(t.guilds.active, true)));
     if (!row) return "not_configured";
     const holds = (role: string | null) => role !== null && roleIds.includes(role);
-    const refusal = this.staticRefusal({
-      member: holds(row.member),
-      guest: holds(row.guest),
-      botAdministrator,
-    });
+    const refusal = this.staticRefusal(holds(row.member) || holds(row.guest), botAdministrator);
     if (refusal) return refusal;
     if (row.enabled !== true) return "off";
     const { open, daily } = await this.counts(db, guildId, userId);
@@ -646,7 +652,7 @@ export class ModMail {
    * open(), read outside a transaction; the submission checks them all again under its locks.
    */
   private async openRefusal(db: Orm, actor: Actor, enabled: boolean): Promise<OpenRefusal | null> {
-    const refusal = this.staticRefusal(actor);
+    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return refusal;
     if (!enabled) return "off";
     const { open, daily } = await this.counts(db, actor.guildId, actor.userId);
@@ -739,11 +745,11 @@ export class ModMail {
     actor: Actor,
     input: { readonly topic: string; readonly body: string; readonly caseId?: string },
   ): Promise<OpenOutcome> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     // Lowercase, as PostgreSQL stores it: the AAD names the case ID as stored.
     const minted = input.caseId?.toLowerCase();
     if (minted !== undefined && !CANONICAL_UUID.test(minted)) throw outOfDateForm();
-    const refusal = this.staticRefusal(actor);
+    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return { status: "refused", reason: refusal };
     const cipher = this.cipher;
     if (!cipher || !mayOpen(actor)) throw new Error("Mod mail's static checks disagree");
@@ -947,7 +953,7 @@ export class ModMail {
    * oldest waiting first; or one state (closed newest first). At most LIST_LIMIT rows.
    */
   async inbox(actor: Actor, filter: InboxFilter): Promise<Inbox> {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "modmail.inbox");
     const db = this.app.db.orm;
     const guildId = actor.guildId;
     const c = t.modmailCases;
@@ -999,8 +1005,8 @@ export class ModMail {
    * for someone who may use member pages now (the page's flags admit them; this checks again).
    */
   async mine(actor: Actor): Promise<MyCases> {
-    authorize(actor, actor.guildId, "user");
-    if (!mayAccess({ ...actor, officer: false }, actor.userId))
+    authorize(actor, actor.guildId);
+    if (!mayOpen(actor))
       throw new Failure("forbidden", "Mod mail is for this server's members and guests.");
     const db = this.app.db.orm;
     const c = t.modmailCases;
@@ -1095,12 +1101,12 @@ export class ModMail {
    * officers" for the rest; officers see the true author of every row and the read log.
    */
   async caseView(actor: Actor, number: bigint): Promise<CaseView | null> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     const db = this.app.db.orm;
     const row = await this.accessible(db, actor, number);
     if (!row) return null;
     const side = sideIn(row.opener_id, actor.userId);
-    const audience = actor.officer ? "officer" : "member";
+    const audience = can(actor, "modmail.inbox") ? "officer" : "member";
     await this.recordRead(row.id, actor.userId, side);
     const stored = await db
       .select()
@@ -1145,7 +1151,7 @@ export class ModMail {
     this.reportUnreadable(unreadable);
     let reads: CaseRead[] | null = null;
     let readCount = 0;
-    if (audience === "officer") {
+    if (can(actor, "modmail.read_log")) {
       reads = (
         await db
           .select({
@@ -1201,6 +1207,7 @@ export class ModMail {
       readCount,
       names: await this.names(guildId, ids),
       canReply: this.cipher !== null && messages < MODMAIL_LIMITS.messagesPerCase,
+      canRespond: side === "member" || can(actor, "modmail.respond"),
       keyProblem: this.cipher === null,
     };
   }
@@ -1234,7 +1241,7 @@ export class ModMail {
     number: bigint,
     input: { readonly messageId: string; readonly body: string; readonly signing: Signing | null },
   ): Promise<ReplyOutcome | null> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     if (this.isStopping()) throw stoppingRefusal();
     // PostgreSQL stores a UUID lowercase, and the AAD is built from the ID as stored, so a form's
     // ID is taken in that spelling: an uppercase one would otherwise be sealed under an AAD the
@@ -1249,6 +1256,9 @@ export class ModMail {
     const problem = textProblem(body, MODMAIL_LIMITS.messageChars);
     if (problem) return { status: "invalid", reason: problem };
     const side = sideIn(found.opener_id, actor.userId);
+    // Reading every case (modmail.inbox) isn't answering them: the officer side writes with
+    // modmail.respond. The opener's own side needs nothing more than mayAccess.
+    if (side === "officer") requirePermission(actor, actor.guildId, "modmail.respond");
     const signing: Signing | null = side === "officer" ? (input.signing ?? "name") : null;
     const guildId = actor.guildId;
     try {
@@ -1422,11 +1432,12 @@ export class ModMail {
     revision: bigint,
     change: "close" | "reopen",
   ): Promise<StateOutcome | null> {
-    authorize(actor, actor.guildId, "user");
+    authorize(actor, actor.guildId);
     if (this.isStopping()) throw stoppingRefusal();
     const found = await this.accessible(this.app.db.orm, actor, number);
     if (!found) return null;
     const side = sideIn(found.opener_id, actor.userId);
+    if (side === "officer") requirePermission(actor, actor.guildId, "modmail.respond");
     if (change === "reopen" && side === "member")
       throw new Failure("forbidden", "Reply to your case to reopen it.");
     return this.app.db.transaction(async (client): Promise<StateOutcome | null> => {

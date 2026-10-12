@@ -13,7 +13,7 @@ Role menu needs a **2.39.0 or newer** release, and My roles **2.40.0 or newer**,
 
 ## Who can change the menu
 
-Any officer: anyone with Discord's Manage Server, or who holds the Officer role with TaruBot backing it (see [Who can do what](/tarubot/admin/access/)). Every officer can make every change, including adding roles and resetting a menu TaruBot can't read. TaruBot doesn't check the officer's own Discord permissions or role position here. What can be added is decided by [the checks below](#what-a-role-must-pass) and by [where TaruBot's own role sits](/tarubot/admin/roles/#where-tarubots-role-sits).
+Any officer, which means anyone who holds the Officer role with TaruBot backing it, and any server manager (see [Who can do what](/tarubot/admin/access/)). Every officer can make every change, including adding roles and resetting a menu TaruBot can't read. TaruBot doesn't check the officer's own Discord permissions or role position here. What can be added is decided by [the checks below](#what-a-role-must-pass) and by [where TaruBot's own role sits](/tarubot/admin/roles/#where-tarubots-role-sits).
 
 Every change is audited: TaruBot records who made it, which change it was, and the IDs of the categories and roles it touched. It doesn't copy the names and descriptions you type into its audit records.
 
@@ -105,7 +105,7 @@ A role that opens channels opens them for everyone who holds it, whatever their 
 - **Never a role TaruBot can't remove**, such as one moved above its own role. It's left alone, so it can't hold up the access change.
 - **Only where a Member or Guest role is set.** A server with neither has no access TaruBot manages, so nothing is removed there.
 
-It happens in the same pass that takes their access role away, as a separate change written after it, with its own reason in Discord's audit log. When someone with none of those roles picks a role that opens channels on My roles, TaruBot doesn't add it, and counts it as not applied. That includes an officer by Manage Server alone who has none of the four roles. If they get Member or Guest back, they can pick the role again.
+It happens in the same pass that takes their access role away, as a separate change written after it, with its own reason in Discord's audit log. When someone with none of those roles picks a role that opens channels on My roles, TaruBot doesn't add it, and counts it as not applied. That includes a server manager who has none of the four roles. If they get Member or Guest back, they can pick the role again.
 
 ### Lobby onboarding
 

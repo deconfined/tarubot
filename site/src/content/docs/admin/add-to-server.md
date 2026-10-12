@@ -122,7 +122,7 @@ You can remove:
 
 - **TaruBot's Administrator**, as soon as `/config validate` says it is no longer needed.
 - **Permissions TaruBot never needs**, which `/config validate` lists, and Mention Everyone allowed to TaruBot in any channel but the officer notifications channel (that one too while mod mail is off).
-- **Your own Administrator, Manage Server or Manage Roles**, if you were given them only to set TaruBot up. Managers need Manage Server and Manage Roles again to rebind a role, change an officer override or switch the role layout.
+- **Your own Administrator, Manage Server or Manage Roles**, if you were given them only to set TaruBot up. Managers need Manage Server and Manage Roles again to link or unlink the FC, rebind a role, change an officer override or switch the role layout.
 
 Never remove:
 

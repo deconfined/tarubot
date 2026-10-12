@@ -27,6 +27,7 @@ import {
   SESSION_OPTIONS,
 } from "../../src/infrastructure/postgres/database.js";
 import * as t from "../../src/infrastructure/postgres/schema.js";
+import { actorOf } from "../fixtures/actors.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const SCHEMA = "validate_visibility_it";
@@ -174,13 +175,12 @@ const CONFIG: Configuration = {
 };
 /** validate() never reaches the Lodestone. */
 const NO_LODESTONE: Lodestone = Object.create(null);
-const ACTOR: Actor = {
+const ACTOR: Actor = actorOf({
   guildId: GUILD,
   userId: OFFICER,
-  officer: true,
   manageRoles: true,
   serverManager: true,
-};
+});
 
 describe.skipIf(!url)("/config validate reads TaruBot's view and the stored records", () => {
   if (!url) return;

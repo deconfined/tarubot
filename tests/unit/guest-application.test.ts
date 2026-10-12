@@ -33,6 +33,7 @@ import {
 import { interactionFixture } from "../fixtures/interactions.js";
 import type { ApplicationRecord } from "../../src/application/records.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
+import { NO_ACCESS } from "../../src/domain/policy.js";
 
 /**
  * /apply requires the application capability; only its pre-form availability read runs here, so
@@ -60,7 +61,7 @@ function context(
       expect(fixture.requests.at(-1)?.body).toMatchObject({
         type: InteractionResponseType.DeferredChannelMessageWithSource,
       });
-      return { guildId, userId, officer: false, manageRoles: false };
+      return { guildId, userId, manageRoles: false, access: NO_ACCESS };
     },
   };
 }
@@ -366,7 +367,7 @@ test("officer component authorization still happens after fresh lookup, before a
   let executions = 0;
   const review = defineComponent({
     prefix: "guest",
-    access: "officer",
+    permissions: ["guests.decide"],
     execute: () => {
       executions++;
       return reply({ tone: "info", title: "Unexpected" });

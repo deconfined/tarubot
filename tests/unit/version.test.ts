@@ -18,7 +18,8 @@ const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
 
 test("version is available to ordinary users and offers a bounded optional commit count", () => {
   const definition = versionCommand.toJSON();
-  expect(versionCommand.access).toBe("user");
+  // No router permission: any human member of the server (2.44.0).
+  expect(versionCommand.permissions).toEqual([]);
   expect(definition.default_member_permissions).toBeUndefined();
   expect(definition.options).toEqual([
     expect.objectContaining({

@@ -5,7 +5,7 @@ import { definePage } from "../../../../src/web/page.js";
 export default definePage({
   path: "/g/:guild/zeta",
   title: "Zeta",
-  access: ["officer"],
+  access: ["config.view"],
   requires: [],
   nav: "Zeta",
   get: () => html`<p>Zeta fixture</p>`,

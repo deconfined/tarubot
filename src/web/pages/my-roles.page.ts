@@ -23,6 +23,7 @@
 import { z } from "zod";
 import { selfRolesKey } from "../../application/keys.js";
 import type { RoleChoiceRequest } from "../../application/self-roles.js";
+import { isStaff } from "../../domain/policy.js";
 import { type CategoryChoice, LIMIT_MESSAGES, MENU_LIMITS } from "../../domain/self-roles.js";
 import { Failure, idSchema } from "../../domain/values.js";
 import { definePage, type PageContext } from "../page.js";
@@ -87,7 +88,7 @@ async function render(context: PageContext, refused?: RefusedChoice) {
   const roles = await context.services.get(selfRolesKey).view(context.actor);
   return renderMyRoles({
     roles,
-    officer: context.actor.officer,
+    officer: isStaff(context.actor),
     action: context.url.pathname,
     token: context.formToken,
     url: context.url,
@@ -98,7 +99,7 @@ async function render(context: PageContext, refused?: RefusedChoice) {
 export default definePage({
   path: MY_ROLES_PATH,
   title: "My roles",
-  access: ["member", "guest", "officer"],
+  access: ["selfroles.use"],
   requires: [selfRolesKey],
   nav: "My roles",
   icon: "user",

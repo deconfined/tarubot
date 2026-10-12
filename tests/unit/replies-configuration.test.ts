@@ -30,7 +30,7 @@ import {
 import { failureReply } from "../../src/discord/presenters/failure.js";
 import { DISCORD_LIMITS, HOUSE_LIMITS } from "../../src/discord/presenters/style.js";
 import type { FailureCode, FailureDetail } from "../../src/domain/failures.js";
-import { authorize, authorizeRoleManager } from "../../src/domain/policy.js";
+import { requirePermission } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import {
   buttonsOf,
@@ -2041,7 +2041,7 @@ describe("configuration failures render as their approved concepts", () => {
   test("permission refusals", () => {
     const officers = expectFailure(
       refusal(
-        thrown(() => authorize(ACTORS.member, ACTORS.member.guildId, "officer")),
+        thrown(() => requirePermission(ACTORS.member, ACTORS.member.guildId, "config.view")),
         VIEWERS.member,
         "/config show",
       ),
@@ -2050,7 +2050,7 @@ describe("configuration failures render as their approved concepts", () => {
     expect(officers.description).toStartWith("Only FC officers can use **/config**.");
     const managers = expectFailure(
       refusal(
-        thrown(() => authorizeRoleManager(ACTORS.officer)),
+        thrown(() => requirePermission(ACTORS.officer, ACTORS.officer.guildId, "admin.roles")),
         officer,
         "/config roles officer",
       ),

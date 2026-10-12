@@ -127,8 +127,9 @@ export class Suggestions {
     const target = this.target;
     if (!target)
       throw new Failure("forbidden", "Suggestions are switched off on this TaruBot right now.");
-    const guild = await this.app.guild(actor);
-    if (!maySuggest(actor, guild)) throw suggestionAccessRefused();
+    // The server must be set up; suggest.use comes from its bound Member and Guest roles.
+    await this.app.guild(actor);
+    if (!maySuggest(actor)) throw suggestionAccessRefused();
     const normalised = normalise(idea);
     if ([...normalised].length < SUGGESTION_MIN) throw suggestionTooShort();
     const text = clean(normalised);

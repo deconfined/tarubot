@@ -308,7 +308,7 @@ function refusal(
 export default definePage({
   path: ROLE_MENU_PATH,
   title: "Role menu",
-  access: ["officer"],
+  access: ["rolemenu.view"],
   requires: [selfRolesKey, gatewayKey],
   nav: "Role menu",
   icon: "list",

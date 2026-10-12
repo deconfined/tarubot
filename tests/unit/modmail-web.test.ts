@@ -11,7 +11,7 @@ import { parseHTML } from "linkedom";
 import { pino } from "pino";
 import { modmailKey } from "../../src/application/keys.js";
 import { Services } from "../../src/bot/services.js";
-import type { Actor } from "../../src/domain/policy.js";
+import { type Actor, accessFor, OFFICERS_ONLY } from "../../src/domain/policy.js";
 import { Failure } from "../../src/domain/values.js";
 import { AccessResolver } from "../../src/web/access.js";
 import { html } from "../../src/web/html.js";
@@ -22,6 +22,7 @@ import { loadPages } from "../../src/web/pages.js";
 import { createWebApp } from "../../src/web/server.js";
 import { webSettings } from "../../src/web/settings.js";
 import { MemorySessions } from "../fixtures/web-sessions.js";
+import { type ActorSpec, actorOf } from "../fixtures/actors.js";
 import { UNREADABLE_TEXT, VISIBILITY_NOTICE } from "../../src/domain/modmail.js";
 import {
   OPEN_CONFLICT,
@@ -607,8 +608,12 @@ describe("fresh actors and safe navigation checks", () => {
   const GUILD_ID = HARNESS_GUILDS.example.id;
   const USER = HARNESS_ACCOUNTS.officer.id;
 
-  /** A web app over `pages`, signed in as USER, whose resolver answers `facts()` each time. */
-  async function app(pages: readonly WebPage[], facts: () => Partial<Actor>) {
+  /**
+   * A web app over `pages`, signed in as USER, whose resolver answers `facts()` each time. An
+   * `access` in the facts is kept as given rather than recomputed: it stands for a permission set no
+   * code template gives (sets become editable in 2.46.0).
+   */
+  async function app(pages: readonly WebPage[], facts: () => Partial<ActorSpec>) {
     const parsed = webSettings({
       WEB_PUBLIC_ORIGIN: "http://localhost:8080",
       DISCORD_CLIENT_SECRET: "invented-client-secret",
@@ -618,7 +623,8 @@ describe("fresh actors and safe navigation checks", () => {
     let calls = 0;
     const resolve = async (guildId: string, userId: string): Promise<Actor> => {
       calls += 1;
-      return {
+      const { access, ...spec } = facts();
+      const actor = actorOf({
         guildId,
         userId,
         officer: false,
@@ -626,8 +632,9 @@ describe("fresh actors and safe navigation checks", () => {
         member: false,
         guest: false,
         botAdministrator: false,
-        ...facts(),
-      };
+        ...spec,
+      });
+      return access ? { ...actor, access } : actor;
     };
     const sessions = new MemorySessions();
     const web = createWebApp({
@@ -681,7 +688,7 @@ describe("fresh actors and safe navigation checks", () => {
     const all = await loadPages();
     const modmailPages = [...all.values()].filter((page) => page.path.includes("/modmail"));
     /** One form post by a user resolving to `facts` (null: removed from the server). */
-    const open = async (facts: Partial<Actor> | null) => {
+    const open = async (facts: Partial<ActorSpec> | null) => {
       // A web app each, so no answer memoized for an earlier post decides this one.
       const web = await app(modmailPages, () => {
         if (facts === null)
@@ -720,7 +727,7 @@ describe("fresh actors and safe navigation checks", () => {
     const control = definePage({
       path: "/g/:guild/control",
       title: "Control",
-      access: ["officer"],
+      access: ["config.view"],
       requires: [],
       get: () => html`<p>control</p>`,
     });
@@ -750,11 +757,57 @@ describe("fresh actors and safe navigation checks", () => {
     expect(gone.text).not.toContain("Can I join");
   });
 
+  test("reading every case isn't answering them: the officer side writes with modmail.respond", async () => {
+    const all = await loadPages();
+    const modmailPages = [...all.values()].filter((page) => page.path.includes("/modmail"));
+    // The Officer role's set without modmail.respond: it still reads every case.
+    const officerSet = accessFor(false, ["officer"]);
+    const readOnly = {
+      ...officerSet,
+      permissions: new Set([...officerSet.permissions].filter((id) => id !== "modmail.respond")),
+    };
+    const readOnlyWeb = await app(modmailPages, () => ({ officer: true, access: readOnly }));
+    const fullWeb = await app(modmailPages, () => ({ officer: true }));
+    expect((await readOnlyWeb.get(`/g/${GUILD_ID}/modmail`)).status).toBe(200);
+    const shown = await readOnlyWeb.get(`/g/${GUILD_ID}/modmail/3`);
+    expect(shown.status).toBe(200);
+    // The case shows, without a form this reader couldn't send.
+    expect(shown.text).not.toContain('name="op" value="reply"');
+    expect(shown.text).not.toContain('value="close"');
+    const full = await fullWeb.get(`/g/${GUILD_ID}/modmail/3`);
+    expect(full.text).toContain('name="op" value="reply"');
+    // A reply, a Close and a Reopen on someone else's case are refused as officer work; the whole
+    // Officer set gets past that check with the same forms (Close's stale revision is then a 409).
+    const reply = {
+      op: "reply",
+      id: "00000000-0000-4000-8000-000000000001",
+      body: "An answer",
+      signed: "officers",
+    };
+    for (const fields of [reply, { op: "close", revision: "1" }, { op: "reopen", revision: "1" }]) {
+      const refused = await readOnlyWeb.post(`/g/${GUILD_ID}/modmail/3`, fields);
+      expect({
+        op: fields.op,
+        status: refused.status,
+        said: refused.text.includes(OFFICERS_ONLY),
+      }).toEqual({
+        op: fields.op,
+        status: 403,
+        said: true,
+      });
+      const answered = await fullWeb.post(`/g/${GUILD_ID}/modmail/3`, fields);
+      expect({ op: fields.op, status: answered.status }).toEqual({
+        op: fields.op,
+        status: fields.op === "close" ? 409 : 303,
+      });
+    }
+  });
+
   test("a navWhen that throws synchronously hides only its own link", async () => {
     const plain = definePage({
       path: "/g/:guild/plain",
       title: "Plain",
-      access: ["officer"],
+      access: ["config.view"],
       requires: [],
       nav: "Plain",
       get: () => html`<p>plain page</p>`,
@@ -762,7 +815,7 @@ describe("fresh actors and safe navigation checks", () => {
     const flaky = definePage({
       path: "/g/:guild/flaky",
       title: "Flaky",
-      access: ["officer"],
+      access: ["config.view"],
       requires: [],
       nav: "Flaky",
       navWhen: () => {

@@ -7,52 +7,34 @@
  * routing, navigation and the server list.
  */
 import { classifyFailure } from "../domain/failures.js";
-import { type Actor, type ActorResolution, authorizeRoleManager } from "../domain/policy.js";
-import { Failure } from "../domain/values.js";
+import { type Actor, type ActorResolution, can, isStaff } from "../domain/policy.js";
+import { isPermissionId, PERMISSIONS, type PermissionId } from "../domain/rbac.js";
 import type { Page } from "./page.js";
 
 /**
- * Every flag a page may declare, any-of; definePage refuses anything else. v3 has `officer`
- * (actor.officer after enrichment: Manage Server, or the Officer role with rank access) and
- * `manager` (authorizeRoleManager passes: Manage Server and Manage Roles). 2.40.0 adds `member`
- * and `guest` (the bound Member or Guest role held now, while TaruBot holds no Administrator in
- * the server: owner decisions Q6 A and A2). 3.1.0 adds operator.
+ * A page declares the TaruBot permissions that admit it, any-of (2.44.0, RBAC); definePage refuses
+ * an id this release doesn't know. A member-tier permission (My roles, opening mod mail) admits
+ * only while TaruBot holds no Administrator in the server, unless the actor is staff (owner
+ * decisions Q6 A and A2, in code): an actor that doesn't say, because it was resolved without
+ * TaruBot's own member or built without the field, isn't admitted by one. Nothing here looks at
+ * `timedOut`: a member in a time-out may still open their pages (Q6), and the application refuses
+ * their saves.
  */
-export const PAGE_ACCESS = ["officer", "manager", "member", "guest"] as const;
+export type PageAccess = PermissionId;
 
-/** A page's access flag. */
-export type PageAccess = (typeof PAGE_ACCESS)[number];
+/** Whether one permission admits the actor to a page; see PageAccess. */
+export function admitsBy(actor: Actor, id: PageAccess): boolean {
+  if (!isPermissionId(id) || !can(actor, id)) return false;
+  return PERMISSIONS[id].tier !== "member" || isStaff(actor) || actor.botAdministrator === false;
+}
 
 /**
- * Each flag's test. `manager` reuses the application's own rule rather than restating it, so the
- * web can't drift from the commands that change officer authority. `member` and `guest` need an
- * explicit `botAdministrator === false` (A2, in code): an actor that doesn't say, because it was
- * resolved without TaruBot's own member or built without the field, admits no member or guest.
- * Neither looks at `timedOut`: a member in a time-out may still open their pages (Q6), and the
- * application refuses their saves.
- */
-const FLAG: Readonly<Record<PageAccess, (actor: Actor) => boolean>> = {
-  officer: (actor) => actor.officer,
-  manager: (actor) => {
-    try {
-      authorizeRoleManager(actor);
-      return true;
-    } catch (error) {
-      // The rule refuses with a Failure; anything else is a bug and must not read as "no".
-      if (error instanceof Failure) return false;
-      throw error;
-    }
-  },
-  member: (actor) => actor.member === true && actor.botAdministrator === false,
-  guest: (actor) => actor.guest === true && actor.botAdministrator === false,
-};
-
-/**
- * True when the actor holds at least one of the flags. An empty list admits no one, and so does a
- * flag this release doesn't know (definePage refuses those, but routing must fail closed anyway).
+ * True when at least one of the page's permissions admits the actor. An empty list admits no one,
+ * and so does an id this release doesn't know (definePage refuses those, but routing must fail
+ * closed anyway).
  */
 export function admits(actor: Actor, access: readonly PageAccess[]): boolean {
-  return access.some((flag) => Object.hasOwn(FLAG, flag) && FLAG[flag](actor));
+  return access.some((id) => admitsBy(actor, id));
 }
 
 /** How long a GET may reuse an actor resolved for the same user and server. */

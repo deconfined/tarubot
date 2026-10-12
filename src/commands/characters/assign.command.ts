@@ -5,7 +5,7 @@ import { completeMember } from "../../discord/autocomplete.js";
 import { command, string } from "../../discord/options.js";
 import { assignReply } from "../../discord/presenters/characters.js";
 import { resolveCharacter, userId } from "../../discord/selectors.js";
-import { authorize } from "../../domain/policy.js";
+import { requirePermission } from "../../domain/policy.js";
 
 export default defineCommand({
   data: command("assign", "Assign a trusted character link to a member")
@@ -15,10 +15,10 @@ export default defineCommand({
     .addStringOption(string("forename", "Exact forename"))
     .addStringOption(string("surname", "Exact surname"))
     .addStringOption(string("world", "Exact world")),
-  access: "officer",
+  permissions: ["characters.assign"],
   requires: [applicationKey],
   async execute({ actor, viewer, interaction, services }) {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "characters.assign");
     const app = services.get(applicationKey);
     await app.guild(actor);
     // A character linked to someone else fails as ownership_conflict; the failure presenter shows
@@ -34,7 +34,7 @@ export default defineCommand({
     );
   },
   autocomplete(context) {
-    authorize(context.actor, context.actor.guildId, "officer");
+    requirePermission(context.actor, context.actor.guildId, "characters.assign");
     return completeMember(context);
   },
 });

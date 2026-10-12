@@ -1,4 +1,5 @@
 /** A slash command owns its registration schema, execution, and private autocomplete. */
+import { modulePermissions, type PermissionId } from "../domain/rbac.js";
 import type {
   ApplicationCommandOptionChoiceData,
   AutocompleteInteraction,
@@ -42,7 +43,12 @@ export interface ModalGateContext extends BotContext {
 /** Metadata and handlers exported together prevent registration/runtime inventories drifting. */
 interface CommandMetadata {
   readonly data: Pick<SlashCommandBuilder, "toJSON">;
-  readonly access?: "user" | "officer";
+  /**
+   * The permissions that admit this module at the router, any-of (2.44.0, RBAC); none means any
+   * human member. A coarse first gate, also applied to autocomplete: each service still checks the
+   * exact permission its operation needs.
+   */
+  readonly permissions?: readonly PermissionId[];
   readonly ephemeral?: boolean;
   /**
    * Replies stay private even where DevBot's public-response override (PUBLIC_TEST_RESPONSES)
@@ -76,7 +82,7 @@ export type CommandOptions = CommandMetadata &
         readonly beforeModal?: never;
       }
     | {
-        readonly access?: "user";
+        readonly permissions?: readonly [];
         readonly modal: (interaction: ChatInputCommandInteraction) => ModalBuilder;
         /**
          * Optional availability check before the form opens. Return a presenter reply to answer
@@ -98,7 +104,7 @@ export type CommandOptions = CommandMetadata &
 export class Command {
   private readonly definition: ReturnType<SlashCommandBuilder["toJSON"]>;
   readonly name: string;
-  readonly access: "user" | "officer";
+  readonly permissions: readonly PermissionId[];
   readonly ephemeral: boolean;
   readonly alwaysPrivate: boolean;
   readonly requires: readonly ServiceKey<unknown>[];
@@ -119,7 +125,7 @@ export class Command {
         "A command requires a Discord builder and exactly one execute or modal handler.",
       );
     }
-    if (options.modal && options.access && options.access !== "user")
+    if (options.modal && (options.permissions?.length ?? 0) > 0)
       throw new Error(
         "Immediate modal commands must be unprivileged; authorize submissions instead.",
       );
@@ -135,7 +141,7 @@ export class Command {
     // Discord.js validates names, option structure, and limits while serializing the builder.
     this.definition = options.data.toJSON();
     this.name = this.definition.name;
-    this.access = options.access ?? "user";
+    this.permissions = modulePermissions(options.permissions);
     this.ephemeral = options.ephemeral ?? true;
     this.alwaysPrivate = options.alwaysPrivate === true;
     if (this.alwaysPrivate && !this.ephemeral)

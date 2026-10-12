@@ -16,7 +16,7 @@ import { and, count, desc, eq, gt, gte, inArray, isNull, lte, not, or, sql } fro
 import type { Configuration } from "../config/env.js";
 import { project } from "../config/project.js";
 import { classifyFailure } from "../domain/failures.js";
-import type { Actor } from "../domain/policy.js";
+import { requirePermission, type Actor } from "../domain/policy.js";
 import {
   after,
   AUTO_COMMENTS_PER_DAY,
@@ -205,6 +205,7 @@ export class IssueReports {
         kind: "option",
         option: "description",
       });
+    requirePermission(actor, actor.guildId, "issue.use");
     // Refuse before collecting context, so hitting the limits costs two reads, not a snapshot.
     await this.limits(this.db.orm, actor);
     const body = await this.render({

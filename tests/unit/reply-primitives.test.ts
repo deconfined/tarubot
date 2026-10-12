@@ -70,6 +70,7 @@ import {
 } from "../fixtures/replies.js";
 import { catalogTests, type ReplyCatalog } from "../fixtures/replies/index.js";
 import { ACTORS, CHARACTER, FC, NOW, REF, VIEWERS } from "../fixtures/results.js";
+import { actorOf } from "../fixtures/actors.js";
 
 describe("formatting", () => {
   test("gil is exact, grouped and signed with '+' or U+2212, never routed through Number()", () => {
@@ -628,14 +629,22 @@ describe("audiences and labels", () => {
     expect(audienceOf(ACTORS.member)).toBe("member");
     // An officer by rank or override, even holding Manage Roles, can't change officer authority.
     expect(audienceOf(ACTORS.officer)).toBe("officer");
-    expect(audienceOf({ ...ACTORS.officer, manageRoles: true })).toBe("officer");
-    // Manage Server without Manage Roles is an officer, not a manager.
-    expect(audienceOf({ ...ACTORS.manager, manageRoles: false })).toBe("officer");
-    expect(audienceOf(ACTORS.manager)).toBe("manager");
-    // Without the serverManager flag, the policy falls back to officer authority.
-    expect(audienceOf({ guildId: "1", userId: "2", officer: true, manageRoles: true })).toBe(
-      "manager",
+    expect(audienceOf(actorOf({ ...ACTORS.officer, officer: true, manageRoles: true }))).toBe(
+      "officer",
     );
+    // Manage Server without Manage Roles is no manager: an officer through the Officer role, and
+    // otherwise a member (Q2 A, 2.44.0; in 2.43.0 Manage Server alone made an officer).
+    expect(audienceOf(actorOf({ ...ACTORS.manager, officer: true, manageRoles: false }))).toBe(
+      "officer",
+    );
+    expect(audienceOf(actorOf({ ...ACTORS.manager, manageRoles: false }))).toBe("member");
+    expect(audienceOf(ACTORS.manager)).toBe("manager");
+    // The audience follows the resolved access, never the Discord flags beside it: without the
+    // serverManager flag nobody is a manager (2.43.0 fell back to the removed officer flag).
+    expect(
+      audienceOf(actorOf({ guildId: "1", userId: "2", officer: true, manageRoles: true })),
+    ).toBe("officer");
+    expect(audienceOf({ ...ACTORS.member, serverManager: true, manageRoles: true })).toBe("member");
     expect(viewerOf(ACTORS.manager, REF)).toEqual({
       audience: "manager",
       userId: ACTORS.manager.userId,

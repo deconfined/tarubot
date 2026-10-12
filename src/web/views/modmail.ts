@@ -868,6 +868,7 @@ function replyForm(model: CaseViewModel, refusedReply: CaseRefusal | undefined):
 /** Close (inside a disclosure that says what it does first) or, for officers, Reopen. */
 function stateForms(model: CaseViewModel): SafeHtml | "" {
   const { view } = model;
+  if (!view.canRespond) return "";
   if (view.state === "closed")
     return view.side === "officer"
       ? postForm(
@@ -962,11 +963,13 @@ ${privacyNote()}
 <ol class="modmail-thread">${entries}</ol>
 ${stateError}
 ${
-  view.canReply
-    ? replyForm(model, refused)
-    : view.keyProblem
-      ? ""
-      : callout(REPLY_ERRORS.case_full, true)
+  !view.canRespond
+    ? ""
+    : view.canReply
+      ? replyForm(model, refused)
+      : view.keyProblem
+        ? ""
+        : callout(REPLY_ERRORS.case_full, true)
 }
 <div class="modmail-case__actions">${stateForms(model)}</div>
 ${readLog(view)}

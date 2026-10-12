@@ -5,12 +5,12 @@ sidebar:
   order: 6
 ---
 
-TaruBot officers run its officer commands. Anyone with Discord's Manage Server is always an officer. Everyone else becomes one by holding the server's **Officer role**, which TaruBot gives out from two sources:
+TaruBot officers run its officer commands. A member becomes one by holding the server's **Officer role**, which TaruBot gives out from two sources:
 
 - **the in-game rank**: members whose linked character holds a chosen FC rank; and
 - **explicit grants** that a server manager records with `/officer grant`.
 
-All of these commands need a server manager (Manage Server and Manage Roles); see [Who can do what](/tarubot/admin/access/).
+Discord's Manage Server alone doesn't make anyone an officer. All of these commands need a server manager (Manage Server and Manage Roles), who holds every permission anyway; see [Who can do what](/tarubot/admin/access/).
 
 ```text
 /config officer_rank rank:Officer
@@ -25,7 +25,8 @@ All of these commands need a server manager (Manage Server and Manage Roles); se
 
 [`/config officer_rank`](/tarubot/reference/commands/#config-officer_rank) names the FC rank whose holders get officer access:
 
-- A linked character with confirmed FC membership and that rank on an accepted roster qualifies its owner. With several linked characters, any one is enough.
+- A linked character with confirmed FC membership and that rank on an accepted roster qualifies its owner, when its link [counts for rank](/tarubot/admin/access/#links-that-count-for-rank). With several linked characters, any one is enough.
+- Until a new link's first roster check, a member who already holds the Officer role keeps it, but gets officer permissions only once the roster confirms the rank.
 - Rank names match regardless of case, spacing and Unicode forms. This is the **FC rank**, not the character's Grand Company rank.
 - A rank alone grants nothing until an FC is linked and an Officer role is bound; the reply says what's still missing.
 - A changed rank rechecks every member. Naming the saved rank again, or `unset_rank:true` with no rank set, changes nothing and says so.
@@ -59,7 +60,7 @@ Binding queues an immediate recheck. Because the grants were recorded first, the
 
 ## Delegated officers
 
-Officers who hold only the Officer role can assign characters to members with `/assign`, but such an assignment never makes anyone an officer: only a verified claim, an imported link, or an assignment by a server manager with Manage Roles lets a character's rank count. This keeps officer access from being handed on indirectly. See [Managing members' characters](/tarubot/admin/member-links/).
+Officers can assign characters to members with `/assign`, but such an assignment never makes anyone an officer or FC Leader: only a verified claim, an imported link, or an assignment by a server manager lets a character's rank count, and only a server manager can remove one of those from someone else. This keeps officer access from being handed on indirectly. See [Managing members' characters](/tarubot/admin/member-links/).
 
 The FC Leader role doesn't grant officer commands either.
 

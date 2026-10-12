@@ -10,9 +10,9 @@ Every command works only inside a server, and every reply is private to the pers
 **Who can use it** uses these words:
 
 - **Anyone** means any human member of the server.
-- **Officers** have Discord's Manage Server permission, or hold the Officer role with TaruBot backing it: a linked character holds the officer rank, or a server manager granted it with `/officer grant`. A role given by hand alone doesn't count. See [Who can do what](/tarubot/admin/access/).
-- **Server managers** have both Manage Server and Manage Roles. Bot officer access alone isn't enough.
-- **Confirmed FC members** have a linked character that an accepted roster lists in the server's Free Company.
+- **Officers** hold the Officer role with TaruBot backing it: a linked character holds the officer rank, or a server manager granted it with `/officer grant`. A role given by hand alone doesn't count, and neither does Manage Server alone. See [Who can do what](/tarubot/admin/access/).
+- **Server managers** have both Manage Server and Manage Roles, and can use every command. Bot officer access alone isn't enough.
+- **Confirmed FC members** hold the Member role and have a linked character that an accepted roster lists in the server's Free Company.
 
 A **Member** option suggests server members as you type. You can also paste a user ID or an @mention, which is how you name someone who has left the server.
 
@@ -22,7 +22,7 @@ A **Member** option suggests server members as you type. You can also paste a us
 
 Assign a trusted character link to a member, with a recorded reason. The character is found the same way as for `/claim`. See [Managing members' characters](/tarubot/admin/member-links/).
 
-**Who can use it:** officers. Only a server manager's assignment lets the character's in-game rank grant automatic officer access; an assignment by any other officer grants membership only.
+**Who can use it:** officers. Only a server manager's assignment lets the character's in-game rank count for the Officer and FC Leader roles; an assignment by any other officer grants membership only.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -104,7 +104,7 @@ Turn character-based nickname management on or off.
 
 Remove a member's character link, with a recorded reason. It works for members who have left.
 
-**Who can use it:** officers.
+**Who can use it:** officers, for links that don't count for rank. Removing a link the member verified, an imported link or a server manager's assignment needs a server manager, because it can count for FC rank.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -150,7 +150,7 @@ Finish a claim: TaruBot reads the character's profile and looks for your token i
 
 Link this server to its Free Company. TaruBot reads the FC from the Lodestone and queues a roster check.
 
-**Who can use it:** officers; a server manager once an officer rank is set.
+**Who can use it:** server managers.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -164,7 +164,7 @@ Link this server to its Free Company. TaruBot reads the FC from the Lodestone an
 
 Unlink the Free Company. Links, ledger accounts and history stay.
 
-**Who can use it:** officers; a server manager once an officer rank is set.
+**Who can use it:** server managers.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -178,7 +178,7 @@ Unlink the Free Company. Links, ledger accounts and history stay.
 
 Choose the Member role, which TaruBot gives to confirmed FC members and removes from everyone else.
 
-**Who can use it:** officers with Discord's Manage Roles; a server manager once onboarding is on.
+**Who can use it:** server managers.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -196,7 +196,7 @@ Give exactly one of `role` or `unset_role:true`. Once onboarding is on, the four
 
 Choose the Guest role, which TaruBot gives to registered visitors, approved applicants and members an officer granted Guest.
 
-**Who can use it:** officers with Discord's Manage Roles; a server manager once onboarding is on.
+**Who can use it:** server managers.
 
 | Option | Type | Required | Notes |
 | --- | --- | --- | --- |

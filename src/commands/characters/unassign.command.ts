@@ -5,7 +5,7 @@ import { completeCharacter, completeMember, focusedOption } from "../../discord/
 import { command, string } from "../../discord/options.js";
 import { unlinkReply } from "../../discord/presenters/characters.js";
 import { userId } from "../../discord/selectors.js";
-import { authorize } from "../../domain/policy.js";
+import { requirePermission } from "../../domain/policy.js";
 import { id } from "../../domain/values.js";
 
 export default defineCommand({
@@ -20,10 +20,10 @@ export default defineCommand({
     )
     .addStringOption(string("character", "Stored character ID", true, true))
     .addStringOption(string("reason", "Audited reason", true)),
-  access: "officer",
+  permissions: ["characters.unassign"],
   requires: [applicationKey],
   async execute({ actor, viewer, interaction, services }) {
-    authorize(actor, actor.guildId, "officer");
+    requirePermission(actor, actor.guildId, "characters.unassign");
     return unlinkReply(
       await services
         .get(applicationKey)
@@ -38,7 +38,7 @@ export default defineCommand({
     );
   },
   autocomplete(context) {
-    authorize(context.actor, context.actor.guildId, "officer");
+    requirePermission(context.actor, context.actor.guildId, "characters.unassign");
     if (focusedOption(context) === "member") return completeMember(context);
     // The selected owner, not the invoking officer, scopes the character query.
     return completeCharacter(

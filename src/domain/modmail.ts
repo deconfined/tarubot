@@ -10,7 +10,7 @@
  * never the text or the member's name, and TaruBot never reads messages or DMs (no message
  * intents).
  */
-import type { Actor } from "./policy.js";
+import { can, type Actor } from "./policy.js";
 
 /** A case's state: waiting on officers, waiting on the member, or closed. */
 export type CaseState = "officers" | "member" | "closed";
@@ -95,21 +95,17 @@ export function caseUrl(origin: string, guildId: string, number: bigint): string
  * through (owner decision of 2026-10-11). The limits still apply.
  */
 export const mayOpen = (actor: Actor): boolean =>
-  (actor.member === true || actor.guest === true) && actor.botAdministrator === false;
+  can(actor, "modmail.open") && actor.botAdministrator === false;
 
 /**
- * Who may read and write a case: any officer of its server (owner decision 6), or its opener while
- * they may still use member pages (the same rule as My roles: Member or Guest now, no
- * Administrator for TaruBot). Anyone else is told the case doesn't exist (404), so case numbers
- * reveal nothing.
+ * Who may read a case: anyone with modmail.inbox in its server (every officer, owner decision 6),
+ * or its opener while they may still open cases (mayOpen: modmail.open, which the Member and Guest
+ * roles carry, and no Administrator for TaruBot). Anyone else is told the case doesn't exist
+ * (404), so case numbers reveal nothing. Writing on the officer side also needs modmail.respond.
  */
 export function mayAccess(actor: Actor, openerId: string): boolean {
-  if (actor.officer) return true;
-  return (
-    actor.userId === openerId &&
-    (actor.member === true || actor.guest === true) &&
-    actor.botAdministrator === false
-  );
+  if (can(actor, "modmail.inbox")) return true;
+  return actor.userId === openerId && mayOpen(actor);
 }
 
 /**

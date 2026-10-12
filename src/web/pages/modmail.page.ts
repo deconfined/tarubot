@@ -33,6 +33,7 @@
 import { z } from "zod";
 import { modmailKey } from "../../application/keys.js";
 import { INBOX_FILTERS, type InboxFilter } from "../../domain/modmail.js";
+import { can } from "../../domain/policy.js";
 import { Failure } from "../../domain/values.js";
 import { definePage, type PageContext, type PostOutcome } from "../page.js";
 import { noticeLocation } from "../views/forms.js";
@@ -168,7 +169,7 @@ async function openCase(context: PageContext, form: FormData): Promise<PostOutco
 async function render(context: PageContext, refused?: SettingsRefusal) {
   const modmail = context.services.get(modmailKey);
   // Both authorize the actor again and read the database and the gateway caches only.
-  if (!context.actor.officer) return renderMyCases(await memberView(context));
+  if (!can(context.actor, "modmail.inbox")) return renderMyCases(await memberView(context));
   return renderInbox({
     inbox: await modmail.inbox(context.actor, filterOf(context.url)),
     guildId: context.guildId,
@@ -183,18 +184,19 @@ async function render(context: PageContext, refused?: SettingsRefusal) {
 export default definePage({
   path: MODMAIL_PATH,
   title: "Mod mail",
-  access: ["member", "guest", "officer"],
+  access: ["modmail.inbox", "modmail.open"],
   requires: [modmailKey],
   // Private text: someone removed or demoted loses the page on their next request (no memo).
   freshActor: true,
   nav: "Mod mail",
   icon: "mail",
-  navWhen: (actor, services) => actor.officer || services.get(modmailKey).enabledIn(actor.guildId),
+  navWhen: (actor, services) =>
+    can(actor, "modmail.inbox") || services.get(modmailKey).enabledIn(actor.guildId),
   get: (context) => render(context),
   async post(context, form) {
     const op = text(form, OP_FIELD);
     // Open a case is the member's view's form; the officers' view never draws it.
-    if (op === "open" && !context.actor.officer) return openCase(context, form);
+    if (op === "open" && !can(context.actor, "modmail.inbox")) return openCase(context, form);
     if (op !== "settings") throw outOfDate();
     const asked = text(form, ENABLED_FIELD);
     const revision = text(form, REVISION_FIELD);

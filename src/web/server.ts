@@ -15,7 +15,7 @@ import { databaseKey, lifecycleKey, publicStatusKey } from "../application/keys.
 import type { StatusSnapshot } from "../application/public-status.js";
 import type { BotContext } from "../bot/context.js";
 import type { ServiceKey, Services } from "../bot/services.js";
-import type { Actor } from "../domain/policy.js";
+import { type Actor, isStaff } from "../domain/policy.js";
 import { Failure, idSchema } from "../domain/values.js";
 import { AccessResolver, admits, listServers, type WebGuild } from "./access.js";
 import { ASSET_CACHE_CONTROL, ASSETS } from "./assets.js";
@@ -703,7 +703,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
             await hiddenPages(pages.values(), context.services, actor),
           ),
           // The side navigation's note: officers configure, members and guests pick roles.
-          audience: actor.officer ? "officer" : "member",
+          audience: isStaff(actor) ? "officer" : "member",
         },
       };
       if (!form || !definition.post)

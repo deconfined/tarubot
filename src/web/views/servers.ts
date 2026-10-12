@@ -27,9 +27,9 @@ export type HomeView =
   | { readonly signedIn: true; readonly servers: readonly ServerLink[] };
 
 /**
- * Who the pages are for, in the words of the access rule (access.ts's flags, 2.40.0): the bound
- * Member or Guest role held now, which opens My roles, and actor.officer, which opens the officers'
- * pages too.
+ * Who the pages are for, in the words of the access rule (access.ts, 2.40.0 and 2.44.0): the bound
+ * Member or Guest role held now, which opens My roles, and officer permissions, which open the
+ * officers' pages too.
  */
 const AUDIENCE =
   "Anyone with the server's Member or Guest role can sign in to pick their roles. Officers can also sign in to manage TaruBot.";

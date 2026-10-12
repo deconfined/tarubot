@@ -23,7 +23,7 @@ const obsolete = (): Failure =>
 
 export default defineComponent({
   prefix: "guest",
-  access: "officer",
+  permissions: ["guests.decide"],
   requires: [applicationKey],
   async execute({ actor, viewer, interaction, services }) {
     if (!interaction.isButton()) throw obsolete();

@@ -29,7 +29,7 @@ for (const name of ["grant", "revoke", "reset"])
   );
 export default defineCommand({
   data,
-  access: "officer",
+  permissions: ["admin.grants"],
   requires: [roleAdministrationKey],
   async execute({ actor, viewer, interaction, services }) {
     const administration = services.get(roleAdministrationKey);
@@ -43,6 +43,6 @@ export default defineCommand({
       viewer,
     );
   },
-  // The router authorizes officer access first; the service still requires a server manager.
+  // The router admits server managers only (admin.grants), for suggestions too.
   autocomplete: (context) => completeMember(context),
 });
