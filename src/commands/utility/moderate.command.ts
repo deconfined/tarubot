@@ -66,6 +66,10 @@ const data = command(
           .setRequired(true)
           .addChoices(...FEATURE_CHOICES),
       )
+      // Discord refuses to register a command whose required option follows an optional one, so
+      // the reason comes before the optional length (2.45.1; 2.45.0 listed them the other way
+      // round and its deploy stopped at command registration).
+      .addStringOption(string("reason", "Why; the member will see this reason", true))
       .addStringOption((option) =>
         option
           .setName("duration")
@@ -74,8 +78,7 @@ const data = command(
           )
           .setRequired(false)
           .addChoices(...DURATION_CHOICES),
-      )
-      .addStringOption(string("reason", "Why; the member will see this reason", true)),
+      ),
   )
   .addSubcommand((sub) =>
     sub

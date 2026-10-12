@@ -707,11 +707,11 @@ Pause one member's use of one feature for a while, without touching their Discor
 | --- | --- | --- | --- |
 | `member` | Member | Yes | Who to pause. They must be in the server, or someone TaruBot already knows from an earlier time there. |
 | `feature` | Choice | Yes | What to pause, by name: linking characters, roster checks, guest applications, reading the ledger, recording ledger deposits, opening mod mail cases, picking roles on My roles, suggesting features or reporting problems. **All member features** pauses every one of them except mod mail, which only a server manager can pause. |
-| `duration` | Choice | No | 1 hour, 1 day, 1 week, 30 days or Until lifted. The default is 1 week. |
 | `reason` | Text | Yes | Up to 1,000 characters. **The member reads it**, and so do officers who can see pauses. |
+| `duration` | Choice | No | 1 hour, 1 day, 1 week, 30 days or Until lifted. The default is 1 week. |
 
 ```text
-/moderate block member:123456789012345678 feature:Suggesting features (/suggest) duration:1 week reason:Posting the same suggestion again and again
+/moderate block member:123456789012345678 feature:Suggesting features (/suggest) reason:Posting the same suggestion again and again duration:1 week
 ```
 
 ### /moderate lift

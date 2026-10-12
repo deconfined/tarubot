@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.45.0**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.45.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.45.1 — Make `/moderate` registrable
+
+- Fix `/moderate block` so Discord accepts it. 2.45.0 listed the optional `duration` option before the required `reason`, and Discord refuses to register a command whose required option follows an optional one, so the deploy stopped at command registration after the database migration and the bot did not start. `reason` now comes before `duration`; each is still found by name, so a command typed with the options in either order behaves as before, and nothing else about pauses changes.
+- Add a test that checks every command against Discord's registration rules (names, description lengths, required options before optional ones, choice counts and lengths, nesting and size), so an invalid definition fails the pull request's checks and not a deploy.
+- 2.45.0 never reached members because of that failure; everything in its entry below applies to this release. This release adds no migration and changes no setting. Migration 015 is the one 2.45.0 already applied, and the commands must be registered again, as for 2.45.0.
 
 ## 2.45.0 — Pause one person's use of a feature
 
