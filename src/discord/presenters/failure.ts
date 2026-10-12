@@ -219,7 +219,7 @@ export const EXAMPLES: Readonly<Record<string, readonly string[]>> = {
   "officer reset": ["/officer reset member:123456789012345678 reason:Back to the in-game rank"],
   // 2.45.0: the feature and duration are choices, written as the picker shows them.
   "moderate block": [
-    "/moderate block member:123456789012345678 feature:Suggesting features (/suggest) duration:1 week reason:Posting the same suggestion again and again",
+    "/moderate block member:123456789012345678 feature:Suggesting features (/suggest) reason:Posting the same suggestion again and again duration:1 week",
   ],
   "moderate lift": [
     "/moderate lift member:123456789012345678 feature:Suggesting features (/suggest) reason:Agreed to follow the rules",

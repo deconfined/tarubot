@@ -525,8 +525,9 @@ test("/moderate declares block, lift and status; the feature and duration are fi
   expect(options("block")).toEqual([
     ["member", true],
     ["feature", true],
-    ["duration", false],
+    // Required options come first: Discord refuses to register the command otherwise (2.45.1).
     ["reason", true],
+    ["duration", false],
   ]);
   expect(options("lift")).toEqual([
     ["member", true],
