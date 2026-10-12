@@ -67,29 +67,34 @@ Use [`/moderate block`](/tarubot/reference/commands/#moderate-block): choose the
 
 ## The reason
 
-Every pause needs a reason of 1 to 1,000 characters. **The paused person reads it,** and so do officers who can see pauses, so write it for them: what happened, and what you expect. It is private text, kept like a guest revocation: it never goes in TaruBot's audit log, logs, reports or Discord, only in the pause's own record, which is kept until the server's data is removed.
+Every pause needs a reason of 1 to 1,000 characters, and a line break counts as one character, so anything the dashboard's box accepts is accepted. Lifting a pause asks for a reason of the same length. **The paused person reads it,** and so do officers who can see pauses, so write it for them: what happened, and what you expect. It is private text, kept like a guest revocation: it never goes in TaruBot's audit log, logs, reports or Discord, only in the pause's own record, which is kept until the server's data is removed.
 
 ## What the paused person sees
 
 They're told which feature, when the pause ends and your reason, and **never who set it**. A pause shows up everywhere the feature is used:
 
-- **Commands** refuse with a **Paused for you** card saying their use of the feature is paused, with the end and the reason. It's checked before any limit, GitHub request or Lodestone read, so a paused try costs nothing and counts against no limit.
+- **Commands** refuse with a **Paused for you** card saying their use of the feature is paused, with the end and the reason. It's checked before the command's limits and before any GitHub request or Lodestone read, so a paused try costs nothing and counts against no limit. Where it comes in:
+  - [`/claim`](/tarubot/reference/commands/#claim) checks it after finding the server and before it searches the Lodestone, so a mistyped name reads as the pause, not as "not found".
+  - [`/modmail`](/tarubot/reference/commands/#modmail) and [`/apply`](/tarubot/reference/commands/#apply) check it **before their form opens**, so nobody writes a message into a form that can't be sent. `/apply` still says first that applications are closed. `/modmail` still says first that mod mail isn't set up or can't be used here, or that the person doesn't hold Member or Guest, and then tells a paused person about the pause before it mentions the on/off switch or the case limits. Server managers, who can't be paused, skip the check. Like the other checks before a form it is a courtesy that lets the form open if it can't finish in time; the submission checks again and refuses a paused person the same way.
+  - [`/issue`](/tarubot/reference/commands/#issue) and [`/ledger deposit`](/tarubot/reference/commands/#ledger-deposit) look at what was typed first, so a description or note that can't be accepted is told that, not the pause.
 - **My roles** still opens and says until when and why, with **Save my roles** off, as during a Discord time-out.
-- **Mod mail's Open a case** is greyed out with a note beside it that opening cases is paused, and `/modmail` refuses and points to `/moderate status` for the end and the reason. Existing cases work as before.
+- **Mod mail's Open a case** is greyed out with a note beside it that opening cases is paused, and `/modmail` refuses before its form opens with the same **Paused for you** card, giving the end and the reason. Existing cases work as before.
 - **Reading the ledger and recording deposits** are refused the same way, for officers as well as members.
 
-The card also points to `/modmail` for talking to the officers, unless opening cases is paused for them as well.
+The card points to `/modmail` for talking to the officers only when the paused feature is one of the member features that go with the Member and Guest roles: suggesting features, My roles and the ledger. For every other feature it says to ask an officer in the server. Linking characters, roster checks, guest applications and reporting problems are open to anyone in the server, who may hold neither role and so have no `/modmail`; and when opening cases is itself what is paused, the card adds that the cases already open stay open on the dashboard. `/moderate status` gives the person the same advice for everything paused for them at once: it points to `/modmail` when any paused feature is one of those member features and opening cases isn't paused.
 
 ## The Moderation page
 
 When the dashboard is on, officers who can see pauses (and server managers) find **Moderation** in the server's navigation. It shows:
 
-- **Paused now:** a card for each paused person, with a chip for each paused feature: when it ends, the reason, and who set it and when. Only officers who can see pauses see who.
+- **Paused now:** a card for each paused person, with a chip for each paused feature: when it ends, the reason, and who set it and when. Only officers who can see pauses see who, and never for their own pauses (see below).
 - **Recently ended:** the newest 25 pauses to end, newest end first, each saying whether it ran out or who lifted it, and the lift's reason. A pause that ran out shows the time it was due to end, not the later moment TaruBot noticed, and has no lifter or lift reason.
 - **Find someone:** a member's ID or a pasted mention, to see their pauses and the earlier ones, or a suggestion number such as `#123`, to see who sent it ([below](#who-sent-a-suggestion)).
 - **Pause someone**, and **Lift** on each chip, for officers who hold **moderation.block**. Someone who holds only **moderation.view** sees everything and the page says changing needs the other permission. To change a pause, pause the same feature again: the new one replaces the old.
 
-Pausing and lifting need a Discord sign-in from the **last 15 minutes**. If yours is older, the page says **Sign in again to make changes** and offers the link, and a change sent from an older session goes to Discord's sign-in first and then back to the page, without what you typed, so type it again. Looking people up needs no recent sign-in.
+**An officer who is paused sees their own pauses like any member.** Only a server manager can pause an officer, and the officer keeps the page. Their own pauses show the feature, the end and the reason and never who set them, with a note in place of Lift ("Your own pause. Someone else lifts it."), and their own ended pauses aren't listed, so the 25 recently ended are other people's. Looking themselves up in **Find someone** shows the same as [`/moderate status`](/tarubot/reference/commands/#moderate-status) does. Who set a pause and who lifted one stays out of sight of the person it is about, whoever they are.
+
+Pausing and lifting need a Discord sign-in from the **last 15 minutes**. If yours is older, the page says **Sign in again to make changes** and offers it as a plain link in place of the buttons. A change you send from an older session is **not made**: the page opens again with that link and without what you typed, so sign in again, then enter the change again. The form can't send you to Discord itself: a form submission redirected on to Discord's sign-in is blocked by the page's security policy in Chromium browsers, so the sign-in is a link you follow from the page. Looking people up needs no recent sign-in.
 
 What this protects, exactly: TaruBot signs you in with Discord's `prompt=none`, so in a browser that is still signed in to Discord the sign-in again is silent and takes a moment. The rule stops a copied or replayed TaruBot session cookie, whose holder's browser has no live Discord session of yours, from pausing people once your last sign-in is more than 15 minutes old. It does **not** protect an unlocked computer or browser that is still signed in to Discord: whoever sits there passes the sign-in without a prompt. Lock your screen, and on a shared computer sign out of Discord itself, not only the dashboard.
 

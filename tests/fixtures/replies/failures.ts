@@ -334,6 +334,18 @@ export const FAILURE_CASES = {
     pausedFailure("modmail.open", { until: at(86_400), reason: "Opening cases without a reason" }),
     "modal modmail",
   ),
+  // A baseline feature (/claim, /refresh, /apply, /issue) is used by lobby newcomers, who can't
+  // use /modmail: the way out is an officer in the server.
+  "forbidden blocked · /claim · member": card(
+    "forbidden.blocked",
+    "member",
+    PAUSED_FOR_YOU,
+    pausedFailure("characters.claim", {
+      until: at(86_400),
+      reason: "Claiming characters that aren't yours",
+    }),
+    "/claim",
+  ),
   // A server manager may pause an officer's member features, so officers can see the card too.
   "forbidden blocked · /issue · officer": card(
     "forbidden.blocked",

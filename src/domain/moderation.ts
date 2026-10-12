@@ -19,6 +19,13 @@ export type PauseDuration = keyof typeof PAUSE_DURATIONS;
 /** A week: long enough to matter, short enough that forgetting one is harmless. */
 export const DEFAULT_PAUSE_DURATION: PauseDuration = "1w";
 
+/**
+ * A typed reason with its line breaks as "\n". A browser counts a line break as one character
+ * against a textarea's maxlength but submits it as CRLF, so measuring the raw text would refuse a
+ * reason the field allowed. Mod mail and suggestions normalize the same way.
+ */
+export const cleanReason = (value: string): string => value.replace(/\r\n?/gu, "\n");
+
 /** Whether an untrusted string names a duration. */
 export const isPauseDuration = (value: unknown): value is PauseDuration =>
   typeof value === "string" && Object.hasOwn(PAUSE_DURATIONS, value);

@@ -32,6 +32,7 @@ import {
   requirePermission,
   type AccessFacts,
   type Actor,
+  type Pause,
 } from "../domain/policy.js";
 import type { ManagedRole, PermissionId } from "../domain/rbac.js";
 import { activeBlocks } from "./blocks.js";
@@ -331,6 +332,14 @@ export class Service {
       ? undefined
       : await activeBlocks(this.db.orm, actor.guildId, actor.userId);
     return { ...actor, member, guest, access: accessFor(manager, roles, pauses) };
+  }
+  /**
+   * The person's active pause on a permission, if any (2.45.0): the one indexed read a pre-form
+   * check makes before a modal opens, where there is no resolved actor yet. Enforcement itself
+   * reads Access.blocked, resolved with the actor.
+   */
+  async pauseOf(guildId: string, userId: string, id: PermissionId): Promise<Pause | undefined> {
+    return (await activeBlocks(this.db.orm, guildId, userId)).get(id);
   }
   /** Read configured state without silently creating a guild for an ordinary/read-only command. */
   async guild(actor: Actor): Promise<GuildRecord> {

@@ -335,7 +335,7 @@ describe.skipIf(!url)("mod mail", () => {
       await enable();
       for (let index = 0; index < MODMAIL_LIMITS.openCases; index++) await opened(MEMBER);
       expect(await open(MEMBER)).toEqual({ status: "refused", reason: "open_limit" });
-      expect(await modmail().openGate(GUILD, MEMBER.userId, [ROLE.member], false)).toBe(
+      expect(await modmail().openGate(GUILD, MEMBER.userId, [ROLE.member], false, false)).toBe(
         "open_limit",
       );
       // Closing frees a slot for the open limit, but the 24-hour count keeps going.
@@ -344,19 +344,21 @@ describe.skipIf(!url)("mod mail", () => {
       await opened(MEMBER);
       await opened(MEMBER);
       expect(await open(MEMBER)).toEqual({ status: "refused", reason: "daily_limit" });
-      expect(await modmail().openGate(GUILD, MEMBER.userId, [ROLE.member], false)).toBe(
+      expect(await modmail().openGate(GUILD, MEMBER.userId, [ROLE.member], false, false)).toBe(
         "daily_limit",
       );
       // Another member, and the same member in another server, are counted apart.
       expect((await open(OTHER_MEMBER)).status).toBe("opened");
-      expect(await modmail().openGate(GUILD, OTHER_MEMBER.userId, [ROLE.member], false)).toBeNull();
-      expect(await modmail().openGate(GUILD, LOBBY.userId, [], false)).toBe("not_member");
-      expect(await modmail().openGate(GUILD, OTHER_MEMBER.userId, [ROLE.member], true)).toBe(
+      expect(
+        await modmail().openGate(GUILD, OTHER_MEMBER.userId, [ROLE.member], false, false),
+      ).toBeNull();
+      expect(await modmail().openGate(GUILD, LOBBY.userId, [], false, false)).toBe("not_member");
+      expect(await modmail().openGate(GUILD, OTHER_MEMBER.userId, [ROLE.member], true, false)).toBe(
         "administrator",
       );
-      expect(await modmail().openGate(OTHER_GUILD, MEMBER.userId, [ROLE.member], false)).toBe(
-        "off",
-      );
+      expect(
+        await modmail().openGate(OTHER_GUILD, MEMBER.userId, [ROLE.member], false, false),
+      ).toBe("off");
     });
 
     test("text is checked: empty, too long or unsavable text opens nothing", async () => {
@@ -423,6 +425,136 @@ describe.skipIf(!url)("mod mail", () => {
       expect(await db.orm.select().from(t.jobs)).toHaveLength(0);
       const [settings] = await db.orm.select().from(t.modmailSettings);
       expect(settings?.last_number).toBe(0n);
+    });
+  });
+
+  describe("the gate for a person whose opening of cases is paused (2.45.0)", () => {
+    const BATCH = "00000000-0000-4000-8000-000000000201";
+    const REASON = "Opening cases without a reason";
+    const HOUR = 3_600_000;
+    /** Whole seconds, so the end survives the round trip through the database unchanged. */
+    const inHours = (hours: number) =>
+      new Date(Math.floor(Date.now() / 1000) * 1000 + hours * HOUR);
+    /** A pause as /moderate block stores it, written straight to the table. */
+    const pauseFor = async (
+      userId: string,
+      permission: string,
+      fields: { guildId?: string; created?: Date; ends?: Date | null } = {},
+    ) => {
+      const guildId = fields.guildId ?? GUILD;
+      await db.orm.insert(t.users).values({ id: userId }).onConflictDoNothing();
+      await db.orm
+        .insert(t.guildUsers)
+        .values({ guild_id: guildId, user_id: userId, present: true, joined_at: inHours(-48) })
+        .onConflictDoNothing();
+      await db.orm.insert(t.memberBlocks).values({
+        batch_id: BATCH,
+        guild_id: guildId,
+        user_id: userId,
+        permission,
+        reason: REASON,
+        issuer_level: "manager",
+        actor_id: OFFICER.userId,
+        ...(fields.created && { created_at: fields.created }),
+        expires_at: fields.ends ?? null,
+      });
+    };
+    const gate = (
+      actor: Actor,
+      options: {
+        roles?: readonly string[];
+        administrator?: boolean;
+        manager?: boolean;
+        service?: ModMail;
+      } = {},
+    ) =>
+      (options.service ?? modmail()).openGate(
+        GUILD,
+        actor.userId,
+        options.roles ?? [ROLE.member],
+        options.administrator ?? false,
+        options.manager ?? false,
+      );
+
+    test("the person's own pause is reported with its end and reason, ahead of the switch and the limits", async () => {
+      const ends = inHours(24);
+      // Mod mail is off here, which anyone at the gate is told, until a pause is stored.
+      expect(await gate(MEMBER)).toBe("off");
+      await pauseFor(MEMBER.userId, "modmail.open", { ends });
+      expect(await gate(MEMBER)).toEqual({ paused: { until: ends, reason: REASON } });
+      await enable();
+      expect(await gate(MEMBER)).toEqual({ paused: { until: ends, reason: REASON } });
+      // The open limit would refuse them too; the pause is what they are told.
+      for (let index = 0; index < MODMAIL_LIMITS.openCases; index++) await opened(MEMBER);
+      expect(await gate(MEMBER)).toEqual({ paused: { until: ends, reason: REASON } });
+      // Another member, and the same person in another server, are not paused.
+      expect(await gate(OTHER_MEMBER)).toBeNull();
+      expect(
+        await modmail().openGate(OTHER_GUILD, MEMBER.userId, [ROLE.member], false, false),
+      ).toBe("off");
+    });
+
+    test("the refusals that need no database and a server manager's skipped read come first", async () => {
+      await enable();
+      await pauseFor(MEMBER.userId, "modmail.open");
+      expect(await gate(MEMBER, { roles: [] })).toBe("not_member");
+      expect(await gate(MEMBER, { administrator: true })).toBe("administrator");
+      expect(await gate(MEMBER, { service: modmail(readModMailKey("")) })).toBe("key");
+      expect(await gate(MEMBER, { service: modmail(undefined, null) })).toBe("web");
+      // A server manager can't be paused, whatever is stored for them.
+      expect(await gate(MEMBER, { manager: true })).toBeNull();
+      expect(await gate(MEMBER)).toEqual({ paused: { until: null, reason: REASON } });
+    });
+
+    test("only an active pause on opening cases counts: not another feature, an ended or a lifted one", async () => {
+      await enable();
+      await pauseFor(MEMBER.userId, "suggest.use");
+      await pauseFor(MEMBER.userId, "issue.use");
+      expect(await gate(MEMBER)).toBeNull();
+      // Ended an hour ago and not yet closed by a later write: not active.
+      await pauseFor(OTHER_MEMBER.userId, "modmail.open", {
+        created: inHours(-2),
+        ends: inHours(-1),
+      });
+      expect(await gate(OTHER_MEMBER)).toBeNull();
+      await pauseFor(GUEST.userId, "modmail.open");
+      expect(await gate(GUEST, { roles: [ROLE.guest] })).toEqual({
+        paused: { until: null, reason: REASON },
+      });
+      await db.orm
+        .update(t.memberBlocks)
+        .set({
+          lifted_at: sql`now()`,
+          lifted_by: OFFICER.userId,
+          lift_reason: "Agreed to follow the rules",
+        })
+        .where(eq(t.memberBlocks.user_id, GUEST.userId));
+      expect(await gate(GUEST, { roles: [ROLE.guest] })).toBeNull();
+    });
+
+    test("the submission refuses the same pause: the card at the gate and the failure agree", async () => {
+      await enable();
+      const ends = inHours(24);
+      await pauseFor(MEMBER.userId, "modmail.open", { ends });
+      const paused = person(MEMBER.userId, {
+        member: true,
+        paused: { "modmail.open": { until: ends, reason: REASON } },
+      });
+      const refused = await open(paused).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(Failure);
+      expect((refused as Failure).detail).toMatchObject({
+        kind: "scope",
+        scope: "blocked",
+        permission: "modmail.open",
+        until: ends,
+        reason: REASON,
+      });
+      expect(await gate(paused)).toEqual({ paused: { until: ends, reason: REASON } });
+      // Nothing was opened.
+      expect(await db.orm.select().from(t.modmailCases)).toEqual([]);
     });
   });
 

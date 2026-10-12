@@ -79,7 +79,7 @@ If someone else changed the case while you were reading it (a new reply, say), T
 
 ## Pausing a member's new cases
 
-A server manager can [pause](/tarubot/admin/moderation/) one member's opening of new cases, for example after a flood of them. Officers can't, because mod mail is how members raise concerns about officers. The member's **Open a case** is greyed out with the reason beside it and `/modmail` refuses, but every case they already have stays usable: they can read it, reply and close it, and your replies still reach them.
+A server manager can [pause](/tarubot/admin/moderation/) one member's opening of new cases, for example after a flood of them. Officers can't, because mod mail is how members raise concerns about officers. The member's **Open a case** is greyed out with the reason beside it and `/modmail` refuses before its form opens, but every case they already have stays usable: they can read it, reply and close it, and your replies still reach them.
 
 ## The read log
 

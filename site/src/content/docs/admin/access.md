@@ -67,7 +67,7 @@ A **pause** (2.45.0) takes one thing away from one person for a while, such as `
 - **Two permissions** govern them, both carried by the Officer role: **moderation.view** sees who is paused and why, and looks up who sent a suggestion; **moderation.block** pauses and lifts. Anyone can read their own pauses.
 - **Server managers can pause anyone** except themselves, other server managers and bots, in any feature. **Officers can pause only people who hold no officer permission,** never mod mail opening (only server managers can pause that), and can change or lift only pauses an officer set.
 - **Server managers can't be paused,** and nobody can pause or lift a pause on themselves.
-- **The paused person is told the feature, the end and the reason, never who set it.** Officers who can see pauses see who.
+- **The paused person is told the feature, the end and the reason, never who set it.** Officers who can see pauses see who set someone else's pause, and an officer who is paused themselves (only a server manager can do that) sees their own like any member.
 
 ## Links that count for rank
 

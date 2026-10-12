@@ -6,11 +6,12 @@
  * shows what it answers.
  *
  * The page needs a sign-in from the last few minutes for a change (recentSignIn): server.ts
- * answers an older session's POST with a 303 to /login, back to this page, before post() runs, and
- * the GET says so in place of its change controls (PageContext.recentSignIn). Looking people up
- * needs no such sign-in: the finder is a GET (`?find=`), read by this page's GET alone. Both the
- * lookups and the changes are fresh: freshActor, so someone who loses moderation.view loses the
- * page on their next request.
+ * answers an older session's POST with a 303 to this page itself before post() runs (a redirect
+ * through /login to Discord would be blocked by the page's form-action 'self'), and the GET says
+ * so in place of its change controls, one plain "Sign in again" link (PageContext.recentSignIn).
+ * Looking people up needs no such sign-in: the finder is a GET (`?find=`), read by this page's GET
+ * alone. Both the lookups and the changes are fresh: freshActor, so someone who loses
+ * moderation.view loses the page on their next request.
  *
  * Two forms post here, each with `op`, and the form token; server.ts has already checked the
  * origin, the token, the shutdown flag, the sign-in's age, this page's budget and a fresh (full)
@@ -36,7 +37,7 @@
 import { moderationKey } from "../../application/keys.js";
 import type { PauseStatus, PauseView } from "../../application/moderation.js";
 import { type Actor, can } from "../../domain/policy.js";
-import { isPauseDuration } from "../../domain/moderation.js";
+import { cleanReason, isPauseDuration } from "../../domain/moderation.js";
 import { isPermissionId, type PermissionId } from "../../domain/rbac.js";
 import { Failure, note } from "../../domain/values.js";
 import { loginLocation } from "../http.js";
@@ -211,7 +212,7 @@ async function block(context: PageContext, form: FormData): Promise<PostOutcome>
     member: text(form, MEMBER_FIELD),
     features,
     duration,
-    reason: text(form, REASON_FIELD),
+    reason: cleanReason(text(form, REASON_FIELD)),
   };
   // Everything wrong with the form is said at once, as the service would say them one at a time.
   const target = readMember(typed.member);
@@ -245,7 +246,7 @@ async function lift(context: PageContext, form: FormData): Promise<PostOutcome> 
   const target = readMember(text(form, MEMBER_FIELD));
   const feature = text(form, FEATURE_FIELD);
   if (target === null || !isPermissionId(feature)) throw outOfDate();
-  const reason = text(form, REASON_FIELD);
+  const reason = cleanReason(text(form, REASON_FIELD));
   try {
     const result = await context.services
       .get(moderationKey)

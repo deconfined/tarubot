@@ -15,6 +15,7 @@ import {
   failureConcept,
   failureReply,
   type FailureReplyOptions,
+  pausedFormReply,
   rendersInPlace,
 } from "../../src/discord/presenters/failure.js";
 import { entryRef, userId, uuid } from "../../src/discord/selectors.js";
@@ -1002,14 +1003,47 @@ describe("per-person moderation cards (2.45.0)", () => {
     const embed = onlyEmbed(FAILURE_CASES["forbidden blocked · mod mail form · member"].render());
     expect(embed.description).toStartWith("Your use of **Opening mod mail cases** here is paused");
     expect(field(blocked("modmail.open", { until: null, reason: REASON }), "What you can do")).toBe(
-      "Run `/moderate status` to see everything that is paused for you. Cases you already have stay open on the dashboard.",
+      "Run `/moderate status` to see everything that is paused for you, or ask an officer in the server. Cases you already have stay open on the dashboard.",
     );
     expect(JSON.stringify(embed)).not.toContain("/modmail`");
-    // Every other feature offers /modmail.
+  });
+
+  test("/modmail is offered only for the member features, whose holders can use it", () => {
+    // Written out, not derived from the catalog: the baseline features are used by lobby newcomers
+    // who hold neither the Member nor the Guest role, so they can't open a case.
+    const ASK =
+      "Run `/moderate status` to see everything that is paused for you, or ask an officer in the server.";
+    const MODMAIL =
+      "Run `/moderate status` to see everything that is paused for you, or `/modmail` to reach the officers.";
+    const ways: Readonly<Record<string, string>> = {
+      "characters.claim": ASK,
+      "roster.refresh": ASK,
+      "guests.apply": ASK,
+      "issue.use": ASK,
+      "suggest.use": MODMAIL,
+      "selfroles.use": MODMAIL,
+      "ledger.view": MODMAIL,
+      "ledger.deposit": MODMAIL,
+      "modmail.open": `${ASK} Cases you already have stay open on the dashboard.`,
+    };
+    // Every pausable feature has a row here, and no other.
+    expect(Object.keys(ways).sort()).toEqual(PAUSE_FEATURES.map((item) => item.permission).sort());
     for (const { permission } of PAUSE_FEATURES)
-      expect(
-        field(blocked(permission, { until: null, reason: REASON }), "What you can do"),
-      ).toContain(permission === "modmail.open" ? "/moderate status" : "`/modmail`");
+      expect({
+        permission,
+        way: field(blocked(permission, { until: null, reason: REASON }), "What you can do"),
+      }).toEqual({ permission, way: ways[permission] });
+  });
+
+  test("the card before a form opens is the same card without the Code and Ref footer", () => {
+    const pause = { until: at(86_400), reason: REASON };
+    for (const { permission } of PAUSE_FEATURES) {
+      const gate = onlyEmbed(pausedFormReply(permission, pause));
+      const submitted = onlyEmbed(render(blocked(permission, pause)));
+      expect({ ...gate, footer: undefined }).toEqual({ ...submitted, footer: undefined });
+      expect(gate.footer).toBeUndefined();
+      expect(submitted.footer?.text).toStartWith("Code forbidden · Ref ");
+    }
   });
 
   test("every pausable feature renders this card from the real policy check, never the membership one", () => {

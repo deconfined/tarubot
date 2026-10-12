@@ -64,9 +64,9 @@ export interface PageContext {
    */
   readonly formToken: string;
   /**
-   * The session's sign-in is recent enough for a page that declares `recentSignIn` (always true
-   * for other pages' purposes it doesn't matter): a GET shows "sign in again" in place of its
-   * change controls when this is false, since a POST would be sent to /login.
+   * The session's sign-in is recent enough for a page that declares `recentSignIn` (other pages
+   * ignore it): a GET shows "sign in again" as a plain link in place of its change controls when
+   * this is false, since a POST would only be answered with a redirect back to the page.
    */
   readonly recentSignIn: boolean;
   readonly report: Reporter;
@@ -137,9 +137,11 @@ export interface PageOptions {
   /**
    * Only with `post` (2.45.0): every POST needs a sign-in within RECENT_SIGN_IN_MS (sessions.ts),
    * for pages that pause people or lift pauses. A POST from an older session is answered 303 to
-   * /login with this page as the return path, before the form is read further; the page then opens
-   * on a fresh session. The form's text isn't kept (the same accepted loss as a stale form), so
-   * the page's GET says when changes need a new sign-in (PageContext.recentSignIn).
+   * the page itself, before the form is read further, and nothing is changed (a redirect from the
+   * form through /login to Discord would be one form-submission navigation, which the page's CSP
+   * form-action 'self' blocks in Chromium). The form's text isn't kept (the same accepted loss as
+   * a stale form), so the page's GET offers "Sign in again" as a plain link when changes need a
+   * new sign-in (PageContext.recentSignIn).
    */
   readonly recentSignIn?: boolean;
   /**

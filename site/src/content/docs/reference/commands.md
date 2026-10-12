@@ -449,7 +449,7 @@ Add TaruBot's own permission entry to each channel it couldn't otherwise see (or
 
 Open the guest application form: two answers of 10 to 300 characters each, which officers review. See [Guest access](/tarubot/use/guest-access/).
 
-**Who can use it:** visitors without a linked character, while the server's guest applications are open.
+**Who can use it:** visitors without a linked character, while the server's guest applications are open. If an officer has paused your use of `/apply`, TaruBot answers with a **Paused for you** card before the form opens.
 
 This command has no options.
 
@@ -749,7 +749,7 @@ Show what is paused. With no member it shows your own pauses the way a paused me
 
 Privately message the server's officers. A form opens with a **topic** (up to 100 characters) and a **message** (up to 4,000), and says at the top that all of the server's officers can read it. TaruBot answers with **Case #N opened** and a button to the case on the dashboard, where the conversation continues; officers are pinged with the case number only. The dashboard's Mod mail page opens cases the same way, with **Open a case**. See [Message your officers](/tarubot/use/mod-mail/) and, for officers, [Mod mail](/tarubot/admin/mod-mail/).
 
-**Who can use it:** holders of the server's Member or Guest role, once an officer has turned mod mail on, while TaruBot doesn't have Administrator in the server. Discord takes slash commands away during a time-out, so a member in one can't run `/modmail`; they can still open a case and reply on the dashboard. Each person can have 3 open cases in a server and open 5 in any 24 hours, however they open them. When it can't be used, TaruBot says why before the form opens.
+**Who can use it:** holders of the server's Member or Guest role, once an officer has turned mod mail on, while TaruBot doesn't have Administrator in the server. Discord takes slash commands away during a time-out, so a member in one can't run `/modmail`; they can still open a case and reply on the dashboard. Each person can have 3 open cases in a server and open 5 in any 24 hours, however they open them. When it can't be used, TaruBot says why before the form opens, including a **Paused for you** card with the end and the reason when a server manager has paused your opening of cases.
 
 This command has no options.
 

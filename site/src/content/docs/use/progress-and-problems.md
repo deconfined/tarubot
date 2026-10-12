@@ -42,7 +42,7 @@ While TaruBot is restarting, for an update say, the dashboard shows a short "Tar
 
 ## If your use of a feature is paused
 
-An officer can pause your use of one feature for a while, for example `/suggest` after repeated abuse. The feature then answers with a card saying it's paused for you. The card gives:
+An officer can pause your use of one feature for a while, for example `/suggest` after repeated abuse. The feature then answers with a card saying it's paused for you. [`/modmail`](/tarubot/use/mod-mail/) and [`/apply`](/tarubot/use/guest-access/) say so before their form opens, so you never type something that can't be sent. The card gives:
 
 - **which feature** is paused;
 - **when the pause ends**, or that it lasts until an officer lifts it;
@@ -55,7 +55,7 @@ What it means:
 - **Nothing you already did is undone.** A suggestion you posted stays posted, mod mail cases you opened stay readable and you can still reply to and close them, and roles you picked stay picked.
 - **On the web,** My roles still opens, says when the pause ends and why, and has no **Save my roles** button until then. Mod mail's **Open a case** is greyed out with a note beside it saying so; your existing cases still work.
 - **To check,** [`/moderate status`](/tarubot/reference/commands/#moderate-status) lists your pauses with their ends and reasons.
-- **If you think it's a mistake,** tell the officers with [`/modmail`](/tarubot/use/mod-mail/), which opens a private case. If opening cases is paused for you too, ask an officer in the server, or reply on a case you already have.
+- **If you think it's a mistake,** the card says how to reach the officers. For suggestions, My roles and the ledger, which come with the Member or Guest role, that's [`/modmail`](/tarubot/use/mod-mail/), which opens a private case. For `/claim`, `/refresh`, `/apply` and `/issue`, which newcomers use before they have either role, and when opening cases is itself paused for you, it's to ask an officer in the server. You can always reply on a case you already have.
 
 TaruBot keeps a record of each pause, with its reason, and officers who can see pauses can see who set it. [Pausing people](/tarubot/admin/moderation/) is the officers' side.
 

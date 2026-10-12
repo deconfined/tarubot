@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { pino } from "pino";
+import { ENDED_LIMIT } from "../../src/application/moderation.js";
 import { type PauseDuration, PAUSE_DURATIONS } from "../../src/domain/moderation.js";
 import { actorOf } from "../fixtures/actors.js";
 import { HARNESS_FORMER_MEMBER, HARNESS_SECOND_OFFICER } from "../fixtures/modmail.js";
@@ -20,6 +21,7 @@ import {
   type HarnessAccount,
   type HarnessStates,
   harnessModerationFor,
+  harnessPauses,
   startHarness,
 } from "../fixtures/web-dev.js";
 
@@ -367,6 +369,66 @@ describe.skipIf(!ipv6Loopback)("Moderation, end to end", () => {
     });
   });
 
+  test("an officer a server manager has paused keeps the page, and sees their own pauses without who set them or who lifted them", async () => {
+    await withHarness({ moderation: "pauses" }, async (signIn) => {
+      const manager = await signIn("manager");
+      const officer = await signIn("officer");
+      expect(
+        (
+          await manager.post(
+            PAGE,
+            block(OFFICER, ["suggest.use", "issue.use"], "Too many reports.", "1d"),
+          )
+        ).status,
+      ).toBe(303);
+      expect((await manager.post(PAGE, lift(OFFICER, "issue.use", "Own lift reason"))).status).toBe(
+        303,
+      );
+      /** The officer's own card on a list page, and the entries of its ended list. */
+      const cardOf = (page: Page) =>
+        [...page.querySelectorAll(".mod-people > .mod-person")].find((card) =>
+          words(card.querySelector(".mod-person__name")).includes(OFFICER),
+        ) as unknown as Page | undefined;
+      const endedFeatures = (page: Page) =>
+        wordsOf(page, ".mod-dones > .mod-done .mod-done__feature");
+      // A server manager sees the whole of it: who set the pause, who lifted the other and why.
+      const managed = await manager.get(PAGE);
+      expect(wordsOf(cardOf(managed.page) as Page, ".mod-pause__by")).toEqual([
+        expect.stringContaining(`Set by ${HARNESS_ACCOUNTS.manager.label} (server manager)`),
+      ]);
+      expect(endedFeatures(managed.page)).toContain("Reporting problems (/issue)");
+      expect(managed.text).toContain("Own lift reason");
+      // The officer keeps the page. Their own pause: the feature, its end and the reason, and in
+      // Lift's place the sentence saying why there is none; no issuer, no lifter, no lift reason.
+      const answer = await officer.get(PAGE);
+      expect(answer.status).toBe(200);
+      const own = cardOf(answer.page);
+      expect(wordsOf(own as Page, ".mod-pause__feature")).toEqual([
+        "Suggesting features (/suggest)",
+      ]);
+      expect(wordsOf(own as Page, ".mod-pause__reason")).toEqual(["Too many reports."]);
+      expect(wordsOf(own as Page, ".mod-pause__note")).toEqual([
+        "Your own pause. Someone else lifts it.",
+      ]);
+      expect((own as unknown as Element).querySelector(".mod-pause__by, button, form")).toBeNull();
+      expect(endedFeatures(answer.page)).not.toContain("Reporting problems (/issue)");
+      expect(answer.text).not.toContain("Own lift reason");
+      // Other people's pauses on the same page still say who set them, and the officer lifts
+      // theirs (the member's two) but not the manager's.
+      expect(answer.page.querySelectorAll(".mod-pause__by")).toHaveLength(4);
+      expect(answer.page.querySelectorAll(".mod-person button.mod-opener")).toHaveLength(2);
+      // Looking yourself up shows the same, with no earlier pauses.
+      const self = await officer.get(`${PAGE}?find=${OFFICER}`);
+      expect(self.page.querySelector(".mod-found .mod-pause__by")).toBeNull();
+      expect(wordsOf(self.page, ".mod-found .mod-pause__feature")).toEqual([
+        "Suggesting features (/suggest)",
+      ]);
+      expect(self.page.querySelector(".mod-found .mod-done, .mod-found__sub")).toBeNull();
+      expect(self.page.querySelector(".mod-found button")).toBeNull();
+      expect(self.text).not.toContain("Own lift reason");
+    });
+  });
+
   test("a refused pause comes back open with what was typed; nothing is written", async () => {
     await withHarness({ moderation: "pauses" }, async (signIn) => {
       const officer = await signIn("officer");
@@ -618,6 +680,17 @@ describe.skipIf(!ipv6Loopback)("Moderation, end to end", () => {
 /** The former member's ID, for the finder. */
 const FORMER = HARNESS_FORMER_MEMBER;
 
+/** Readable text of exactly `length` characters, a line break after every sentence, ending on a letter. */
+function reasonOfLength(length: number): string {
+  const sentence = "Opened the same case again and again.";
+  let text = "";
+  while (text.length < length) text += `${sentence}\n`;
+  return `${text.slice(0, length - 1)}.`;
+}
+
+/** What a browser submits for a textarea: every line break as CRLF. */
+const asSubmitted = (text: string): string => text.replace(/\n/gu, "\r\n");
+
 describe("the harness's Moderation keeps in step with the service", () => {
   test("an unknown length is an input refusal naming the duration, and nothing is written", async () => {
     const pauses = harnessModerationFor({ moderation: "pauses" });
@@ -647,5 +720,100 @@ describe("the harness's Moderation keeps in step with the service", () => {
       (await pauses.block(officer, MEMBER, ["selfroles.use"], "1d", "Because.")).duration,
     ).toBe("1d");
     expect((await pauses.overview(officer)).active).toHaveLength(before + 1);
+  });
+
+  /** The harness officer, and the server manager who alone can pause them. */
+  const officer = actorOf({
+    guildId: GUILD,
+    userId: OFFICER,
+    officer: true,
+    manageRoles: false,
+    member: true,
+    botAdministrator: false,
+  });
+  const manager = actorOf({
+    guildId: GUILD,
+    userId: MANAGER,
+    manageRoles: true,
+    serverManager: true,
+    member: true,
+    botAdministrator: false,
+  });
+
+  test("an officer who is paused reads their own rows without who set them, and their own ended ones not at all", async () => {
+    const service = harnessModerationFor({ moderation: "pauses" });
+    await service.block(manager, OFFICER, ["suggest.use", "issue.use"], "1w", "Too many reports.");
+    await service.lift(manager, OFFICER, ["issue.use"], "Own lift reason");
+    // The officer's overview: the active one without `by`; nothing of the lifted one; everyone
+    // else's rows as before, with `by`, and the ended ones ordered by their real end (the lift
+    // three days ago, then the pause that ran out eight days ago).
+    const seen = await service.overview(officer);
+    const own = seen.active.filter((entry) => entry.userId === OFFICER);
+    expect(own.map((entry) => [entry.permission, entry.reason])).toEqual([
+      ["suggest.use", "Too many reports."],
+    ]);
+    expect(own.every((entry) => !("by" in entry))).toBe(true);
+    expect(seen.active.filter((entry) => entry.userId !== OFFICER)).toHaveLength(4);
+    expect(seen.active.filter((entry) => entry.userId !== OFFICER).every((entry) => entry.by)).toBe(
+      true,
+    );
+    expect(seen.ended.map((entry) => [entry.userId, entry.permission])).toEqual([
+      [HARNESS_ACCOUNTS.timedOut.id, "suggest.use"],
+      [MEMBER, "roster.refresh"],
+    ]);
+    // Their own lookup is the same: the active one without `by`, no ended list.
+    const status = await service.status(officer, OFFICER);
+    expect(status.self).toBe(true);
+    expect(status.active.map((entry) => "by" in entry)).toEqual([false]);
+    expect(status.ended).toEqual([]);
+    // The manager, looking at the officer, sees all of it.
+    const managed = await service.overview(manager);
+    expect(managed.active.find((entry) => entry.userId === OFFICER)?.by).toEqual({
+      userId: MANAGER,
+      level: "manager",
+    });
+    expect(managed.ended[0]).toMatchObject({
+      userId: OFFICER,
+      permission: "issue.use",
+      ended: { by: MANAGER, reason: "Own lift reason" },
+    });
+  });
+
+  test("the officer's own ended pauses are left out before the limit, so other people's fill it", async () => {
+    const service = harnessModerationFor({ moderation: "pauses" });
+    await service.block(manager, OFFICER, ["suggest.use"], "1w", "Too many reports.");
+    await service.lift(manager, OFFICER, ["suggest.use"], "Own lift reason");
+    // More than the limit of the member's pauses replaced by newer ones, all after the officer's.
+    for (let round = 0; round <= ENDED_LIMIT + 1; round += 1)
+      await service.block(manager, MEMBER, ["selfroles.use"], "1w", `Round ${String(round)}.`);
+    const seen = await service.overview(officer);
+    expect(seen.ended).toHaveLength(ENDED_LIMIT);
+    expect(seen.ended.every((entry) => entry.userId === MEMBER)).toBe(true);
+  });
+
+  test("a reason typed with line breaks reads as the service reads it: CRLF as LF, 1,000 characters, no more", async () => {
+    const pauses = harnessPauses({ moderation: "pauses" });
+    const service = harnessModerationFor({ moderation: "pauses" }, pauses);
+    const exact = reasonOfLength(1000);
+    const submitted = asSubmitted(exact);
+    // What makes it a test: the submitted text is over the limit, the text it means is not.
+    expect(exact.length).toBe(1000);
+    expect(submitted.length).toBeGreaterThan(1000);
+    await service.block(officer, MEMBER, ["suggest.use"], "1d", submitted);
+    const row = pauses.rows.find((entry) => entry.reason.includes("again and again."));
+    expect(row?.reason).toBe(exact);
+    await service.lift(officer, MEMBER, ["suggest.use"], submitted);
+    expect(row?.lifted?.reason).toBe(exact);
+    // One more character is still too long, however the line breaks arrive.
+    const over = reasonOfLength(1001);
+    for (const text of [over, asSubmitted(over)])
+      for (const attempt of [
+        () => service.block(officer, MEMBER, ["issue.use"], "1d", text),
+        () => service.lift(officer, MEMBER, ["suggest.use"], text),
+      ])
+        await expect(attempt()).rejects.toMatchObject({
+          code: "input",
+          detail: { kind: "option", option: "reason" },
+        });
   });
 });

@@ -36,13 +36,18 @@ import { DiscordGateway } from "../../src/discord/gateway.js";
 import { NO_ACCESS } from "../../src/domain/policy.js";
 
 /**
- * /apply requires the application capability; only its pre-form availability read runs here, so
- * a prototype-backed instance with that one method replaced is enough (no database or Discord).
+ * /apply requires the application capability; only its pre-form reads run here (availability, and
+ * since 2.45.0 the person's pauses), so a prototype-backed instance with the first replaced and a
+ * database that has no pauses is enough (no PostgreSQL or Discord). A person who is paused is
+ * tested in pause-gates.test.ts.
  */
 function applicationServices(open: (guildId: string) => Promise<boolean>): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fixture");
   app.guestApplicationsOpen = open;
+  Object.assign(app, {
+    db: { orm: { select: () => ({ from: () => ({ where: async () => [] }) }) } },
+  });
   return new Services().provide(applicationKey, app);
 }
 

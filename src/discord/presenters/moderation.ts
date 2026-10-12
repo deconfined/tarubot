@@ -23,7 +23,7 @@ import type {
   PauseView,
 } from "../../application/moderation.js";
 import { featureLabel, PAUSE_DURATIONS } from "../../domain/moderation.js";
-import type { PermissionId } from "../../domain/rbac.js";
+import { PERMISSIONS, type PermissionId } from "../../domain/rbac.js";
 import type { Viewer } from "./audience.js";
 import { cmd, count, list, member, mentionUser, plain, when } from "./format.js";
 import { type FieldSpec, type Presented, reply, type ReplySpec } from "./reply.js";
@@ -232,10 +232,25 @@ function endedLine(pause: PauseView): string {
 }
 
 /**
+ * How a paused person is told to reach the officers about `paused`, the features paused for them:
+ * `modmail` when /modmail is theirs to use, `ask` otherwise. /modmail needs the Member or Guest
+ * role, which holding a member-tier feature (/suggest, My roles, the ledger) implies; the baseline
+ * features (/claim, /refresh, /apply, /issue) are used by lobby newcomers who hold neither, and
+ * someone whose opening of cases is itself paused can't open one. So it is offered only when some
+ * paused feature is member-tier and opening cases is not among them. Read from the permission
+ * catalog's tiers, not a list kept here.
+ */
+export function reachOfficers(paused: readonly PermissionId[]): "modmail" | "ask" {
+  if (paused.includes("modmail.open")) return "ask";
+  return paused.some((id) => PERMISSIONS[id].tier === "member") ? "modmail" : "ask";
+}
+
+/**
  * /moderate status. A person's own view (`status.self`) lists what is paused for them in the
- * second person, with the end and the reason and never who set it, and points at /modmail unless
- * opening mod mail is itself paused. An officer's view of someone else names the member, lists
- * each active pause with who set it and when, and the newest ended ones. Read-only, so info tone.
+ * second person, with the end and the reason and never who set it, and says how to reach the
+ * officers (reachOfficers): /modmail where they can use it, an officer in the server otherwise. An
+ * officer's view of someone else names the member, lists each active pause with who set it and
+ * when, and the newest ended ones. Read-only, so info tone.
  */
 export function statusReply(status: PauseStatus, viewer: Viewer): Presented {
   const active = status.active;
@@ -246,16 +261,16 @@ export function statusReply(status: PauseStatus, viewer: Viewer): Presented {
         title: "Nothing is paused for you",
         description: "None of TaruBot's features are paused for you here.",
       });
-    const mailPaused = active.some((pause) => pause.permission === "modmail.open");
+    const way = reachOfficers(active.map((pause) => pause.permission));
     return card("status.self", {
       tone: "info",
       title: "What's paused for you",
       description: [
         `Your use of ${count(active.length, "feature")} here is paused.`,
-        !mailPaused && "Use **/modmail** to reach the officers.",
-      ]
-        .filter((part): part is string => Boolean(part))
-        .join(" "),
+        way === "modmail"
+          ? "Use **/modmail** to reach the officers."
+          : "Ask an officer in the server.",
+      ].join(" "),
       fields: active.map((pause) => pauseField(pause, false)),
     });
   }

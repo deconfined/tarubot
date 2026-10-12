@@ -9,6 +9,10 @@
  * one chip per paused feature (the feature, its end, the reason, who set it and Lift), then the
  * ended pauses as a grid of small entries. A pause is deny-only and touches no Discord role, so
  * the page says what the person sees: the feature, when it ends and the reason, never who set it.
+ * An officer can be paused too (by a server manager) and keeps the page: their own pauses show
+ * exactly that, with a sentence in place of Lift, and their own ended ones are not listed. The view
+ * decides this on the person (isOwn), not on what the service attached, so an own row never says
+ * who set it, who lifted it or why, anywhere on the page.
  *
  * Pause someone and Lift open on top of the page, as the Role menu's editors and Mod mail's Open a
  * case do (views/role-menu.ts, whose stylesheet draws every .overlay): a modal <dialog> opened by
@@ -527,28 +531,45 @@ function opener(
 // Pauses
 
 /**
+ * Whether a pause is the viewer's own. Decided on the person, never on `by`: the service leaves
+ * `by` off the viewer's own rows (owner decision Q5 A), and the view keeps the rule itself, so
+ * whatever it is handed, an own row never says who set it or who lifted it.
+ */
+const isOwn = (pause: PauseView, view: ModerationView): boolean =>
+  pause.userId === view.viewer.userId;
+
+/**
  * What stands in a chip for Lift when it isn't one. Only when the viewer could change pauses at
  * all: the reason is shown where the button would be, so nobody wonders where it went.
  */
 function liftNote(pause: PauseView, view: ModerationView): string | null {
-  if (pause.userId === view.viewer.userId) return "Your own pause. Someone else lifts it.";
+  if (isOwn(pause, view)) return "Your own pause. Someone else lifts it.";
   if (pause.by?.level === "manager" && !view.viewer.manager)
     return "A server manager set this, so only a server manager can lift it.";
   return null;
 }
 
 /**
+ * Whether Lift is within a viewer who may change pauses' reach: not their own, not a manager's
+ * they can't lift, and the issuer is known. A pause without one, other than the viewer's own, is
+ * not something the service sends; it is left alone rather than guessed at.
+ */
+const liftable = (pause: PauseView, view: ModerationView): boolean =>
+  pause.by !== undefined && liftNote(pause, view) === null;
+
+/**
  * One paused feature as a chip: the feature and its end on a line, the reason, and who set it with
- * Lift. `own` is the person's own view of their pauses, which never says who set one.
+ * Lift. The viewer's own pauses never say who set them, and their Lift is a sentence saying why
+ * there isn't one.
  */
 function chip(pause: PauseView, view: ModerationView, prefix = LIFT_PREFIX): SafeHtml {
   const { viewer, names } = view;
   const lift = `${prefix}-${pause.id}`;
   let control: SafeHtml | "" = "";
-  if (pause.by !== undefined && viewer.canChange) {
+  if (viewer.canChange) {
     const note = liftNote(pause, view);
     if (note !== null) control = html`<span class="note mod-pause__note">${note}</span>`;
-    else if (view.recentSignIn)
+    else if (liftable(pause, view) && view.recentSignIn)
       control = opener(
         html`Lift${context(`${featureLabel(pause.permission)} for ${whoText(pause.userId, names)}`)}`,
         lift,
@@ -557,7 +578,7 @@ function chip(pause: PauseView, view: ModerationView, prefix = LIFT_PREFIX): Saf
       );
   }
   const setBy =
-    pause.by === undefined
+    pause.by === undefined || isOwn(pause, view)
       ? ""
       : html`<span class="mod-pause__by">Set by ${whoShort(pause.by.userId, names)} (${LEVEL_WORDS[pause.by.level]}) on ${at(pause.createdAt)}</span>`;
   return html`<li class="mod-pause">
@@ -570,9 +591,7 @@ function chip(pause: PauseView, view: ModerationView, prefix = LIFT_PREFIX): Saf
 /** One person's card: who, and a chip per paused feature. */
 function personCard(userId: string, pauses: readonly PauseView[], view: ModerationView): SafeHtml {
   const stale =
-    !view.recentSignIn &&
-    view.viewer.canChange &&
-    pauses.some((pause) => pause.by !== undefined && liftNote(pause, view) === null);
+    !view.recentSignIn && view.viewer.canChange && pauses.some((pause) => liftable(pause, view));
   return html`<li class="orr-card mod-person">
 <h3 class="mod-person__name"><a href="${findHref(view, userId)}">${whoLinkText(userId, view.names)}</a>${
     view.names.get(userId) === null ? html` <span class="mod-gone">Left the server</span>` : ""
@@ -600,6 +619,14 @@ function byPerson(pauses: readonly PauseView[]): Map<string, PauseView[]> {
   }
   return groups;
 }
+
+/**
+ * The ended pauses a viewer is shown: other people's. Who lifted a pause, and why, is for officers
+ * about other people (owner decision Q5 A), so the viewer's own are left out of every list of them,
+ * whatever the service sent; the service leaves them out as well.
+ */
+const endedFor = (pauses: readonly PauseView[], view: ModerationView): PauseView[] =>
+  pauses.filter((pause) => !isOwn(pause, view));
 
 /** One ended pause: who, what, how it ended and why. */
 function endedEntry(pause: PauseView, view: ModerationView, linked = true): SafeHtml {
@@ -649,6 +676,7 @@ function foundPerson(status: PauseStatus, view: ModerationView): SafeHtml {
   const { viewer, names } = view;
   const subject = status.subject;
   const mayPause = viewer.canChange && !status.self;
+  const earlier = endedFor(status.ended, view);
   const prefill = { ...BLANK_PAUSE, member: subject };
   const control = !mayPause
     ? ""
@@ -670,9 +698,9 @@ ${
     : html`<ul class="mod-pauses">${status.active.map((pause) => chip(pause, view, FOUND_LIFT_PREFIX))}</ul>`
 }
 ${
-  status.ended.length === 0
+  earlier.length === 0
     ? ""
-    : html`<h4 class="mod-found__sub">Earlier pauses</h4><ul class="mod-dones">${status.ended.map((pause) => endedEntry(pause, view, false))}</ul>`
+    : html`<h4 class="mod-found__sub">Earlier pauses</h4><ul class="mod-dones">${earlier.map((pause) => endedEntry(pause, view, false))}</ul>`
 }
 </div>`;
 }
@@ -736,6 +764,7 @@ function changeNotes(view: ModerationView): SafeHtml | "" {
 export function renderModeration(view: ModerationView): SafeHtml {
   const { overview, refused } = view;
   const groups = byPerson(overview.active);
+  const endedList = endedFor(overview.ended, view);
   const open =
     refused?.form === "block"
       ? pausePanel(
@@ -770,9 +799,9 @@ ${overview.truncated ? html`<p class="note">Showing the newest pauses only. Lift
 <section class="mod-section" aria-labelledby="${ENDED_HEADING}"${behind(view)}>
 <div class="section-heading"><h2 id="${ENDED_HEADING}" tabindex="-1">Recently ended</h2><p class="section-description">Newest first. A pause that ran out has nobody who lifted it.</p></div>
 ${
-  overview.ended.length === 0
+  endedList.length === 0
     ? html`<div class="empty-state"><p>No pause has ended yet.</p></div>`
-    : html`<ul class="mod-dones">${overview.ended.map((pause) => endedEntry(pause, view))}</ul>`
+    : html`<ul class="mod-dones">${endedList.map((pause) => endedEntry(pause, view))}</ul>`
 }
 </section>
 ${open}`;

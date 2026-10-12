@@ -207,7 +207,7 @@ export type OpenRefusal =
  * sits on the dashboard). They name the rule and what to do, never another member, and never
  * which officers are involved.
  */
-export const OPEN_REFUSALS: Readonly<Record<OpenRefusal, string>> = {
+export const OPEN_REFUSALS: Readonly<Record<Exclude<OpenRefusal, "paused">, string>> = {
   not_configured: "TaruBot isn't set up in this server yet, so mod mail isn't available here.",
   not_member:
     "Mod mail is for this server's members and guests. If you've just been given Member or Guest, try again in a minute.",
@@ -216,8 +216,6 @@ export const OPEN_REFUSALS: Readonly<Record<OpenRefusal, string>> = {
   off: "Mod mail isn't turned on in this server. Ask an officer if you need to reach them.",
   key: "Mod mail isn't available on this TaruBot right now: its encryption key isn't set up. Ask an officer.",
   web: "Mod mail needs TaruBot's web pages, which aren't turned on for this TaruBot. Ask an officer.",
-  paused:
-    "Opening new mod mail cases is paused for you here. /moderate status shows why and until when.",
   open_limit: `You already have ${MODMAIL_LIMITS.openCases} open cases in this server. Add to one of them on the dashboard, or close one first.`,
   daily_limit: `You've opened ${MODMAIL_LIMITS.dailyCases} cases in this server in the last 24 hours. Add to an open case on the dashboard, or try again later.`,
 };

@@ -549,6 +549,8 @@ export function harnessModMail(store: ModMailStore, options: ModMailOptions): Mo
     const bodyError = textProblem(body, MODMAIL_LIMITS.messageChars);
     if (bodyError) return { status: "invalid", field: "message", error: bodyError };
     const refusal = openRefusal(actor);
+    // requireNotPaused above already reported a pause, as the real open() does.
+    if (refusal === "paused") throw new Error("The fake's checks disagree");
     if (refusal) return { status: "refused", reason: refusal };
     if (!mayOpen(actor)) throw new Error("The fake's checks disagree");
     const settings = settingsOf(actor.guildId);

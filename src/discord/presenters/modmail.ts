@@ -105,8 +105,11 @@ export function modmailOpenedReply(number: bigint, url: string | null): Presente
 /**
  * /modmail refused, before its form opens or when the form comes back: an expected state in plain
  * words (OPEN_REFUSALS), so it has no Code or Ref and is never reported, like /apply's closed card.
+ * A pause is not one of these in Discord: the gate and the submission both show the person's own
+ * Paused for you card (failure.ts's pausedFormReply and pausedFailure), with the end and the
+ * reason, so "paused" has no entry here; only the Mod mail page words it (WEB_OPEN_REFUSALS).
  */
-export function modmailRefusedReply(reason: OpenRefusal): Presented {
+export function modmailRefusedReply(reason: Exclude<OpenRefusal, "paused">): Presented {
   const limit = reason === "open_limit" || reason === "daily_limit";
   return card("modmail.refused", {
     tone: limit ? "pending" : "info",

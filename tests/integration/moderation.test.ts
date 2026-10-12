@@ -594,6 +594,66 @@ describe.skipIf(!url)("per-person moderation", () => {
       expect(await auditRows()).toEqual([]);
     });
 
+    test("a reason is measured with its line breaks as one character, as the form's textarea counts them, and stored with \\n only", async () => {
+      // A browser counts a line break as one character against maxlength but submits it as CRLF,
+      // so a reason the field allowed is longer on the wire. These are 1,000 characters once
+      // normalized (998 letters and 2 breaks) and 1,002 as typed.
+      const lines = ["a".repeat(333), "b".repeat(333), "c".repeat(332)];
+      const stored = lines.join("\n");
+      const typed = lines.join("\r\n");
+      expect([stored.length, typed.length]).toEqual([1000, 1002]);
+
+      const paused = await block(MANAGER, USER.member, ["suggest.use"], "1w", typed);
+      expect(paused.permissions).toEqual(["suggest.use"]);
+      const [open] = await openRows(USER.member);
+      expect(open?.reason).toBe(stored);
+      expect(open?.reason).not.toContain("\r");
+
+      const lifted = await lift(MANAGER, USER.member, ["suggest.use"], typed);
+      expect(lifted.lifted).toEqual(["suggest.use"]);
+      const [closed] = await blockRows(USER.member);
+      expect(closed?.lift_reason).toBe(stored);
+      expect(closed?.lift_reason).not.toContain("\r");
+      // The stored text is what a later reader sees: no carriage return anywhere in the history.
+      expect(
+        await db.query(
+          "SELECT 1 FROM member_blocks WHERE reason LIKE '%' || chr(13) || '%' OR lift_reason LIKE '%' || chr(13) || '%'",
+        ),
+      ).toEqual([]);
+
+      // A lone carriage return (an old Mac line ending) is one break too.
+      await block(MANAGER, USER.member, ["issue.use"], "1w", "first\rsecond\r\nthird");
+      expect((await openRows(USER.member)).map((row) => row.reason)).toEqual([
+        "first\nsecond\nthird",
+      ]);
+    });
+
+    test("a reason over 1,000 characters once normalized is refused, however its line breaks are written", async () => {
+      // 999 letters and 2 breaks: 1,001 characters normalized, 1,003 with CRLF.
+      const tooLong = ["a".repeat(333), "b".repeat(333), "c".repeat(333)];
+      await block(MANAGER, USER.member, ["suggest.use"], "1w", "Paused first");
+      const rows = await blockRows();
+      const audits = await auditRows();
+      for (const reason of [tooLong.join("\r\n"), tooLong.join("\n"), tooLong.join("\r")]) {
+        expect(reason.length).toBeGreaterThanOrEqual(1001);
+        const option = { code: "input", detail: { kind: "option", option: "reason" } };
+        expect(
+          await refused(block(MANAGER, USER.otherMember, ["suggest.use"], "1w", reason)),
+        ).toMatchObject(option);
+        // The same text refuses a lift of a pause that does exist, so it is the reason refused.
+        expect(await refused(lift(MANAGER, USER.member, ["suggest.use"], reason))).toMatchObject(
+          option,
+        );
+      }
+      // One character fewer is accepted, in the same CRLF form.
+      const fits = [...tooLong.slice(0, 2), "c".repeat(332)];
+      await block(MANAGER, USER.otherMember, ["suggest.use"], "1w", fits.join("\r\n"));
+      expect(await openRows(USER.otherMember)).toHaveLength(1);
+      // Nothing was written by the refusals: the first pause is still open and unchanged.
+      expect(await blockRows(USER.member)).toEqual(rows);
+      expect((await auditRows()).slice(0, audits.length)).toEqual(audits);
+    });
+
     test("a server's configuration is needed, and a pause belongs to its own server", async () => {
       const failure = await refused(
         block({ ...MANAGER, guildId: "666666666666666999" }, USER.member, ["suggest.use"]),
@@ -1080,6 +1140,116 @@ describe.skipIf(!url)("per-person moderation", () => {
         reason: "Older",
         ended: { by: USER.manager, reason: "Done" },
       });
+    });
+
+    test("an officer who is paused sees their own pauses on the page without who set them, and no ended pause of theirs; a manager sees all of it", async () => {
+      // A server manager paused the officer on two features and lifted one of them, with a reason
+      // meant for officers about other people. They also paused two members, one lifted since.
+      await block(MANAGER, USER.officer, ["suggest.use"], "1w", "Officer's reason");
+      await block(MANAGER, USER.officer, ["issue.use"], "1w", "Officer's lifted reason");
+      await lift(MANAGER, USER.officer, ["issue.use"], "Private lift reason about the officer");
+      await block(MANAGER, USER.member, ["selfroles.use"], "1w", "Member's lifted reason");
+      await lift(MANAGER, USER.member, ["selfroles.use"], "Private lift reason about the member");
+      await block(MANAGER, USER.otherMember, ["ledger.view"], "1w", "Other member's reason");
+
+      const own = await moderation.overview(OFFICER);
+      const ownRows = own.active.filter((view) => view.userId === USER.officer);
+      expect(ownRows.map((view) => [view.permission, view.reason])).toEqual([
+        ["suggest.use", "Officer's reason"],
+      ]);
+      // The feature, end and reason show; who set it does not, exactly as /moderate status.
+      expect(ownRows[0]?.until).toBeInstanceOf(Date);
+      for (const view of ownRows) expect(view).not.toHaveProperty("by");
+      expect(JSON.stringify(ownRows)).not.toContain(USER.manager);
+      expect(JSON.stringify(ownRows)).not.toContain("moderator");
+      expect(await moderation.status(OFFICER, USER.officer)).toMatchObject({
+        self: true,
+        active: [{ permission: "suggest.use", reason: "Officer's reason" }],
+        ended: [],
+      });
+      // Other people's active pauses keep who set them.
+      const others = own.active.find((view) => view.userId === USER.otherMember);
+      expect(others).toMatchObject({
+        permission: "ledger.view",
+        by: { userId: USER.manager, level: "manager" },
+      });
+      // Their own lifted pause is left out of the ended list entirely, with its lift reason.
+      expect(own.ended.map((view) => [view.userId, view.permission])).toEqual([
+        [USER.member, "selfroles.use"],
+      ]);
+      expect(own.ended[0]).toMatchObject({
+        by: { userId: USER.manager, level: "manager" },
+        ended: { by: USER.manager, reason: "Private lift reason about the member" },
+      });
+      expect(JSON.stringify(own)).not.toContain("Private lift reason about the officer");
+      expect(JSON.stringify(own)).not.toContain("Officer's lifted reason");
+
+      // A server manager sees the same pauses of the officer with who set them and the lift reason.
+      const all = await moderation.overview(MANAGER);
+      expect(
+        all.active
+          .filter((view) => view.userId === USER.officer)
+          .map((view) => [view.permission, view.by]),
+      ).toEqual([["suggest.use", { userId: USER.manager, level: "manager" }]]);
+      const endedOfficer = all.ended.filter((view) => view.userId === USER.officer);
+      expect(endedOfficer).toHaveLength(1);
+      expect(endedOfficer[0]).toMatchObject({
+        permission: "issue.use",
+        reason: "Officer's lifted reason",
+        by: { userId: USER.manager, level: "manager" },
+        ended: { by: USER.manager, reason: "Private lift reason about the officer" },
+      });
+      expect(all.ended).toHaveLength(2);
+      // Another officer, not paused, sees the first officer's rows as a manager does.
+      const second = await moderation.overview(SECOND_OFFICER);
+      expect(second.ended.map((view) => [view.userId, view.ended?.reason])).toEqual(
+        all.ended.map((view) => [view.userId, view.ended?.reason]),
+      );
+      expect(second.active.find((view) => view.userId === USER.officer)?.by).toEqual({
+        userId: USER.manager,
+        level: "manager",
+      });
+    });
+
+    test("the viewer's own ended pauses don't use up the page's limit for ended ones", async () => {
+      // The officer's ENDED_LIMIT pauses ended in the last half hour; another person's
+      // ENDED_LIMIT + 2 ended earlier than any of those.
+      const seedEnded = (user: string, label: string, count: number, minutesAgo: number) =>
+        db.query(
+          `INSERT INTO member_blocks (batch_id, guild_id, user_id, permission, reason, issuer_level, actor_id,
+             lifted_at, lifted_by, lift_reason)
+           SELECT $1, $2, $3, 'suggest.use', $4 || ' ' || n, 'manager', $5,
+             now() - ($6::int + n) * interval '1 minute', $5, 'Seeded lift'
+           FROM generate_series(1, $7::int) n`,
+          [ZERO_BATCH, GUILD, user, label, USER.manager, minutesAgo, count],
+        );
+      await seedEnded(USER.officer, "Own ended", ENDED_LIMIT, 0);
+      await seedEnded(USER.member, "Other ended", ENDED_LIMIT + 2, 100);
+
+      const own = await moderation.overview(OFFICER);
+      expect(own.ended).toHaveLength(ENDED_LIMIT);
+      expect(own.ended.every((view) => view.userId === USER.member)).toBe(true);
+      expect(own.ended[0]?.reason).toBe("Other ended 1");
+      expect(own.ended.at(-1)?.reason).toBe(`Other ended ${ENDED_LIMIT}`);
+      // Ordering is still newest end first.
+      const ends = own.ended.map((view) => view.ended?.at.getTime() ?? Number.NaN);
+      expect(ends).toEqual([...ends].sort((a, b) => b - a));
+
+      // A manager has no ended pauses of their own to leave out, and the officer's are newest.
+      const all = await moderation.overview(MANAGER);
+      expect(all.ended).toHaveLength(ENDED_LIMIT);
+      expect(all.ended.every((view) => view.userId === USER.officer)).toBe(true);
+      expect(all.ended[0]?.reason).toBe("Own ended 1");
+      // With fewer of the other person's than the limit, the page is just those.
+      await db.query("TRUNCATE member_blocks");
+      await seedEnded(USER.officer, "Own ended", ENDED_LIMIT + 3, 0);
+      await seedEnded(USER.member, "Other ended", 3, 100);
+      const few = await moderation.overview(OFFICER);
+      expect(few.ended.map((view) => view.reason)).toEqual([
+        "Other ended 1",
+        "Other ended 2",
+        "Other ended 3",
+      ]);
     });
 
     test("a long list is cut at the page's limit and says so; ended pauses show the newest", async () => {

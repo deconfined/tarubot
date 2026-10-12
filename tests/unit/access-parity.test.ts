@@ -564,9 +564,13 @@ const ledgerRead = (current: boolean): Decision => ({
       }
       if (!actor.officer && !facts.eligible) throw membershipNeeded();
     }),
-  // Without ledger.audit it checks membership first, then ledger.view (memberRoleNeeded).
+  // The real order: a pause on ledger.view first and for everyone, ledger.audit holders included
+  // (it is what opens the ledger for them, so a pause must not hide behind it); then the previous
+  // FC's ledger.audit; then, only without ledger.audit, membership and ledger.view
+  // (memberRoleNeeded).
   next: (actor, facts) =>
     passes(() => {
+      requireNotPaused(actor, "ledger.view");
       if (!current)
         requirePermission(
           actor,
@@ -575,7 +579,6 @@ const ledgerRead = (current: boolean): Decision => ({
           "Only officers can view a previous FC's ledger.",
         );
       if (!can(actor, "ledger.audit")) {
-        requireNotPaused(actor, "ledger.view");
         if (!facts.eligible) throw membershipNeeded();
         if (!can(actor, "ledger.view")) throw memberRoleNeeded("ledger.view");
       }
@@ -1162,8 +1165,9 @@ describe("2.45.0: what is new, and what a pause takes away", () => {
   });
 
   /**
-   * The decisions a pause on a feature refuses: the writes. `bites` says when the pause matters at
-   * all; the ledger's read skips it for anyone who may audit it (ledger.audit), as the service does.
+   * The decisions a pause on a feature refuses: the writes, and the ledger's read. `bites` says when
+   * the pause matters at all; it is for a decision that exempts someone from it, and none does
+   * now: Service.ledgerRead reports a pause on ledger.view first, for ledger.audit holders too.
    */
   const REFUSED_WHILE_PAUSED: readonly {
     readonly decision: string;
@@ -1179,11 +1183,8 @@ describe("2.45.0: what is new, and what a pause takes away", () => {
     { decision: "ModMail.open", feature: "modmail.open" },
     { decision: "SelfRoles.choose", feature: "selfroles.use" },
     { decision: "Service.ledger(deposit)", feature: "ledger.deposit" },
-    {
-      decision: "Service.ledgerRead(current FC)",
-      feature: "ledger.view",
-      bites: (actor) => !can(actor, "ledger.audit"),
-    },
+    { decision: "Service.ledgerRead(current FC)", feature: "ledger.view" },
+    { decision: "Service.ledgerRead(previous FC)", feature: "ledger.view" },
   ];
 
   /**

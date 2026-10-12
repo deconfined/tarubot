@@ -573,7 +573,8 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
    *    servers TaruBot serves.
    * 3. The server must be one the gateway has cached and this deployment serves, else 404, before
    *    any Discord call.
-   * A POST then passes four more, none of which costs a Discord request:
+   * A POST then passes five more (4 to 7, and 6a for a page that declares recentSignIn), none of
+   * which costs a Discord request:
    * 4. The form must carry the session's form token (403, "Form out of date"); the field is
    *    removed before post().
    * 5. Once shutdown has begun, nothing new starts (429 with Retry-After): the drain stops the web
@@ -586,6 +587,9 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
    *    full resolution refreshes the memo and their next POSTs within ACTOR_MEMO_MS cost nothing.
    *    A stale refusal (someone promoted less than a minute ago) is what that page's own GET
    *    already answers inside the same window.
+   * 6a. A page that declares recentSignIn (2.45.0) needs a session whose Discord sign-in is within
+   *    RECENT_SIGN_IN_MS: an older one is answered 303 to the page itself, whose GET offers
+   *    "Sign in again" as a plain link. After 6, so a refusal the memo already holds stays a 403.
    * 7. The page's budget for this user in this server (429 with Retry-After), before the fresh
    *    actor, so a POST over budget costs no Discord REST call.
    * And every request:
@@ -658,17 +662,18 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
           c.set("errorFrame", null);
           throw new HTTPException(known === null ? 404 : 403);
         }
-        // A page that pauses people (2.45.0) wants a sign-in from the last few minutes. Sending the
-        // browser through Discord again is harmless, so this runs before the budget and the actor
-        // costs, but after the memo refusal above: someone the memo already shows can't use the
-        // page gets its plain 403, not an invitation to sign in. The form is not kept. The
-        // callback rotates in a session with a fresh sign-in time and returns to this page.
+        // A page that pauses people (2.45.0) wants a sign-in from the last few minutes. This runs
+        // before the budget and the actor costs, but after the memo refusal above: someone the
+        // memo already shows can't use the page gets its plain 403. The form is not kept. The
+        // answer is a same-origin 303 to the page itself, whose GET shows "Sign in again" as a
+        // plain link: a redirect from this form to /login and on to Discord would be one
+        // form-submission navigation, and the page's form-action 'self' blocks its hop to Discord
+        // in Chromium, so the click would silently do nothing. (A session-less POST has the same
+        // weakness further up; it predates this release.) The link's sign-in rotates in a session
+        // with a fresh sign-in time and returns to this page.
         if (definition.recentSignIn && !current.recentSignIn) {
           c.set("errorFrame", null);
-          return redirect(
-            c,
-            `${PATHS.login}?${RETURN_PARAM}=${encodeURIComponent(definition.href(guildId))}`,
-          );
+          return redirect(c, definition.href(guildId));
         }
         // Keyed by page, server and Discord user, never by address. A POST refused by the token,
         // shutdown, memo or budget check isn't counted; one refused later, by the actor check or

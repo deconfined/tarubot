@@ -4307,6 +4307,19 @@ describe("Moderation (2.45.0)", () => {
       ...extra,
     });
 
+  /**
+   * The officer's own pause as the service sends it to them (a server manager paused them): the
+   * feature, end and reason, and no `by`.
+   */
+  const ownPause = (
+    n: number,
+    permission: PermissionId,
+    extra: Partial<PauseView> = {},
+  ): PauseView => {
+    const { by: _setBy, ...rest } = pause(n, OFFICER_ID, permission);
+    return { ...rest, ...extra };
+  };
+
   const status = (
     subject: string,
     active: PauseView[],
@@ -4623,15 +4636,171 @@ describe("Moderation (2.45.0)", () => {
     );
     expect(lifts(manager, 1)).toHaveLength(1);
     expect(manager.querySelector(".mod-pause__note")).toBeNull();
-    // Your own pause is never yours to lift, whoever set it.
+    // Your own pause is never yours to lift. Only a server manager can pause an officer, and a
+    // server manager can't be paused, so the one who sees this is an officer: the service sends
+    // their own rows without `by`, and the note and the missing Lift don't depend on it.
     const { document: own } = await moderationPage(
-      view({ ...SAMPLE, viewer: { userId: MEMBER_ID, canChange: true, manager: true } }),
+      view({
+        overview: {
+          active: [
+            pause(1, MEMBER_ID, "suggest.use"),
+            ownPause(8, "issue.use"),
+            ownPause(9, "suggest.use", { until: null }),
+          ],
+          ended: [],
+          truncated: false,
+        },
+      }),
     );
-    expect(lifts(own, 0)).toHaveLength(0);
-    expect(wordsOf(own, ".mod-person:first-child .mod-pause__note")).toEqual([
+    const mine = own.querySelectorAll(".mod-person")[1];
+    expect(words(mine?.querySelector(".mod-person__name"))).toBe(`Mogwin Kupoberry ${OFFICER_ID}`);
+    expect(mine?.querySelectorAll(".mod-pause")).toHaveLength(2);
+    expect(mine?.querySelectorAll("button.mod-opener")).toHaveLength(0);
+    expect(wordsOf(own, ".mod-person:nth-child(2) .mod-pause__note")).toEqual([
       "Your own pause. Someone else lifts it.",
       "Your own pause. Someone else lifts it.",
     ]);
+    // Somebody else's, on the same page, keeps its Lift and its issuer.
+    expect(own.querySelectorAll(".mod-person:first-child button.mod-opener")).toHaveLength(1);
+  });
+
+  test("an officer who is paused sees their own pauses without who set them, and their own ended ones not at all", async () => {
+    /** The viewer: an officer who may look and change, and is not a server manager. */
+    const officer = { userId: OFFICER_ID, canChange: true, manager: false } as const;
+    /** What a page must never say about the viewer's own pauses, whoever it is handed. */
+    const NOT_SAID = [
+      "Set by",
+      "Lifted by",
+      "(server manager)",
+      "Own lift reason",
+      "Moogle Manager",
+    ];
+    const handed = ownPause(9, "suggest.use", {
+      by: { userId: MANAGER_ID, level: "manager" },
+    });
+    const model = view({
+      viewer: officer,
+      overview: {
+        active: [pause(1, MEMBER_ID, "issue.use"), ownPause(8, "issue.use"), handed],
+        ended: [
+          // Another person's ended pause stays, with its lifter and reason.
+          ended(5, MEMBER_ID, "roster.refresh", {
+            at: "2026-10-11T10:00:00.000Z",
+            by: OFFICER_ID,
+            reason: "They apologised.",
+          }),
+          // The viewer's own is not sent; if one were, the page would not list it.
+          ended(
+            6,
+            OFFICER_ID,
+            "selfroles.use",
+            { at: "2026-10-10T10:00:00.000Z", by: MANAGER_ID, reason: "Own lift reason" },
+            { by: { userId: MANAGER_ID, level: "manager" } },
+          ),
+        ],
+        truncated: false,
+      },
+    });
+    const { document, markup } = await moderationPage(model);
+    const cards = [...document.querySelectorAll(".mod-people > .mod-person")];
+    const own = cards.find((card) =>
+      words(card.querySelector(".mod-person__name")).includes(OFFICER_ID),
+    );
+    // The cards: the viewer's own says what they would see (feature, end, reason) and nothing more.
+    expect(wordsOf(own as unknown as Document, ".mod-pause__feature")).toEqual([
+      "Reporting problems (/issue)",
+      "Suggesting features (/suggest)",
+    ]);
+    expect(wordsOf(own as unknown as Document, ".mod-pause__reason")).toEqual([
+      "Reason 8",
+      "Reason 9",
+    ]);
+    expect(own?.querySelector(".mod-pause__by")).toBeNull();
+    expect(own?.querySelectorAll("button, form, dialog")).toHaveLength(0);
+    expect(wordsOf(own as unknown as Document, ".mod-pause__note")).toEqual([
+      "Your own pause. Someone else lifts it.",
+      "Your own pause. Someone else lifts it.",
+    ]);
+    // Another person's pause on the same page still names its issuer and has its Lift.
+    const theirs = cards.find((card) =>
+      words(card.querySelector(".mod-person__name")).includes(MEMBER_ID),
+    );
+    expect(words(theirs?.querySelector(".mod-pause__by"))).toBe(
+      "Set by Mogwin Kupoberry (officer) on 2026-10-10 09:30 UTC",
+    );
+    expect(theirs?.querySelectorAll("button.mod-opener")).toHaveLength(1);
+    // The ended list is the other person's alone: its lifter and its reason, none of the viewer's.
+    expect(
+      [...document.querySelectorAll(".mod-dones > .mod-done")].map((entry) => [
+        words(entry.querySelector(".mod-done__feature")),
+        words(entry.querySelector(".mod-done__how")),
+        words(entry.querySelector(".mod-done__why")),
+      ]),
+    ).toEqual([
+      [
+        "Roster checks (/refresh)",
+        "Lifted by Mogwin Kupoberry on 2026-10-11 10:00 UTC",
+        "They apologised.",
+      ],
+    ]);
+    // Nothing about the viewer's own rows is said anywhere on the page: only the other person's
+    // "Set by" and "Lifted by" are, once each.
+    expect(markup.match(/Set by/gu)).toHaveLength(1);
+    expect(markup.match(/Lifted by/gu)).toHaveLength(1);
+    for (const text of NOT_SAID.slice(2))
+      expect({ text, shown: markup.includes(text) }).toEqual({ text, shown: false });
+    // Only their own ended pause, handed to the page anyway: the section says none has ended.
+    const alone = await moderationPage(
+      view({
+        viewer: officer,
+        overview: { active: [], ended: model.overview.ended.slice(1), truncated: false },
+      }),
+    );
+    expect(wordsOf(alone.document, ".empty-state p")).toEqual([
+      "Nobody is paused.",
+      "Pause someone with the button above, or find a member or a suggestion's sender first.",
+      "No pause has ended yet.",
+    ]);
+    for (const text of NOT_SAID)
+      expect({ text, shown: alone.markup.includes(text) }).toEqual({ text, shown: false });
+
+    // The finder, looking at yourself: the pauses and their reasons, no issuer, no earlier pauses,
+    // the same note in place of Lift, and nothing to change.
+    const self = await moderationPage(
+      view({
+        viewer: officer,
+        findText: OFFICER_ID,
+        found: {
+          kind: "member",
+          status: status(
+            OFFICER_ID,
+            [ownPause(8, "issue.use"), handed],
+            model.overview.ended.slice(1),
+            true,
+          ),
+        },
+      }),
+    );
+    const found = self.document.querySelector(".mod-found");
+    expect(found?.querySelectorAll(".mod-pause")).toHaveLength(2);
+    expect(found?.querySelector(".mod-pause__by")).toBeNull();
+    expect(found?.querySelector(".mod-found__sub, .mod-done")).toBeNull();
+    expect(found?.querySelector("button")).toBeNull();
+    expect(wordsOf(found as unknown as Document, ".mod-pause__note")).toEqual([
+      "Your own pause. Someone else lifts it.",
+      "Your own pause. Someone else lifts it.",
+    ]);
+    // An old sign-in has nothing to offer on their own card: no Lift to sign in for.
+    const stale = await moderationPage({ ...model, recentSignIn: false });
+    const staleOwn = [...stale.document.querySelectorAll(".mod-person")].find((card) =>
+      words(card.querySelector(".mod-person__name")).includes(OFFICER_ID),
+    );
+    expect(staleOwn?.querySelector(".mod-signin")).toBeNull();
+    expect(stale.document.querySelectorAll("main a.mod-signin")).toHaveLength(2);
+    // Someone who may look but not change gets no sentence in place of a button either.
+    const lookOnly = await moderationPage({ ...model, viewer: { ...officer, canChange: false } });
+    expect(lookOnly.document.querySelector(".mod-pause__note")).toBeNull();
+    expect(lookOnly.markup.match(/Set by/gu)).toHaveLength(1);
   });
 
   test("ended pauses say who lifted them and why, or that they ran out; the expiry marker is no reason", async () => {

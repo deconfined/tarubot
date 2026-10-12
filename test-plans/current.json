@@ -5,7 +5,7 @@
     "Before upgrading, take the pre-migration backup: 2.44.0 won't start on migration 015, so going back means restoring it. The deploy registers /moderate (24 roots, 52 paths).",
     "As an officer (Officer role, no Manage Server): /moderate block a test member from /suggest for 1 hour with a reason. As them, /suggest refuses with the feature, end and reason, naming nobody. /moderate status shows it to you; /moderate lift ends it.",
     "As that officer, try to pause yourself, a server manager, another officer, a bot and mod mail opening: each refuses. As a server manager, pause mod mail opening: the member can't open a case but can still reply to theirs.",
-    "On the Moderation page, look up a suggestion's sender by its number. Wait 15 minutes, change a pause: it goes through Discord sign-in first, then back to the page.",
+    "On the Moderation page, look up a suggestion's sender by its number. Wait 15 minutes, change a pause: nothing changes and the page offers a Sign in again link; follow it, then repeat the change. A paused officer sees their own pauses there, not who set them.",
     "Pause My roles for the test member: the page opens, says until when and why, with Save off."
   ],
   "assistant": [
@@ -16,7 +16,7 @@
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
     "Read each non-manager's active pauses on the database clock at every resolution; a pause removes a held permission and grants none. Server managers and bots carry none.",
-    "Refuse a paused feature before any limit, GitHub request or Lodestone read, naming the feature, end and reason, never who set it. Keep My roles open, Save off, and existing mod mail cases usable.",
+    "Refuse a paused feature before any limit, GitHub request or Lodestone read (/claim before its search, /modmail and /apply before their form opens), naming the feature, end and reason, never who set it. Keep My roles open, Save off, and existing mod mail cases usable.",
     "Write each pause and lift in one transaction with its audit row, no reason in the audit, and no Discord change, DM or job.",
     "Expose database, Discord and writer-lease readiness; report 2.45.0, startup time and effect state without pinging members."
   ]

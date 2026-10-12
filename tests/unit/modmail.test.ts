@@ -703,7 +703,7 @@ describe("Discord messages carry no text and name no member", () => {
   });
 
   test("every refusal is plain words with no Code or Ref", () => {
-    for (const reason of Object.keys(OPEN_REFUSALS) as OpenRefusal[]) {
+    for (const reason of Object.keys(OPEN_REFUSALS) as Exclude<OpenRefusal, "paused">[]) {
       const embed = onlyEmbed(modmailRefusedReply(reason));
       expect(embed.description).toBe(OPEN_REFUSALS[reason]);
       expect(embed.footer).toBeUndefined();

@@ -90,7 +90,8 @@
  *   the real rules (src/application/moderation.ts), and a pause changes what the paused person
  *   sees on My roles and Mod mail at once. The server manager account (Manage Server and Manage
  *   Roles) can pause mod mail and can't be paused; the harness officer holds both Moderation
- *   permissions and can't pause the second officer.
+ *   permissions and can't pause the second officer, but a server manager can pause the officer:
+ *   their own pauses then show on the page without who set them, and their own ended ones don't.
  * My roles (2.40.0) reads the same menus. Each account holds a few invented menu roles (HELD), and
  *   a save runs the real rules (SelfRoles.choose's), then a fake worker applies it about two
  *   seconds later, as the roles.self job would (planSelfRoles, every role checked again), so a
@@ -160,6 +161,7 @@ import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
 import { classifyFailure, effectsPaused } from "../../src/domain/failures.js";
 import {
+  cleanReason,
   isPauseDuration,
   PAUSE_DURATIONS,
   type PauseDuration,
@@ -1932,7 +1934,8 @@ export function harnessModerationFor(
   ): Promise<BlockResult> => {
     requirePermission(actor, actor.guildId, "moderation.block");
     const ids = pauseFeatures(permissions);
-    const text = note(reason, "reason");
+    // Line breaks as "\n" before the length is judged, as the real service reads them.
+    const text = note(cleanReason(reason), "reason");
     // An unknown length is refused, never read as a default (the real service's input refusal).
     if (!isPauseDuration(duration))
       throw new Failure("input", "Pick one of the listed durations.", 0, {
@@ -1990,7 +1993,7 @@ export function harnessModerationFor(
   ): Promise<LiftResult> => {
     requirePermission(actor, actor.guildId, "moderation.block");
     const ids = pauseFeatures(permissions);
-    const text = note(reason, "reason");
+    const text = note(cleanReason(reason), "reason");
     if (target === actor.userId) throw selfRefusal("You can't lift your own pause.");
     const level = actor.access.manager ? "manager" : "moderator";
     closeEnded(actor.guildId, target);
@@ -2071,9 +2074,13 @@ export function harnessModerationFor(
     requirePermission(actor, actor.guildId, "moderation.view");
     const here = pauses.rows.filter((row) => row.guildId === actor.guildId);
     const active = here.filter((row) => pauseActive(row, pauses.now())).sort(newestFirst);
+    // As the real overview: an officer can be paused too (by a server manager), and their own
+    // rows show the feature, end and reason and never who set them; their own ended pauses are
+    // left out before the limit, so other people's fill it.
+    const show = (row: HarnessPauseRow): PauseView => viewOf(row, row.userId !== actor.userId);
     return {
-      active: active.slice(0, ACTIVE_LIMIT).map((row) => viewOf(row, true)),
-      ended: endedRows(here).map((row) => viewOf(row, true)),
+      active: active.slice(0, ACTIVE_LIMIT).map(show),
+      ended: endedRows(here.filter((row) => row.userId !== actor.userId)).map(show),
       truncated: active.length > ACTIVE_LIMIT,
     };
   };

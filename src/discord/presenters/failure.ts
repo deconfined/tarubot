@@ -21,7 +21,8 @@ import {
   type SetupPiece,
 } from "../../domain/failures.js";
 import { featureLabel } from "../../domain/moderation.js";
-import { OFFICERS_ONLY } from "../../domain/policy.js";
+import { OFFICERS_ONLY, type Pause, pausedFailure } from "../../domain/policy.js";
+import type { PermissionId } from "../../domain/rbac.js";
 import { isOfficer, type Viewer } from "./audience.js";
 import { verifyButton } from "./controls.js";
 import {
@@ -42,6 +43,7 @@ import {
   when,
 } from "./format.js";
 import { applicationsClosedSpec } from "./guests.js";
+import { reachOfficers } from "./moderation.js";
 import { reply, type ButtonSpec, type FieldSpec, type Presented } from "./reply.js";
 import { HOUSE_LIMITS, type Tone } from "./style.js";
 
@@ -405,18 +407,29 @@ function missingPermissions(s: Situation, scope: ForbiddenScope | undefined): st
 
 /**
  * A person's use of a feature is paused (2.45.0, owner decisions Q5 A and 3). It is never the
- * "membership" card, which says a role is missing: the person is shown the feature, when the pause
- * ends and the reason an officer gave, and never who set it. /modmail is offered as the way to
- * reach the officers unless opening mod mail is itself what is paused. The pause arrives as typed
- * detail (policy.ts's pausedFailure), so nothing here reads the message text.
+ * "membership" card, which says a role is missing: the person is shown the feature, when the
+ * pause ends and the reason an officer gave, and never who set it. The way to the officers is
+ * offered by tier (reachOfficers): /modmail only for the member features whose holders can use it,
+ * and "ask an officer in the server" for everything else, since the baseline features are used by
+ * lobby newcomers who hold no Member or Guest role and so cannot open a case. The pause arrives as
+ * typed detail (policy.ts's pausedFailure), so nothing here reads the message text.
  */
 function pausedUseView(s: Situation): FailureView {
   const detail = s.detail?.kind === "scope" ? s.detail : undefined;
-  const feature = detail?.permission ? `**${featureLabel(detail.permission)}**` : "this feature";
-  const ends = detail?.until
-    ? `until ${when(detail.until, "f")} (${when(detail.until, "R")})`
+  return pausedCard(detail?.permission, detail?.until, detail?.reason);
+}
+
+/** The Paused for you card for one pause; every part is optional so a detail-less one still reads. */
+function pausedCard(
+  permission: PermissionId | undefined,
+  until: Date | undefined,
+  reason: string | undefined,
+): FailureView {
+  const feature = permission ? `**${featureLabel(permission)}**` : "this feature";
+  const ends = until
+    ? `until ${when(until, "f")} (${when(until, "R")})`
     : "until an officer lifts it";
-  const mailPaused = detail?.permission === "modmail.open";
+  const way = permission ? reachOfficers([permission]) : "ask";
   return {
     concept: "forbidden.blocked",
     tone: "error",
@@ -424,18 +437,35 @@ function pausedUseView(s: Situation): FailureView {
     lead: `Your use of ${feature} here is paused ${ends}.`,
     unchanged: "changed",
     fields: [
-      detail?.reason !== undefined && {
+      reason !== undefined && {
         name: "Reason",
-        value: plain(detail.reason, HOUSE_LIMITS.userText),
+        value: plain(reason, HOUSE_LIMITS.userText),
       },
       {
         name: "What you can do",
-        value: mailPaused
-          ? "Run `/moderate status` to see everything that is paused for you. Cases you already have stay open on the dashboard."
-          : "Run `/moderate status` to see everything that is paused for you, or `/modmail` to reach the officers.",
+        value: [
+          "Run `/moderate status` to see everything that is paused for you,",
+          way === "modmail"
+            ? "or `/modmail` to reach the officers."
+            : "or ask an officer in the server.",
+          // Opening cases is itself what is paused: the ones already open are not.
+          permission === "modmail.open" && "Cases you already have stay open on the dashboard.",
+        ]
+          .filter((part): part is string => Boolean(part))
+          .join(" "),
       },
     ],
   };
+}
+
+/**
+ * The Paused for you card as /modmail and /apply show it before their form opens, for a person
+ * whose use of `permission` is paused. The same title, lead, reason and next step as the card the
+ * feature gives at submission (it is built by the same code), but an expected state: no Code or
+ * Ref footer, and it is not reported. It names no one who set the pause.
+ */
+export function pausedFormReply(permission: PermissionId, pause: Pause): Presented {
+  return render(pausedFailure(permission, pause), { ref: "" }, false);
 }
 
 /** Permission refusals, by the scope detail naming the rule that refused. */
@@ -1433,6 +1463,11 @@ function diagnosticField(v: FailureView, s: Situation): FieldSpec | undefined {
  * footer's code and Ref always match the log entry.
  */
 export function failureReply(error: unknown, options: FailureReplyOptions): Presented {
+  return render(error, options, true);
+}
+
+/** failureReply's card, with or without the Code and Ref footer (see pausedFormReply). */
+function render(error: unknown, options: FailureReplyOptions, footer: boolean): Presented {
   const { s, v } = view(error, options);
   const description = [v.lead, unchangedSentence(v, s), v.tail]
     .filter((part): part is string => Boolean(part))
@@ -1442,7 +1477,7 @@ export function failureReply(error: unknown, options: FailureReplyOptions): Pres
     title: v.title,
     description: cutMarkdown(description, HOUSE_LIMITS.description),
     fields: [...(v.fields ?? []), diagnosticField(v, s)],
-    footer: [`Code ${s.c.code}`, `Ref ${options.ref}`],
+    ...(footer && { footer: [`Code ${s.c.code}`, `Ref ${options.ref}`] }),
     buttons: v.buttons ?? [],
   });
 }

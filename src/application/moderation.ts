@@ -24,9 +24,14 @@
  * database clock's, as they are when a pause is read.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNotNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, lte, ne, or, sql } from "drizzle-orm";
 import { classifyFailure } from "../domain/failures.js";
-import { isPauseDuration, PAUSE_DURATIONS, type PauseDuration } from "../domain/moderation.js";
+import {
+  cleanReason,
+  isPauseDuration,
+  PAUSE_DURATIONS,
+  type PauseDuration,
+} from "../domain/moderation.js";
 import { type Actor, authorize, isStaff, requirePermission } from "../domain/policy.js";
 import { isBlockable, MANAGER_ONLY_BLOCKS, type PermissionId } from "../domain/rbac.js";
 import { Failure, note, stoppingRefusal } from "../domain/values.js";
@@ -197,7 +202,7 @@ export class Moderation {
     requirePermission(actor, actor.guildId, "moderation.block");
     if (this.isStopping()) throw stoppingRefusal();
     const ids = features(permissions);
-    const text = note(reason, "reason");
+    const text = note(cleanReason(reason), "reason");
     if (!isPauseDuration(duration))
       throw new Failure("input", "Pick one of the listed durations.", 0, {
         kind: "option",
@@ -311,7 +316,7 @@ export class Moderation {
     requirePermission(actor, actor.guildId, "moderation.block");
     if (this.isStopping()) throw stoppingRefusal();
     const ids = features(permissions);
-    const text = note(reason, "reason");
+    const text = note(cleanReason(reason), "reason");
     if (target === actor.userId) throw selfRefusal("You can't lift your own pause.");
     await this.app.guild(actor);
     const level = actor.access.manager ? "manager" : "moderator";
@@ -395,7 +400,8 @@ export class Moderation {
       ...(ended && {
         ended: {
           at: ended,
-          by: row.liftedBy,
+          // Who lifted it is for officers about other people, like the lift reason (Q5 A).
+          by: officer ? row.liftedBy : null,
           reason: officer && row.liftedBy !== null ? row.liftReason : null,
         },
       }),
@@ -462,11 +468,22 @@ export class Moderation {
       db
         .select(this.columns)
         .from(b)
-        .where(and(server, or(isNotNull(b.lifted_at), lte(b.expires_at, sql`now()`))))
+        // The viewer's own ended pauses are left out, as in status(): who lifted them, and why, is
+        // for officers about other people (owner decision Q5 A), however the viewer came to see
+        // this page. The limit then fills with other people's.
+        .where(
+          and(
+            server,
+            ne(b.user_id, actor.userId),
+            or(isNotNull(b.lifted_at), lte(b.expires_at, sql`now()`)),
+          ),
+        )
         .orderBy(desc(ENDED_AT))
         .limit(ENDED_LIMIT),
     ]);
-    const show = (row: (typeof active)[number]) => this.view(row, true);
+    // An officer can be paused too (by a server manager), and keeps the page: their own rows show
+    // the feature, end and reason and never who set them, exactly as /moderate status does.
+    const show = (row: (typeof active)[number]) => this.view(row, row.userId !== actor.userId);
     return {
       active: active
         .slice(0, ACTIVE_LIMIT)

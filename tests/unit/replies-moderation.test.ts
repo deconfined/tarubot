@@ -18,6 +18,7 @@ import {
 import { classifyFailure } from "../../src/domain/failures.js";
 import { PAUSE_FEATURE_IDS } from "../../src/domain/moderation.js";
 import type { Actor } from "../../src/domain/policy.js";
+import type { PermissionId } from "../../src/domain/rbac.js";
 import { Failure } from "../../src/domain/values.js";
 import { expectHouseStyle, onlyEmbed, stress, visibleText } from "../fixtures/replies.js";
 import { actorOf } from "../fixtures/actors.js";
@@ -220,11 +221,37 @@ describe("/moderate status", () => {
     );
   });
 
-  test("/modmail is offered unless opening mod mail is itself paused", () => {
-    const mailPaused = ownStatus([pause({ permission: "modmail.open", until: null })]);
-    const embed = onlyEmbed(statusReply(mailPaused, VIEWERS.member));
-    expect(embed.description).toBe("Your use of 1 feature here is paused.");
-    expect(embedOf("status.self").description).toContain("/modmail");
+  test("/modmail is offered only where the paused person can use it, otherwise an officer in the server", () => {
+    const MODMAIL = "Use **/modmail** to reach the officers.";
+    const ASK = "Ask an officer in the server.";
+    const description = (...permissions: PermissionId[]) =>
+      onlyEmbed(
+        statusReply(
+          ownStatus(permissions.map((permission) => pause({ permission, until: null }))),
+          VIEWERS.member,
+        ),
+      ).description;
+    // Written out per case, not derived from the catalog. A member feature's holders have the
+    // Member or Guest role, so /modmail is theirs ...
+    expect(description("suggest.use")).toBe(`Your use of 1 feature here is paused. ${MODMAIL}`);
+    expect(description("selfroles.use")).toContain(MODMAIL);
+    expect(description("ledger.view")).toContain(MODMAIL);
+    expect(description("ledger.deposit")).toContain(MODMAIL);
+    expect(embedOf("status.self").description).toContain(MODMAIL);
+    // ... a baseline feature is used by lobby newcomers, who hold neither role ...
+    for (const baseline of [
+      "characters.claim",
+      "roster.refresh",
+      "guests.apply",
+      "issue.use",
+    ] as const)
+      expect(description(baseline)).toBe(`Your use of 1 feature here is paused. ${ASK}`);
+    // ... and a person who can't open cases is not pointed at the command.
+    expect(description("modmail.open")).toBe(`Your use of 1 feature here is paused. ${ASK}`);
+    // A mixed list offers /modmail when some member feature is paused and opening cases is not.
+    expect(description("guests.apply", "suggest.use")).toContain(MODMAIL);
+    expect(description("suggest.use", "modmail.open")).toContain(ASK);
+    expect(description("guests.apply", "issue.use")).toContain(ASK);
   });
 
   test("an officer sees who set each pause and at what level, and the newest ended ones", () => {
