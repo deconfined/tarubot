@@ -209,10 +209,14 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     ]);
     const actions = events(box);
     expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("backup"));
-    expect(actions.indexOf("upload-database")).toBeLessThan(actions.indexOf("migrate"));
-    expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("migrate"));
-    expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("register"));
-    expect(actions.indexOf("register")).toBeLessThan(actions.indexOf("start"));
+    // Discord before the database (2026-10-12): a rejected command set can't follow a migration.
+    expect(actions.indexOf("upload-database")).toBeLessThan(actions.indexOf("register"));
+    expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("register"));
+    expect(actions.indexOf("register")).toBeLessThan(actions.indexOf("migrate"));
+    expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("start"));
+    // The candidate's offline check runs, in its image, before anything stops.
+    expect(actions.indexOf("candidate-present")).toBeLessThan(actions.indexOf("candidate-check"));
+    expect(actions.indexOf("candidate-check")).toBeLessThan(actions.indexOf("stop"));
     expect(actions).toContain("register-global");
     expect(actions).not.toContain("register-guild");
     expect(actions.indexOf("scope-live")).toBeLessThan(actions.indexOf("stop"));
@@ -361,7 +365,14 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
       ).toBe(false);
       const actions = events(box);
       expect(actions.filter((action) => action === "start").length).toBeLessThanOrEqual(1);
-      if (["backup", "age", "upload"].includes(failure)) expect(actions).not.toContain("migrate");
+      if (["backup", "age", "upload"].includes(failure)) {
+        expect(actions).not.toContain("register");
+        expect(actions).not.toContain("migrate");
+      }
+      // A rejected registration stops before the migration; a failed migration follows a
+      // registration that succeeded, so Discord already holds the new commands.
+      if (failure === "register") expect(actions).not.toContain("migrate");
+      if (failure === "migrate") expect(actions).toContain("register");
       if (["migrate", "register"].includes(failure)) expect(actions).not.toContain("start");
       expect(readFileSync(join(box.root, ".env"), "utf8")).toBe(envContents);
       expect(
@@ -480,9 +491,11 @@ describe.skipIf(!hostToolsAvailable)("target-bound staging host transitions", ()
     expect(actions.indexOf("scope-live")).toBeLessThan(actions.indexOf("stop"));
     expect(actions.indexOf("scope-candidate")).toBeLessThan(actions.indexOf("stop"));
     expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("backup"));
-    expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("migrate"));
-    expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("register-guild"));
-    expect(actions.indexOf("register-guild")).toBeLessThan(actions.indexOf("start"));
+    expect(actions.indexOf("upload-settings")).toBeLessThan(actions.indexOf("register-guild"));
+    expect(actions.indexOf("register-guild")).toBeLessThan(actions.indexOf("migrate"));
+    expect(actions.indexOf("migrate")).toBeLessThan(actions.indexOf("start"));
+    // The offline check ran with the guild scope the registration uses (the fixture asserts it).
+    expect(actions.indexOf("candidate-check")).toBeLessThan(actions.indexOf("stop"));
     expect(actions.lastIndexOf("observe")).toBeLessThan(actions.indexOf("restart-policy"));
     const current = JSON.parse(readFileSync(join(box.state, "current"), "utf8"));
     expect(current).toMatchObject({
@@ -940,6 +953,105 @@ describe.skipIf(!hostToolsAvailable)("optional native web transitions", () => {
     ])
       expect(events(box)).not.toContain(action);
     expect(existsSync(join(box.sim, "proxy.json"))).toBe(false);
+  });
+
+  test("already-live never runs the offline candidate check: the live image may predate it", () => {
+    const box = sandbox();
+    expect(deploy(box).code).toBe(0);
+    writeFileSync(join(box.sim, "events"), "");
+    writeFileSync(join(box.sim, "fail-candidate-check"), "registration");
+    const result = deploy(
+      box,
+      `deploy production ${box.target.version} ${box.target.commit} ${box.target.digest} 1235`,
+    );
+    expect(result.stdout).toEndWith("result already-live\n");
+    expect(events(box)).not.toContain("candidate-present");
+    expect(events(box)).not.toContain("candidate-check");
+  });
+});
+
+describe.skipIf(!hostToolsAvailable)("offline candidate check (2.45.2)", () => {
+  const untouched = (box: HostSandbox) => {
+    const actions = events(box);
+    for (const action of ["stop", "backup", "register", "migrate", "start"])
+      expect(actions).not.toContain(action);
+    expect(existsSync(join(box.state, "pending"))).toBe(false);
+    expect(existsSync(join(box.state, "current"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
+      true,
+    );
+  };
+
+  for (const part of ["identity", "config", "modules", "registration"]) {
+    test(`a ${part} failure refuses while the old bot still runs`, () => {
+      const box = sandbox();
+      writeFileSync(join(box.sim, "fail-candidate-check"), part);
+      const result = deploy(box);
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toEndWith("\nresult refused\n");
+      expectReasons(result.stdout, [
+        entryLine,
+        `reason candidate part=${part}`,
+        "reason failed step=pull check=candidate-check status=1",
+      ]);
+      // The problem text stays in the private log, never on the public channel.
+      expect(result.stdout).not.toContain("required option");
+      expect(
+        readFileSync(
+          join(box.state, "logs", readdirSync(join(box.state, "logs"))[0] ?? ""),
+          "utf8",
+        ),
+      ).toContain("required option after an optional one");
+      assertPublic(result, box);
+      untouched(box);
+    });
+  }
+
+  test("a check that dies without its line is still a refusal, naming no part", () => {
+    const box = sandbox();
+    writeFileSync(join(box.sim, "fail-candidate-check"), "");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("\nresult refused\n");
+    expect(result.stdout).toContain("reason failed step=pull check=candidate-check status=1");
+    expect(result.stdout).not.toContain("reason candidate part=");
+    untouched(box);
+  });
+
+  test("a part name outside the fixed four is not relayed", () => {
+    const box = sandbox();
+    writeFileSync(join(box.sim, "fail-candidate-check"), "visit-evil-site");
+    const result = deploy(box);
+    expect(result.stdout).toEndWith("\nresult refused\n");
+    expect(result.stdout).not.toContain("evil");
+    expect(result.stdout).not.toContain("reason candidate part=");
+    untouched(box);
+  });
+
+  test("an image without the check is delivered, the absence noted only on a failure", () => {
+    const box = sandbox();
+    writeFileSync(join(box.sim, "no-candidate-check"), "");
+    const result = deploy(box);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toEndWith("result deployed\n");
+    expect(result.stdout).not.toContain("reason candidate");
+    expect(events(box)).toContain("candidate-present");
+    expect(events(box)).not.toContain("candidate-check");
+    // A later failure in the same delivery carries the note.
+    const failed = sandbox();
+    writeFileSync(join(failed.sim, "no-candidate-check"), "");
+    knob(failed, "pull");
+    expect(deploy(failed).stdout).not.toContain("reason candidate check=absent");
+    const late = sandbox();
+    writeFileSync(join(late.sim, "no-candidate-check"), "");
+    knob(late, "backup");
+    expect(deploy(late).stdout).toContain("reason candidate check=absent");
+  });
+
+  test("a staging check receives the guild the registration will use", () => {
+    const box = sandbox(true, "staging");
+    expect(deploy(box).code).toBe(0);
+    expect(events(box)).toContain("candidate-check");
   });
 });
 

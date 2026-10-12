@@ -126,7 +126,7 @@ exit "$(cat "$FAKE/host-exit")"`,
 }
 
 const steps = ["step preflight", "step fetch", "step pull", "step stop", "step backup"];
-const allSteps = [...steps, "step migrate", "step register", "step start", "step observe"];
+const allSteps = [...steps, "step register", "step migrate", "step start", "step observe"];
 const entryLine = `reason entry sha256=${entrySha}`;
 const logPath = `~/.local/state/tarubot-deploy/logs/${runId}001-*.log`;
 const docs =
@@ -469,7 +469,7 @@ for (const locale of locales) {
             const result = run({
               stdout: [
                 entryLine,
-                ...allSteps.slice(0, 6),
+                ...allSteps.slice(0, 7),
                 "reason failed step=migrate check=migrate status=124 timeout=true",
                 `reason restore outcome=skipped cause=${cause}`,
                 "reason fence writers=stopped",
@@ -522,7 +522,7 @@ for (const locale of locales) {
               run({
                 stdout: [
                   entryLine,
-                  ...allSteps.slice(0, 6),
+                  ...allSteps.slice(0, 7),
                   "reason failed step=migrate check=migrate status=1",
                   ...reasons,
                   "result needs-owner",
@@ -678,7 +678,7 @@ for (const locale of locales) {
           const result = run({
             stdout: [
               entryLine,
-              ...allSteps.slice(0, 6),
+              ...allSteps.slice(0, 7),
               "reason failed step=migrate check=migrate status=1",
               'reason restore msg="outcome=failed cause=no-kit"',
               "result needs-owner",
@@ -694,7 +694,7 @@ for (const locale of locales) {
         const result = run({
           stdout: [
             entryLine,
-            ...allSteps.slice(0, 6),
+            ...allSteps.slice(0, 7),
             "reason failed step=migrate check=migrate status=1",
             'reason bot-error msg="query failed code=<redacted>" code=28P01',
             'reason bot-error msg="startup code=EVIL check=readiness" type=Error',

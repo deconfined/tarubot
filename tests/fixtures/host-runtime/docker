@@ -141,6 +141,33 @@ case $1 in
                 -f "$manifest" -f "$SIM/native-caddy.yml" "$@"
             fi
             ;;
+          *'candidate-check.js")'*)
+            # Whether the candidate image holds the offline check (images older than it don't).
+            [[ $* == *'--pull never'* ]]
+            record candidate-present
+            if [[ -e $SIM/no-candidate-check ]]; then printf 'false\n'; else printf 'true\n'; fi
+            ;;
+          *candidate-check.js*)
+            [[ $* == *'--pull never'* ]]
+            # VERSION SCHEMA, then the scope the entry registers in.
+            version=$(jq -r .target.version "$SIM/config.json")
+            if [[ $(jq -r .deploymentTarget "$SIM/config.json") == staging ]]; then
+              [[ ${*: -4} == "$version 001_initial.sql --guild $(jq -r .TEST_GUILD_ID "$SIM/candidate-env.json")" ]]
+            else
+              [[ ${*: -3} == "$version 001_initial.sql --global" ]]
+            fi
+            record candidate-check
+            # fail-candidate-check holds the failing part (empty: none named, as a crash would).
+            if [[ -e $SIM/fail-candidate-check ]]; then
+              part=$(cat "$SIM/fail-candidate-check")
+              printf '%s\n' 'registration: moderate/block/reason: required option after an optional one' >&2
+              if [[ -n $part ]]; then
+                printf '{"check":"%s","identity":true,"config":true,"modules":true,"registration":false}\n' "$part"
+              fi
+              exit 1
+            fi
+            printf '%s\n' '{"check":"ok","identity":true,"config":true,"modules":true,"registration":true}'
+            ;;
           *'tarubot bun -e '*)
             [[ $* == *'--pull never'* ]]
             code=${@: -2:1}
