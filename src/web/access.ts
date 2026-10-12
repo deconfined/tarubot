@@ -18,7 +18,8 @@ import type { Page } from "./page.js";
  * decisions Q6 A and A2, in code): an actor that doesn't say, because it was resolved without
  * TaruBot's own member or built without the field, isn't admitted by one. Nothing here looks at
  * `timedOut`: a member in a time-out may still open their pages (Q6), and the application refuses
- * their saves.
+ * their saves. #105 plans an operator page behind an access rule that doesn't exist yet; nothing
+ * here admits it.
  */
 export type PageAccess = PermissionId;
 

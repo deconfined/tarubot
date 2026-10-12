@@ -6,9 +6,10 @@
  * one does, so every rule here styles markup that exists, apart from the guard that keeps a nested
  * card solid.
  *
- * Left out on purpose: the form controls, switches, sliders, dialog, tooltip and toast (v3 pages
- * have no controls; disclosures are `<details>`), the icon-only button (every control has a visible
- * label), the danger button and the Discord message preview. Not yet rendered, so not ported:
+ * Left out on purpose: the switches, sliders, tooltip and toast (no page runs a script to drive
+ * them), the icon-only button (every control has a visible label) and the Discord message preview.
+ * The form controls and the danger button are in forms.ts (2.39.0), and the editors' overlay is in
+ * role-menu.ts. Not yet rendered, so not ported:
  * tags, tabs, keyboard keys, the badge's own classes and dot, the interactive and solid card
  * variants and the other padding sizes, the card actions, and the stat's unit and meta lines.
  *

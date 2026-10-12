@@ -2,7 +2,7 @@
 # settings copy (scripts/host-env-backup.ts) and, from 2.24.0, the daily database dumps.
 # Public keys only: they can encrypt but never decrypt. The private key is
 # ~/tarubot-cutover/age/tarubot.key on the operator machine, with an offline copy kept by the
-# owner (docs/HOSTING.md "Settings copy"). To rotate, add the new key here, re-encrypt, then
+# owner (docs/DEPLOYMENT.md "Backups and restore"). To rotate, add the new key here, re-encrypt, then
 # remove the old one.
 # Generated 2026-09-25 on the operator machine.
 age10k03wzyuk9degwqwnald3g7crh3s7cfrt6evmycsgchh93wsaanquevfc6

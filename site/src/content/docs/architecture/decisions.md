@@ -37,7 +37,7 @@ These are the current design choices and their engineering rationale. Implementa
 
 **Decision.** Every command works only inside a server, and every reply is private.
 
-**Why.** Every operation belongs to one server: its FC, its roles, its ledger. A DM has none of that context. Private replies keep members' records and officers' diagnostics to the person who asked, and no reply or post can ping anyone.
+**Why.** Every operation belongs to one server: its FC, its roles, its ledger. A DM has none of that context. Private replies keep members' records and officers' diagnostics to the person who asked, and no reply or post can ping anyone, apart from mod mail's ping of the Officer role in the officer notifications channel.
 
 ## SQL migrations are the schema authority
 

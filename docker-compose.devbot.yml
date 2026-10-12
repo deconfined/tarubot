@@ -1,4 +1,5 @@
-# Development overlay: DevBot uses its own database while sharing local dependency services.
+# Development overlay for the local devbot profile: its own tarubot_dev database while sharing local
+# dependency services. DevBot itself runs on the staging host (docker-compose.staging.yml).
 # Apply with: docker compose -f docker-compose.yml -f docker-compose.devbot.yml ...
 services:
   tarubot:

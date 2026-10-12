@@ -121,7 +121,7 @@ describe("the resolver", () => {
     // A value's own final newline survives, and a file without one is taken as it is.
     expect(read(`${CA}\n\n`)).toBe(`${CA}\n`);
     expect(read(TOKEN)).toBe(TOKEN);
-    // An empty optional value is a lone newline (Podman refuses an empty secret).
+    // An empty optional value can be a lone newline (some secret stores refuse an empty secret).
     expect(read("\n")).toBe("");
     expect(read("")).toBe("");
     // Only the newline: blanks and a carriage return are part of the value.

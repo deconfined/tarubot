@@ -5,7 +5,7 @@ sidebar:
   order: 10
 ---
 
-TaruBot posts in two channels besides the ledger: officer notices and member status changes in a staff channel, and, if you choose one, short update posts for everyone who uses TaruBot. All are sent with mentions turned off, so they never ping anyone.
+TaruBot posts in two channels besides the ledger: officer notices, member status changes and mod mail pings in a staff channel, and, if you choose one, short update posts for everyone who uses TaruBot. All are sent with mentions turned off, so they never ping anyone, except [mod mail pings](#mod-mail-pings), which mention the Officer role and nothing else.
 
 ## Officer notices
 
