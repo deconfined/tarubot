@@ -1,6 +1,6 @@
 ---
 title: Progress and problems
-description: Check background work, refresh your roles, see whether TaruBot is up, and report a problem.
+description: Check background work, refresh your roles, see whether TaruBot is up, what to do when your use of a feature is paused, and report a problem.
 sidebar:
   order: 7
 ---
@@ -39,6 +39,25 @@ While TaruBot is restarting, for an update say, the dashboard shows a short "Tar
 - [`/ping`](/tarubot/reference/commands/#ping) shows Discord's gateway latency, a quick check that the bot is alive.
 - [`/channel`](/tarubot/reference/commands/#channel) shows the current channel's ID, name and type (only the ID in a channel TaruBot can't see), handy when an officer asks for a channel ID.
 - [`/suggest`](/tarubot/reference/commands/#suggest) sends an idea for TaruBot to its public GitHub repository, from the FC's own server. See [Suggest a feature](/tarubot/use/suggest-a-feature/).
+
+## If your use of a feature is paused
+
+An officer can pause your use of one feature for a while, for example `/suggest` after repeated abuse. The feature then answers with a card saying it's paused for you. The card gives:
+
+- **which feature** is paused;
+- **when the pause ends**, or that it lasts until an officer lifts it;
+- **the reason** an officer wrote. It never says who set the pause.
+
+What it means:
+
+- **Only that feature is paused.** Your roles, your nickname, your links and everything else work as before. Pausing takes nothing else away from you.
+- **It ends by itself** at the time shown, and there's nothing you need to do. An officer can lift it sooner. TaruBot doesn't message you when a pause starts or ends.
+- **Nothing you already did is undone.** A suggestion you posted stays posted, mod mail cases you opened stay readable and you can still reply to and close them, and roles you picked stay picked.
+- **On the web,** My roles still opens, says when the pause ends and why, and has no **Save my roles** button until then. Mod mail's **Open a case** is greyed out with a note beside it saying so; your existing cases still work.
+- **To check,** [`/moderate status`](/tarubot/reference/commands/#moderate-status) lists your pauses with their ends and reasons.
+- **If you think it's a mistake,** tell the officers with [`/modmail`](/tarubot/use/mod-mail/), which opens a private case. If opening cases is paused for you too, ask an officer in the server, or reply on a case you already have.
+
+TaruBot keeps a record of each pause, with its reason, and officers who can see pauses can see who set it. [Pausing people](/tarubot/admin/moderation/) is the officers' side.
 
 ## Report a problem
 

@@ -28,12 +28,27 @@ export const SESSION_SWEEP_MS = 3600_000;
  */
 export const SESSIONS_PER_USER = 10;
 
+/**
+ * How recently someone must have signed in with Discord to make a change on a page that declares
+ * `recentSignIn` (2.45.0; the recent-sign-in control owner decision Q7 deferred until the first
+ * destructive web action, docs/THREAT_MODEL.md). A copied session cookie then can't pause people
+ * or lift pauses past this window without a live Discord session behind it: /login uses
+ * prompt=none, so the check is silent for a browser still signed in to Discord and does not
+ * defend an unlocked one.
+ */
+export const RECENT_SIGN_IN_MS = 15 * 60_000;
+
 /** One signed-in browser. The token itself is never part of it. */
 export interface Session {
   readonly userId: string;
   readonly createdAt: Date;
-  /** When the user signed in with Discord; v4 can require a recent sign-in for sensitive writes. */
+  /** When the user signed in with Discord. */
   readonly authenticatedAt: Date;
+  /**
+   * authenticatedAt is within RECENT_SIGN_IN_MS, judged on the database clock like every session
+   * expiry. What a page that declares `recentSignIn` is gated on.
+   */
+  readonly recentSignIn: boolean;
   readonly lastSeenAt: Date;
   /** The absolute expiry (createdAt + SESSION_ABSOLUTE_MS); idle expiry follows lastSeenAt. */
   readonly expiresAt: Date;
@@ -112,6 +127,7 @@ const SESSION = {
   userId: s.user_id,
   createdAt: s.created_at,
   authenticatedAt: s.authenticated_at,
+  recentSignIn: sql<boolean>`${s.authenticated_at} > now()-${RECENT_SIGN_IN_MS / 1000}*interval '1 second'`,
   lastSeenAt: s.last_seen_at,
   expiresAt: s.expires_at,
 };

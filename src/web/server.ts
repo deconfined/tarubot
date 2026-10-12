@@ -658,6 +658,18 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
           c.set("errorFrame", null);
           throw new HTTPException(known === null ? 404 : 403);
         }
+        // A page that pauses people (2.45.0) wants a sign-in from the last few minutes. Sending the
+        // browser through Discord again is harmless, so this runs before the budget and the actor
+        // costs, but after the memo refusal above: someone the memo already shows can't use the
+        // page gets its plain 403, not an invitation to sign in. The form is not kept. The
+        // callback rotates in a session with a fresh sign-in time and returns to this page.
+        if (definition.recentSignIn && !current.recentSignIn) {
+          c.set("errorFrame", null);
+          return redirect(
+            c,
+            `${PATHS.login}?${RETURN_PARAM}=${encodeURIComponent(definition.href(guildId))}`,
+          );
+        }
         // Keyed by page, server and Discord user, never by address. A POST refused by the token,
         // shutdown, memo or budget check isn't counted; one refused later, by the actor check or
         // the page, is.
@@ -686,6 +698,7 @@ export function createWebApp(dependencies: WebAppDependencies): Hono<WebEnv> {
         number,
         services,
         formToken: token,
+        recentSignIn: current.recentSignIn,
         report: context.report,
         ref: c.get("ref"),
       };

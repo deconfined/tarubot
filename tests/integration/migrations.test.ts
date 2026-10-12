@@ -1,9 +1,10 @@
 /**
- * Migration rehearsals (005 through 013) in private PostgreSQL schemas, isolated from
- * persistence.test.ts's public schema: import/activation backfill, the new CHECKs, the
- * guest-application switch, the changelog columns, the status-notice columns, the web sessions
- * table, the self-service role menus with their payload-clearing trigger, the status page's
- * samples, an empty database, and the real migrate() runner.
+ * Migration rehearsals (005 through 013, and 015; 014's are in modmail.test.ts) in private
+ * PostgreSQL schemas, isolated from persistence.test.ts's public schema: import/activation
+ * backfill, the new CHECKs, the guest-application switch, the changelog columns, the status-notice
+ * columns, the web sessions table, the self-service role menus with their payload-clearing
+ * trigger, the status page's samples, the per-person pauses with their history trigger, an empty
+ * database, and the real migrate() runner.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -958,6 +959,574 @@ describe.skipIf(!url)("migration 013 status samples", () => {
     } finally {
       await client.query("ROLLBACK");
       client.release();
+    }
+  });
+});
+
+const MEMBER_BLOCKS = "015_member_blocks.sql";
+
+describe.skipIf(!url)("migration 015 member blocks", () => {
+  if (!url) return;
+  const db = new Database(url);
+  afterAll(async () => {
+    await db.close();
+  });
+  const GUILD = "666666666666666901";
+  const OTHER_GUILD = "666666666666666902";
+  const PERSON = "723456789012345901";
+  const OTHER_PERSON = "723456789012345902";
+  const STRANGER = "723456789012345903";
+  const ISSUER = "723456789012345911";
+  const BATCH = "00000000-0000-4000-8000-000000000015";
+  /** One pause as the tests write it; times are SQL expressions, so they stay on the database clock. */
+  type Row = {
+    guild: string;
+    user: string;
+    permission: string;
+    reason: string;
+    level: string;
+    created: string;
+    expires: string | null;
+  };
+  const row = (overrides: Partial<Row> = {}): Row => ({
+    guild: GUILD,
+    user: PERSON,
+    permission: "suggest.use",
+    reason: "Spam in suggestions",
+    level: "manager",
+    created: "now()",
+    expires: null,
+    ...overrides,
+  });
+  /** Plain SQL, because the Drizzle mapping and the savepoint helpers below want literal control. */
+  const insert = (r: Row) =>
+    `INSERT INTO member_blocks (batch_id, guild_id, user_id, permission, reason, issuer_level,
+       actor_id, created_at, expires_at)
+     VALUES ('${BATCH}', '${r.guild}', '${r.user}', '${r.permission}', $1, '${r.level}', '${ISSUER}',
+       ${r.created}, ${r.expires ?? "NULL"})`;
+
+  /** One rolled-back transaction with schema-014 data in a private schema, then 015 applied. */
+  async function rehearse(
+    schema: string,
+    body: (
+      client: PoolClient,
+      refused: (statement: string, values: unknown[], code: string) => Promise<void>,
+    ) => Promise<void>,
+  ) {
+    const client = await db.pool.connect();
+    /** Run a statement that must fail with `code`, inside a savepoint so the rehearsal continues. */
+    const refused = async (statement: string, values: unknown[], code: string) => {
+      await client.query("SAVEPOINT refused");
+      await expect(client.query(statement, values)).rejects.toMatchObject({ code });
+      await client.query("ROLLBACK TO SAVEPOINT refused");
+    };
+    try {
+      await client.query("BEGIN");
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET LOCAL search_path TO ${schema}`);
+      for (const file of (await migrationFiles()).filter((name) => name < MEMBER_BLOCKS))
+        await client.query(await migration(file));
+      // Schema-014 data the new table neither needs nor touches, and the people a pause names.
+      await client.query("INSERT INTO guilds (id) VALUES ($1), ($2)", [GUILD, OTHER_GUILD]);
+      await client.query("INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4)", [
+        PERSON,
+        OTHER_PERSON,
+        STRANGER,
+        ISSUER,
+      ]);
+      await client.query(
+        "INSERT INTO guild_users (guild_id, user_id) VALUES ($1, $2), ($1, $3), ($4, $2)",
+        [GUILD, PERSON, OTHER_PERSON, OTHER_GUILD],
+      );
+      expect(
+        (await client.query("SELECT to_regclass('modmail_cases') IS NOT NULL AS present")).rows,
+      ).toEqual([{ present: true }]);
+      await client.query(await migration(MEMBER_BLOCKS));
+      await body(client, refused);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  }
+
+  test("an empty history table with its indexes and both history triggers", async () => {
+    await rehearse("m015_shape", async (client) => {
+      expect((await client.query("SELECT 1 FROM member_blocks")).rows).toEqual([]);
+      expect(
+        (
+          await client.query<{ column_name: string; is_nullable: string }>(
+            `SELECT column_name, is_nullable FROM information_schema.columns
+             WHERE table_schema='m015_shape' AND table_name='member_blocks' ORDER BY ordinal_position`,
+          )
+        ).rows.map((column) => [column.column_name, column.is_nullable]),
+      ).toEqual([
+        ["id", "NO"],
+        ["batch_id", "NO"],
+        ["guild_id", "NO"],
+        ["user_id", "NO"],
+        ["permission", "NO"],
+        ["reason", "NO"],
+        ["issuer_level", "NO"],
+        ["actor_id", "NO"],
+        ["created_at", "NO"],
+        ["expires_at", "YES"],
+        ["lifted_at", "YES"],
+        ["lifted_by", "YES"],
+        ["lift_reason", "YES"],
+      ]);
+      // The key, the foreign key to guild_users and seven CHECKs (PostgreSQL 18 also lists NOT NULL).
+      expect(
+        (
+          await client.query<{ contype: string }>(
+            "SELECT contype FROM pg_constraint WHERE conrelid='m015_shape.member_blocks'::regclass AND contype IN ('c', 'f', 'p', 'u', 'x') ORDER BY 1",
+          )
+        ).rows.map((constraint) => constraint.contype),
+      ).toEqual(["c", "c", "c", "c", "c", "c", "c", "f", "p"]);
+      const indexes = (
+        await client.query<{ indexname: string; indexdef: string }>(
+          "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='m015_shape' AND tablename='member_blocks' ORDER BY indexname",
+        )
+      ).rows;
+      expect(indexes.map((index) => index.indexname)).toEqual([
+        "member_blocks_batch",
+        "member_blocks_guild",
+        "member_blocks_open",
+        "member_blocks_pkey",
+      ]);
+      // The open-pause rule is a partial unique index, the read enrichActor makes on every resolution.
+      const open = indexes.find((index) => index.indexname === "member_blocks_open")?.indexdef;
+      expect(open).toContain("UNIQUE INDEX");
+      expect(open).toContain("(guild_id, user_id, permission)");
+      expect(open).toContain("WHERE (lifted_at IS NULL)");
+      expect(
+        indexes.find((index) => index.indexname === "member_blocks_guild")?.indexdef,
+      ).toContain("(guild_id, created_at DESC)");
+      expect(
+        (
+          await client.query<{ tgname: string; before_row: boolean }>(
+            `SELECT tgname, (tgtype & 1) = 1 AND (tgtype & 2) = 2 AS before_row
+             FROM pg_trigger WHERE tgrelid='m015_shape.member_blocks'::regclass AND NOT tgisinternal
+             ORDER BY tgname`,
+          )
+        ).rows,
+      ).toEqual([
+        { tgname: "member_blocks_delete", before_row: true },
+        { tgname: "member_blocks_update", before_row: true },
+      ]);
+    });
+  });
+
+  test("the schema head is 015, the last migration file", async () => {
+    expect(SCHEMA_VERSION).toBe(MEMBER_BLOCKS);
+    expect((await migrationFiles()).at(-1)).toBe(MEMBER_BLOCKS);
+  });
+
+  test("the CHECKs hold: permission shape, reason length, level, end after start, lift columns", async () => {
+    await rehearse("m015_checks", async (client, refused) => {
+      const ok = (r: Row, reason = "Spam in suggestions") => client.query(insert(r), [reason]);
+      // Permission ids are lowercase dotted words, at most 64 characters; the column does not
+      // restrict them to today's catalog (a later release may allow more).
+      await ok(row({ permission: "later.feature_x" }));
+      for (const bad of [
+        "suggest",
+        "Suggest.use",
+        "suggest.Use",
+        ".use",
+        "suggest.",
+        "suggest.use ",
+        "suggest.use2",
+        `a.${"b".repeat(63)}`,
+      ])
+        await refused(insert(row({ permission: bad })), ["reason"], "23514");
+      await ok(row({ permission: `a.${"b".repeat(62)}` }));
+      // A reason is 1 to 1000 characters; the length counts characters, not bytes.
+      await ok(row({ permission: "issue.use" }), "x".repeat(1000));
+      await ok(row({ permission: "ledger.view" }), "é".repeat(1000));
+      for (const bad of ["", "x".repeat(1001)])
+        await refused(insert(row({ permission: "roster.refresh" })), [bad], "23514");
+      await refused(
+        insert(row({ permission: "roster.refresh", level: "admin" })),
+        ["reason"],
+        "23514",
+      );
+      await refused(
+        insert(row({ permission: "roster.refresh", level: "officer" })),
+        ["reason"],
+        "23514",
+      );
+      await ok(row({ permission: "roster.refresh", level: "moderator" }));
+      // The end is strictly after the start; an equal or earlier end is refused.
+      await ok(row({ user: OTHER_PERSON, expires: "now() + interval '1 hour'" }));
+      await refused(
+        insert(
+          row({
+            user: OTHER_PERSON,
+            permission: "ledger.view",
+            created: "timestamptz '2026-10-12T10:00:00Z'",
+            expires: "timestamptz '2026-10-12T10:00:00Z'",
+          }),
+        ),
+        ["reason"],
+        "23514",
+      );
+      await refused(
+        insert(
+          row({
+            user: OTHER_PERSON,
+            permission: "ledger.view",
+            created: "now()",
+            expires: "now() - interval '1 second'",
+          }),
+        ),
+        ["reason"],
+        "23514",
+      );
+      // A pause whose start is in the past may have an end in the past, as an ended pause has.
+      await ok(
+        row({
+          user: OTHER_PERSON,
+          permission: "ledger.view",
+          created: "now() - interval '2 hours'",
+          expires: "now() - interval '1 hour'",
+        }),
+      );
+      // The ids are the external_id domain's, and every column but the end and the lift is required.
+      await refused(insert(row({ user: "not-a-user" })), ["reason"], "23514");
+      await refused(
+        "INSERT INTO member_blocks (guild_id, user_id, permission, reason, issuer_level, actor_id) VALUES ($1, $2, 'issue.use', 'r', 'manager', $3)",
+        [GUILD, OTHER_PERSON, ISSUER],
+        "23502",
+      );
+
+      // The lift columns travel together: no lifter or reason without a lift time.
+      const change = (permission: string, set: string) =>
+        `UPDATE member_blocks SET ${set} WHERE user_id='${OTHER_PERSON}' AND permission='${permission}' AND lifted_at IS NULL`;
+      for (const permission of ["guests.apply", "modmail.open", "ledger.deposit", "issue.use"])
+        await ok(row({ user: OTHER_PERSON, permission }));
+      await refused(change("guests.apply", `lifted_by='${ISSUER}'`), [], "23514");
+      await refused(change("guests.apply", "lift_reason='Resolved'"), [], "23514");
+      await refused(
+        change("guests.apply", `lifted_by='${ISSUER}', lift_reason='Resolved'`),
+        [],
+        "23514",
+      );
+      // Anyone but the closing of an ended pause names its lifter; the reason, when there is one,
+      // is 1 to 1000 characters.
+      await refused(change("issue.use", "lifted_at=now(), lift_reason='Resolved'"), [], "23514");
+      await refused(
+        change("issue.use", `lifted_at=now(), lifted_by='${ISSUER}', lift_reason=''`),
+        [],
+        "23514",
+      );
+      await refused(
+        change(
+          "issue.use",
+          `lifted_at=now(), lifted_by='${ISSUER}', lift_reason='${"x".repeat(1001)}'`,
+        ),
+        [],
+        "23514",
+      );
+      // A lift with a lifter is fine; so is the closing of an ended pause, which has none. Each
+      // changed the one row it names (an UPDATE that matches nothing would pass silently).
+      const lifted = await client.query(
+        change("modmail.open", `lifted_at=now(), lifted_by='${ISSUER}', lift_reason='Resolved'`),
+      );
+      const closed = await client.query(
+        change("ledger.deposit", "lifted_at=now(), lift_reason='expired'"),
+      );
+      expect([lifted.rowCount, closed.rowCount]).toEqual([1, 1]);
+    });
+  });
+
+  test("a lift names its lifter unless it is the closing of an ended pause; a lift with neither lifter nor reason is refused", async () => {
+    await rehearse("m015_lifter", async (client, refused) => {
+      // What lifted_by and lift_reason may be once lifted_at is set. The reason column alone
+      // decides the pause with no lifter: only 'expired' is the closing of an ended pause, and a
+      // missing reason is not (a comparison with NULL would have let it through).
+      const cases: { lifter: string | null; reason: string | null; accepted: boolean }[] = [
+        { lifter: null, reason: null, accepted: false },
+        { lifter: null, reason: "Resolved", accepted: false },
+        { lifter: null, reason: "Expired", accepted: false },
+        { lifter: null, reason: " expired", accepted: false },
+        { lifter: null, reason: "expired", accepted: true },
+        { lifter: ISSUER, reason: null, accepted: true },
+        { lifter: ISSUER, reason: "Resolved", accepted: true },
+        { lifter: ISSUER, reason: "expired", accepted: true },
+      ];
+      const stored = async (user: string) =>
+        (
+          await client.query<{
+            permission: string;
+            lifted: boolean;
+            lifted_by: string | null;
+            lift_reason: string | null;
+          }>(
+            `SELECT permission, lifted_at IS NOT NULL AS lifted, lifted_by, lift_reason
+               FROM member_blocks WHERE user_id=$1 ORDER BY permission`,
+            [user],
+          )
+        ).rows;
+
+      // A row written already lifted (INSERT), for each combination.
+      const insertLifted = `INSERT INTO member_blocks (batch_id, guild_id, user_id, permission, reason,
+           issuer_level, actor_id, created_at, lifted_at, lifted_by, lift_reason)
+         VALUES ('${BATCH}', '${GUILD}', '${PERSON}', 'suggest.use', 'Spam in suggestions', 'manager',
+           '${ISSUER}', now() - interval '1 hour', now(), $1, $2)`;
+      for (const { lifter, reason, accepted } of cases) {
+        if (accepted) {
+          const inserted = await client.query(insertLifted, [lifter, reason]);
+          expect(inserted.rowCount).toBe(1);
+        } else await refused(insertLifted, [lifter, reason], "23514");
+      }
+      // Lifted rows are history, not open pauses: the four accepted ones sit side by side, and
+      // the refused ones left nothing behind.
+      expect(await stored(PERSON)).toHaveLength(cases.filter((c) => c.accepted).length);
+      const pair = (by: string | null, why: string | null) =>
+        `${by ?? "no lifter"} / ${why ?? "no reason"}`;
+      expect(
+        (await stored(PERSON))
+          .map(({ lifted_by, lift_reason }) => pair(lifted_by, lift_reason))
+          .sort(),
+      ).toEqual(
+        cases
+          .filter((c) => c.accepted)
+          .map((c) => pair(c.lifter, c.reason))
+          .sort(),
+      );
+
+      // The same combinations as the lift of an open pause (UPDATE), one open pause each.
+      const permissions = [
+        "suggest.use",
+        "issue.use",
+        "ledger.view",
+        "ledger.deposit",
+        "guests.apply",
+        "modmail.open",
+        "selfroles.use",
+        "roster.refresh",
+      ];
+      const lift = `UPDATE member_blocks SET lifted_at=now(), lifted_by=$1, lift_reason=$2
+         WHERE user_id='${OTHER_PERSON}' AND permission=$3 AND lifted_at IS NULL`;
+      for (const [index, { lifter, reason, accepted }] of cases.entries()) {
+        const permission = permissions[index];
+        if (!permission) throw new Error("Missing a permission for the case");
+        await client.query(insert(row({ user: OTHER_PERSON, permission })), ["Spam"]);
+        if (accepted) {
+          const updated = await client.query(lift, [lifter, reason, permission]);
+          expect(updated.rowCount).toBe(1);
+        } else await refused(lift, [lifter, reason, permission], "23514");
+      }
+      const standing = (permission: string | undefined, lifted: boolean) =>
+        `${permission}: ${lifted ? "lifted" : "open"}`;
+      expect(
+        (await stored(OTHER_PERSON))
+          .map(({ permission, lifted }) => standing(permission, lifted))
+          .sort(),
+      ).toEqual(cases.map((c, index) => standing(permissions[index], c.accepted)).sort());
+
+      // On one row: the missing lifter and the missing reason are refused together, and giving
+      // only the reason 'expired' is what turns the same write into an accepted closing.
+      const one = (set: string) =>
+        `UPDATE member_blocks SET ${set} WHERE user_id='${PERSON}' AND permission='later.feature_x'`;
+      await client.query(insert(row({ permission: "later.feature_x" })), ["Spam"]);
+      await refused(one("lifted_at=now()"), [], "23514");
+      await refused(one("lifted_at=now(), lifted_by=NULL, lift_reason=NULL"), [], "23514");
+      expect((await client.query(one("lifted_at=now(), lift_reason='expired'"))).rowCount).toBe(1);
+      // Without a lift time neither column may be set, whatever they hold, on a new row too.
+      for (const [by, why] of [
+        [ISSUER, null],
+        [null, "expired"],
+        [ISSUER, "Resolved"],
+      ] as const)
+        await refused(
+          `INSERT INTO member_blocks (batch_id, guild_id, user_id, permission, reason, issuer_level,
+             actor_id, lifted_by, lift_reason)
+           VALUES ('${BATCH}', '${GUILD}', '${PERSON}', 'issue.use', 'Spam', 'manager', '${ISSUER}', $1, $2)`,
+          [by, why],
+          "23514",
+        );
+    });
+  });
+
+  test("the history trigger refuses DELETE and every write but the one-time lift", async () => {
+    await rehearse("m015_history", async (client, refused) => {
+      const r = row({ expires: "now() + interval '1 hour'" });
+      await client.query(insert(r), ["Spam in suggestions"]);
+      const id = (
+        await client.query<{ id: string }>("SELECT id FROM member_blocks WHERE user_id=$1", [
+          PERSON,
+        ])
+      ).rows[0]?.id;
+      if (!id) throw new Error("Missing pause");
+      const stored = async () =>
+        (
+          await client.query(
+            `SELECT batch_id, guild_id, user_id, permission, reason, issuer_level, actor_id,
+               created_at, expires_at, lifted_at, lifted_by, lift_reason FROM member_blocks WHERE id=$1`,
+            [id],
+          )
+        ).rows;
+      const before = await stored();
+      // P0001 is the trigger's own RAISE EXCEPTION, which fires before any CHECK or foreign key.
+      await refused("DELETE FROM member_blocks WHERE id=$1", [id], "P0001");
+      for (const set of [
+        "reason='A different reason'",
+        "expires_at=now() + interval '10 days'",
+        "expires_at=NULL",
+        "issuer_level='moderator'",
+        `actor_id='${OTHER_PERSON}'`,
+        "created_at=created_at - interval '1 day'",
+        "permission='issue.use'",
+        `user_id='${OTHER_PERSON}'`,
+        `guild_id='${OTHER_GUILD}'`,
+        "batch_id=gen_random_uuid()",
+        "id=gen_random_uuid()",
+        // Even together with a legitimate lift: the whole write is refused.
+        `lifted_at=now(), lifted_by='${ISSUER}', lift_reason='Resolved', reason='Edited'`,
+      ])
+        await refused(`UPDATE member_blocks SET ${set} WHERE id=$1`, [id], "P0001");
+      expect(await stored()).toEqual(before);
+
+      // A no-change write is not a different write, and the lift is allowed once.
+      await client.query("UPDATE member_blocks SET reason=reason WHERE id=$1", [id]);
+      await client.query(
+        `UPDATE member_blocks SET lifted_at=now(), lifted_by='${ISSUER}', lift_reason='Resolved' WHERE id=$1`,
+        [id],
+      );
+      const [lifted] = await stored();
+      expect(lifted).toMatchObject({ lifted_by: ISSUER, lift_reason: "Resolved" });
+      expect(lifted?.lifted_at).toBeInstanceOf(Date);
+      // A lifted pause is fixed: no second lift, no change of the first, no taking it back, and
+      // no deleting it.
+      for (const set of [
+        `lifted_at=now() + interval '1 hour', lifted_by='${ISSUER}', lift_reason='Resolved'`,
+        "lift_reason='Resolved again'",
+        `lifted_by='${OTHER_PERSON}'`,
+        "lifted_at=NULL, lifted_by=NULL, lift_reason=NULL",
+        "reason='Edited'",
+      ])
+        await refused(`UPDATE member_blocks SET ${set} WHERE id=$1`, [id], "P0001");
+      await refused("DELETE FROM member_blocks WHERE id=$1", [id], "P0001");
+      expect(await stored()).toEqual([lifted]);
+      // The closing of an ended pause is also a lift, and is also once.
+      await client.query(
+        insert(
+          row({
+            permission: "ledger.view",
+            created: "now() - interval '2 hours'",
+            expires: "now() - interval '1 hour'",
+          }),
+        ),
+        ["Spam"],
+      );
+      const closing =
+        "UPDATE member_blocks SET lifted_at=now(), lift_reason='expired' WHERE permission='ledger.view'";
+      await client.query(closing);
+      await refused(closing, [], "P0001");
+    });
+  });
+
+  test("one open pause per person and feature; a lift, another person, feature or server allow another", async () => {
+    await rehearse("m015_open", async (client, refused) => {
+      await client.query(insert(row()), ["First"]);
+      // A second open pause for the same person and feature, with another reason, level or end.
+      await refused(insert(row()), ["Second"], "23505");
+      await refused(
+        insert(row({ level: "moderator", expires: "now() + interval '1 day'" })),
+        ["Second"],
+        "23505",
+      );
+      // Another feature, another person and another server are independent.
+      await client.query(insert(row({ permission: "issue.use" })), ["Other feature"]);
+      await client.query(insert(row({ user: OTHER_PERSON })), ["Other person"]);
+      await client.query(insert(row({ guild: OTHER_GUILD })), ["Other server"]);
+      // After a lift the same feature can be paused again, and the history keeps both.
+      await client.query(
+        `UPDATE member_blocks SET lifted_at=now(), lifted_by='${ISSUER}', lift_reason='Resolved'
+         WHERE user_id=$1 AND guild_id=$2 AND permission='suggest.use'`,
+        [PERSON, GUILD],
+      );
+      await client.query(insert(row()), ["Again"]);
+      await refused(insert(row()), ["Third"], "23505");
+      expect(
+        (
+          await client.query<{ reason: string; open: boolean }>(
+            "SELECT reason, lifted_at IS NULL AS open FROM member_blocks WHERE user_id=$1 AND guild_id=$2 AND permission='suggest.use' ORDER BY reason",
+            [PERSON, GUILD],
+          )
+        ).rows,
+      ).toEqual([
+        { reason: "Again", open: true },
+        { reason: "First", open: false },
+      ]);
+      // An ended but unclosed pause still blocks a second row: the application closes it first.
+      await client.query(
+        insert(
+          row({
+            user: OTHER_PERSON,
+            permission: "ledger.view",
+            created: "now() - interval '2 hours'",
+            expires: "now() - interval '1 hour'",
+          }),
+        ),
+        ["Ended"],
+      );
+      await refused(
+        insert(row({ user: OTHER_PERSON, permission: "ledger.view" })),
+        ["Next"],
+        "23505",
+      );
+    });
+  });
+
+  test("a pause names someone TaruBot has seen in that server", async () => {
+    await rehearse("m015_known", async (client, refused) => {
+      // A user with no guild_users row at all, and one known only in another server.
+      await refused(insert(row({ user: STRANGER })), ["Spam"], "23503");
+      await refused(insert(row({ user: OTHER_PERSON, guild: OTHER_GUILD })), ["Spam"], "23503");
+      await client.query(insert(row({ user: PERSON, guild: OTHER_GUILD })), ["Known there"]);
+      // A guild_users row can't be removed while a pause names it.
+      await refused(
+        "DELETE FROM guild_users WHERE guild_id=$1 AND user_id=$2",
+        [OTHER_GUILD, PERSON],
+        "23503",
+      );
+    });
+  });
+
+  test("Database.migrate applies 015 once and then skips it by checksum", async () => {
+    const schema = "m015_runner";
+    const staged = await mkdtemp(join(tmpdir(), "tarubot-schema-014-"));
+    const confined = new URL(url);
+    confined.searchParams.set("options", `${SESSION_OPTIONS} -c search_path=${schema}`);
+    const runner = new Database(confined.toString());
+    try {
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await db.query(`CREATE SCHEMA ${schema}`);
+      expect(await runner.query("SELECT current_schema() AS schema")).toEqual([{ schema }]);
+      for (const file of (await migrationFiles()).filter((name) => name < MEMBER_BLOCKS))
+        await copyFile(join(directory, file), join(staged, file));
+      await runner.migrate(staged);
+      // This build refuses a schema-014 database until 015 is applied, and can still verify one.
+      await expect(runner.schema()).rejects.toMatchObject({ code: "schema" });
+      const previous = (await migrationFiles()).filter((name) => name < MEMBER_BLOCKS).at(-1) ?? "";
+      await runner.schema(previous);
+      await expect(runner.query("SELECT 1 FROM member_blocks")).rejects.toThrow();
+
+      const report = await runner.migrate(directory);
+      expect(report.applied).toEqual([MEMBER_BLOCKS]);
+      await runner.schema();
+      expect(await runner.query("SELECT 1 FROM member_blocks")).toEqual([]);
+      // A repeated run is a checksum-verified no-op.
+      const history = "SELECT version, applied_at FROM schema_migrations ORDER BY version";
+      const recorded = await runner.query(history);
+      expect((await runner.migrate(directory)).applied).toEqual([]);
+      expect(await runner.query(history)).toEqual(recorded);
+      expect(recorded.at(-1)).toMatchObject({ version: MEMBER_BLOCKS });
+    } finally {
+      await runner.close();
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await rm(staged, { recursive: true, force: true });
     }
   });
 });

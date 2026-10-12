@@ -20,6 +20,7 @@ import {
   lifecycleKey,
   publicStatusKey,
   modmailKey,
+  moderationKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
@@ -60,7 +61,7 @@ import {
   type WebContext,
   type WebServer,
 } from "../../src/web/server.js";
-import { formToken, SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
+import { formToken, RECENT_SIGN_IN_MS, SESSION_ABSOLUTE_MS } from "../../src/web/sessions.js";
 import { type WebSettings, webSettings } from "../../src/web/settings.js";
 import { notice, noticeLocation } from "../../src/web/views/forms.js";
 import { type DiscordAccount, discordOAuthError, FakeDiscord } from "../fixtures/discord-oauth.js";
@@ -75,7 +76,10 @@ import {
   harnessGateway,
   harnessOptions,
   harnessPeople,
+  type HarnessPauses,
+  harnessModerationFor,
   harnessModMailFor,
+  harnessPauses,
   harnessSelfRoles,
   MENU_CATEGORY,
   MENU_REVISION,
@@ -209,6 +213,8 @@ interface World {
   readonly menus: HarnessMenus;
   /** My roles' held roles and newest changes (2.40.0), on `clock`. */
   readonly people: HarnessPeople;
+  /** The Moderation page's pauses (2.45.0), on `clock`. */
+  readonly pauses: HarnessPauses;
   /** The public status page's PublicStatus (2.41.0) on `clock`, ticked once. */
   readonly status: StatusFixture;
   readonly logs: () => LogLine[];
@@ -219,7 +225,9 @@ interface World {
  * harness's in-memory SelfRoles over `menus`, in the review `states` given.
  */
 function services(
-  world: Pick<World, "lifecycle" | "menus" | "people"> & { readonly status?: StatusFixture },
+  world: Pick<World, "lifecycle" | "menus" | "people" | "pauses"> & {
+    readonly status?: StatusFixture;
+  },
   syncStatus: () => Promise<SyncStatusView>,
   states: HarnessStates = {},
 ) {
@@ -263,6 +271,7 @@ function services(
     .provide(gatewayKey, harnessGateway())
     .provide(selfRolesKey, harnessSelfRoles(states, world.menus, world.people))
     .provide(modmailKey, harnessModMailFor(states))
+    .provide(moderationKey, harnessModerationFor(states, world.pauses))
     .provide(publicStatusKey, status.service);
 }
 
@@ -399,6 +408,20 @@ async function world(options: WorldOptions = {}): Promise<World> {
       return html`<p>Never shown</p>`;
     },
   });
+  // A page whose changes need a recent sign-in (2.45.0), standing in for any such page.
+  const recentPage = definePage({
+    path: "/g/:guild/recent",
+    title: "Recent",
+    access: ["config.view"],
+    requires: [],
+    recentSignIn: true,
+    get: ({ recentSignIn }) => html`<p>Sign-in ${recentSignIn ? "recent" : "old"}</p>`,
+    async post(context, form) {
+      posts.push(Object.fromEntries(form));
+      return { redirect: context.url.pathname };
+    },
+    postLimit: 120,
+  });
   // A page members and guests may open (2.40.0), and officers too, as My roles declares; it
   // stands in for any such page, so these tests don't depend on one page's own behavior.
   const picksPage = definePage({
@@ -411,7 +434,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   });
   const pages = new Map<string, Page>([
     ...(options.fixturesOnly ? [] : await loadPages()),
-    ...[formPage, kitPage, limitedPage, undeclaredPage, picksPage].map(
+    ...[formPage, kitPage, limitedPage, undeclaredPage, picksPage, recentPage].map(
       (fixture): [string, Page] => [fixture.path, fixture],
     ),
   ]);
@@ -420,6 +443,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const resolve = resolver(resolutions, modes, botAdministrator);
   const menus: HarnessMenus = new Map();
   const people = harnessPeople(() => clock.now);
+  const pauses = harnessPauses({}, () => new Date(clock.now));
   // The status page's readiness is the lifecycle fake's, through the same flag /health/ready uses.
   const status = statusFixture(
     () => ({
@@ -434,7 +458,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   if (!options.statusUnstarted) await status.service.tick();
   const context: WebContext = {
     services: services(
-      { lifecycle, menus, people, status },
+      { lifecycle, menus, people, pauses, status },
       options.syncStatus ?? (async () => SYNC),
       options.menuStates,
     ),
@@ -487,6 +511,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
     stopping,
     menus,
     people,
+    pauses,
     status,
     logs: () => lines.map((line) => JSON.parse(line) as LogLine),
   };
@@ -2926,7 +2951,12 @@ describe("startWeb", () => {
   ): WebContext {
     return {
       services: services(
-        { lifecycle: { ready: true }, menus: new Map(), people: harnessPeople() },
+        {
+          lifecycle: { ready: true },
+          menus: new Map(),
+          people: harnessPeople(),
+          pauses: harnessPauses(),
+        },
         syncStatus,
       ),
       allowsGuild: () => true,
@@ -3691,4 +3721,225 @@ services:
     },
     30_000,
   );
+});
+
+describe("pages that need a recent sign-in (2.45.0)", () => {
+  const recent = `/g/${GUILD}/recent`;
+  const moderation = `/g/${GUILD}/moderation`;
+  /** Where a stale POST is sent, with the page as the way back. */
+  const login = (path: string) => `/login?to=${encodeURIComponent(path)}`;
+
+  /** Sign `browser` in again through the redirect a stale POST was given, back to its page. */
+  async function signInAgain(
+    w: World,
+    browser: Browser,
+    location: string,
+    id = OFFICER,
+  ): Promise<void> {
+    const started = await browser.get(location);
+    expect(started.status).toBe(302);
+    const callback = w.discord.authorize(new URL(started.headers.get("location") ?? ""), { id });
+    const back = await browser.get(`${callback.pathname}${callback.search}`);
+    expect(back.status).toBe(303);
+    expect(back.headers.get("location")).toBe(new URL(location, DEV).searchParams.get("to"));
+  }
+
+  test("a sign-in within 15 minutes posts, and the page is told; the boundary is strict", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    expect(await (await officer.get(recent)).text()).toContain("Sign-in recent");
+    const posted = await officer.post(recent, "a=1");
+    expect(posted.status).toBe(303);
+    expect(posted.headers.get("location")).toBe(recent);
+    expect(w.posts).toEqual([{ a: "1" }]);
+    // One millisecond short of the limit is still recent, as PostgreSQL's `>` reads it; the limit
+    // itself is not.
+    w.clock.now += RECENT_SIGN_IN_MS - 1;
+    expect(await (await officer.get(recent)).text()).toContain("Sign-in recent");
+    expect((await officer.post(recent, "a=2")).status).toBe(303);
+    expect(w.posts).toEqual([{ a: "1" }, { a: "2" }]);
+    w.clock.now += 1;
+    expect(await (await officer.get(recent)).text()).toContain("Sign-in old");
+  });
+
+  test("an older sign-in is sent to /login and back to the page, before anything is read, spent or run", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    // Warm the memo and the page's budget the way a normal POST would.
+    expect((await officer.post(recent, "a=0")).status).toBe(303);
+    w.posts.length = 0;
+    w.clock.now += RECENT_SIGN_IN_MS;
+    const resolved = w.resolutions.length;
+    const stale = await officer.post(recent, "a=1");
+    expect(stale.status).toBe(303);
+    expect(stale.headers.get("location")).toBe(login(recent));
+    // The handler never ran, no actor was resolved for it, and the answer is no error page.
+    expect(w.posts).toEqual([]);
+    expect(w.resolutions).toHaveLength(resolved);
+    expect(w.reports).toEqual([]);
+    expect(await stale.text()).toBe("");
+    // The sign-in that follows rotates in a session with a fresh time, and the same form posts.
+    await signInAgain(w, officer, stale.headers.get("location") ?? "");
+    expect(await (await officer.get(recent)).text()).toContain("Sign-in recent");
+    const again = await officer.post(recent, "a=2");
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe(recent);
+    expect(w.posts).toEqual([{ a: "2" }]);
+  });
+
+  test("the form token and the shutdown check still come first; other pages ignore the sign-in's age", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    w.clock.now += 3 * RECENT_SIGN_IN_MS;
+    // A form that isn't this session's can't even make the redirect.
+    const forged = await officer.post(recent, "a=1", {}, "not-this-sessions-token");
+    expect(forged.status).toBe(403);
+    // Nor can a POST while the bot is stopping: a 429 to try again, not a trip through Discord.
+    w.stopping.now = true;
+    expect((await officer.post(recent, "a=1")).status).toBe(429);
+    w.stopping.now = false;
+    expect(w.posts).toEqual([]);
+    // A page that didn't ask for it posts on the old session as before.
+    const plain = await officer.post(`/g/${GUILD}/form`, "name=Ada");
+    expect(plain.status).toBe(303);
+    expect(w.posts).toEqual([{ name: "Ada" }]);
+    // A GET never redirects for it, and a page without the option is told nothing of the age.
+    expect((await officer.get(recent)).status).toBe(200);
+  });
+
+  test("the Moderation page: an old session sees a link in place of its forms, and writes nothing", async () => {
+    const w = await world();
+    const officer = await signedIn(w);
+    const fresh = parseHTML(await (await officer.get(moderation)).text()).document;
+    expect(fresh.querySelectorAll("main form[method=post], main .mod-signin")).toHaveLength(1);
+    expect(fresh.querySelector("main .mod-opener")?.textContent).toBe("Pause someone");
+    const fields = (reason: string) =>
+      `op=block&member=${MEMBER}&feature=suggest.use&duration=1w&reason=${encodeURIComponent(reason)}`;
+    w.clock.now += RECENT_SIGN_IN_MS;
+    // The page opens and looks the same, but its controls are one link to sign in again.
+    const old = await officer.get(moderation);
+    expect(old.status).toBe(200);
+    const page = parseHTML(await old.text()).document;
+    expect(
+      page.querySelectorAll("main form[method=post], main dialog, main .mod-opener"),
+    ).toHaveLength(0);
+    expect(
+      [...page.querySelectorAll("main a.mod-signin")].map((link) => link.getAttribute("href")),
+    ).toEqual([login(moderation)]);
+    expect(page.querySelector("main .notice--warning")?.textContent).toContain(
+      "Pausing and lifting need a sign-in from the last 15 minutes",
+    );
+    // A POST from it is the redirect, and nothing is written.
+    const stale = await officer.post(moderation, fields("Spam"));
+    expect(stale.status).toBe(303);
+    expect(stale.headers.get("location")).toBe(login(moderation));
+    expect(w.pauses.rows).toEqual([]);
+    // After signing in again, the same form writes it, once.
+    await signInAgain(w, officer, stale.headers.get("location") ?? "");
+    const done = await officer.post(moderation, fields("Spam"));
+    expect(done.status).toBe(303);
+    expect(done.headers.get("location")).toBe(`${moderation}?notice=paused&find=${MEMBER}#status`);
+    expect(
+      w.pauses.rows.map((row) => [row.userId, row.permission, row.reason, row.actorId]),
+    ).toEqual([[MEMBER, "suggest.use", "Spam", OFFICER]]);
+    // Looking people up needs no recent sign-in, with the session as old as it was.
+    w.clock.now += RECENT_SIGN_IN_MS;
+    const found = await officer.get(`${moderation}?find=${MEMBER}`);
+    expect(found.status).toBe(200);
+    expect(await found.text()).toContain("Suggesting features (/suggest)");
+  });
+
+  test("a member is turned away from the page and from its forms, whatever the sign-in's age", async () => {
+    const w = await world();
+    const member = await signedIn(w, MEMBER);
+    expect((await member.get(moderation)).status).toBe(403);
+    const posted = await member.post(
+      moderation,
+      `op=block&member=${GUEST}&feature=suggest.use&duration=1w&reason=x`,
+    );
+    expect(posted.status).toBe(403);
+    w.clock.now += RECENT_SIGN_IN_MS;
+    // Stale as well, and the memo's minute is over, so nothing known says the member can't use the
+    // page: they are sent to sign in (the next test has the memo show it), and signing in again
+    // lands on the same refusal.
+    const form = `op=block&member=${GUEST}&feature=suggest.use&duration=1w&reason=x`;
+    const stale = await member.post(moderation, form);
+    expect(stale.status).toBe(303);
+    expect(stale.headers.get("location")).toBe(login(moderation));
+    await signInAgain(w, member, stale.headers.get("location") ?? "", MEMBER);
+    expect((await member.post(moderation, form)).status).toBe(403);
+    expect(w.pauses.rows).toEqual([]);
+  });
+
+  test("the actor memo refuses first: whoever it shows can't use the page gets the plain 403 on an old session, and everyone else is sent to sign in", async () => {
+    const w = await world();
+    const picks = `/g/${GUILD}/picks`;
+    const fields = (target: string) =>
+      `op=block&member=${target}&feature=suggest.use&duration=1w&reason=x`;
+    const member = await signedIn(w, MEMBER);
+    const officer = await signedIn(w);
+    // Fresh sessions are as before: the member is refused, the officer's pause is written.
+    const refused = await member.post(moderation, fields(GUEST));
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("location")).toBeNull();
+    const first = await officer.post(moderation, fields(GUEST));
+    expect(first.status).toBe(303);
+    expect(first.headers.get("location")).toBe(`${moderation}?notice=paused&find=${GUEST}#status`);
+    const written = w.pauses.rows.length;
+    expect(written).toBe(1);
+
+    // Both sessions go stale, and a plain GET (a page that admits both) makes the memo hold what
+    // Discord says of each: the officer is admitted to the page, the member is not.
+    w.clock.now += RECENT_SIGN_IN_MS;
+    for (const browser of [member, officer]) expect((await browser.get(picks)).status).toBe(200);
+    w.posts.length = 0;
+    w.reports.length = 0;
+    const resolved = w.resolutions.length;
+
+    // The member: the memo says no, so the answer is the plain 403 of any POST to a page they
+    // can't use, with no invitation to sign in, on the real page and on the stand-in alike.
+    for (const path of [moderation, recent]) {
+      const turned = await member.post(path, path === recent ? "a=1" : fields(GUEST));
+      expect({ path, status: turned.status, to: turned.headers.get("location") }).toEqual({
+        path,
+        status: 403,
+        to: null,
+      });
+      expect(await turned.text()).not.toBe("");
+    }
+    // The officer: the memo admits them, so the old session is what stops the request: the
+    // redirect back to this page after signing in, whose handler never runs.
+    for (const path of [moderation, recent]) {
+      const sent = await officer.post(path, path === recent ? "a=1" : fields(MEMBER));
+      expect({ path, status: sent.status, to: sent.headers.get("location") }).toEqual({
+        path,
+        status: 303,
+        to: login(path),
+      });
+      expect(await sent.text()).toBe("");
+    }
+    expect(login(moderation)).toBe(`/login?to=%2Fg%2F${GUILD}%2Fmoderation`);
+    // Neither answer cost a Discord request, wrote anything, or reached a handler or the reports.
+    expect(w.resolutions).toHaveLength(resolved);
+    expect(w.pauses.rows).toHaveLength(written);
+    expect(w.posts).toEqual([]);
+    expect(w.reports).toEqual([]);
+
+    // Once the memo's minute is over nothing is known of either, so the member is sent to sign in
+    // as well; the refusal comes after signing in again, from the fresh actor.
+    w.clock.now += 61_000;
+    const unknown = await member.post(moderation, fields(GUEST));
+    expect(unknown.status).toBe(303);
+    expect(unknown.headers.get("location")).toBe(login(moderation));
+    expect(w.resolutions).toHaveLength(resolved);
+    await signInAgain(w, member, unknown.headers.get("location") ?? "", MEMBER);
+    expect((await member.post(moderation, fields(GUEST))).status).toBe(403);
+    expect(w.pauses.rows).toHaveLength(written);
+    // And the officer, signed in again, writes.
+    await signInAgain(w, officer, login(moderation));
+    const again = await officer.post(moderation, fields(MEMBER));
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe(`${moderation}?notice=paused&find=${MEMBER}#status`);
+    expect(w.pauses.rows).toHaveLength(written + 1);
+  });
 });

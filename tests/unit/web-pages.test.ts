@@ -11,8 +11,10 @@ import {
   applicationKey,
   gatewayKey,
   lifecycleKey,
+  moderationKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
+import type { PauseStatus, PauseView } from "../../src/application/moderation.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
 import type { JobView, SyncRunRow, SyncStatusView } from "../../src/application/results.js";
 import {
@@ -40,7 +42,9 @@ import {
 } from "../../src/domain/self-roles.js";
 import { Failure } from "../../src/domain/values.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
-import { isPermissionId } from "../../src/domain/rbac.js";
+import { PAUSE_FEATURES } from "../../src/domain/moderation.js";
+import { isPermissionId, type PermissionId } from "../../src/domain/rbac.js";
+import { admits } from "../../src/web/access.js";
 import { FAVICON, STYLESHEET } from "../../src/web/assets.js";
 import { html, type SafeHtml } from "../../src/web/html.js";
 import { FORM_TOKEN_FIELD, problemOf } from "../../src/web/http.js";
@@ -65,6 +69,20 @@ import {
   skippedText,
   UNCHANGED_WHILE_WAITING,
 } from "../../src/web/views/my-roles.js";
+import {
+  drawsRefused,
+  FIND_UNREADABLE,
+  MEMBER_UNREADABLE,
+  MODERATION_NOTICES,
+  type ModerationView,
+  type Names,
+  readFind,
+  readMember,
+  type RefusedLift,
+  type RefusedPause,
+  renderModeration,
+} from "../../src/web/views/moderation.js";
+import { MODERATION_CSS } from "../../src/web/styles/moderation.js";
 import { renderStatus } from "../../src/web/views/status.js";
 import { renderPublicStatus, STATUS_TITLE } from "../../src/web/views/public-status.js";
 import type { StatusSnapshot } from "../../src/application/public-status.js";
@@ -92,6 +110,7 @@ import {
   SECOND_MENU,
 } from "../fixtures/web-dev.js";
 import { type ActorSpec, actorOf } from "../fixtures/actors.js";
+import { HARNESS_FORMER_MEMBER } from "../fixtures/modmail.js";
 
 const GUILD = "100000000000000001";
 const USER = "200000000000000002";
@@ -156,6 +175,13 @@ function inspect(markup: string): Document {
   // Forms post here only (the CSP's form-action agrees), and each carries the session's form
   // token exactly once, so no POST form can be forged or forgotten.
   for (const form of document.querySelectorAll("form")) {
+    // The one exception (2.45.0) is a lookup that changes nothing, such as the Moderation finder:
+    // a same-origin GET with no token, which can carry no hidden field either.
+    if (form.getAttribute("method") === "get") {
+      expect(form.getAttribute("action")).toMatch(/^\/[^/\\]/u);
+      expect(form.querySelectorAll('input[type="hidden"]')).toHaveLength(0);
+      continue;
+    }
     expect(form.getAttribute("method")).toBe("post");
     expect(form.getAttribute("action")).toMatch(/^\/[^/\\]/u);
     const tokens = [...form.querySelectorAll(`input[name="${FORM_TOKEN_FIELD}"]`)];
@@ -205,6 +231,16 @@ describe("definePage", () => {
     expect(page.href(GUILD)).toBe(`/g/${GUILD}/status`);
     expect(page.nav).toBe("Status");
     expect(page.icon).toBeUndefined();
+    // A sign-in from the last few minutes for a change (2.45.0) is opt-in, and needs a POST.
+    expect(page.recentSignIn).toBe(false);
+    expect(
+      definePage({
+        ...base,
+        post: async () => ({ redirect: "/" }),
+        postLimit: 30,
+        recentSignIn: true,
+      }).recentSignIn,
+    ).toBe(true);
     expect(definePage({ ...base, icon: "activity" }).icon).toBe("activity");
     expect(definePage({ ...base, path: "/g/:guild/roles/officer-ranks" }).path).toBe(
       "/g/:guild/roles/officer-ranks",
@@ -288,6 +324,9 @@ describe("definePage", () => {
       [{ nav: " " }, "A page's navigation label must be text."],
       [{ nav: 1 }, "A page's navigation label must be text."],
       [{ icon: "rocket" }, "A page's icon must name one of the icons in icons.ts."],
+      [{ recentSignIn: "yes" }, "A page's recentSignIn must be true or false."],
+      [{ recentSignIn: 1 }, "A page's recentSignIn must be true or false."],
+      [{ recentSignIn: true }, "A page's recentSignIn needs a post handler."],
       [{ icon: 1 }, "A page's icon must name one of the icons in icons.ts."],
     ];
     for (const [override, message] of cases)
@@ -957,6 +996,7 @@ describe("Status", () => {
       userId: USER,
       createdAt: at,
       authenticatedAt: at,
+      recentSignIn: true,
       lastSeenAt: at,
       expiresAt: at,
     };
@@ -972,6 +1012,7 @@ describe("Status", () => {
         .provide(lifecycleKey, lifecycle)
         .provide(gatewayKey, gateway),
       formToken: TOKEN,
+      recentSignIn: true,
       report: () => {},
       ref: REF,
     };
@@ -1551,9 +1592,11 @@ describe("Role menu (2.39.0)", () => {
     expect(page?.nav).toBe("Role menu");
     expect(page?.icon).toBe("list");
     // Officers' navigation, in path order: My roles (2.40.0) is theirs too (owner decision Q6),
-    // and Mod mail (2.43.0) is listed to officers whether or not it's on.
+    // Mod mail (2.43.0) is listed to officers whether or not it's on, and Moderation (2.45.0)
+    // comes before it, as "moderation" sorts before "modmail".
     expect(navLinks((await loadPages()).values(), officer).map((link) => link.label)).toEqual([
       "Server configuration",
+      "Moderation",
       "Mod mail",
       "My roles",
       "Role menu",
@@ -3875,6 +3918,58 @@ describe("My roles (2.40.0)", () => {
     ).toEqual(["TaruBot isn't set up in this server yet, so there are no roles to pick here."]);
   });
 
+  test("a paused person keeps the page: when it ends and why in a callout, the rows readable, nothing to save", async () => {
+    const until = new Date("2026-10-19T09:30:00.000Z");
+    const reason = "Please stop changing roles every minute.";
+    const paused = person(HARNESS_ACCOUNTS.member.id, {
+      paused: { "selfroles.use": { until, reason } },
+    });
+    const roles = await viewOf(paused);
+    expect(roles.paused).toEqual({ until, reason });
+    expect(roles.canSave).toBe(false);
+    expect((await viewOf(member)).paused).toBeNull();
+    const { document, markup } = await myRolesPage(roles, { viewer: paused });
+    expect(callouts(document)).toEqual([
+      "Your use of My roles is paused until 2026-10-19 09:30 UTC: Please stop changing roles every minute.",
+    ]);
+    // The end is a <time>, and the reason is isolated text: neither is markup.
+    expect(document.querySelector(".my-roles-callouts time")?.getAttribute("datetime")).toBe(
+      until.toISOString(),
+    );
+    expect(isolated(document)).toContain(reason);
+    // Like a time-out: no form and no Save button, inputs disabled, the rows still readable. The
+    // page never says who paused them (the pause doesn't carry it).
+    expect(document.querySelectorAll("main form, main button")).toHaveLength(0);
+    for (const input of document.querySelectorAll("main fieldset input"))
+      expect(input.hasAttribute("disabled")).toBe(true);
+    expect(
+      document.querySelector(".my-categories")?.classList.contains("my-categories--locked"),
+    ).toBe(true);
+    expect(document.querySelector(".my-roles-intro__privacy")?.textContent).toBe(PRIVACY);
+    expect(markup).not.toMatch(/paused by|set by/iu);
+    // Until someone lifts it, when it has no end; a hostile reason stays text.
+    const open = person(HARNESS_ACCOUNTS.member.id, {
+      paused: { "selfroles.use": { until: null, reason: HOSTILE[0] } },
+    });
+    const { document: forever, markup: foreverMarkup } = await myRolesPage(await viewOf(open), {
+      viewer: open,
+    });
+    expect(callouts(forever)).toEqual([
+      `Your use of My roles is paused until someone lifts it: ${HOSTILE[0]}`,
+    ]);
+    expect(forever.querySelectorAll("main img")).toHaveLength(0);
+    expect(foreverMarkup).not.toContain(`<img src=x`);
+    // A pause and a time-out say both, the pause first.
+    const both = person(HARNESS_ACCOUNTS.member.id, {
+      timedOut: true,
+      paused: { "selfroles.use": { until, reason } },
+    });
+    expect(callouts((await myRolesPage(await viewOf(both), { viewer: both })).document)).toEqual([
+      "Your use of My roles is paused until 2026-10-19 09:30 UTC: Please stop changing roles every minute.",
+      CHOICE_MESSAGES.timedOut,
+    ]);
+  });
+
   test("officers see the Administrator banner (A2) and an unreadable menu's note; members never do", async () => {
     const administrator =
       "Members and guests can't open this page while TaruBot has Administrator in this server. Use /setup overrides, then remove Administrator once /config validate says it's no longer needed.";
@@ -4160,5 +4255,1073 @@ describe("My roles (2.40.0)", () => {
         name,
         styled: true,
       });
+  });
+});
+
+describe("Moderation (2.45.0)", () => {
+  const MODERATION = "/g/:guild/moderation";
+  const PAGE = `/g/${GUILD}/moderation`;
+  const OFFICER_ID = HARNESS_ACCOUNTS.officer.id;
+  const MEMBER_ID = HARNESS_ACCOUNTS.member.id;
+  const GUEST_ID = HARNESS_ACCOUNTS.guest.id;
+  const MANAGER_ID = HARNESS_ACCOUNTS.manager.id;
+  const FORMER_ID = HARNESS_FORMER_MEMBER;
+  const NAMES: Names = new Map<string, string | null>([
+    [OFFICER_ID, "Mogwin Kupoberry"],
+    [MEMBER_ID, "Kupo"],
+    [GUEST_ID, "Pomp"],
+    [MANAGER_ID, "Moogle Manager"],
+    [FORMER_ID, null],
+  ]);
+  const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const CREATED = new Date("2026-10-10T09:30:00.000Z");
+  const ENDS = new Date("2026-10-17T09:30:00.000Z");
+
+  /** An officer's view of one pause; fields replaced as a test needs. */
+  const pause = (
+    n: number,
+    userId: string,
+    permission: PermissionId,
+    extra: Partial<PauseView> = {},
+  ): PauseView => ({
+    id: uuid(n),
+    userId,
+    permission,
+    reason: `Reason ${n}`,
+    createdAt: CREATED,
+    until: ENDS,
+    by: { userId: OFFICER_ID, level: "moderator" },
+    ...extra,
+  });
+
+  /** An ended pause: lifted by hand, or (by null) run out. */
+  const ended = (
+    n: number,
+    userId: string,
+    permission: PermissionId,
+    how: { at: string; by: string | null; reason: string | null },
+    extra: Partial<PauseView> = {},
+  ): PauseView =>
+    pause(n, userId, permission, {
+      ended: { at: new Date(how.at), by: how.by, reason: how.reason },
+      ...extra,
+    });
+
+  const status = (
+    subject: string,
+    active: PauseView[],
+    old: PauseView[] = [],
+    self = false,
+  ): PauseStatus => ({ subject, self, active, ended: old });
+
+  /** A Moderation view as the page builds it, with any field replaced. */
+  const view = (overrides: Partial<ModerationView> = {}): ModerationView => ({
+    overview: { active: [], ended: [], truncated: false },
+    names: NAMES,
+    viewer: { userId: OFFICER_ID, canChange: true, manager: false },
+    recentSignIn: true,
+    recentMinutes: 15,
+    signInHref: `/login?to=${encodeURIComponent(PAGE)}`,
+    action: PAGE,
+    token: TOKEN,
+    url: new URL(PAGE, "https://example.org"),
+    findText: "",
+    ...overrides,
+  });
+
+  /** The whole document for a Moderation view, as the page renders it. */
+  async function moderationPage(
+    model: ModerationView,
+  ): Promise<{ document: Document; markup: string }> {
+    const markup = await render(
+      layout(
+        {
+          title: "Moderation",
+          signedIn: true,
+          formToken: TOKEN,
+          ...(model.refused && { error: true, modal: drawsRefused(model) }),
+          guild: { id: GUILD, name: "Example FC", nav: [], audience: "officer" },
+        },
+        renderModeration(model),
+      ),
+    );
+    const document = inspect(markup);
+    // Every id once: each label's `for`, each summary link and each dialog's name need it (the
+    // finder shows a paused person's chips again, under ids of their own).
+    const ids = [...document.querySelectorAll("[id]")].map((element) => element.getAttribute("id"));
+    expect(ids.filter((id, at) => ids.indexOf(id) !== at)).toEqual([]);
+    return { document, markup };
+  }
+
+  /** An element's text with the whitespace between template lines collapsed. */
+  const words = (element: Element | null | undefined): string =>
+    (element?.textContent ?? "").replace(/\s+/gu, " ").trim();
+  const wordsOf = (document: Document, selector: string): string[] =>
+    [...document.querySelectorAll(selector)].map(words);
+
+  /** A rich page: pauses of both levels, a person with two, and ended ones. */
+  const SAMPLE = view({
+    overview: {
+      active: [
+        pause(1, MEMBER_ID, "suggest.use", { reason: "Posted the same idea five times." }),
+        pause(2, MEMBER_ID, "issue.use", { until: null, reason: "Reports about nothing." }),
+        pause(3, GUEST_ID, "modmail.open", {
+          by: { userId: MANAGER_ID, level: "manager" },
+          reason: "Kept opening cases about a closed one.",
+        }),
+        pause(4, FORMER_ID, "ledger.deposit"),
+      ],
+      ended: [
+        ended(5, MEMBER_ID, "roster.refresh", {
+          at: "2026-10-11T10:00:00.000Z",
+          by: OFFICER_ID,
+          reason: "They apologised.",
+        }),
+        ended(
+          6,
+          GUEST_ID,
+          "selfroles.use",
+          { at: "2026-10-09T10:00:00.000Z", by: null, reason: "expired" },
+          {
+            until: new Date("2026-10-09T10:00:00.000Z"),
+          },
+        ),
+        ended(
+          7,
+          FORMER_ID,
+          "ledger.view",
+          { at: "2026-10-08T10:00:00.000Z", by: null, reason: null },
+          {
+            until: new Date("2026-10-08T10:00:00.000Z"),
+          },
+        ),
+      ],
+      truncated: false,
+    },
+  });
+
+  test("the page module: officers who can see pauses, fresh actor, recent sign-in, 30 POSTs", async () => {
+    const pages = await loadPages();
+    const page = pages.get(MODERATION);
+    expect(page?.title).toBe("Moderation");
+    expect(page?.access).toEqual(["moderation.view"]);
+    // Only the moderation service: the names it shows come with its own views.
+    expect(page?.requires).toEqual([moderationKey]);
+    // Private text and a lookup of who sent a suggestion: no actor memo, and every change needs a
+    // sign-in from the last few minutes.
+    expect(page?.freshActor).toBe(true);
+    expect(page?.recentSignIn).toBe(true);
+    expect(page?.postLimit).toBe(30);
+    expect(page?.post).toBeFunction();
+    expect(page?.nav).toBe("Moderation");
+    expect(page?.icon).toBe("clock");
+    expect(page?.href(GUILD)).toBe(PAGE);
+    // Officers see it before Mod mail ("moderation" sorts first); members, guests and the lobby
+    // never do, and the manager has it too.
+    const labels = (actor: Actor) => navLinks(pages.values(), actor).map((link) => link.label);
+    const officer = actorOf({
+      guildId: GUILD,
+      userId: OFFICER_ID,
+      officer: true,
+      manageRoles: false,
+    });
+    const manager = actorOf({
+      guildId: GUILD,
+      userId: MANAGER_ID,
+      manageRoles: true,
+      serverManager: true,
+    });
+    for (const actor of [officer, manager]) {
+      expect(labels(actor)).toContain("Moderation");
+      expect(labels(actor).indexOf("Moderation")).toBeLessThan(labels(actor).indexOf("Mod mail"));
+    }
+    for (const spec of [{ member: true }, { guest: true }, {}])
+      expect(
+        labels(
+          actorOf({
+            guildId: GUILD,
+            userId: MEMBER_ID,
+            manageRoles: false,
+            botAdministrator: false,
+            ...spec,
+          }),
+        ),
+      ).not.toContain("Moderation");
+    // Viewing needs moderation.view alone: an officer who may look but not change is admitted.
+    const lookOnly: Actor = {
+      ...officer,
+      access: {
+        ...officer.access,
+        permissions: new Set(
+          [...officer.access.permissions].filter((id) => id !== "moderation.block"),
+        ),
+      },
+    };
+    expect(admits(lookOnly, page?.access ?? [])).toBe(true);
+    expect(
+      admits(
+        actorOf({
+          guildId: GUILD,
+          userId: MEMBER_ID,
+          manageRoles: false,
+          member: true,
+          botAdministrator: false,
+        }),
+        page?.access ?? [],
+      ),
+    ).toBe(false);
+  });
+
+  test("a member's ID or mention, and a suggestion's #number, are all the finder reads", () => {
+    const id = "200000000000000002";
+    expect(readMember(id)).toBe(id);
+    expect(readMember(`  <@${id}>  `)).toBe(id);
+    expect(readMember(`<@!${id}>`)).toBe(id);
+    for (const text of [
+      "",
+      "Kupo",
+      "@Kupo",
+      "123",
+      "#123",
+      `<@&${id}>`,
+      `<#${id}>`,
+      `<@${id}`,
+      `${id}0000000`,
+      `0${id}`,
+      "99999999999999999999",
+      "18446744073709551616",
+      `${id} ${id}`,
+    ])
+      expect({ text, id: readMember(text) }).toEqual({ text, id: null });
+    expect(readFind(id)).toEqual({ kind: "member", userId: id });
+    expect(readFind(`<@${id}>`)).toEqual({ kind: "member", userId: id });
+    expect(readFind("#123")).toEqual({ kind: "suggestion", number: 123 });
+    expect(readFind(" #7 ")).toEqual({ kind: "suggestion", number: 7 });
+    for (const text of ["", "123", "#0", "#012", "#-1", "# 1", "#1.5", "#1x", "suggestion 3", "#"])
+      expect({ text, found: readFind(text) }).toEqual({ text, found: null });
+    // A number too long to be exact can't name a suggestion.
+    expect(readFind("#1234567890123456")).toBeNull();
+  });
+
+  test("pauses are cards by person with a chip per feature: its end, the reason, who set it", async () => {
+    const { document } = await moderationPage(SAMPLE);
+    expect(wordsOf(document, "main h2")).toEqual(["Paused now", "Recently ended"]);
+    expect(words(document.querySelector("#mod-active ~ .section-count"))).toBe("3 people");
+    const cards = [...document.querySelectorAll(".mod-people > .mod-person")];
+    // Newest first, grouped: the member's two chips share one card.
+    expect(cards.map((card) => words(card.querySelector(".mod-person__name")))).toEqual([
+      `Kupo ${MEMBER_ID}`,
+      `Pomp ${GUEST_ID}`,
+      `${FORMER_ID} Left the server`,
+    ]);
+    const first = cards[0];
+    const chips = [...(first?.querySelectorAll(".mod-pause") ?? [])];
+    expect(chips.map((chip) => words(chip.querySelector(".mod-pause__feature")))).toEqual([
+      "Suggesting features (/suggest)",
+      "Reporting problems (/issue)",
+    ]);
+    expect(chips.map((chip) => words(chip.querySelector(".mod-until")))).toEqual([
+      "Until 2026-10-17 09:30 UTC",
+      "Until lifted",
+    ]);
+    expect(chips.map((chip) => words(chip.querySelector(".mod-pause__reason")))).toEqual([
+      "Posted the same idea five times.",
+      "Reports about nothing.",
+    ]);
+    expect(chips.map((chip) => words(chip.querySelector(".mod-pause__by")))).toEqual([
+      "Set by Mogwin Kupoberry (officer) on 2026-10-10 09:30 UTC",
+      "Set by Mogwin Kupoberry (officer) on 2026-10-10 09:30 UTC",
+    ]);
+    expect(first?.querySelector(".mod-until time")?.getAttribute("datetime")).toBe(
+      ENDS.toISOString(),
+    );
+    // The name links to the finder for that person.
+    expect(first?.querySelector(".mod-person__name a")?.getAttribute("href")).toBe(
+      `${PAGE}?find=${MEMBER_ID}`,
+    );
+    // The guest's chip says a server manager set it.
+    expect(words(cards[1]?.querySelector(".mod-pause__by"))).toBe(
+      "Set by Moogle Manager (server manager) on 2026-10-10 09:30 UTC",
+    );
+    // Lift is a button per chip that opens that chip's own panel, with the feature and the person
+    // in its name; the panel is a closed dialog holding the lift form.
+    const lift = first?.querySelector("button.mod-opener");
+    expect(words(lift)).toBe("Lift: Suggesting features (/suggest) for Kupo");
+    expect(lift?.getAttribute("commandfor")).toBe(`mod-lift-${uuid(1)}`);
+    expect(lift?.getAttribute("command")).toBe("show-modal");
+    const panel = document.getElementById(`mod-lift-${uuid(1)}`);
+    expect(panel?.tagName).toBe("DIALOG");
+    expect(panel?.getAttribute("closedby")).toBe("any");
+    expect(panel?.getAttribute("aria-labelledby")).toBe(`mod-lift-${uuid(1)}-title`);
+    expect(words(document.getElementById(`mod-lift-${uuid(1)}-title`))).toBe(
+      "Lift pause: Suggesting features (/suggest) for Kupo",
+    );
+    const form = panel?.querySelector("form");
+    expect(form?.getAttribute("method")).toBe("post");
+    expect(
+      [...(form?.querySelectorAll("input[type=hidden]") ?? [])].map((input) => [
+        input.getAttribute("name"),
+        input.getAttribute("value"),
+      ]),
+    ).toEqual([
+      [FORM_TOKEN_FIELD, TOKEN],
+      ["op", "lift"],
+      ["member", MEMBER_ID],
+      ["feature", "suggest.use"],
+    ]);
+    expect(form?.querySelector("textarea")?.getAttribute("name")).toBe("reason");
+    expect(form?.querySelector("textarea")?.getAttribute("maxlength")).toBe("1000");
+    // Lift is never anchored: the static pairs are one per button, and Lift has as many as there
+    // are pauses. The only anchor on the page is the toolbar's Pause someone and its panel.
+    expect(lift?.className).not.toContain("anchor");
+    expect(panel?.className).not.toContain("anchor");
+    expect(
+      [...document.querySelectorAll("[class*=anchor]")].map(
+        (element) => element.id || element.tagName,
+      ),
+    ).toEqual(["BUTTON", "mod-pause"]);
+    // One name per Lift, so assistive technology can tell them apart.
+    const names = [...document.querySelectorAll("button.mod-opener")].map(words);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("an empty page says so; a long list says it's cut", async () => {
+    const { document } = await moderationPage(view());
+    expect(wordsOf(document, ".empty-state p")).toEqual([
+      "Nobody is paused.",
+      "Pause someone with the button above, or find a member or a suggestion's sender first.",
+      "No pause has ended yet.",
+    ]);
+    expect(document.querySelector("#mod-active ~ .section-count")?.textContent).toBe("0 people");
+    const { document: cut } = await moderationPage(
+      view({
+        overview: {
+          active: [pause(1, MEMBER_ID, "suggest.use")],
+          ended: [],
+          truncated: true,
+        },
+      }),
+    );
+    expect(words(cut.querySelector("#mod-active ~ .section-count"))).toBe("1 person");
+    expect(cut.querySelector("main")?.textContent).toContain("Showing the newest pauses only.");
+  });
+
+  test("a server manager's pause is theirs to lift; your own is someone else's", async () => {
+    const lifts = (document: Document, card: number) => [
+      ...(document.querySelectorAll(".mod-person")[card]?.querySelectorAll("button.mod-opener") ??
+        []),
+    ];
+    // An officer: no Lift on the manager's chip, and the reason why in its place.
+    const { document: officer } = await moderationPage(SAMPLE);
+    expect(lifts(officer, 1)).toHaveLength(0);
+    expect(
+      words(officer.querySelectorAll(".mod-person")[1]?.querySelector(".mod-pause__note")),
+    ).toBe("A server manager set this, so only a server manager can lift it.");
+    // A manager lifts it, and the manager's own copy of the page says nothing of the kind.
+    const { document: manager } = await moderationPage(
+      view({ ...SAMPLE, viewer: { userId: MANAGER_ID, canChange: true, manager: true } }),
+    );
+    expect(lifts(manager, 1)).toHaveLength(1);
+    expect(manager.querySelector(".mod-pause__note")).toBeNull();
+    // Your own pause is never yours to lift, whoever set it.
+    const { document: own } = await moderationPage(
+      view({ ...SAMPLE, viewer: { userId: MEMBER_ID, canChange: true, manager: true } }),
+    );
+    expect(lifts(own, 0)).toHaveLength(0);
+    expect(wordsOf(own, ".mod-person:first-child .mod-pause__note")).toEqual([
+      "Your own pause. Someone else lifts it.",
+      "Your own pause. Someone else lifts it.",
+    ]);
+  });
+
+  test("ended pauses say who lifted them and why, or that they ran out; the expiry marker is no reason", async () => {
+    const { document } = await moderationPage(SAMPLE);
+    const entries = [...document.querySelectorAll(".mod-dones > .mod-done")];
+    expect(
+      entries.map((entry) => [
+        words(entry.querySelector(".mod-done__feature")),
+        words(entry.querySelector(".mod-done__how")),
+        words(entry.querySelector(".mod-done__why")),
+        words(entry.querySelector(".mod-done__was")),
+      ]),
+    ).toEqual([
+      [
+        "Roster checks (/refresh)",
+        "Lifted by Mogwin Kupoberry on 2026-10-11 10:00 UTC",
+        "They apologised.",
+        "Paused for: Reason 5",
+      ],
+      ["Picking roles on My roles", "Ran out 2026-10-09 10:00 UTC", "", "Paused for: Reason 6"],
+      ["Reading the ledger", "Ran out 2026-10-08 10:00 UTC", "", "Paused for: Reason 7"],
+    ]);
+    expect(entries[1]?.querySelector(".mod-done__why")).toBeNull();
+    expect(document.body.textContent).not.toContain("expired");
+    // Each entry links to its person in the finder.
+    expect(entries[0]?.querySelector("a")?.getAttribute("href")).toBe(`${PAGE}?find=${MEMBER_ID}`);
+  });
+
+  test("the finder is a GET lookup with its own field; what it finds follows the viewer's rights", async () => {
+    const { document } = await moderationPage(view());
+    const finder = document.querySelector("form.mod-finder");
+    expect(finder?.getAttribute("method")).toBe("get");
+    expect(finder?.getAttribute("action")).toBe(PAGE);
+    expect(finder?.getAttribute("role")).toBe("search");
+    const field = finder?.querySelector("input[name=find]");
+    expect(field?.getAttribute("maxlength")).toBe("64");
+    expect(words(document.querySelector('label[for="mod-find"]'))).toBe("Find someone");
+    expect(words(document.getElementById("mod-find-hint"))).toBe(
+      "A member's ID or mention, or a suggestion number such as #123 to see who sent it.",
+    );
+    expect(words(finder?.querySelector("button"))).toBe("Find");
+
+    // Text it can't read: the field says so, and nothing else shows.
+    const unreadable = await moderationPage(
+      view({ findText: "hello", found: { kind: "unreadable" } }),
+    );
+    expect(words(unreadable.document.getElementById("mod-find-error"))).toBe(
+      `Error: ${FIND_UNREADABLE}`,
+    );
+    expect(unreadable.document.querySelector("#mod-find")?.getAttribute("aria-invalid")).toBe(
+      "true",
+    );
+    expect(unreadable.document.querySelector("#mod-found")).toBeNull();
+    expect(unreadable.document.querySelector("#mod-find")?.getAttribute("value")).toBe("hello");
+
+    // A member with pauses, earlier ones, and Pause with the member filled in.
+    const member = await moderationPage(
+      view({
+        findText: MEMBER_ID,
+        found: {
+          kind: "member",
+          status: status(
+            MEMBER_ID,
+            [pause(1, MEMBER_ID, "suggest.use")],
+            [
+              ended(5, MEMBER_ID, "roster.refresh", {
+                at: "2026-10-11T10:00:00.000Z",
+                by: OFFICER_ID,
+                reason: "Sorted out.",
+              }),
+            ],
+          ),
+        },
+      }),
+    );
+    const result = member.document.querySelector(".mod-found");
+    expect(words(result?.querySelector(".mod-found__name"))).toBe(`Kupo ${MEMBER_ID}`);
+    expect(wordsOf(member.document, ".mod-found .mod-pause__feature")).toEqual([
+      "Suggesting features (/suggest)",
+    ]);
+    expect(words(result?.querySelector(".mod-found__sub"))).toBe("Earlier pauses");
+    expect(wordsOf(member.document, ".mod-found .mod-done__how")).toEqual([
+      "Lifted by Mogwin Kupoberry on 2026-10-11 10:00 UTC",
+    ]);
+    const pauseButton = result?.querySelector("button.mod-opener");
+    expect(words(pauseButton)).toBe("Pause");
+    expect(pauseButton?.getAttribute("commandfor")).toBe("mod-pause-found");
+    expect(
+      member.document.querySelector('#mod-pause-found input[name="member"]')?.getAttribute("value"),
+    ).toBe(MEMBER_ID);
+
+    // A member who isn't paused.
+    const none = await moderationPage(
+      view({ findText: GUEST_ID, found: { kind: "member", status: status(GUEST_ID, []) } }),
+    );
+    expect(words(none.document.querySelector(".mod-found__none"))).toBe("Not paused.");
+
+    // Yourself: your own pauses with their reasons, never who set them, and nothing to change.
+    const { by: _setBy, ...mine } = pause(8, OFFICER_ID, "suggest.use");
+    const self = await moderationPage(
+      view({
+        findText: OFFICER_ID,
+        found: {
+          kind: "member",
+          status: status(OFFICER_ID, [mine], [], true),
+        },
+      }),
+    );
+    expect(words(self.document.querySelector(".mod-found .note"))).toBe(
+      "This is you. You see your own pauses and their reasons here, but not who set them.",
+    );
+    expect(self.document.querySelector(".mod-found .mod-pause__by")).toBeNull();
+    expect(self.document.querySelector(".mod-found button")).toBeNull();
+
+    // A suggestion: its sender and their pauses, or an honest "no record".
+    const sent = await moderationPage(
+      view({
+        findText: "#7",
+        found: {
+          kind: "suggestion",
+          number: 7,
+          sender: status(MEMBER_ID, [pause(1, MEMBER_ID, "suggest.use")]),
+        },
+      }),
+    );
+    expect(words(sent.document.querySelector(".mod-found__line"))).toBe(
+      `Suggestion #7 was sent by Kupo ${MEMBER_ID}.`,
+    );
+    expect(sent.document.querySelectorAll(".mod-found .mod-pause")).toHaveLength(1);
+    const lost = await moderationPage(
+      view({ findText: "#12", found: { kind: "suggestion", number: 12, sender: null } }),
+    );
+    expect(wordsOf(lost.document, 'section[aria-labelledby="mod-found"] .empty-state p')).toEqual([
+      "There is no record of who sent suggestion #12 in this server.",
+      "It may be older than TaruBot's records, or have been posted in another server.",
+    ]);
+    expect(lost.document.querySelector(".mod-found")).toBeNull();
+    // The sender who left is named by ID, and said to have left.
+    const gone = await moderationPage(
+      view({
+        findText: "#9",
+        found: { kind: "suggestion", number: 9, sender: status(FORMER_ID, []) },
+      }),
+    );
+    expect(words(gone.document.querySelector(".mod-found__line"))).toBe(
+      `Suggestion #9 was sent by ${FORMER_ID} Left the server.`,
+    );
+  });
+
+  test("a found person who is also in the list has each Lift panel twice, under ids of its own", async () => {
+    const theirs = SAMPLE.overview.active.filter((entry) => entry.userId === MEMBER_ID);
+    expect(theirs).toHaveLength(2);
+    for (const viewer of [
+      { userId: OFFICER_ID, canChange: true, manager: false },
+      { userId: MANAGER_ID, canChange: true, manager: true },
+    ]) {
+      // moderationPage() fails on any id the page holds twice.
+      const { document } = await moderationPage(
+        view({
+          ...SAMPLE,
+          viewer,
+          findText: MEMBER_ID,
+          found: { kind: "member", status: status(MEMBER_ID, theirs) },
+        }),
+      );
+      const targets = (selector: string) =>
+        [...document.querySelectorAll(selector)].map((button) => button.getAttribute("commandfor"));
+      expect(targets(".mod-found button.mod-opener").sort()).toEqual(
+        [...theirs.map((entry) => `mod-lift-found-${entry.id}`), "mod-pause-found"].sort(),
+      );
+      expect(targets(".mod-people button.mod-opener").sort()).toEqual(
+        [
+          ...theirs.map((entry) => `mod-lift-${entry.id}`),
+          // The former member's (an officer's) and, for a manager, the guest's too.
+          `mod-lift-${uuid(4)}`,
+          ...(viewer.manager ? [`mod-lift-${uuid(3)}`] : []),
+        ].sort(),
+      );
+      // Every button opens a dialog that exists, and each of its fields is labelled by its own.
+      for (const button of document.querySelectorAll("button.mod-opener")) {
+        const panel = document.getElementById(button.getAttribute("commandfor") ?? "");
+        expect(panel?.tagName).toBe("DIALOG");
+        const field = panel?.querySelector("textarea, input[name=member]:not([type=hidden])");
+        expect(document.querySelector(`label[for="${field?.getAttribute("id")}"]`)).not.toBeNull();
+        expect(
+          panel?.contains(document.querySelector(`label[for="${field?.getAttribute("id")}"]`)),
+        ).toBe(true);
+      }
+    }
+  });
+
+  test("the Pause someone form: who, what, how long and the reason they will see", async () => {
+    const { document } = await moderationPage(view());
+    const toolbar = document.querySelector(".mod-toolbar");
+    const opener = toolbar?.querySelector("button.mod-opener");
+    expect(words(opener)).toBe("Pause someone");
+    expect(opener?.getAttribute("commandfor")).toBe("mod-pause");
+    expect(opener?.className).toContain("orr-btn--primary");
+    const panel = document.getElementById("mod-pause");
+    expect(panel?.tagName).toBe("DIALOG");
+    // Beside its button on a wide screen: the panel points at the anchor its button names.
+    expect(panel?.className).toBe(
+      "overlay overlay--anchored anchored-moderation-pause overlay--wide",
+    );
+    expect(opener?.classList.contains("anchor-moderation-pause")).toBe(true);
+    expect(words(panel?.querySelector("#mod-pause-note"))).toBe(
+      "They see the feature, when it ends and your reason, never who paused them. Their Discord roles don't change.",
+    );
+    const form = panel?.querySelector("form");
+    expect(
+      [...(form?.querySelectorAll("input[type=hidden]") ?? [])].map((input) =>
+        input.getAttribute("name"),
+      ),
+    ).toEqual([FORM_TOKEN_FIELD, "op"]);
+    expect(form?.querySelector('input[name="op"]')?.getAttribute("value")).toBe("block");
+    const member = form?.querySelector('input[name="member"]');
+    expect(member?.hasAttribute("required")).toBe(true);
+    expect(member?.getAttribute("value")).toBe("");
+    expect(words(form?.querySelector('label[for="mod-pause-member"]'))).toBe("Member");
+    expect(words(document.getElementById("mod-pause-member-hint"))).toBe(
+      "Their ID, or paste a mention.",
+    );
+    // The length: a week unless told otherwise.
+    const select = form?.querySelector('select[name="duration"]');
+    expect(
+      [...(select?.querySelectorAll("option") ?? [])].map((option) => [
+        option.getAttribute("value"),
+        words(option),
+        option.hasAttribute("selected"),
+      ]),
+    ).toEqual([
+      ["1h", "1 hour", false],
+      ["1d", "1 day", false],
+      ["1w", "1 week", true],
+      ["30d", "30 days", false],
+      ["forever", "Until lifted", false],
+    ]);
+    // Every feature a pause can name, in plain words, one checkbox each; none ticked to start.
+    const boxes = [...(form?.querySelectorAll('input[type="checkbox"][name="feature"]') ?? [])];
+    expect(boxes.map((box) => box.getAttribute("value"))).toEqual(
+      PAUSE_FEATURES.map((feature) => feature.permission),
+    );
+    expect(
+      boxes.map((box) => words(form?.querySelector(`label[for="${box.getAttribute("id")}"]`))),
+    ).toEqual(PAUSE_FEATURES.map((feature) => feature.label));
+    expect(boxes.filter((box) => box.hasAttribute("checked"))).toHaveLength(0);
+    // Mod mail is a server manager's alone: disabled for an officer, with the reason beside it.
+    const modmail = boxes.find((box) => box.getAttribute("value") === "modmail.open");
+    expect(modmail?.hasAttribute("disabled")).toBe(true);
+    expect(words(document.getElementById(modmail?.getAttribute("aria-describedby") ?? ""))).toBe(
+      "Only a server manager can pause this.",
+    );
+    expect(boxes.filter((box) => box.hasAttribute("disabled"))).toHaveLength(1);
+    // The reason is what they see.
+    const reason = form?.querySelector('textarea[name="reason"]');
+    expect(reason?.hasAttribute("required")).toBe(true);
+    expect(reason?.getAttribute("maxlength")).toBe("1000");
+    expect(words(form?.querySelector('label[for="mod-pause-reason"]'))).toBe(
+      "Reason (they'll see this)",
+    );
+    expect(words(form?.querySelector(".form-actions button"))).toBe("Pause");
+    // A server manager may pause mod mail.
+    const managed = await moderationPage(
+      view({ viewer: { userId: MANAGER_ID, canChange: true, manager: true } }),
+    );
+    expect(
+      managed.document.querySelectorAll('#mod-pause input[name="feature"]:not([disabled])'),
+    ).toHaveLength(PAUSE_FEATURES.length);
+    // Officers' own limits are said once, in a line; a manager's page has none.
+    expect(words(document.querySelector(".mod-limits"))).toBe(
+      "Officers can pause members and guests who hold no officer permissions, and lift pauses officers set. Only server managers can pause mod mail or change a pause a server manager set.",
+    );
+    expect(managed.document.querySelector(".mod-limits")).toBeNull();
+  });
+
+  test("someone who may look but not change gets no change control, and is told why", async () => {
+    const { document, markup } = await moderationPage(
+      view({ ...SAMPLE, viewer: { userId: OFFICER_ID, canChange: false, manager: false } }),
+    );
+    expect(
+      document.querySelectorAll("main form[method=post], main dialog, main .mod-opener"),
+    ).toHaveLength(0);
+    expect(document.querySelectorAll("main button")).toHaveLength(1);
+    expect(document.querySelector("main button")?.textContent).toBe("Find");
+    expect(words(document.querySelector("main .notice"))).toBe(
+      "You can see who is paused here. Pause a member's use of a feature is a separate permission, which you don't have.",
+    );
+    // The lists are all still there.
+    expect(document.querySelectorAll(".mod-pause")).toHaveLength(4);
+    expect(document.querySelectorAll(".mod-done")).toHaveLength(3);
+    expect(markup).not.toContain("Sign in again");
+  });
+
+  test("a sign-in older than 15 minutes swaps every change control for one link, and says why", async () => {
+    const signIn = `/login?to=${encodeURIComponent(PAGE)}`;
+    const { document } = await moderationPage(view({ ...SAMPLE, recentSignIn: false }));
+    // No form to post, no panel to open, no Lift: only the lookup.
+    expect(
+      document.querySelectorAll("main form[method=post], main dialog, main .mod-opener"),
+    ).toHaveLength(0);
+    expect(document.querySelectorAll("main form")).toHaveLength(1);
+    expect(document.querySelector("main form")?.getAttribute("method")).toBe("get");
+    const links = [...document.querySelectorAll("main a.mod-signin")];
+    // The toolbar's, and one on each person whose pause the viewer could have lifted (the
+    // manager's chip, which an officer can't lift anyway, has none on its own).
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([signIn, signIn, signIn]);
+    for (const link of links) expect(words(link)).toBe("Sign in again to make changes");
+    expect(words(document.querySelector("main .notice--warning"))).toBe(
+      "Pausing and lifting need a sign-in from the last 15 minutes, and yours is older. Sign in again to make changes; you can look people up without.",
+    );
+    // Looking people up still works: the chips and the lists show.
+    expect(document.querySelectorAll(".mod-pause")).toHaveLength(4);
+    // A found person's Pause is the same link.
+    const found = await moderationPage(
+      view({
+        recentSignIn: false,
+        findText: GUEST_ID,
+        found: { kind: "member", status: status(GUEST_ID, []) },
+      }),
+    );
+    expect(found.document.querySelectorAll("main a.mod-signin")).toHaveLength(2);
+    expect(found.document.querySelector(".mod-found button")).toBeNull();
+  });
+
+  test("Pause someone opens beside its button, as the Role menu's editors do; Lift and a refused form open centred", async () => {
+    /** The names a document gives as anchors and as panels pointing at one, and what carries each. */
+    const anchors = (document: Document) => ({
+      named: [...document.querySelectorAll("[class*='anchor-']")].map((element) => [
+        element.tagName,
+        [...element.classList].filter((name) => name.startsWith("anchor-")),
+        element.getAttribute("commandfor"),
+      ]),
+      pointing: [...document.querySelectorAll("[class*='anchored-']")].map((element) => [
+        element.tagName,
+        element.id,
+        [...element.classList].filter((name) => name.startsWith("anchored-")),
+        element.classList.contains("overlay--anchored"),
+      ]),
+    });
+    // The toolbar's Pause someone: its button names the anchor and its closed dialog points at it.
+    const plain = anchors((await moderationPage(SAMPLE)).document);
+    expect(plain).toEqual({
+      named: [["BUTTON", ["anchor-moderation-pause"], "mod-pause"]],
+      pointing: [["DIALOG", "mod-pause", ["anchored-moderation-pause"], true]],
+    });
+    // The finder's result card has a second Pause, with a pair of its own (anchor names are
+    // global to the page), and its panel is the same form for that one person.
+    const foundPage = anchors(
+      (
+        await moderationPage(
+          view({
+            ...SAMPLE,
+            findText: MEMBER_ID,
+            found: {
+              kind: "member",
+              status: status(MEMBER_ID, [pause(1, MEMBER_ID, "suggest.use")]),
+            },
+          }),
+        )
+      ).document,
+    );
+    expect(foundPage).toEqual({
+      named: [
+        ["BUTTON", ["anchor-moderation-pause"], "mod-pause"],
+        ["BUTTON", ["anchor-moderation-pause-found"], "mod-pause-found"],
+      ],
+      pointing: [
+        ["DIALOG", "mod-pause", ["anchored-moderation-pause"], true],
+        ["DIALOG", "mod-pause-found", ["anchored-moderation-pause-found"], true],
+      ],
+    });
+    // Every Lift button and panel (the page's chips and the result card's) is centred: none is
+    // named as an anchor or points at one.
+    const lifts = (await moderationPage(SAMPLE)).document.querySelectorAll(
+      "[id^='mod-lift-'], button[commandfor^='mod-lift-']",
+    );
+    expect(lifts.length).toBeGreaterThan(0);
+    for (const element of lifts)
+      expect({ id: element.id, anchored: /anchor/u.test(element.className) }).toEqual({
+        id: element.id,
+        anchored: false,
+      });
+    // Those with no change controls (a look-only viewer, or a sign-in too old) have no anchors at all.
+    for (const model of [
+      view({ ...SAMPLE, viewer: { userId: OFFICER_ID, canChange: false, manager: false } }),
+      view({ ...SAMPLE, recentSignIn: false }),
+    ])
+      expect(anchors((await moderationPage(model)).document)).toEqual({ named: [], pointing: [] });
+    // A refused form is drawn open, centred and unanchored, since the page loads at its top, where
+    // the button may be off the screen: the toolbar's button is a link to it and names no anchor.
+    const refusedPause = (
+      await moderationPage(
+        view({
+          ...SAMPLE,
+          refused: {
+            form: "block",
+            member: "",
+            features: [],
+            duration: "1w",
+            reason: "",
+            problems: [{ field: "form", message: "Server managers can't be paused." }],
+          },
+        }),
+      )
+    ).document;
+    expect(anchors(refusedPause)).toEqual({ named: [], pointing: [] });
+    expect(refusedPause.querySelector("#mod-pause")?.className).toBe(
+      "overlay overlay--open overlay--wide",
+    );
+    // A refused Lift is drawn open too; the closed Pause someone beside the toolbar stays anchored.
+    const refusedLift = (
+      await moderationPage(
+        view({
+          ...SAMPLE,
+          refused: {
+            form: "lift",
+            member: MEMBER_ID,
+            feature: "suggest.use",
+            reason: "",
+            problems: [{ field: "reason", message: "Add a reason of 1–1,000 characters." }],
+          },
+        }),
+      )
+    ).document;
+    expect(refusedLift.querySelector("#mod-lift-open")?.className).toBe(
+      "overlay overlay--open overlay--narrow",
+    );
+    expect(anchors(refusedLift).pointing.map((entry) => entry[1])).toEqual(["mod-pause"]);
+  });
+
+  test("a refused Pause someone form comes back open over the page with what was typed", async () => {
+    const refused: RefusedPause = {
+      form: "block",
+      member: "Kupo",
+      features: ["suggest.use", "issue.use"],
+      duration: "30d",
+      reason: "Typed reason",
+      problems: [
+        { field: "member", message: MEMBER_UNREADABLE },
+        { field: "feature", message: "Pick at least one feature." },
+        { field: "reason", message: "Add a reason of 1–1,000 characters." },
+        { field: "form", message: "Server managers can't be paused." },
+      ],
+    };
+    expect(drawsRefused(view({ refused }))).toBe(true);
+    expect(drawsRefused(view())).toBe(false);
+    const { document } = await moderationPage(view({ ...SAMPLE, refused }));
+    // Drawn open: a plain element over its own backdrop, last in the content, no closed copy.
+    const open = document.querySelector("main > .overlay-backdrop + .overlay.overlay--open");
+    expect(open?.id).toBe("mod-pause");
+    expect(open?.getAttribute("role")).toBe("dialog");
+    expect(open?.getAttribute("aria-modal")).toBe("true");
+    expect(document.querySelectorAll("dialog#mod-pause")).toHaveLength(0);
+    expect(open?.nextElementSibling).toBeNull();
+    expect(open?.className).toBe("overlay overlay--open overlay--wide");
+    // The summary is first in its body, one link per problem to the control or the form's line.
+    const summary = open?.querySelector(".overlay__body > .error-summary");
+    expect(summary).not.toBeNull();
+    expect(
+      [...(summary?.querySelectorAll("a") ?? [])].map((link) => [
+        link.getAttribute("href"),
+        words(link),
+      ]),
+    ).toEqual([
+      ["#mod-pause-member", MEMBER_UNREADABLE],
+      ["#mod-pause-feature", "Pick at least one feature."],
+      ["#mod-pause-reason", "Add a reason of 1–1,000 characters."],
+      ["#mod-pause-error", "Server managers can't be paused."],
+    ]);
+    for (const link of summary?.querySelectorAll("a") ?? [])
+      expect(document.querySelector(link.getAttribute("href") ?? "")).not.toBeNull();
+    // What was typed comes back: the member as typed, the features ticked, the length, the reason.
+    expect(open?.querySelector('input[name="member"]')?.getAttribute("value")).toBe("Kupo");
+    expect(
+      [...(open?.querySelectorAll('input[name="feature"][checked]') ?? [])].map((box) =>
+        box.getAttribute("value"),
+      ),
+    ).toEqual(["suggest.use", "issue.use"]);
+    expect(open?.querySelector("option[selected]")?.getAttribute("value")).toBe("30d");
+    expect(open?.querySelector("textarea")?.textContent?.trim()).toBe("Typed reason");
+    expect(open?.querySelector('input[name="member"]')?.getAttribute("aria-invalid")).toBe("true");
+    // The page under it is inert, and so is the shell; its Close loads the page afresh.
+    for (const selector of [".lead", ".mod-toolbar", ".mod-section"])
+      for (const element of document.querySelectorAll(selector))
+        expect({ selector, inert: element.hasAttribute("inert") }).toEqual({
+          selector,
+          inert: true,
+        });
+    expect(document.querySelector("a.overlay__close")?.getAttribute("href")).toBe(PAGE);
+    expect(document.title.startsWith("Error: ")).toBe(true);
+    // The toolbar's button is a link to the open panel's title.
+    expect(document.querySelector(".mod-toolbar a.mod-opener")?.getAttribute("href")).toBe(
+      "#mod-pause-title",
+    );
+    expect(document.querySelectorAll(".mod-toolbar button.mod-opener")).toHaveLength(0);
+  });
+
+  test("a refused Lift comes back open too, naming the feature and the person", async () => {
+    const refused: RefusedLift = {
+      form: "lift",
+      member: MEMBER_ID,
+      feature: "suggest.use",
+      reason: "Typed lift reason",
+      problems: [{ field: "reason", message: "Add a reason of 1–1,000 characters." }],
+    };
+    const { document } = await moderationPage(view({ ...SAMPLE, refused }));
+    const open = document.querySelector(".overlay.overlay--open");
+    expect(open?.id).toBe("mod-lift-open");
+    expect(open?.className).toBe("overlay overlay--open overlay--narrow");
+    expect(words(open?.querySelector(".overlay__title"))).toBe(
+      "Lift pause: Suggesting features (/suggest) for Kupo",
+    );
+    expect(
+      [...(open?.querySelectorAll("input[type=hidden]") ?? [])].map((input) => [
+        input.getAttribute("name"),
+        input.getAttribute("value"),
+      ]),
+    ).toEqual([
+      [FORM_TOKEN_FIELD, TOKEN],
+      ["op", "lift"],
+      ["member", MEMBER_ID],
+      ["feature", "suggest.use"],
+    ]);
+    expect(open?.querySelector("textarea")?.textContent?.trim()).toBe("Typed lift reason");
+    expect(
+      [...(open?.querySelectorAll(".error-summary a") ?? [])].map((link) =>
+        link.getAttribute("href"),
+      ),
+    ).toEqual(["#mod-lift-open-reason"]);
+    expect(document.querySelector(".mod-toolbar")?.hasAttribute("inert")).toBe(true);
+    // The Pause someone button is still there to use after Close; no block form is drawn open.
+    expect(document.querySelectorAll("#mod-pause")).toHaveLength(1);
+  });
+
+  test("names and reasons are escaped and isolated; a notice is only ever a fixed sentence", async () => {
+    const reason = '<img src=x onerror=alert(1)> "quoted" & ‮evil‬';
+    const hostile = new Map<string, string | null>([
+      [MEMBER_ID, HOSTILE[0]],
+      [OFFICER_ID, HOSTILE[1]],
+      [GUEST_ID, HOSTILE[2]],
+    ]);
+    const { document, markup } = await moderationPage(
+      view({
+        names: hostile,
+        overview: {
+          active: [pause(1, MEMBER_ID, "suggest.use", { reason }), pause(2, GUEST_ID, "issue.use")],
+          ended: [
+            ended(3, MEMBER_ID, "roster.refresh", {
+              at: "2026-10-11T10:00:00.000Z",
+              by: OFFICER_ID,
+              reason,
+            }),
+          ],
+          truncated: false,
+        },
+        findText: HOSTILE[3],
+        found: { kind: "unreadable" },
+        url: new URL(`${PAGE}?notice=<script>alert(1)</script>`, "https://example.org"),
+      }),
+    );
+    expect(markup).not.toContain("<img src=x");
+    expect(markup).not.toContain("<script>alert");
+    expect(document.querySelectorAll("main img, main script")).toHaveLength(0);
+    const texts = isolated(document);
+    for (const text of [reason, HOSTILE[0], HOSTILE[1], HOSTILE[2]])
+      expect({ text, isolated: texts.includes(text) }).toEqual({ text, isolated: true });
+    // The finder keeps what was typed, escaped, as the value of its field.
+    expect(document.querySelector("#mod-find")?.getAttribute("value")).toBe(HOSTILE[3]);
+    // A notice token the table doesn't hold shows nothing, and is never shown.
+    expect(document.querySelector("#status")).toBeNull();
+    for (const [token, sentence] of Object.entries(MODERATION_NOTICES)) {
+      const { document: shown } = await moderationPage(
+        view({ url: new URL(`${PAGE}?notice=${token}`, "https://example.org") }),
+      );
+      expect(words(shown.querySelector("#status"))).toBe(sentence);
+    }
+    expect(Object.keys(MODERATION_NOTICES)).toEqual(["paused", "lifted", "not-paused"]);
+  });
+
+  test("every class the page renders has a rule, and only the two Pause someone panels are ever anchored", async () => {
+    const css = String(STYLESHEET.body).replace(/\/\*[\s\S]*?\*\//gu, "");
+    const shown = SAMPLE.overview;
+    const documents = [
+      (await moderationPage(SAMPLE)).document,
+      (await moderationPage(view({ ...SAMPLE, recentSignIn: false }))).document,
+      (
+        await moderationPage(
+          view({ ...SAMPLE, viewer: { userId: OFFICER_ID, canChange: false, manager: false } }),
+        )
+      ).document,
+      (
+        await moderationPage(
+          view({ ...SAMPLE, viewer: { userId: MANAGER_ID, canChange: true, manager: true } }),
+        )
+      ).document,
+      (
+        await moderationPage(
+          view({
+            overview: { ...shown, truncated: true },
+            findText: "#12",
+            found: { kind: "suggestion", number: 12, sender: null },
+          }),
+        )
+      ).document,
+      (
+        await moderationPage(
+          view({
+            ...SAMPLE,
+            findText: MEMBER_ID,
+            found: {
+              kind: "member",
+              status: status(
+                MEMBER_ID,
+                [pause(1, MEMBER_ID, "suggest.use")],
+                [shown.ended[0] as PauseView],
+              ),
+            },
+          }),
+        )
+      ).document,
+      (await moderationPage(view({ findText: "x", found: { kind: "unreadable" } }))).document,
+      (
+        await moderationPage(
+          view({
+            ...SAMPLE,
+            refused: {
+              form: "block",
+              member: "",
+              features: [],
+              duration: "1w",
+              reason: "",
+              problems: [{ field: "form", message: "Server managers can't be paused." }],
+            },
+          }),
+        )
+      ).document,
+      (
+        await moderationPage(
+          view({
+            ...SAMPLE,
+            refused: {
+              form: "lift",
+              member: MEMBER_ID,
+              feature: "suggest.use",
+              reason: "",
+              problems: [{ field: "form", message: "A server manager paused that." }],
+            },
+          }),
+        )
+      ).document,
+    ];
+    const classes = new Set<string>();
+    for (const document of documents)
+      for (const element of document.querySelectorAll("main [class]"))
+        for (const name of element.classList) classes.add(name);
+    for (const name of [
+      "mod-toolbar",
+      "mod-finder",
+      "mod-person",
+      "mod-pause",
+      "mod-pause__reason",
+      "mod-until",
+      "mod-done",
+      "mod-found",
+      "mod-signin",
+      "mod-opener",
+      "mod-form",
+      "mod-form__row",
+      "mod-limits",
+      "overlay--open",
+      "overlay-backdrop",
+    ])
+      expect({ name, rendered: classes.has(name) }).toEqual({ name, rendered: true });
+    for (const name of classes)
+      expect({ name, styled: new RegExp(`\\.${name}(?![\\w-])`, "u").test(css) }).toEqual({
+        name,
+        styled: true,
+      });
+    // The page's own rules (styles/moderation.ts) add no anchor positioning: the stylesheet keeps
+    // its one @supports block (web-assets.test.ts), where the two Pause someone pairs are next to
+    // the Role menu's. In every state, a panel anchored on this page is one of those two; a Lift
+    // panel, and a form drawn open after a refusal, never is.
+    for (const property of ["anchor-name", "position-anchor", "position-area", "overlay--anchored"])
+      expect({ property, found: MODERATION_CSS.includes(property) }).toEqual({
+        property,
+        found: false,
+      });
+    expect(MODERATION_CSS).not.toMatch(/\.overlay[\s{,]/u);
+    for (const document of documents)
+      for (const panel of document.querySelectorAll(".overlay--anchored"))
+        expect(panel.id).toMatch(/^mod-pause(?:-found)?$/u);
   });
 });

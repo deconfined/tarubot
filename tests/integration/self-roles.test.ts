@@ -116,7 +116,7 @@ const holding = (userId: string, ...permissions: PermissionId[]): Actor => ({
   manageRoles: false,
   serverManager: false,
   botAdministrator: false,
-  access: { manager: false, roles: [], permissions: new Set(permissions) },
+  access: { manager: false, roles: [], permissions: new Set(permissions), blocked: new Map() },
 });
 
 const role = (id: string, position: number, permissions = 0n, managed = false): ApiRole => ({

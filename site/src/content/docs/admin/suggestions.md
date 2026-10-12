@@ -1,6 +1,6 @@
 ---
 title: Feature suggestions
-description: What /suggest lets members post publicly, where it works, how suggestions are moderated, and who can switch it off.
+description: What /suggest lets members post publicly, where it works, how suggestions are moderated, how to pause a member who abuses it, who can find a suggestion's sender, and who can switch it off.
 sidebar:
   order: 12
 ---
@@ -16,7 +16,7 @@ sidebar:
 - Holders of the server's bound **Member** or **Guest** role, read fresh from Discord each time. Officers qualify through their Member role.
 - Officer access alone doesn't qualify, and neither does a server manager without either role. While no Member or Guest role is bound, nobody qualifies.
 
-To stop one member from suggesting, take away the role that qualifies them: a Guest with [`/guest revoke`](/tarubot/reference/commands/#guest-revoke). It counts from the moment Discord removes the role, a moment after the command. A member keeps the Member role while the FC's roster lists their character.
+To stop one member from suggesting for a while, [pause](/tarubot/admin/moderation/) their use of `/suggest`: it leaves their roles alone, ends by itself and tells them why. To stop them for good, take away the role that qualifies them: a Guest with [`/guest revoke`](/tarubot/reference/commands/#guest-revoke). That counts from the moment Discord removes the role, a moment after the command. A member keeps the Member role while the FC's roster lists their character.
 
 ## What goes public
 
@@ -26,13 +26,18 @@ Cleaning can't catch a name typed out or an ID split up on purpose, and a public
 
 ## Limits
 
-Each member can send one suggestion an hour and three in any 24 hours, and the deployment posts at most ten in any 24 hours, from every member together. A few accounts could use up the daily ten; the limit keeps the repository from being flooded, and the maintainers deal with abuse after posting.
+Each member can send one suggestion an hour and three in any 24 hours, and the deployment posts at most ten in any 24 hours, from every member together. A few accounts could use up the daily ten; the limit keeps the repository from being flooded, and the maintainers deal with abuse after posting. A paused member's try is refused before any limit, so it uses up none of them.
 
 ## Moderation
 
 Suggestions go up without review. TaruBot's maintainers moderate them on GitHub: they answer, label, close (for example as not planned), lock or delete issues. Officers can't remove an issue from Discord. To flag one, comment on it on GitHub or tell the maintainers.
 
-The issue never names the member who sent it, and neither does anything else public. The deployment records privately who sent each issue, so its operator can find the sender if a suggestion needs follow-up ([monitoring](/tarubot/deploy/monitoring/#public-suggestions)).
+The issue never names the member who sent it, and neither does anything else public. TaruBot records privately who sent each issue, and two groups can read that record:
+
+- **Officers who can see pauses** (**moderation.view**, which the Officer role carries) can look up the sender of suggestion #N on the dashboard's [Moderation page](/tarubot/admin/moderation/#who-sent-a-suggestion), so they can [pause](/tarubot/admin/moderation/) that person's `/suggest` if the idea was abuse. This is new in 2.45.0 and deliberate: until then only the deployment's operator could find a sender. The lookup covers your own server, and finds nothing for an attempt GitHub didn't confirm.
+- **The deployment's operator** can find the sender in the database too ([monitoring](/tarubot/deploy/monitoring/#public-suggestions)).
+
+Don't share a sender's name where members read it.
 
 ## The off switch
 

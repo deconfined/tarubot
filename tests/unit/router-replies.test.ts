@@ -15,7 +15,12 @@ import {
   SlashCommandBuilder,
 } from "discord.js";
 import type { APIEmbed } from "discord.js";
-import { applicationKey, roleAdministrationKey } from "../../src/application/keys.js";
+import {
+  applicationKey,
+  moderationKey,
+  roleAdministrationKey,
+} from "../../src/application/keys.js";
+import { Moderation } from "../../src/application/moderation.js";
 import { RoleAdministration } from "../../src/application/role-administration.js";
 import { Service } from "../../src/application/service.js";
 import { defineCommand } from "../../src/bot/command.js";
@@ -25,6 +30,7 @@ import { InteractionRouter } from "../../src/bot/router.js";
 import { Services } from "../../src/bot/services.js";
 import officerCommand from "../../src/commands/configuration/officer.command.js";
 import setupCommand from "../../src/commands/configuration/setup.command.js";
+import moderateCommand from "../../src/commands/utility/moderate.command.js";
 import { DiscordGateway } from "../../src/discord/gateway.js";
 import { dataReply, reply, type Presented } from "../../src/discord/presenters/reply.js";
 import type { ReportOptions } from "../../src/domain/failures.js";
@@ -33,6 +39,7 @@ import { Failure } from "../../src/domain/values.js";
 import { actorOf } from "../fixtures/actors.js";
 import { interactionFixture, type RecordedRequest } from "../fixtures/interactions.js";
 import { discordError } from "../fixtures/replies/failures.js";
+import { ownStatus } from "../fixtures/replies/moderation.js";
 import { CHARACTER, at } from "../fixtures/results.js";
 
 /** One report() call. */
@@ -893,5 +900,97 @@ test("/officer member suggestions are for server managers only", async () => {
     expect(reports).toEqual([]);
   } finally {
     await fixture.close();
+  }
+});
+
+/** A router over the real /moderate command and a Moderation stub that answers `status` and throws `next`. */
+function moderateHarness(actor: Actor, overrides: Partial<BotContext> = {}) {
+  const fixture = interactionFixture();
+  const reports: Report[] = [];
+  const moderation: unknown = Object.create(Moderation.prototype);
+  if (!(moderation instanceof Moderation)) throw new Error("Invalid moderation fixture");
+  Object.assign(moderation, {
+    status: async () => ownStatus([]),
+    block: async () => {
+      throw next;
+    },
+  });
+  const router = new InteractionRouter(
+    {
+      client: fixture.client,
+      services: new Services().provide(moderationKey, moderation),
+      allowsGuild: () => true,
+      isStopping: () => false,
+      resolveActor: async (guildId, userId) => ({ ...actor, guildId, userId }),
+      report: (error, operation, options) => reports.push({ error, operation, options }),
+      ...overrides,
+    },
+    new Map([[moderateCommand.name, moderateCommand]]),
+    new Map(),
+  );
+  return { fixture, reports, router };
+}
+
+test("/moderate admits every member and stays private, even under DevBot's public-response override", async () => {
+  // status is for everyone (the router has no gate), and a reply that names a paused member would
+  // tell onlookers about them, so the acknowledgement stays ephemeral where the override would
+  // make a failure or a reply public.
+  for (const publicGuild of ["100", undefined]) {
+    const { fixture, reports, router } = moderateHarness(MEMBER, {
+      publicResponseGuildId: publicGuild,
+    });
+    try {
+      await router.handle(
+        fixture.slash("moderate", [
+          { type: ApplicationCommandOptionType.Subcommand, name: "status" },
+        ]),
+      );
+      expect(fixture.requests[0]?.body).toMatchObject({
+        type: InteractionResponseType.DeferredChannelMessageWithSource,
+        data: { flags: MessageFlags.Ephemeral },
+      });
+      expect(embedOf(fixture.requests.at(-1)).title).toBe("Nothing is paused for you");
+      expect(reports).toEqual([]);
+    } finally {
+      await fixture.close();
+    }
+  }
+});
+
+test("/moderate's refusals are the Not allowed cards, private and logged at info", async () => {
+  const subcommand = {
+    type: ApplicationCommandOptionType.Subcommand,
+    name: "block",
+    options: [
+      { type: ApplicationCommandOptionType.String, name: "member", value: "300000000000000001" },
+      { type: ApplicationCommandOptionType.String, name: "feature", value: "suggest.use" },
+      { type: ApplicationCommandOptionType.String, name: "reason", value: "Spam" },
+    ],
+  };
+  for (const [scope, sentence] of [
+    ["protected", "Server managers can't be paused."],
+    ["self", "You can't pause yourself."],
+  ] as const) {
+    const { fixture, reports, router } = moderateHarness(OFFICER, { publicResponseGuildId: "100" });
+    try {
+      next = new Failure("forbidden", sentence, 0, { kind: "scope", scope });
+      const interaction = fixture.slash("moderate", [subcommand]);
+      await router.handle(interaction);
+      expect(fixture.requests[0]?.body).toMatchObject({ data: { flags: MessageFlags.Ephemeral } });
+      expect(embedOf(fixture.requests.at(-1))).toMatchObject({
+        title: "Not allowed",
+        description: `${sentence} Nothing was changed.`,
+        footer: { text: `Code forbidden · Ref ${interaction.id}` },
+      });
+      expect(reports).toEqual([
+        {
+          error: expect.any(Failure),
+          operation: interaction.id,
+          options: { level: "info", scope: "/moderate block" },
+        },
+      ]);
+    } finally {
+      await fixture.close();
+    }
   }
 });

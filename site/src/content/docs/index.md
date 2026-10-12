@@ -31,7 +31,7 @@ hero:
 ## Who these pages are for
 
 - **[Use TaruBot](/tarubot/use/getting-started/)** is for members and visitors of a server that runs TaruBot: linking your characters, nicknames, guest access, picking your own roles, messaging your officers privately, the FC ledger, checking whether TaruBot is up, what to do when something goes wrong, and suggesting features.
-- **[Run a server](/tarubot/admin/add-to-server/)** is for officers and server managers: adding the bot, who can do what, setting a server up, roles, the self-service role menu, mod mail, officers, guest applications, the ledger, officer notices, member status posts and update posts, health checks, and feature suggestions.
+- **[Run a server](/tarubot/admin/add-to-server/)** is for officers and server managers: adding the bot, who can do what, setting a server up, roles, the self-service role menu, mod mail, officers, guest applications, the ledger, pausing one person's use of a feature on the Moderation page, officer notices, member status posts and update posts, health checks, and feature suggestions.
 - **[Deploy and operate](/tarubot/deploy/requirements/)** is for people who run their own TaruBot: requirements, the Discord application, installation, configuration, updates and backups, monitoring and the maintenance tools.
 - **[Architecture and design](/tarubot/architecture/overview/)** is for contributors and the curious: how the bot is built, how it decides access, what it stores, and why.
 - **[Reference](/tarubot/reference/commands/)** lists every command and option, and every reply code.
@@ -47,6 +47,7 @@ hero:
 - **Can gate channels.** Optional lobby onboarding shows newcomers only a lobby until they link a character or are approved.
 - **Tells officers what changed.** A short post in the officers' channel lists members who gained or lost access, Officer or FC Leader, with the reason, and characters that left the FC.
 - **Lets members reach officers privately.** With mod mail turned on, `/modmail` or the dashboard opens a private case that members and officers continue there, encrypted at rest, with Discord pings that carry only a case number.
+- **Lets officers pause one person's use of a feature.** Someone abusing `/suggest`, for example, can be stopped for a while from `/moderate` or the dashboard's Moderation page, without touching their roles, and they see why when they next use it.
 - **Shares what's new.** After an update that changes something you can notice, in Discord, on the dashboard or on this site, it can post a short note in a channel the officers choose.
 - **Shows whether it's up.** With the dashboard on, a public [status page](/tarubot/use/progress-and-problems/#is-tarubot-up) shows TaruBot's status right now and its uptime over the last 90 days, with no sign-in.
 

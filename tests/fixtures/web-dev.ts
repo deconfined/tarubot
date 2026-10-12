@@ -82,6 +82,15 @@
  *   TaruBot can't mention the Officer role, so the settings card warns that pings notify nobody.
  *   Open a case, replies, Close, Reopen and the switch work on an in-memory copy, with the real
  *   rules.
+ * - --state-moderation=pauses: Moderation (2.45.0) lists invented pauses in Example FC: the member's
+ *   /suggest (an officer's, five days left) and problem reports (until lifted), the guest's mod mail
+ *   (a server manager's, which officers can't lift), someone who left (ledger deposits, ending
+ *   tomorrow), and two ended ones (one lifted by hand, one that ran out). Pausing, lifting and the
+ *   finder (#7 is the member's suggestion, #9 a former member's) work on an in-memory copy with
+ *   the real rules (src/application/moderation.ts), and a pause changes what the paused person
+ *   sees on My roles and Mod mail at once. The server manager account (Manage Server and Manage
+ *   Roles) can pause mod mail and can't be paused; the harness officer holds both Moderation
+ *   permissions and can't pause the second officer.
  * My roles (2.40.0) reads the same menus. Each account holds a few invented menu roles (HELD), and
  *   a save runs the real rules (SelfRoles.choose's), then a fake worker applies it about two
  *   seconds later, as the roles.self job would (planSelfRoles, every role checked again), so a
@@ -112,10 +121,21 @@ import {
   gatewayKey,
   lifecycleKey,
   modmailKey,
+  moderationKey,
   publicStatusKey,
   selfRolesKey,
 } from "../../src/application/keys.js";
 import { ApplicationLifecycle } from "../../src/application/lifecycle.js";
+import {
+  ACTIVE_LIMIT,
+  type BlockResult,
+  ENDED_LIMIT,
+  type LiftResult,
+  Moderation,
+  type ModerationOverview,
+  type PauseStatus,
+  type PauseView,
+} from "../../src/application/moderation.js";
 import { PublicStatus } from "../../src/application/public-status.js";
 import { createReporter } from "../../src/application/reporting.js";
 import type {
@@ -138,13 +158,22 @@ import {
 } from "../../src/application/self-roles.js";
 import { Service } from "../../src/application/service.js";
 import { Services } from "../../src/bot/services.js";
-import { effectsPaused } from "../../src/domain/failures.js";
+import { classifyFailure, effectsPaused } from "../../src/domain/failures.js";
+import {
+  isPauseDuration,
+  PAUSE_DURATIONS,
+  type PauseDuration,
+} from "../../src/domain/moderation.js";
 import type { ApiOverwrite, ApiRole } from "../../src/domain/permissions.js";
 import {
   type Actor,
+  accessFor,
   authorize,
   can,
   isStaff,
+  type Pause,
+  pauseOn,
+  requireNotPaused,
   requirePermission,
   selfServiceAccess,
 } from "../../src/domain/policy.js";
@@ -175,7 +204,8 @@ import {
   selfRoleSettings,
   unreadableChannels,
 } from "../../src/domain/self-roles.js";
-import { Failure } from "../../src/domain/values.js";
+import { isBlockable, MANAGER_ONLY_BLOCKS, type PermissionId } from "../../src/domain/rbac.js";
+import { Failure, note } from "../../src/domain/values.js";
 import type {
   VisibilityChannel,
   VisibilityGuild,
@@ -240,6 +270,11 @@ export const HARNESS_ACCOUNTS = {
   guest: { id: "200000000000000005", label: "A guest of Example FC" },
   /** A member of Example FC in a Discord time-out: opens My roles, but can't save there. */
   timedOut: { id: "200000000000000007", label: "A member of Example FC in a time-out" },
+  /**
+   * A server manager of Example FC (Manage Server and Manage Roles, 2.45.0): holds every staff
+   * permission, can pause mod mail, and can't be paused. Not in Second FC.
+   */
+  manager: { id: "200000000000000008", label: "A server manager of Example FC" },
   /** In Example FC with neither Member nor Guest (a lobby newcomer): "no access", no session. */
   lobby: { id: "200000000000000006", label: "A newcomer in Example FC's lobby" },
   /** In neither server (Discord's Unknown Member): "no access" too. */
@@ -274,6 +309,8 @@ export interface HarnessStates {
   readonly history?: HarnessHistory;
   /** --state-modmail: Mod mail's switch and invented cases (2.43.0). */
   readonly modmail?: HarnessModMailState;
+  /** --state-moderation: Moderation's invented pauses (2.45.0); none without it. */
+  readonly moderation?: "pauses";
 }
 
 /** --state-roles' values, each a banner My roles shows. */
@@ -373,15 +410,23 @@ export interface Harness {
 
 /**
  * Each account's actor in each server, as gateway.actor and enrichActor would make it, or undefined
- * where Discord would answer Unknown Member. The guest, the timed-out member and the lobby
- * newcomer are only in Example FC (under any name --state-hostile-names gives it).
+ * where Discord would answer Unknown Member. The guest, the timed-out member, the server manager
+ * and the lobby newcomer are only in Example FC (under any name --state-hostile-names gives it).
+ * `pauses` is what enrichActor reads from member_blocks (2.45.0): the person's active pauses,
+ * which take permissions out of can() for everyone but a server manager.
  */
-function harnessActor(guildId: string, userId: string, states: HarnessStates): Actor | undefined {
+function harnessActor(
+  guildId: string,
+  userId: string,
+  states: HarnessStates,
+  pauses: HarnessPauses = harnessPauses({}),
+): Actor | undefined {
   const accounts = HARNESS_ACCOUNTS;
   const everywhere: readonly string[] = [accounts.officer.id, accounts.member.id, accounts.bot.id];
   const exampleOnly: readonly string[] = [
     accounts.guest.id,
     accounts.timedOut.id,
+    accounts.manager.id,
     accounts.lobby.id,
   ];
   const present =
@@ -389,6 +434,7 @@ function harnessActor(guildId: string, userId: string, states: HarnessStates): A
     (exampleOnly.includes(userId) && guildId === HARNESS_GUILDS.example.id);
   if (!present) return undefined;
   const officer = userId === accounts.officer.id && officerGuilds(states).has(guildId);
+  const manager = userId === accounts.manager.id;
   const holdsMember: readonly string[] = [
     accounts.officer.id,
     accounts.member.id,
@@ -396,12 +442,12 @@ function harnessActor(guildId: string, userId: string, states: HarnessStates): A
   ];
   const member = holdsMember.includes(userId);
   const guest = userId === accounts.guest.id;
-  return actorOf({
+  const actor = actorOf({
     guildId,
     userId,
     officer,
-    manageRoles: false,
-    serverManager: false,
+    manageRoles: manager,
+    serverManager: manager,
     roleIds: [
       ...(officer ? [ROLE.officer] : []),
       ...(member ? [ROLE.member] : []),
@@ -413,17 +459,21 @@ function harnessActor(guildId: string, userId: string, states: HarnessStates): A
     botAdministrator: holdsAdministrator(harnessSnapshot(guildId, states)),
     timedOut: userId === accounts.timedOut.id,
   });
+  const active = pauses.activeFor(guildId, userId);
+  return active.size === 0
+    ? actor
+    : { ...actor, access: accessFor(actor.access.manager, actor.access.roles, active) };
 }
 
 /** The resolver main.ts builds from gateway.actor and enrichActor, answered from invented data. */
-function actorResolver(states: HarnessStates) {
+function actorResolver(states: HarnessStates, pauses: HarnessPauses = harnessPauses({})) {
   return async (guildId: string, userId: string): Promise<Actor> => {
     if (userId === HARNESS_ACCOUNTS.bot.id)
       throw new Failure("forbidden", "Bot accounts can't use TaruBot.", 0, {
         kind: "scope",
         scope: "human",
       });
-    const actor = harnessActor(guildId, userId, states);
+    const actor = harnessActor(guildId, userId, states, pauses);
     if (!actor)
       throw new Failure("forbidden", "That member isn't in this server.", 0, {
         kind: "scope",
@@ -1463,6 +1513,7 @@ export function harnessSelfRoles(
     const job = newest(actor.guildId, actor.userId);
     const effectsMode = harnessEffects(states);
     const timedOut = actor.timedOut === true;
+    const paused = pauseOn(actor, "selfroles.use") ?? null;
     return {
       guildId: actor.guildId,
       configured: true,
@@ -1480,13 +1531,16 @@ export function harnessSelfRoles(
       status: jobStatus(job, people.now()),
       effectsMode,
       timedOut,
-      canSave: effectsMode === "live" && !timedOut,
+      paused,
+      canSave: effectsMode === "live" && !timedOut && paused === null,
       administrator: isStaff(actor) ? holdsAdministrator(snapshot) : null,
       roleNames: menuRoleNames(menu, snapshot),
     };
   };
   roles.choose = async (actor, request): Promise<RoleChoiceOutcome> => {
     admitted(actor);
+    // A pause (2.45.0) refuses the save as the real operation does, ahead of the time-out.
+    requireNotPaused(actor, "selfroles.use");
     if (actor.timedOut === true) throw new Failure("forbidden", CHOICE_MESSAGES.timedOut);
     if (harnessEffects(states) !== "live") throw new Failure("disabled", CHOICE_MESSAGES.paused);
     const { menu } = saved(actor.guildId);
@@ -1528,7 +1582,11 @@ export function harnessSelfRoles(
  * The dashboard's services, answered with the existing invented configuration fixtures, and the
  * in-memory SelfRoles of Role menu and My roles.
  */
-function harnessServices(states: HarnessStates, statusNow: () => Date): Services {
+function harnessServices(
+  states: HarnessStates,
+  statusNow: () => Date,
+  pauses: HarnessPauses,
+): Services {
   const app: unknown = Object.create(Service.prototype);
   if (!(app instanceof Service)) throw new Error("Invalid application fake");
   // One saved menu per server for Role menu, My roles and the health check on Server
@@ -1574,6 +1632,7 @@ function harnessServices(states: HarnessStates, statusNow: () => Date): Services
     .provide(gatewayKey, harnessGateway(states))
     .provide(selfRolesKey, harnessSelfRoles(states, menus, harnessPeople()))
     .provide(modmailKey, harnessModMailFor(states))
+    .provide(moderationKey, harnessModerationFor(states, pauses))
     .provide(
       publicStatusKey,
       harnessStatus(states, () => lifecycle.status(), statusNow),
@@ -1590,12 +1649,10 @@ const MODMAIL_PEOPLE = {
 } as const;
 
 /**
- * Mod mail's fake (2.43.0) for `states`: its store from --state-modmail, names as the harness's
- * member cache gives them (the accounts' labels, or --state-hostile-names' names), a second
- * officer, and someone who left (null). TaruBot's Administrator follows the Role menu's snapshot,
- * as for My roles.
+ * The names the harness's member cache gives: the accounts' labels (or --state-hostile-names'
+ * names), a second officer, and someone who left (null, so a page shows their ID or says so).
  */
-export function harnessModMailFor(states: HarnessStates = {}) {
+export function harnessMemberNames(states: HarnessStates = {}): Map<string, string | null> {
   const hostile: Readonly<Record<string, string>> = states.hostileNames
     ? HOSTILE_NAMES.members
     : {};
@@ -1607,12 +1664,432 @@ export function harnessModMailFor(states: HarnessStates = {}) {
   );
   names.set(HARNESS_SECOND_OFFICER, "Another officer of Example FC");
   names.set(HARNESS_FORMER_MEMBER, null);
+  return names;
+}
+
+/**
+ * Mod mail's fake (2.43.0) for `states`: its store from --state-modmail, names as the harness's
+ * member cache gives them (the accounts' labels, or --state-hostile-names' names), a second
+ * officer, and someone who left (null). TaruBot's Administrator follows the Role menu's snapshot,
+ * as for My roles.
+ */
+export function harnessModMailFor(states: HarnessStates = {}) {
   return harnessModMail(modmailStore(states.modmail, MODMAIL_PEOPLE), {
     people: MODMAIL_PEOPLE,
-    names,
+    names: harnessMemberNames(states),
     administrator: (guildId) => holdsAdministrator(harnessSnapshot(guildId, states)),
     effectsMode: harnessEffects(states),
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-person moderation (2.45.0)
+
+/** One invented pause, as a member_blocks row holds it. */
+interface HarnessPauseRow {
+  readonly id: string;
+  readonly guildId: string;
+  readonly userId: string;
+  readonly permission: PermissionId;
+  readonly reason: string;
+  readonly createdAt: Date;
+  readonly until: Date | null;
+  readonly level: "manager" | "moderator";
+  readonly actorId: string;
+  /** Written once, as the table's trigger allows: when, by whom (null: it ran out) and why. */
+  lifted?: { readonly at: Date; readonly by: string | null; readonly reason: string };
+}
+
+/** The pauses of every invented server, and the clock they are judged on. */
+export interface HarnessPauses {
+  readonly rows: HarnessPauseRow[];
+  readonly now: () => Date;
+  /** `userId`'s active pauses in `guildId`, as Service.enrichActor reads them. */
+  activeFor(guildId: string, userId: string): Map<PermissionId, Pause>;
+}
+
+/** Whether a pause still holds at `at`: not lifted, and not past its end. */
+const pauseActive = (row: HarnessPauseRow, at: Date): boolean =>
+  row.lifted === undefined && (row.until === null || row.until.getTime() > at.getTime());
+
+/**
+ * What /suggest's audit rows say, for the Moderation finder: the sender of each suggestion posted
+ * in Example FC. #7 is the member's; #9 was posted by someone who has since left.
+ */
+export const HARNESS_SUGGESTIONS: ReadonlyMap<number, string> = new Map([
+  [7, HARNESS_ACCOUNTS.member.id],
+  [9, HARNESS_FORMER_MEMBER],
+]);
+
+/**
+ * --state-moderation=pauses' reasons. Under --state-hostile-names one carries markup and a
+ * right-to-left override, which the page must show as text.
+ */
+export const HARNESS_PAUSE_REASONS = {
+  repeat: "Posted the same idea five times after officers had answered it.",
+  noise: "Test reports about nothing, one after another.",
+  hostile: '<img src=x onerror=alert(1)> "Spam" & ‮evil‬',
+} as const;
+
+/**
+ * The harness's pauses: none by default, so the healthy default Moderation and the other pages
+ * rely on is "nobody is paused"; --state-moderation=pauses fills Example FC with a few active
+ * pauses of both levels, some ended ones, and the sort of person each belongs to. `now` is the
+ * clock every pause is judged on, as the database clock is in production.
+ */
+export function harnessPauses(
+  states: HarnessStates = {},
+  now: () => Date = () => new Date(),
+): HarnessPauses {
+  const rows: HarnessPauseRow[] = [];
+  const pauses: HarnessPauses = {
+    rows,
+    now,
+    activeFor: (guildId, userId) =>
+      new Map(
+        rows
+          .filter(
+            (row) => row.guildId === guildId && row.userId === userId && pauseActive(row, now()),
+          )
+          .map((row) => [row.permission, { until: row.until, reason: row.reason }] as const),
+      ),
+  };
+  if (states.moderation !== "pauses") return pauses;
+  const guildId = HARNESS_GUILDS.example.id;
+  const ago = (minutes: number): Date => new Date(now().getTime() - minutes * 60_000);
+  const add = (
+    userId: string,
+    permission: PermissionId,
+    reason: string,
+    created: Date,
+    until: Date | null,
+    by: { readonly id: string; readonly level: "manager" | "moderator" },
+    lifted?: HarnessPauseRow["lifted"],
+  ): void => {
+    rows.push({
+      id: randomUUID(),
+      guildId,
+      userId,
+      permission,
+      reason,
+      createdAt: created,
+      until,
+      level: by.level,
+      actorId: by.id,
+      ...(lifted && { lifted }),
+    });
+  };
+  const officer = { id: HARNESS_ACCOUNTS.officer.id, level: "moderator" } as const;
+  const manager = { id: HARNESS_ACCOUNTS.manager.id, level: "manager" } as const;
+  const { member, guest, timedOut } = HARNESS_ACCOUNTS;
+  // Active: two for the member (an officer's), one for the guest (a server manager's, so officers
+  // can't lift it), one for someone who left.
+  add(
+    member.id,
+    "suggest.use",
+    HARNESS_PAUSE_REASONS.repeat,
+    ago(2 * 1440),
+    ago(-5 * 1440),
+    officer,
+  );
+  add(member.id, "issue.use", HARNESS_PAUSE_REASONS.noise, ago(60), null, officer);
+  add(
+    guest.id,
+    "modmail.open",
+    "Kept opening new cases about a closed one.",
+    ago(300),
+    null,
+    manager,
+  );
+  add(
+    HARNESS_FORMER_MEMBER,
+    "ledger.deposit",
+    states.hostileNames ? HARNESS_PAUSE_REASONS.hostile : "Recorded deposits that weren't real.",
+    ago(180),
+    ago(-20 * 60),
+    manager,
+  );
+  // Ended: one lifted by hand, one that ran out.
+  add(
+    timedOut.id,
+    "suggest.use",
+    "Spam while angry about the time-out.",
+    ago(10 * 1440),
+    ago(9 * 1440),
+    officer,
+    {
+      at: ago(3 * 1440),
+      by: officer.id,
+      reason: "They apologised in a mod mail case.",
+    },
+  );
+  add(
+    member.id,
+    "roster.refresh",
+    "Refreshed the roster over and over.",
+    ago(9 * 1440),
+    ago(8 * 1440),
+    officer,
+  );
+  return pauses;
+}
+
+/** The refusals the real service gives for a target the actor may not pause (keep in step). */
+const protectedTarget = (message: string): Failure =>
+  new Failure("forbidden", message, 0, { kind: "scope", scope: "protected" });
+const selfRefusal = (message: string): Failure =>
+  new Failure("forbidden", message, 0, { kind: "scope", scope: "self" });
+const unknownMember = (user: string): Failure =>
+  new Failure("not_found", "That user isn't a current or former member of this server.", 0, {
+    kind: "resource",
+    resource: "member",
+    id: user,
+  });
+
+/** Valid, unique, blockable features; anything else is the person's mistake (as the real one). */
+function pauseFeatures(ids: readonly PermissionId[]): PermissionId[] {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0)
+    throw new Failure("input", "Pick at least one feature.", 0, {
+      kind: "option",
+      option: "feature",
+    });
+  if (!unique.every(isBlockable))
+    throw new Failure("input", "That feature can't be paused.", 0, {
+      kind: "option",
+      option: "feature",
+    });
+  return unique;
+}
+
+/**
+ * The Moderation service over `pauses` instead of PostgreSQL (2.45.0): the real service's order of
+ * checks and its rules in memory, so the page can be driven end to end. Who may pause whom, who
+ * may lift whose, what a person sees of their own, what officers see of everyone's, and how an
+ * ended pause reads all follow src/application/moderation.ts, and pausing someone changes the
+ * actors the harness resolves next, so their My roles and Mod mail pages show it. Permission
+ * checks go through requirePermission. Nothing is audited. Someone is "known" when they are a
+ * current member of Example FC, the second officer, or already have a row, or the former member.
+ */
+export function harnessModerationFor(
+  states: HarnessStates = {},
+  pauses: HarnessPauses = harnessPauses(states),
+) {
+  const moderation: unknown = Object.create(Moderation.prototype);
+  if (!(moderation instanceof Moderation)) throw new Error("Invalid moderation fake");
+  const names = harnessMemberNames(states);
+  const resolve = actorResolver(states, pauses);
+  const example = HARNESS_GUILDS.example.id;
+  /** The target's access as the real service resolves it; null for someone not in the server. */
+  const subjectOf = async (guildId: string, target: string): Promise<Actor | null> => {
+    if (target === HARNESS_SECOND_OFFICER && guildId === example)
+      return actorOf({
+        guildId,
+        userId: target,
+        officer: true,
+        manageRoles: false,
+        member: true,
+        botAdministrator: false,
+      });
+    try {
+      return await resolve(guildId, target);
+    } catch (error) {
+      const { category, detail } = classifyFailure(error);
+      if (category === "forbidden" && detail?.kind === "scope") {
+        if (detail.scope === "human") throw protectedTarget("Bots can't be paused.");
+        if (detail.scope === "current_member") return null;
+      }
+      throw error;
+    }
+  };
+  /** Close this person's pauses that ended by themselves, as the real service does first. */
+  const closeEnded = (guildId: string, userId: string): void => {
+    const at = pauses.now();
+    for (const row of pauses.rows)
+      if (
+        row.guildId === guildId &&
+        row.userId === userId &&
+        row.lifted === undefined &&
+        row.until !== null &&
+        row.until.getTime() <= at.getTime()
+      )
+        row.lifted = { at, by: null, reason: "expired" };
+  };
+  const openRow = (guildId: string, userId: string, permission: PermissionId) =>
+    pauses.rows.find(
+      (row) =>
+        row.guildId === guildId &&
+        row.userId === userId &&
+        row.permission === permission &&
+        pauseActive(row, pauses.now()),
+    );
+  moderation.block = async (
+    actor: Actor,
+    target: string,
+    permissions: readonly PermissionId[],
+    duration: PauseDuration,
+    reason: string,
+  ): Promise<BlockResult> => {
+    requirePermission(actor, actor.guildId, "moderation.block");
+    const ids = pauseFeatures(permissions);
+    const text = note(reason, "reason");
+    // An unknown length is refused, never read as a default (the real service's input refusal).
+    if (!isPauseDuration(duration))
+      throw new Failure("input", "Pick one of the listed durations.", 0, {
+        kind: "option",
+        option: "duration",
+      });
+    if (target === actor.userId) throw selfRefusal("You can't pause yourself.");
+    const level = actor.access.manager ? "manager" : "moderator";
+    if (level === "moderator" && ids.some((id) => MANAGER_ONLY_BLOCKS.has(id)))
+      throw protectedTarget("Only a server manager can pause mod mail.");
+    const subject = await subjectOf(actor.guildId, target);
+    if (subject?.access.manager) throw protectedTarget("Server managers can't be paused.");
+    if (level === "moderator" && subject && isStaff(subject))
+      throw protectedTarget("Only a server manager can pause someone with officer permissions.");
+    const seen =
+      target === HARNESS_FORMER_MEMBER ||
+      pauses.rows.some((row) => row.guildId === actor.guildId && row.userId === target);
+    if (!subject && !seen) throw unknownMember(target);
+    closeEnded(actor.guildId, target);
+    // Check every feature before changing any, as the real transaction rolls back as a whole.
+    for (const id of ids)
+      if (level === "moderator" && openRow(actor.guildId, target, id)?.level === "manager")
+        throw protectedTarget(
+          "A server manager paused that, so only a server manager can change it.",
+        );
+    const at = pauses.now();
+    const seconds = PAUSE_DURATIONS[duration].seconds;
+    const until = seconds === null ? null : new Date(at.getTime() + seconds * 1000);
+    const replaced: PermissionId[] = [];
+    for (const id of ids) {
+      const open = openRow(actor.guildId, target, id);
+      if (open) {
+        open.lifted = { at, by: actor.userId, reason: "Replaced by a new pause" };
+        replaced.push(id);
+      }
+      pauses.rows.push({
+        id: randomUUID(),
+        guildId: actor.guildId,
+        userId: target,
+        permission: id,
+        reason: text,
+        createdAt: at,
+        until,
+        level,
+        actorId: actor.userId,
+      });
+    }
+    return { target, permissions: ids, duration, until, replaced, batch: randomUUID() };
+  };
+  moderation.lift = async (
+    actor: Actor,
+    target: string,
+    permissions: readonly PermissionId[],
+    reason: string,
+  ): Promise<LiftResult> => {
+    requirePermission(actor, actor.guildId, "moderation.block");
+    const ids = pauseFeatures(permissions);
+    const text = note(reason, "reason");
+    if (target === actor.userId) throw selfRefusal("You can't lift your own pause.");
+    const level = actor.access.manager ? "manager" : "moderator";
+    closeEnded(actor.guildId, target);
+    const lifted: PermissionId[] = [];
+    const notPaused: PermissionId[] = [];
+    const open: HarnessPauseRow[] = [];
+    for (const id of ids) {
+      const row = openRow(actor.guildId, target, id);
+      if (!row) notPaused.push(id);
+      else if (level === "moderator" && row.level === "manager")
+        throw protectedTarget(
+          "A server manager paused that, so only a server manager can lift it.",
+        );
+      else {
+        open.push(row);
+        lifted.push(id);
+      }
+    }
+    const at = pauses.now();
+    for (const row of open) row.lifted = { at, by: actor.userId, reason: text };
+    return { target, lifted, notPaused };
+  };
+  /**
+   * A row as a view shows it; `officer` adds who set it and the lift's reason. As the real
+   * service's view: a lift by a person ends it when they lifted it, and a pause that ran out ended
+   * at its own end, whether or not a later write only closed it (a lift with nobody who lifted it).
+   */
+  const viewOf = (row: HarnessPauseRow, officer: boolean): PauseView => {
+    const at = pauses.now();
+    const over = row.until !== null && row.until.getTime() <= at.getTime();
+    const byPerson = row.lifted?.by != null;
+    const ended = byPerson ? row.lifted?.at : row.lifted !== undefined || over ? row.until : null;
+    return {
+      id: row.id,
+      userId: row.userId,
+      permission: row.permission,
+      reason: row.reason,
+      createdAt: row.createdAt,
+      until: row.until,
+      ...(officer && { by: { userId: row.actorId, level: row.level } }),
+      ...(ended && {
+        ended: {
+          at: ended,
+          by: row.lifted?.by ?? null,
+          reason: officer && byPerson ? (row.lifted?.reason ?? null) : null,
+        },
+      }),
+    };
+  };
+  const newestFirst = (left: HarnessPauseRow, right: HarnessPauseRow): number =>
+    right.createdAt.getTime() - left.createdAt.getTime();
+  /** When it really ended: a person's lift, else its own end (the real service's ENDED_AT). */
+  const endedAt = (row: HarnessPauseRow): number =>
+    (row.lifted?.by != null ? row.lifted.at : (row.until ?? row.createdAt)).getTime();
+  const endedRows = (rows: readonly HarnessPauseRow[]): HarnessPauseRow[] =>
+    rows
+      .filter((row) => !pauseActive(row, pauses.now()))
+      .sort((left, right) => endedAt(right) - endedAt(left))
+      .slice(0, ENDED_LIMIT);
+  moderation.status = async (actor: Actor, subject: string): Promise<PauseStatus> => {
+    authorize(actor, actor.guildId);
+    const self = subject === actor.userId;
+    if (!self) requirePermission(actor, actor.guildId, "moderation.view");
+    const mine = pauses.rows.filter(
+      (row) => row.guildId === actor.guildId && row.userId === subject,
+    );
+    return {
+      subject,
+      self,
+      active: mine
+        .filter((row) => pauseActive(row, pauses.now()))
+        .sort(newestFirst)
+        .map((row) => viewOf(row, !self)),
+      ended: self ? [] : endedRows(mine).map((row) => viewOf(row, true)),
+    };
+  };
+  moderation.overview = async (actor: Actor): Promise<ModerationOverview> => {
+    requirePermission(actor, actor.guildId, "moderation.view");
+    const here = pauses.rows.filter((row) => row.guildId === actor.guildId);
+    const active = here.filter((row) => pauseActive(row, pauses.now())).sort(newestFirst);
+    return {
+      active: active.slice(0, ACTIVE_LIMIT).map((row) => viewOf(row, true)),
+      ended: endedRows(here).map((row) => viewOf(row, true)),
+      truncated: active.length > ACTIVE_LIMIT,
+    };
+  };
+  moderation.senderOfSuggestion = async (actor: Actor, number: number): Promise<string | null> => {
+    requirePermission(actor, actor.guildId, "moderation.view");
+    // Scoped to the server: the invented suggestions were posted in Example FC only.
+    return actor.guildId === example ? (HARNESS_SUGGESTIONS.get(number) ?? null) : null;
+  };
+  moderation.names = async (
+    _guildId: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, string | null>> =>
+    new Map(
+      [...new Set(ids)].filter((id) => names.has(id)).map((id) => [id, names.get(id) ?? null]),
+    );
+  return moderation;
 }
 
 /**
@@ -1704,6 +2181,11 @@ export type HarnessOptions = Pick<WebOptions, "hostname" | "tls" | "port"> & {
    * by default. Tests pin it so what the page shows doesn't depend on the time of day.
    */
   readonly statusNow?: () => Date;
+  /**
+   * The clock pauses are judged on (2.45.0), for tests that let one end; the wall clock by
+   * default.
+   */
+  readonly pausesNow?: () => Date;
 };
 
 /** Default loopback harness; a public origin and private port also exercise real reverse proxies. */
@@ -1725,7 +2207,10 @@ export async function startHarness(
     fetch: authorizePage(discord, `${new URL(origin).origin}/auth/callback`),
   });
   const reporter = createReporter(log);
-  const services = harnessServices(states, options.statusNow ?? (() => new Date()));
+  // One store of pauses for Moderation's fake and the actors the web resolves, so a pause changes
+  // what the paused person's pages show, as it does in production.
+  const pauses = harnessPauses(states, options.pausesNow);
+  const services = harnessServices(states, options.statusNow ?? (() => new Date()), pauses);
   const status = services.get(publicStatusKey);
   status.start();
   let web: WebServer | null = null;
@@ -1741,7 +2226,7 @@ export async function startHarness(
         services,
         allowsGuild: () => true,
         isStopping: () => false,
-        resolveActor: actorResolver(states),
+        resolveActor: actorResolver(states, pauses),
         report: reporter,
         guilds: () => harnessGuilds(states),
       },
@@ -1795,6 +2280,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       "state-roles": { type: "string" },
       "state-history": { type: "string" },
       "state-modmail": { type: "string" },
+      "state-moderation": { type: "string" },
     },
     allowPositionals: false,
   });
@@ -1817,6 +2303,9 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
     throw new Error(
       "Pass --state-modmail=cases, empty, off, unreadable, nokey, long, limit or quiet.",
     );
+  const moderation = values["state-moderation"];
+  if (moderation !== undefined && moderation !== "pauses")
+    throw new Error("Pass --state-moderation=pauses.");
   const tls =
     values.cert && values.key
       ? { cert: Bun.file(values.cert), key: Bun.file(values.key) }
@@ -1838,6 +2327,7 @@ export function harnessOptions(args: readonly string[]): HarnessOptions {
       ...(rolesState && { roles: rolesState }),
       ...(historyState && { history: historyState }),
       ...(modmailState && { modmail: modmailState }),
+      ...(moderation === "pauses" && { moderation }),
     },
   };
 }
@@ -1862,6 +2352,7 @@ if (import.meta.main) {
     roles: "--state-roles",
     history: "--state-history",
     modmail: "--state-modmail",
+    moderation: "--state-moderation",
   } as const satisfies Record<keyof HarnessStates, string>;
   const states = Object.entries(options.states ?? {}).map(([state, value]) => {
     const flag = flags[state as keyof HarnessStates];

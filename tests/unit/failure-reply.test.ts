@@ -20,6 +20,13 @@ import {
 import { entryRef, userId, uuid } from "../../src/discord/selectors.js";
 import { FAILURE_CATEGORY, type FailureCode } from "../../src/domain/failures.js";
 import { GUEST_APPLICATIONS_CLOSED } from "../../src/domain/guest-application.js";
+import { PAUSE_FEATURES } from "../../src/domain/moderation.js";
+import {
+  accessFor,
+  type Pause,
+  pausedFailure,
+  requirePermission,
+} from "../../src/domain/policy.js";
 import { Failure, id } from "../../src/domain/values.js";
 import {
   buttonsOf,
@@ -30,7 +37,7 @@ import {
 } from "../fixtures/replies.js";
 import { catalogTests } from "../fixtures/replies/index.js";
 import { discordError, FAILURE_CASES, FAILURE_SOURCES } from "../fixtures/replies/failures.js";
-import { at, CHARACTER, GUEST_ID, NOW, REF, VIEWERS } from "../fixtures/results.js";
+import { ACTORS, at, CHARACTER, GUEST_ID, NOW, REF, VIEWERS } from "../fixtures/results.js";
 
 catalogTests("failure", FAILURE_CASES);
 
@@ -952,5 +959,167 @@ describe("the ledger's Member-role card (2.44.0)", () => {
     expect(suggest.fields?.[0]?.value).toContain("the Guest role, or the Member role");
     expect(suggest.fields?.[0]?.value).not.toContain("TaruBot gives confirmed FC members");
     expect(suggest.fields?.[0]?.value).not.toBe(ROSTER_STEPS);
+  });
+});
+
+describe("per-person moderation cards (2.45.0)", () => {
+  /** What the pause shows its person; the Failure carries no issuer, so no card can name one. */
+  const REASON = "Posting the same suggestion again and again";
+  const blocked = (id: Parameters<typeof pausedFailure>[0], pause: Pause) =>
+    pausedFailure(id, pause);
+
+  test("a paused feature is its own card: feature, end, reason and the way to the officers", () => {
+    const embed = expectFailure(FAILURE_CASES["forbidden blocked · /suggest · member"].render(), {
+      code: "forbidden",
+      ref: REF,
+      tone: "error",
+      title: "Paused for you",
+    });
+    expect(embed).toMatchObject({
+      description:
+        "Your use of **Suggesting features (/suggest)** here is paused until <t:1790428200:f> (<t:1790428200:R>). Nothing was changed.",
+      fields: [
+        { name: "Reason", value: REASON },
+        {
+          name: "What you can do",
+          value:
+            "Run `/moderate status` to see everything that is paused for you, or `/modmail` to reach the officers.",
+        },
+      ],
+    });
+  });
+
+  test("a pause with no end says an officer lifts it", () => {
+    const embed = onlyEmbed(
+      FAILURE_CASES["forbidden blocked · /suggest until lifted · member"].render(),
+    );
+    expect(embed.description).toBe(
+      "Your use of **Suggesting features (/suggest)** here is paused until an officer lifts it. Nothing was changed.",
+    );
+  });
+
+  test("when opening mod mail is itself paused, /modmail is not offered and open cases are", () => {
+    const embed = onlyEmbed(FAILURE_CASES["forbidden blocked · mod mail form · member"].render());
+    expect(embed.description).toStartWith("Your use of **Opening mod mail cases** here is paused");
+    expect(field(blocked("modmail.open", { until: null, reason: REASON }), "What you can do")).toBe(
+      "Run `/moderate status` to see everything that is paused for you. Cases you already have stay open on the dashboard.",
+    );
+    expect(JSON.stringify(embed)).not.toContain("/modmail`");
+    // Every other feature offers /modmail.
+    for (const { permission } of PAUSE_FEATURES)
+      expect(
+        field(blocked(permission, { until: null, reason: REASON }), "What you can do"),
+      ).toContain(permission === "modmail.open" ? "/moderate status" : "`/modmail`");
+  });
+
+  test("every pausable feature renders this card from the real policy check, never the membership one", () => {
+    for (const { permission, label } of PAUSE_FEATURES) {
+      const actor = {
+        ...ACTORS.member,
+        access: accessFor(
+          false,
+          ["member"],
+          new Map<typeof permission, Pause>([[permission, { until: at(3_600), reason: REASON }]]),
+        ),
+      };
+      let error: unknown;
+      try {
+        requirePermission(actor, actor.guildId, permission);
+      } catch (caught) {
+        error = caught;
+      }
+      for (const viewer of [VIEWERS.member, VIEWERS.officer, undefined]) {
+        expect(failureConcept(error, { ref: REF, viewer })).toBe("forbidden.blocked");
+        const embed = onlyEmbed(render(error, { viewer }));
+        expect(embed.title).toBe("Paused for you");
+        expect(embed.description).toContain(`**${label}**`);
+      }
+    }
+  });
+
+  test("the card never says who set the pause and shows the reason as plain text", () => {
+    const hostile = "# **loud** <@123456789012345678> @everyone [x](https://example.org)";
+    const embed = onlyEmbed(
+      render(blocked("suggest.use", { until: at(3_600), reason: hostile }), {
+        viewer: VIEWERS.member,
+        scope: "/suggest",
+      }),
+    );
+    const reason = embed.fields?.find((item) => item.name === "Reason")?.value ?? "";
+    expect(reason).toContain("\\<@123456789012345678>");
+    // The bracket is escaped, so the text is not a masked link.
+    expect(reason).toContain("\\[x]");
+    expect(embed.fields?.map((item) => item.name)).toEqual(["Reason", "What you can do"]);
+    expect(
+      visibleText(render(blocked("suggest.use", { until: null, reason: REASON }))),
+    ).not.toMatch(/set by|paused by|issuer/iu);
+    // A long reason is cut to the house limit for user text.
+    const long = field(
+      blocked("suggest.use", { until: null, reason: "x".repeat(1_000) }),
+      "Reason",
+    );
+    expect(long?.length).toBeLessThanOrEqual(300);
+  });
+
+  test("the protected and self refusals show the service's sentence as written", () => {
+    const cases = [
+      [
+        "forbidden protected · /moderate block manager · officer",
+        "Server managers can't be paused.",
+      ],
+      [
+        "forbidden protected · /moderate block mod mail · officer",
+        "Only a server manager can pause mod mail.",
+      ],
+      ["forbidden self · /moderate block · manager", "You can't pause yourself."],
+      ["forbidden self · /moderate lift · officer", "You can't lift your own pause."],
+    ] as const;
+    for (const [kind, sentence] of cases) {
+      const embed = expectFailure(FAILURE_CASES[kind].render(), {
+        code: "forbidden",
+        ref: REF,
+        tone: "error",
+        title: "Not allowed",
+      });
+      expect(embed.description).toBe(`${sentence} Nothing was changed.`);
+      expect(embed.fields ?? []).toEqual([]);
+    }
+  });
+
+  test("/moderate is a mixed root: refusals name the subcommand, and status for another member is own-records", () => {
+    // A member may run /moderate status, so "Only FC officers can use /moderate" would be wrong.
+    expect(
+      onlyEmbed(FAILURE_CASES["forbidden officer · /moderate block · member"].render()),
+    ).toMatchObject({
+      title: "Officers only",
+      description: "Only FC officers can use **/moderate block**. Nothing was changed.",
+    });
+    expect(
+      onlyEmbed(FAILURE_CASES["forbidden owner · /moderate status member: · member"].render()),
+    ).toMatchObject({
+      title: "Only your own records",
+      description: "You can view only your own records. Officers can look up other members.",
+      fields: [
+        {
+          name: "What you can do",
+          value: "Run `/moderate status` without the member option to see your own.",
+        },
+      ],
+    });
+  });
+
+  test("the three new scopes have a card of their own for every audience, not 'Not available here'", () => {
+    for (const [scope, concept] of [
+      ["blocked", "forbidden.blocked"],
+      ["protected", "forbidden.protected"],
+      ["self", "forbidden.self"],
+    ] as const)
+      for (const [, viewer] of AUDIENCES)
+        expect(
+          failureConcept(new Failure("forbidden", "A sentence.", 0, { kind: "scope", scope }), {
+            ref: REF,
+            viewer,
+          }),
+        ).toBe(concept);
   });
 });

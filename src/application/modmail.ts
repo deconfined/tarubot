@@ -44,7 +44,7 @@ import {
   MODMAIL_LIMITS,
   MODMAIL_PING_KIND,
   mayAccess,
-  mayOpen,
+  mayUse,
   NOTIFY_COALESCE_SECONDS,
   type OpenRefusal,
   type PingEvent,
@@ -60,7 +60,15 @@ import {
   textProblem,
   caseUrl,
 } from "../domain/modmail.js";
-import { authorize, can, requirePermission, type Actor } from "../domain/policy.js";
+import {
+  authorize,
+  can,
+  holds,
+  pauseOn,
+  requireNotPaused,
+  requirePermission,
+  type Actor,
+} from "../domain/policy.js";
 import { holdsAdministrator } from "../domain/self-roles.js";
 import { type OfficerPing, officerPing } from "../domain/visibility.js";
 import { Failure, stoppingRefusal } from "../domain/values.js";
@@ -652,8 +660,9 @@ export class ModMail {
    * open(), read outside a transaction; the submission checks them all again under its locks.
    */
   private async openRefusal(db: Orm, actor: Actor, enabled: boolean): Promise<OpenRefusal | null> {
-    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
+    const refusal = this.staticRefusal(holds(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return refusal;
+    if (pauseOn(actor, "modmail.open")) return "paused";
     if (!enabled) return "off";
     const { open, daily } = await this.counts(db, actor.guildId, actor.userId);
     if (open >= MODMAIL_LIMITS.openCases) return "open_limit";
@@ -749,10 +758,12 @@ export class ModMail {
     // Lowercase, as PostgreSQL stores it: the AAD names the case ID as stored.
     const minted = input.caseId?.toLowerCase();
     if (minted !== undefined && !CANONICAL_UUID.test(minted)) throw outOfDateForm();
-    const refusal = this.staticRefusal(can(actor, "modmail.open"), actor.botAdministrator);
+    // A pause is its own refusal, ahead of every other (it never reads as a missing role).
+    requireNotPaused(actor, "modmail.open");
+    const refusal = this.staticRefusal(holds(actor, "modmail.open"), actor.botAdministrator);
     if (refusal) return { status: "refused", reason: refusal };
     const cipher = this.cipher;
-    if (!cipher || !mayOpen(actor)) throw new Error("Mod mail's static checks disagree");
+    if (!cipher || !mayUse(actor)) throw new Error("Mod mail's static checks disagree");
     const topic = cleanTopic(input.topic);
     const body = cleanText(input.body);
     const topicError = textProblem(topic, MODMAIL_LIMITS.topicChars);
@@ -1006,7 +1017,7 @@ export class ModMail {
    */
   async mine(actor: Actor): Promise<MyCases> {
     authorize(actor, actor.guildId);
-    if (!mayOpen(actor))
+    if (!mayUse(actor))
       throw new Failure("forbidden", "Mod mail is for this server's members and guests.");
     const db = this.app.db.orm;
     const c = t.modmailCases;

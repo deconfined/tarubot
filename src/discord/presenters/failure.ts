@@ -20,6 +20,7 @@ import {
   type ForbiddenScope,
   type SetupPiece,
 } from "../../domain/failures.js";
+import { featureLabel } from "../../domain/moderation.js";
 import { OFFICERS_ONLY } from "../../domain/policy.js";
 import { isOfficer, type Viewer } from "./audience.js";
 import { verifyButton } from "./controls.js";
@@ -59,6 +60,9 @@ export const FAILURE_CONCEPTS = [
   "forbidden.membership",
   "forbidden.context",
   "forbidden.test_guild",
+  "forbidden.blocked",
+  "forbidden.protected",
+  "forbidden.self",
   "setup.guild",
   "setup.fc",
   "setup.ledger",
@@ -169,7 +173,7 @@ const LEDGER_MUTATIONS: ReadonlySet<string> = new Set([
 ]);
 
 /** Roots whose other subcommands members may run, so a refusal names the subcommand. */
-const MIXED_ROOTS: ReadonlySet<string> = new Set(["guest"]);
+const MIXED_ROOTS: ReadonlySet<string> = new Set(["guest", "moderate"]);
 
 /**
  * Example commands per command path. An input failure's option detail picks the first example
@@ -211,6 +215,15 @@ export const EXAMPLES: Readonly<Record<string, readonly string[]>> = {
   "officer grant": ["/officer grant member:123456789012345678 reason:New FC officer"],
   "officer revoke": ["/officer revoke member:123456789012345678 reason:Stepped down"],
   "officer reset": ["/officer reset member:123456789012345678 reason:Back to the in-game rank"],
+  // 2.45.0: the feature and duration are choices, written as the picker shows them.
+  "moderate block": [
+    "/moderate block member:123456789012345678 feature:Suggesting features (/suggest) duration:1 week reason:Posting the same suggestion again and again",
+  ],
+  "moderate lift": [
+    "/moderate lift member:123456789012345678 feature:Suggesting features (/suggest) reason:Agreed to follow the rules",
+    "/moderate lift member:123456789012345678 feature:All member features reason:Agreed to follow the rules",
+  ],
+  "moderate status": ["/moderate status member:123456789012345678"],
   "config officer_rank": [
     "/config officer_rank rank:Officer",
     "/config officer_rank unset_rank:true",
@@ -390,6 +403,41 @@ function missingPermissions(s: Situation, scope: ForbiddenScope | undefined): st
   return missing.length ? missing.join(" and ") : undefined;
 }
 
+/**
+ * A person's use of a feature is paused (2.45.0, owner decisions Q5 A and 3). It is never the
+ * "membership" card, which says a role is missing: the person is shown the feature, when the pause
+ * ends and the reason an officer gave, and never who set it. /modmail is offered as the way to
+ * reach the officers unless opening mod mail is itself what is paused. The pause arrives as typed
+ * detail (policy.ts's pausedFailure), so nothing here reads the message text.
+ */
+function pausedUseView(s: Situation): FailureView {
+  const detail = s.detail?.kind === "scope" ? s.detail : undefined;
+  const feature = detail?.permission ? `**${featureLabel(detail.permission)}**` : "this feature";
+  const ends = detail?.until
+    ? `until ${when(detail.until, "f")} (${when(detail.until, "R")})`
+    : "until an officer lifts it";
+  const mailPaused = detail?.permission === "modmail.open";
+  return {
+    concept: "forbidden.blocked",
+    tone: "error",
+    title: "Paused for you",
+    lead: `Your use of ${feature} here is paused ${ends}.`,
+    unchanged: "changed",
+    fields: [
+      detail?.reason !== undefined && {
+        name: "Reason",
+        value: plain(detail.reason, HOUSE_LIMITS.userText),
+      },
+      {
+        name: "What you can do",
+        value: mailPaused
+          ? "Run `/moderate status` to see everything that is paused for you. Cases you already have stay open on the dashboard."
+          : "Run `/moderate status` to see everything that is paused for you, or `/modmail` to reach the officers.",
+      },
+    ],
+  };
+}
+
 /** Permission refusals, by the scope detail naming the rule that refused. */
 function forbiddenView(s: Situation): FailureView {
   const scope = s.detail?.kind === "scope" ? s.detail.scope : undefined;
@@ -518,6 +566,26 @@ function forbiddenView(s: Situation): FailureView {
         lead:
           s.message ?? "This copy of TaruBot is a test instance and only works in its test server.",
         unchanged: "none",
+      };
+    case "blocked":
+      return pausedUseView(s);
+    case "protected":
+      // The throw site's sentence is the approved copy ("Server managers can't be paused."), and
+      // it varies with the rule that refused, so it is shown as written.
+      return {
+        concept: "forbidden.protected",
+        tone: "error",
+        title: "Not allowed",
+        lead: s.message ?? "You can't pause or lift a pause for that person.",
+        unchanged: "changed",
+      };
+    case "self":
+      return {
+        concept: "forbidden.self",
+        tone: "error",
+        title: "Not allowed",
+        lead: s.message ?? "You can't do that to yourself.",
+        unchanged: "changed",
       };
     default:
       // human and current_member, plus any refusal without a scope detail.

@@ -37,6 +37,7 @@ export const PERMISSION_AREAS = [
   "Ledger",
   "Mod mail",
   "Role menu",
+  "Moderation",
   "Member features",
 ] as const;
 
@@ -275,6 +276,19 @@ export const PERMISSIONS = {
     tier: "staff",
     label: "Add roles to the menu and publish them",
   },
+  // Moderation (2.45.0): pausing one person's use of a feature.
+  "moderation.view": {
+    area: "Moderation",
+    kind: "read",
+    tier: "staff",
+    label: "See who is paused, and who sent a suggestion",
+  },
+  "moderation.block": {
+    area: "Moderation",
+    kind: "write",
+    tier: "staff",
+    label: "Pause a member's use of a feature",
+  },
   // Member features.
   "selfroles.use": {
     area: "Member features",
@@ -324,6 +338,27 @@ export function modulePermissions(value: unknown): readonly PermissionId[] {
 /** Ids of one tier, in catalog order. */
 export const permissionsOfTier = (tier: PermissionTier): readonly PermissionId[] =>
   PERMISSION_IDS.filter((id) => PERMISSIONS[id].tier === tier);
+
+/**
+ * What one person's use can be paused for (2.45.0, owner decision 3): every member and baseline
+ * permission, the features people use rather than the work officers do. A pause is deny-only and
+ * touches no Discord role. Staff permissions can't be paused yet; the stored column is general, so
+ * allowing them later needs no migration.
+ */
+export const BLOCKABLE: readonly PermissionId[] = Object.freeze(
+  PERMISSION_IDS.filter(
+    (id) => PERMISSIONS[id].tier === "member" || PERMISSIONS[id].tier === "baseline",
+  ),
+);
+
+/** Whether `id` can be paused for a person. */
+export const isBlockable = (id: PermissionId): boolean => BLOCKABLE.includes(id);
+
+/**
+ * The pauses only a server manager may set or lift (owner decision Q6 B): mod mail is how members
+ * raise concerns about officers, so officers can't cut it off.
+ */
+export const MANAGER_ONLY_BLOCKS: ReadonlySet<PermissionId> = new Set(["modmail.open"]);
 
 /** The roles TaruBot manages that can carry permissions. Rank roles join in 2.47.0. */
 export type ManagedRole = "member" | "guest" | "officer" | "leader";

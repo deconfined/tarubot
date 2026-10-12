@@ -13,6 +13,7 @@ import {
   issueReportsKey,
   lifecycleKey,
   modmailKey,
+  moderationKey,
   publicStatusKey,
   synchronizationKey,
   roleAdministrationKey,
@@ -24,6 +25,7 @@ import { Heartbeat } from "./application/heartbeat.js";
 import { IssueReports } from "./application/issue-reports.js";
 import { ApplicationLifecycle } from "./application/lifecycle.js";
 import { ModMail, ModMailRetention } from "./application/modmail.js";
+import { Moderation } from "./application/moderation.js";
 import {
   changesPausedAnywhere,
   PgStatusSamples,
@@ -234,6 +236,16 @@ const services = new Services()
   .provide(
     modmailKey,
     new ModMail(app, modmailCipher, dashboard.origin, () => lifecycle.isStopping(), report),
+  )
+  // Per-person moderation (2.45.0): pauses are database writes only (no Discord request, no job),
+  // refused once shutdown starts. A target's access is resolved like an actor's, in full.
+  .provide(
+    moderationKey,
+    new Moderation(
+      app,
+      async (guildId, userId) => app.enrichActor(await gateway.actor(guildId, userId, "full")),
+      () => lifecycle.isStopping(),
+    ),
   );
 const context: BotContext = {
   client: gateway.client,

@@ -48,6 +48,10 @@ const FAILURE_PINS: Readonly<Record<string, Pin>> = {
   "forbidden.administrator": { member: ["error", "Administrator or server owner only"] },
   "forbidden.membership": { member: ["warning", "FC membership needed"] },
   "forbidden.context": { member: ["error", "Not available here"] },
+  // 2.45.0 (per-person moderation): a pause is its own card, never the missing-role one.
+  "forbidden.blocked": { member: ["error", "Paused for you"] },
+  "forbidden.protected": { member: ["error", "Not allowed"] },
+  "forbidden.self": { member: ["error", "Not allowed"] },
   "setup.guild": {
     member: ["info", "TaruBot isn't set up here yet"],
     officer: ["warning", "Finish setup first"],

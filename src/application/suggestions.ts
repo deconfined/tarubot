@@ -19,7 +19,7 @@ import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Configuration } from "../config/env.js";
 import { deployments } from "../config/deployment.js";
 import { project } from "../config/project.js";
-import type { Actor } from "../domain/policy.js";
+import { requireNotPaused, type Actor } from "../domain/policy.js";
 import { after, secondsUntil } from "../domain/reports.js";
 import {
   assertPublic,
@@ -129,6 +129,8 @@ export class Suggestions {
       throw new Failure("forbidden", "Suggestions are switched off on this TaruBot right now.");
     // The server must be set up; suggest.use comes from its bound Member and Guest roles.
     await this.app.guild(actor);
+    // A pause is reported as one, before the limits, GitHub and the membership card.
+    requireNotPaused(actor, "suggest.use");
     if (!maySuggest(actor)) throw suggestionAccessRefused();
     const normalised = normalise(idea);
     if ([...normalised].length < SUGGESTION_MIN) throw suggestionTooShort();

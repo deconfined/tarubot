@@ -1,23 +1,23 @@
 {
-  "title": "Session: 2.44.0 permissions review",
-  "objective": "Review 2.44.0 on owner-authorized staging: every function checks a named permission carried by the roles TaruBot manages; Manage Server alone grants nothing; linking the FC, binding any of the four roles and removing rank-bearing links need a server manager; FC Leader counts only links that confer rank. No migration, setting or command change. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.45.0 pauses review",
+  "objective": "Review 2.45.0 on owner-authorized staging: an officer or server manager pauses one person's use of one feature and lifts it again with /moderate or the Moderation page; the person is told the feature, the end and the reason, never who set it; the attenuation rules hold; changes on the page need a sign-in within 15 minutes. Migration 015 is additive. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Before upgrading, note who holds FC Leader and the Officer role on staging, and who has Manage Server without Manage Roles. 2.44.0 adds no migration or setting, so going back is redeploying 2.43.0.",
-    "As a delegated officer (Officer role, no Manage Server): /config show and validate work; /config fc unlink, /config roles member and /unassign of a verified link refuse with Server managers only; /unassign of a link another officer assigned works.",
-    "With Manage Server but neither Manage Roles nor the Officer role: /config, Role menu and the officer pages refuse. As a server manager everything works.",
-    "Have a delegated officer /assign the FC leader's character to a test member: after the next pass they get Member, not FC Leader. Assigned by a server manager, FC Leader follows.",
-    "Members still use /suggest, My roles, mod mail and the ledger as before; approve production only after its own baseline."
+    "Before upgrading, take the pre-migration backup: 2.44.0 won't start on migration 015, so going back means restoring it. The deploy registers /moderate (24 roots, 52 paths).",
+    "As an officer (Officer role, no Manage Server): /moderate block a test member from /suggest for 1 hour with a reason. As them, /suggest refuses with the feature, end and reason, naming nobody. /moderate status shows it to you; /moderate lift ends it.",
+    "As that officer, try to pause yourself, a server manager, another officer, a bot and mod mail opening: each refuses. As a server manager, pause mod mail opening: the member can't open a case but can still reply to theirs.",
+    "On the Moderation page, look up a suggestion's sender by its number. Wait 15 minutes, change a pause: it goes through Discord sign-in first, then back to the page.",
+    "Pause My roles for the test member: the page opens, says until when and why, with Save off."
   ],
   "assistant": [
-    "Before release, run the full suite with disposable PostgreSQL, the access parity test against 2.43.0, the version gate and the documentation site build.",
+    "Before release, run the full suite with disposable PostgreSQL, the migration 015 rehearsal, the pause enforcement and access parity tests, the version gate and the documentation site build.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, key, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
   "bot": [
     "Run one DevBot instance under the staging profile, with effects initially paused and strict managed-database/test-guild guards.",
-    "Resolve each command, button and page request's permissions from the managed roles held now: Member and Guest carry member features, a backed Officer role officer permissions, server managers everything.",
-    "Count rank only through links that can confer it, for Officer and FC Leader alike; keep held roles while evidence is unresolved, without granting officer permissions.",
-    "Keep mod mail, status samples and role choices as in 2.43.0, 2.41.0 and 2.40.0.",
-    "Expose database, Discord and writer-lease readiness; report 2.44.0, startup time and effect state without pinging members."
+    "Read each non-manager's active pauses on the database clock at every resolution; a pause removes a held permission and grants none. Server managers and bots carry none.",
+    "Refuse a paused feature before any limit, GitHub request or Lodestone read, naming the feature, end and reason, never who set it. Keep My roles open, Save off, and existing mod mail cases usable.",
+    "Write each pause and lift in one transaction with its audit row, no reason in the audit, and no Discord change, DM or job.",
+    "Expose database, Discord and writer-lease readiness; report 2.45.0, startup time and effect state without pinging members."
   ]
 }

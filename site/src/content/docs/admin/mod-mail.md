@@ -77,6 +77,10 @@ You choose for each reply. Choose **Send reply**: the case then waits on the mem
 
 If someone else changed the case while you were reading it (a new reply, say), TaruBot refuses your Close or Reopen and shows the case as it is now: check the newest messages, then try again.
 
+## Pausing a member's new cases
+
+A server manager can [pause](/tarubot/admin/moderation/) one member's opening of new cases, for example after a flood of them. Officers can't, because mod mail is how members raise concerns about officers. The member's **Open a case** is greyed out with the reason beside it and `/modmail` refuses, but every case they already have stays usable: they can read it, reply and close it, and your replies still reach them.
+
 ## The read log
 
 Every time someone opens a case's page, TaruBot records who and when, and whether they're the member or an officer (opening it again within a minute counts once). Seeing a case's topic in a list, the inbox or the member's own list, is recorded too, as **Saw the topic in a list** (once an hour). **Read log** at the bottom of a case, folded by default, lists the newest 50 and how many there are in all. Only officers see it.

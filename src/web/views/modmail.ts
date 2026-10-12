@@ -179,6 +179,8 @@ export const WEB_OPEN_REFUSALS: Readonly<Record<OpenRefusal, string>> = {
   web: "Mod mail needs TaruBot's web pages, which aren't turned on for this TaruBot.",
   off: "Mod mail is turned off in this server, so you can't open a new case. Your cases stay here, and you can still reply to them.",
   key: "Mod mail's encryption key isn't set up on this TaruBot, so no new case can be opened right now. Ask an officer.",
+  paused:
+    "Opening new cases is paused for you here. Your cases stay here, and you can still reply to them.",
   open_limit: `You have ${MODMAIL_LIMITS.openCases} open cases in this server, the most at once. Add to one of them below, or close one first.`,
   daily_limit: `You've opened ${MODMAIL_LIMITS.dailyCases} cases in this server in the last 24 hours. Add to an open case below, or try again later.`,
 };

@@ -56,6 +56,8 @@ After an FC is unlinked, its ledger stays. Officers can read it by naming it:
 
 A previous FC's ledger is read-only.
 
+A [pause](/tarubot/admin/moderation/#what-can-be-paused) holds for officers too. If a server manager pauses an officer's **Reading the ledger**, that officer can't read any ledger, a previous FC's included, whatever their officer permissions. If it pauses **Recording ledger deposits**, their deposits stop, but their withdrawals, corrections and opening balance don't.
+
 ## Posts in the ledger channel
 
 Every entry is posted to the ledger channel as `<Operation> · <amount>`: deposits in green, withdrawals and the opening balance in blue, corrections in orange. A post shows the full note, the new balance (a correction also shows the previous balance and the entry it corrects), who recorded it and the entry number, with the entry ID in the footer.

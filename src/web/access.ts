@@ -7,7 +7,7 @@
  * routing, navigation and the server list.
  */
 import { classifyFailure } from "../domain/failures.js";
-import { type Actor, type ActorResolution, can, isStaff } from "../domain/policy.js";
+import { type Actor, type ActorResolution, holds, isStaff } from "../domain/policy.js";
 import { isPermissionId, PERMISSIONS, type PermissionId } from "../domain/rbac.js";
 import type { Page } from "./page.js";
 
@@ -25,7 +25,9 @@ export type PageAccess = PermissionId;
 
 /** Whether one permission admits the actor to a page; see PageAccess. */
 export function admitsBy(actor: Actor, id: PageAccess): boolean {
-  if (!isPermissionId(id) || !can(actor, id)) return false;
+  // holds, not can: a pause on a feature removes the write, not the page (a member whose My roles
+  // is paused still opens it, and one whose mod mail is paused still reads their cases).
+  if (!isPermissionId(id) || !holds(actor, id)) return false;
   return PERMISSIONS[id].tier !== "member" || isStaff(actor) || actor.botAdministrator === false;
 }
 

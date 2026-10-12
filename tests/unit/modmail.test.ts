@@ -2,9 +2,9 @@
  * Mod mail's pure parts (2.43.0): the rules in src/domain/modmail.ts, /modmail's form and its
  * submission binding, the Discord messages (none carries the text or names the member), the
  * gateway's one role ping, the views each audience gets, the job kinds' labels and the readiness
- * flag, and the permission checks (2.44.0) on the web harness's fake. Database behavior is in
- * tests/integration/modmail.test.ts and the pages end to end in modmail-web.test.ts. Invented
- * IDs; keys from readable phrases.
+ * flag, the permission checks (2.44.0) on the web harness's fake, and that a pause on opening
+ * cases (2.45.0) stops new cases only. Database behavior is in tests/integration/modmail.test.ts
+ * and the pages end to end in modmail-web.test.ts. Invented IDs; keys from readable phrases.
  */
 import { describe, expect, test } from "bun:test";
 import { ButtonStyle, ComponentType, DiscordAPIError } from "discord.js";
@@ -50,6 +50,7 @@ import {
   MODMAIL_PATH,
   mayAccess,
   mayOpen,
+  mayUse,
   OPEN_REFUSALS,
   type OpenRefusal,
   shownAuthor,
@@ -141,6 +142,52 @@ describe("the rules", () => {
     expect(mayAccess(reader(SECOND), MEMBER)).toBe(true);
     // Manage Server alone is no officer (Q2 A).
     expect(mayAccess(actor(OFFICER, { serverManager: true }), MEMBER)).toBe(false);
+  });
+
+  test("a pause on opening stops new cases only (2.45.0): the person keeps the cases they have", () => {
+    const ends = new Date("2026-10-19T12:00:00.000Z");
+    const paused = actor(MEMBER, { member: true, paused: { "modmail.open": { until: ends } } });
+    // New cases: no. Using mod mail as a member, and reaching their own case: yes.
+    expect(mayOpen(paused)).toBe(false);
+    expect(mayUse(paused)).toBe(true);
+    expect(mayAccess(paused, MEMBER)).toBe(true);
+    // Someone else's case is still not theirs, and a guest is paused the same way.
+    expect(mayAccess(paused, SECOND)).toBe(false);
+    const guest = actor(MEMBER, { guest: true, paused: { "modmail.open": {} } });
+    expect([mayOpen(guest), mayUse(guest), mayAccess(guest, MEMBER)]).toEqual([false, true, true]);
+    // Another feature's pause changes nothing here.
+    const other = actor(MEMBER, { member: true, paused: { "suggest.use": {}, "ledger.view": {} } });
+    expect([mayOpen(other), mayUse(other), mayAccess(other, MEMBER)]).toEqual([true, true, true]);
+    // The A2 gate still closes the door a pause leaves open, and a pause never opens one.
+    const guarded = actor(MEMBER, {
+      member: true,
+      botAdministrator: true,
+      paused: { "modmail.open": {} },
+    });
+    expect([mayOpen(guarded), mayUse(guarded), mayAccess(guarded, MEMBER)]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    const outsider = actor(MEMBER, { paused: { "modmail.open": {} } });
+    expect([mayOpen(outsider), mayUse(outsider), mayAccess(outsider, MEMBER)]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    // Without a pause, mayOpen and mayUse are the same question (2.44.0's mayOpen).
+    for (const facts of [{ member: true }, { guest: true }, {}, { officer: true }] as const) {
+      const person = actor(MEMBER, facts);
+      expect(mayOpen(person)).toBe(mayUse(person));
+    }
+  });
+
+  test("a pause doesn't narrow the officers' side: reading every case is the inbox permission", () => {
+    // An officer who is also a Member can be paused from opening, and still reads every case.
+    const officer = actor(OFFICER, { officer: true, member: true, paused: { "modmail.open": {} } });
+    expect([mayOpen(officer), mayUse(officer)]).toEqual([false, true]);
+    expect(mayAccess(officer, MEMBER)).toBe(true);
+    expect(can(officer, "modmail.inbox")).toBe(true);
   });
 
   test("sides and states: the opener is the member side; a reply waits on the other side", () => {
@@ -289,6 +336,242 @@ describe("answering a case needs modmail.respond on the officer side only (2.44.
         (await service.caseView(own, opened.number))?.revision ?? 0n,
       ),
     ).toEqual({ status: "saved" });
+  });
+});
+
+describe("a pause on opening cases (2.45.0, owner decision Q6 B, the web harness's fake)", () => {
+  const NOW = Date.parse("2026-10-12T12:00:00.000Z");
+  const ENDS = new Date("2026-10-19T12:00:00.000Z");
+  const REASON = "Please use the open case instead of starting new ones.";
+  const people = {
+    guild: GUILD,
+    officer: OFFICER,
+    member: MEMBER,
+    guest: "200000000000000003",
+    timedOut: "200000000000000004",
+  };
+  /** The harness's cases state: #1 the member's, closed; #2 the member's, waiting on officers. */
+  const fake = () =>
+    harnessModMail(modmailStore("cases", people, NOW), {
+      people,
+      names: new Map(),
+      administrator: () => false,
+      effectsMode: "live",
+      now: () => NOW,
+    });
+  /** The member, with opening paused until a week from now. */
+  const paused = (facts: Partial<ActorSpec> = {}): Actor =>
+    actor(MEMBER, {
+      member: true,
+      paused: { "modmail.open": { until: ENDS, reason: REASON } },
+      ...facts,
+    });
+  const blocked = {
+    code: "forbidden",
+    message: "Your use of this feature here is paused.",
+    detail: {
+      kind: "scope",
+      scope: "blocked",
+      permission: "modmail.open",
+      until: ENDS,
+      reason: REASON,
+    },
+  };
+
+  test("a paused person can't open a case, and nothing is written", async () => {
+    const service = fake();
+    const someone = paused();
+    const before = (await service.mine(actor(MEMBER, { member: true }))).cases.length;
+    await expect(
+      service.open(someone, { topic: "Another question", body: "Can I ask again?" }),
+    ).rejects.toMatchObject(blocked);
+    // It is a pause, not the missing-role refusal and not a "refused" outcome.
+    await expect(
+      service.open(someone, { topic: "Another question", body: "Can I ask again?" }),
+    ).rejects.not.toMatchObject({ detail: { scope: "membership" } });
+    expect((await service.mine(actor(MEMBER, { member: true }))).cases).toHaveLength(before);
+    // The same words from the same person unpaused do open a case.
+    expect(
+      await service.open(actor(MEMBER, { member: true }), {
+        topic: "Another question",
+        body: "Can I ask again?",
+      }),
+    ).toMatchObject({ status: "opened" });
+  });
+
+  test("the real ModMail.open refuses a pause before it reads the cipher, the database or the text", async () => {
+    // A bare instance: any read of its key, origin or database would throw a TypeError instead.
+    const real: unknown = Object.create(ModMail.prototype);
+    if (!(real instanceof ModMail)) throw new Error("Invalid mod mail fixture");
+    await expect(real.open(paused(), { topic: "", body: "" })).rejects.toMatchObject(blocked);
+    await expect(
+      real.open(paused({ botAdministrator: true }), { topic: "Topic", body: "Body" }),
+    ).rejects.toMatchObject(blocked);
+  });
+
+  test("the pause comes before the text checks and the limits", async () => {
+    const service = fake();
+    // Empty text would be an "invalid" outcome, and a full set of cases an "open_limit" one.
+    await expect(service.open(paused(), { topic: "", body: "" })).rejects.toMatchObject(blocked);
+    const full = harnessModMail(modmailStore("limit", people, NOW), {
+      people,
+      names: new Map(),
+      administrator: () => false,
+      effectsMode: "live",
+      now: () => NOW,
+    });
+    await expect(full.open(paused(), { topic: "Topic", body: "Body" })).rejects.toMatchObject(
+      blocked,
+    );
+  });
+
+  test("a repeat of a form that already made a case is refused too, rather than found", async () => {
+    const service = fake();
+    const caseId = "00000000-0000-4000-8000-000000000007";
+    const input = { topic: "Raid night", body: "Can we move it?", caseId };
+    const opened = await service.open(actor(MEMBER, { member: true }), input);
+    expect(opened.status).toBe("opened");
+    await expect(service.open(paused(), input)).rejects.toMatchObject(blocked);
+  });
+
+  test("they still list, read, answer and close the cases they have", async () => {
+    const service = fake();
+    const someone = paused();
+    const mine = await service.mine(someone);
+    expect(mine.cases.map((entry) => entry.number)).toEqual([2n, 1n]);
+    expect(mine.enabled).toBe(true);
+    const view = await service.caseView(someone, 2n);
+    expect(view).toMatchObject({ audience: "member", side: "member", state: "officers" });
+    // Someone else's case is still not theirs (404, as always).
+    expect(await service.caseView(someone, 3n)).toBeNull();
+    expect(
+      await service.reply(someone, 2n, {
+        messageId: ZERO_CASE,
+        body: "More detail",
+        signing: null,
+      }),
+    ).toEqual({ status: "saved", messageId: ZERO_CASE });
+    expect(
+      await service.close(someone, 2n, (await service.caseView(someone, 2n))?.revision ?? 0n),
+    ).toEqual({ status: "saved" });
+    expect((await service.caseView(someone, 2n))?.state).toBe("closed");
+    // The officers' answer reaches them as before.
+    expect((await service.caseView(someone, 2n))?.canRespond).toBe(true);
+  });
+
+  test("the page says why the button is off, with the reason a paused person is shown", async () => {
+    const service = fake();
+    const cases = await service.mine(paused());
+    expect(cases.openRefusal).toBe("paused");
+    const document = parseHTML(
+      `<!doctype html><html><body>${String(
+        await renderMyCases({
+          guildId: GUILD,
+          cases,
+          action: `/g/${GUILD}/modmail`,
+          token: "token",
+          caseId: ZERO_CASE,
+        }),
+      )}</body></html>`,
+    ).document;
+    const button = document.querySelector("button.modmail-opener");
+    expect(button?.hasAttribute("disabled")).toBe(true);
+    expect(
+      document.getElementById(button?.getAttribute("aria-describedby") ?? "")?.textContent,
+    ).toBe(WEB_OPEN_REFUSALS.paused);
+    expect(document.querySelector("dialog, form")).toBeNull();
+    // Their cases are still listed beneath it.
+    expect(document.body.textContent).toContain("Raid night");
+  });
+
+  test("the courtesy refusal follows ModMail's order: the static ones first, then the pause", async () => {
+    const service = fake();
+    // Mod mail off, with a pause: the pause is what the person is told (the switch is checked after).
+    const off = harnessModMail(modmailStore("off", people, NOW), {
+      people,
+      names: new Map(),
+      administrator: () => false,
+      effectsMode: "live",
+      now: () => NOW,
+    });
+    expect((await off.mine(paused())).openRefusal).toBe("paused");
+    expect((await off.mine(actor(MEMBER, { member: true }))).openRefusal).toBe("off");
+    // The key problem is a static refusal and comes first.
+    const nokey = harnessModMail(modmailStore("nokey", people, NOW), {
+      people,
+      names: new Map(),
+      administrator: () => false,
+      effectsMode: "live",
+      now: () => NOW,
+    });
+    expect((await nokey.mine(paused())).openRefusal).toBe("key");
+    // A paused person without the role, or with TaruBot as Administrator, isn't let in by it.
+    await expect(
+      service.mine(actor(MEMBER, { paused: { "modmail.open": {} } })),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    await expect(service.mine(paused({ botAdministrator: true }))).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    // And a pause on something else leaves the button as it was.
+    const other = actor(MEMBER, { member: true, paused: { "suggest.use": {} } });
+    expect((await service.mine(other)).openRefusal).toBeNull();
+  });
+
+  test("a pause with no end, or one set by a server manager, reads the same way", async () => {
+    // The pause carries no issuer, so how the person is told doesn't depend on who set it; only
+    // the end and the reason differ.
+    const service = fake();
+    const forever = actor(MEMBER, {
+      member: true,
+      paused: { "modmail.open": { until: null, reason: "Set by a server manager." } },
+    });
+    expect((await service.mine(forever)).openRefusal).toBe("paused");
+    const failure = await service
+      .open(forever, { topic: "Topic", body: "Body" })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "forbidden",
+      message: blocked.message,
+      detail: {
+        kind: "scope",
+        scope: "blocked",
+        permission: "modmail.open",
+        reason: "Set by a server manager.",
+      },
+    });
+    // An open-ended pause carries no end time at all.
+    expect(Object.hasOwn((failure as Failure).detail ?? {}, "until")).toBe(false);
+    expect(Object.keys((failure as Failure).detail ?? {}).sort()).toEqual([
+      "kind",
+      "permission",
+      "reason",
+      "scope",
+    ]);
+  });
+
+  test("an officer who is also a Member is paused from opening and keeps the officers' side", async () => {
+    const service = fake();
+    const officer = actor(OFFICER, {
+      officer: true,
+      member: true,
+      paused: { "modmail.open": { reason: REASON } },
+    });
+    await expect(service.open(officer, { topic: "Topic", body: "Body" })).rejects.toMatchObject({
+      detail: { scope: "blocked", permission: "modmail.open" },
+    });
+    expect((await service.inbox(officer, "open")).cases.length).toBeGreaterThan(0);
+    expect(await service.caseView(officer, 2n)).toMatchObject({
+      audience: "officer",
+      side: "officer",
+      canRespond: true,
+    });
+    expect(
+      await service.reply(officer, 2n, {
+        messageId: ZERO_CASE,
+        body: "An answer",
+        signing: "name",
+      }),
+    ).toEqual({ status: "saved", messageId: ZERO_CASE });
   });
 });
 
@@ -820,7 +1103,7 @@ describe("the views", () => {
   });
 
   test("each reason the member can't open a case disables the button and says why", async () => {
-    for (const reason of ["off", "key", "open_limit", "daily_limit"] as const) {
+    for (const reason of ["off", "key", "paused", "open_limit", "daily_limit"] as const) {
       const document = await inspect(renderMyCases(mineView(reason)));
       expect(document.querySelector("button.modmail-opener[disabled]")).not.toBeNull();
       expect(document.body.textContent).toContain(WEB_OPEN_REFUSALS[reason]);

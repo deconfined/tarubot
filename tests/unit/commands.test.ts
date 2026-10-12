@@ -1,6 +1,7 @@
 /** Snapshot the declared feature surface through real discovery, including nested subcommands. */
 import { expect, test } from "bun:test";
 import { ApplicationCommandOptionType, InteractionContextType } from "discord.js";
+import type { AutocompleteContext } from "../../src/bot/command.js";
 import { loadCommands, loadComponents } from "../../src/bot/discovery.js";
 import { applicationKey } from "../../src/application/keys.js";
 import { Service } from "../../src/application/service.js";
@@ -15,6 +16,7 @@ import syncCommand from "../../src/commands/synchronization/sync.command.js";
 import type { Command } from "../../src/bot/command.js";
 import { viewerOf } from "../../src/discord/presenters/audience.js";
 import { cursor, entryRef, userId, uuid } from "../../src/discord/selectors.js";
+import { PAUSE_DURATIONS, PAUSE_FEATURES } from "../../src/domain/moderation.js";
 import type { Actor } from "../../src/domain/policy.js";
 import { Failure, lodestoneId } from "../../src/domain/values.js";
 import { actorOf } from "../fixtures/actors.js";
@@ -79,6 +81,10 @@ test("command inventory exactly matches the declared public surface", async () =
       "unassign",
       "characters",
       "main",
+      // 2.45.0: pause one person's use of one feature, lift it, and read what is paused.
+      "moderate block",
+      "moderate lift",
+      "moderate status",
       "modmail",
       "nickname",
       "refresh",
@@ -133,6 +139,8 @@ test("the router's permission gates are pinned (2.44.0)", async () => {
     ],
     // Server managers only: the router refuses everyone else with the manager card.
     officer: ["admin.grants"],
+    // /moderate (2.45.0) is absent: it admits any member, since status is for everyone and block
+    // and lift check moderation.block in the service that does the work.
     setup: ["admin.setup"],
   });
   expect(gated(await loadComponents())).toEqual({
@@ -177,6 +185,9 @@ test("every member option suggests server members (owner decision, 2026-09-24)",
       "guest reset",
       "guest revoke",
       "guest status",
+      "moderate block",
+      "moderate lift",
+      "moderate status",
       "officer grant",
       "officer reset",
       "officer revoke",
@@ -466,4 +477,144 @@ test("commands reject malformed IDs with an option detail before any service cal
   } finally {
     await fixture.close();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// /moderate (2.45.0)
+
+/** One registered option of a /moderate subcommand, as Discord receives it. */
+interface Declared {
+  readonly name: string;
+  readonly description: string;
+  readonly required?: boolean;
+  readonly autocomplete?: boolean;
+  readonly max_length?: number;
+  readonly choices?: readonly { readonly name: string; readonly value: string }[];
+}
+
+/** A /moderate subcommand and its options. */
+interface DeclaredSubcommand {
+  readonly name: string;
+  readonly options?: readonly Declared[];
+}
+
+/** /moderate as registered. */
+async function moderate() {
+  const command = (await loadCommands()).get("moderate");
+  if (!command) throw new Error("No /moderate command");
+  const subcommands = (command.toJSON().options ?? []) as unknown as readonly DeclaredSubcommand[];
+  /** The registered option `option` of subcommand `name`. */
+  const declared = (name: string, option: string): Declared => {
+    const found = subcommands
+      .find((sub) => sub.name === name)
+      ?.options?.find((o) => o.name === option);
+    if (!found) throw new Error(`No /moderate ${name} ${option}`);
+    return found;
+  };
+  return { command, subcommands, declared };
+}
+
+test("/moderate declares block, lift and status; the feature and duration are fixed choices", async () => {
+  const { command, subcommands, declared } = await moderate();
+  expect(subcommands.map((sub) => sub.name)).toEqual(["block", "lift", "status"]);
+  const options = (name: string) =>
+    (subcommands.find((sub) => sub.name === name)?.options ?? []).map((o) => [
+      o.name,
+      o.required === true,
+    ]);
+  expect(options("block")).toEqual([
+    ["member", true],
+    ["feature", true],
+    ["duration", false],
+    ["reason", true],
+  ]);
+  expect(options("lift")).toEqual([
+    ["member", true],
+    ["feature", true],
+    ["reason", true],
+  ]);
+  expect(options("status")).toEqual([["member", false]]);
+  // Each pausable feature by its plain-words name (the value is the permission), then "all".
+  const features = [
+    ...PAUSE_FEATURES.map(({ permission, label }) => ({ name: label, value: permission })),
+    { name: "All member features", value: "all" },
+  ];
+  expect(declared("block", "feature").choices).toEqual(features);
+  expect(declared("lift", "feature").choices).toEqual(features);
+  expect(features).toHaveLength(10);
+  expect(declared("block", "duration").choices).toEqual(
+    Object.entries(PAUSE_DURATIONS).map(([value, { label }]) => ({ name: label, value })),
+  );
+  // Choices and autocomplete exclude each other: only the member option suggests.
+  for (const [sub, option] of [
+    ["block", "feature"],
+    ["block", "duration"],
+    ["lift", "feature"],
+  ] as const)
+    expect(declared(sub, option).autocomplete).not.toBe(true);
+  for (const sub of ["block", "lift", "status"])
+    expect(declared(sub, "member").autocomplete).toBe(true);
+  // The reason is up to 1,000 characters, and block says the member sees it.
+  expect(declared("block", "reason").max_length).toBe(1_000);
+  expect(declared("block", "reason").description).toContain("member will see");
+  // The router lets every member in, because status is for everyone and each service call checks
+  // its own permission; replies stay private even under DevBot's public-response override.
+  expect(command.permissions).toEqual([]);
+  expect(command.ephemeral).toBe(true);
+  expect(command.alwaysPrivate).toBe(true);
+});
+
+/** A cached guild member as completeMember reads it. */
+const cached = (id: string, username: string) => ({
+  id,
+  displayName: username,
+  nickname: null,
+  user: { username, globalName: null, bot: false },
+});
+
+/** An autocomplete context for /moderate `sub`, typing in `focused`, as a member or an officer. */
+function moderateContext(
+  sub: string,
+  focused: string,
+  who: "member" | "officer",
+): AutocompleteContext {
+  return {
+    actor: actorOf({
+      guildId: "100",
+      userId: "400",
+      officer: who === "officer",
+      manageRoles: false,
+    }),
+    interaction: {
+      options: {
+        getFocused: (full?: boolean) => (full ? { name: focused, value: "" } : ""),
+        getSubcommand: () => sub,
+      },
+      guild: {
+        members: {
+          cache: new Map([
+            ["400", cached("400", "juniperfox")],
+            ["500", cached("500", "wyvernmoth")],
+          ]),
+          search: async () => new Map(),
+        },
+      },
+    },
+  } as unknown as AutocompleteContext;
+}
+
+test("/moderate suggests members only to those who may pause them, and a member only themselves on status", async () => {
+  const { command } = await moderate();
+  const suggest = async (sub: string, who: "member" | "officer", focused = "member") =>
+    (await command.autocomplete?.(moderateContext(sub, focused, who)))?.map((c) => c.value);
+  // Finding people to pause is for those who can pause them: no suggestions otherwise.
+  for (const sub of ["block", "lift"]) {
+    expect(await suggest(sub, "member")).toEqual([]);
+    expect(await suggest(sub, "officer")).toEqual(["400", "500"]);
+  }
+  // status: officers who can see pauses get members; anyone else gets themselves.
+  expect(await suggest("status", "officer")).toEqual(["400", "500"]);
+  expect(await suggest("status", "member")).toEqual(["400"]);
+  // Feature and duration are choices, never completed.
+  expect(await suggest("block", "officer", "feature")).toEqual([]);
 });

@@ -172,7 +172,13 @@ export type ForbiddenScope =
   | "membership"
   | "human"
   | "test_guild"
-  | "current_member";
+  | "current_member"
+  /** The person's use of a feature is paused (2.45.0); the detail names the feature. */
+  | "blocked"
+  /** Pausing or lifting a pause on someone the actor may not (a server manager, staff, a bot). */
+  | "protected"
+  /** Pausing or lifting a pause on yourself. */
+  | "self";
 
 /** The configuration a setup failure is missing. */
 export type SetupPiece =
@@ -216,6 +222,10 @@ export type FailureDetail =
       readonly scope: ForbiddenScope;
       /** The TaruBot permission that refused (2.44.0), when a permission check did. */
       readonly permission?: PermissionId;
+      /** For `blocked`: when the pause ends, or absent when it lasts until someone lifts it. */
+      readonly until?: Date;
+      /** For `blocked`: the reason the person is shown (owner decision Q5 A); never who set it. */
+      readonly reason?: string;
     }
   | { readonly kind: "setup"; readonly missing: SetupPiece }
   | {

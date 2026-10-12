@@ -31,9 +31,12 @@ import {
   authorize,
   can,
   isStaff,
+  pauseOn,
+  requireNotPaused,
   requirePermission,
   selfServiceAccess,
   type Actor,
+  type Pause,
 } from "../domain/policy.js";
 import {
   accessLossRemovals,
@@ -365,6 +368,11 @@ export interface MyRoles {
   readonly effectsMode: EffectsMode;
   /** In a Discord time-out: may look, but the form is disabled until it ends. */
   readonly timedOut: boolean;
+  /**
+   * The person's use of My roles is paused (2.45.0): the page opens, shows when it ends and why,
+   * and Save is off, as in a time-out. Null when it isn't.
+   */
+  readonly paused: Pause | null;
   /** A save can be accepted now: configured, live, not timed out, and the view was read. */
   readonly canSave: boolean;
   /**
@@ -808,6 +816,7 @@ export class SelfRoles {
         : [];
     const effectsMode = this.app.effectsMode(guild ?? { effects_enabled: false });
     const timedOut = actor.timedOut === true;
+    const paused = pauseOn(actor, "selfroles.use") ?? null;
     return {
       guildId,
       configured: guild !== undefined,
@@ -818,7 +827,13 @@ export class SelfRoles {
       status: latest ? choiceStatus(latest) : null,
       effectsMode,
       timedOut,
-      canSave: guild !== undefined && snapshot !== null && effectsMode === "live" && !timedOut,
+      paused,
+      canSave:
+        guild !== undefined &&
+        snapshot !== null &&
+        effectsMode === "live" &&
+        !timedOut &&
+        paused === null,
       administrator: isStaff(actor) && snapshot ? holdsAdministrator(snapshot) : null,
       roleNames: menuRoleNames(stored.menu, snapshot),
     };
@@ -834,6 +849,8 @@ export class SelfRoles {
   async choose(actor: Actor, request: RoleChoiceRequest): Promise<RoleChoiceOutcome> {
     authorize(actor, actor.guildId);
     if (!selfServiceAccess(actor)) throw noAccess();
+    // A pause (2.45.0) keeps the page open and refuses the save, as a Discord time-out does.
+    requireNotPaused(actor, "selfroles.use");
     // Discord blocks reactions during a time-out too, so this matches Dyno (owner decision Q6).
     if (actor.timedOut === true) throw new Failure("forbidden", CHOICE_MESSAGES.timedOut);
     if (this.isStopping()) throw stoppingRefusal();

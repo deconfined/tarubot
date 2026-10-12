@@ -1,11 +1,16 @@
 /**
  * TaruBot's permission catalog (2.44.0, RBAC): the catalog's shape, the pinned id list (stored
- * sets and blocks name these ids from 2.45.0, so one is never renamed or reused), the code
- * templates and the tier rule they obey, and the module declaration check.
+ * sets and pauses name these ids from 2.45.0, so one is never renamed or reused), the code
+ * templates and the tier rule they obey, the module declaration check, and what a pause may name
+ * (2.45.0: BLOCKABLE and MANAGER_ONLY_BLOCKS).
  */
 import { describe, expect, test } from "bun:test";
+import { featuresMatchCatalog, PAUSE_FEATURE_IDS } from "../../src/domain/moderation.js";
 import {
+  BLOCKABLE,
+  isBlockable,
   isPermissionId,
+  MANAGER_ONLY_BLOCKS,
   type ManagedRole,
   modulePermissions,
   PERMISSION_AREAS,
@@ -77,6 +82,8 @@ describe("the catalog", () => {
       "rolemenu.view": "staff",
       "rolemenu.edit": "staff",
       "rolemenu.publish": "staff",
+      "moderation.view": "staff",
+      "moderation.block": "staff",
       "selfroles.use": "member",
       "suggest.use": "member",
       "issue.use": "baseline",
@@ -86,6 +93,44 @@ describe("the catalog", () => {
     );
     // toEqual ignores key order; the catalog order is the dashboard's, so pin it too.
     expect([...PERMISSION_IDS]).toEqual(Object.keys(pinned) as PermissionId[]);
+  });
+
+  test("the areas and their order are pinned, and every area holds a permission", () => {
+    // The dashboard groups by area in this order; Moderation (2.45.0) sits before Member features.
+    expect([...PERMISSION_AREAS]).toEqual([
+      "Server setup",
+      "Configuration",
+      "Members",
+      "Roster",
+      "Guests",
+      "Ledger",
+      "Mod mail",
+      "Role menu",
+      "Moderation",
+      "Member features",
+    ]);
+    for (const area of PERMISSION_AREAS)
+      expect(PERMISSION_IDS.some((id) => PERMISSIONS[id].area === area)).toBe(true);
+  });
+
+  test("moderation.view and moderation.block are staff permissions in the Moderation area (2.45.0)", () => {
+    expect(permission("moderation.view")).toMatchObject({
+      area: "Moderation",
+      kind: "read",
+      tier: "staff",
+    });
+    expect(permission("moderation.block")).toMatchObject({
+      area: "Moderation",
+      kind: "write",
+      tier: "staff",
+    });
+    expect(PERMISSION_IDS.filter((id) => PERMISSIONS[id].area === "Moderation")).toEqual([
+      "moderation.view",
+      "moderation.block",
+    ]);
+    // Neither is member-side: a manager holds both implicitly.
+    expect("memberSide" in permission("moderation.view")).toBe(false);
+    expect("memberSide" in permission("moderation.block")).toBe(false);
   });
 
   test("only /suggest and opening mod mail are member-side", () => {
@@ -170,6 +215,8 @@ describe("roles and templates (owner decision 1)", () => {
         "rolemenu.view",
         "rolemenu.edit",
         "rolemenu.publish",
+        "moderation.view",
+        "moderation.block",
         "ledger.view",
         "ledger.deposit",
         "selfroles.use",
@@ -209,6 +256,57 @@ describe("roles and templates (owner decision 1)", () => {
     ]);
     for (const id of TEMPLATES_V1.guest) expect(TEMPLATES_V1.member).toContain(id);
     expect(TEMPLATES_V1.leader).toEqual([]);
+  });
+});
+
+describe("what a pause may name (BLOCKABLE, 2.45.0)", () => {
+  test("it is exactly the member and baseline permissions, in catalog order", () => {
+    expect([...BLOCKABLE]).toEqual([
+      "characters.claim",
+      "roster.refresh",
+      "guests.apply",
+      "ledger.view",
+      "ledger.deposit",
+      "modmail.open",
+      "selfroles.use",
+      "suggest.use",
+      "issue.use",
+    ]);
+    // The list above is the pin; this is the rule that produces it.
+    expect([...BLOCKABLE]).toEqual(
+      PERMISSION_IDS.filter((id) => ["member", "baseline"].includes(PERMISSIONS[id].tier)),
+    );
+    expect(Object.isFrozen(BLOCKABLE)).toBe(true);
+    expect(new Set(BLOCKABLE).size).toBe(BLOCKABLE.length);
+  });
+
+  test("isBlockable agrees for every id, and no staff or fixed permission can be paused", () => {
+    for (const id of PERMISSION_IDS) expect(isBlockable(id)).toBe(BLOCKABLE.includes(id));
+    for (const id of [...permissionsOfTier("fixed"), ...permissionsOfTier("staff")])
+      expect(isBlockable(id)).toBe(false);
+    // Pausing the pausing, or the reading of mod mail cases, is deferred: staff ones aren't offered.
+    expect(isBlockable("moderation.block")).toBe(false);
+    expect(isBlockable("modmail.inbox")).toBe(false);
+  });
+
+  test("the pause features the dashboard and /moderate offer are exactly these, in the same order", () => {
+    expect([...PAUSE_FEATURE_IDS]).toEqual([...BLOCKABLE]);
+    expect(featuresMatchCatalog()).toBe(true);
+  });
+
+  test("only a server manager may pause or lift mod mail opening (owner decision Q6 B)", () => {
+    expect([...MANAGER_ONLY_BLOCKS]).toEqual(["modmail.open"]);
+    for (const id of MANAGER_ONLY_BLOCKS) expect(isBlockable(id)).toBe(true);
+    expect(MANAGER_ONLY_BLOCKS.has("suggest.use")).toBe(false);
+  });
+
+  test("the Officer template carries both moderation permissions, and no other role does", () => {
+    expect(TEMPLATES_V1.officer).toContain("moderation.view");
+    expect(TEMPLATES_V1.officer).toContain("moderation.block");
+    for (const role of ["member", "guest", "leader"] as const) {
+      expect(TEMPLATES_V1[role]).not.toContain("moderation.view");
+      expect(TEMPLATES_V1[role]).not.toContain("moderation.block");
+    }
   });
 });
 

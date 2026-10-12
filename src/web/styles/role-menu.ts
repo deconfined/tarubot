@@ -74,10 +74,15 @@ function anchorPair(name: string): string {
 
 /**
  * The other pages' anchored panels, which share these rules: Mod mail's Open a case (2.43.0,
- * views/modmail.ts), one button on its page. Kept here so every anchoring declaration stays in
- * this stylesheet's one @supports block.
+ * views/modmail.ts) and Moderation's two Pause buttons (2.45.0, views/moderation.ts: the
+ * toolbar's, and the one in the finder's result card), one button each on their pages. Kept here
+ * so every anchoring declaration stays in this stylesheet's one @supports block. Moderation's
+ * Lift panels are not here: a page has as many Lift buttons as pauses, and these pairs are static,
+ * so they open centred.
  */
-const PAGE_ANCHORS = ["modmail-open"].map(anchorPair).join("\n\n");
+const PAGE_ANCHORS = ["modmail-open", "moderation-pause", "moderation-pause-found"]
+  .map(anchorPair)
+  .join("\n\n");
 
 export const ROLE_MENU_CSS = `/* Role menu */
 
@@ -1086,13 +1091,14 @@ main.orr-enter:has(.overlay--open) {
  * screen, so views/role-menu.ts gives it no anchor class, and these rules name only open dialogs and
  * popovers. They override the centred rules above at the same specificity, so they stay after them.
  *
- * Each editor's button is an anchor and its panel points at it (ANCHOR_PAIRS). The panel opens just
- * under the button, a small gap between them, its start edge at the button's, as wide as before; it
- * moves back toward the start only as far as it takes to stay on the screen, clear of the sidebar
- * from 64rem. The area spans the screen's whole width and the start is clamped, rather than an
- * area beside the button that flips to its other side: a panel wider than the room on either side
- * (Edit roles at 48rem on a 768px screen) would then overflow every option, and the browser would
- * fall back to the first one, off the bottom of the screen.
+ * Each editor's button is an anchor and its panel points at it (ANCHOR_PAIRS, and PAGE_ANCHORS for
+ * the other pages' buttons). The panel opens just under the button, a small gap between them, its
+ * start edge at the button's, as wide as before; it moves back toward the start only as far as it
+ * takes to stay on the screen, clear of the sidebar from 64rem. The area spans the screen's whole
+ * width and the start is clamped, rather than an area beside the button that flips to its other
+ * side: a panel wider than the room on either side (Edit roles at 48rem on a 768px screen) would
+ * then overflow every option, and the browser would fall back to the first one, off the bottom of
+ * the screen.
  *
  * When its content doesn't fit under the button it opens above it (flip-block). When it fits on
  * neither side it fills the side with more room, its body scrolling: the capped options' floor,

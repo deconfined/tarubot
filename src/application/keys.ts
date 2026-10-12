@@ -7,6 +7,7 @@ import { GuildEvents } from "./guild-events.js";
 import { IssueReports } from "./issue-reports.js";
 import { ApplicationLifecycle } from "./lifecycle.js";
 import { ModMail } from "./modmail.js";
+import { Moderation } from "./moderation.js";
 import { PublicStatus } from "./public-status.js";
 import { Service } from "./service.js";
 import { Synchronization } from "./synchronization.js";
@@ -85,4 +86,12 @@ export const dashboardKey = new ServiceKey(
 export const modmailKey = new ServiceKey(
   "mod mail",
   (value): value is ModMail => value instanceof ModMail,
+);
+/**
+ * Per-person moderation (2.45.0): `/moderate` sets, lifts and shows pauses through it, and the
+ * Moderation page lists and changes them.
+ */
+export const moderationKey = new ServiceKey(
+  "moderation",
+  (value): value is Moderation => value instanceof Moderation,
 );

@@ -63,6 +63,12 @@ export interface PageContext {
    * postForm puts it in), and server.ts refuses a POST without it before post() runs.
    */
   readonly formToken: string;
+  /**
+   * The session's sign-in is recent enough for a page that declares `recentSignIn` (always true
+   * for other pages' purposes it doesn't matter): a GET shows "sign in again" in place of its
+   * change controls when this is false, since a POST would be sent to /login.
+   */
+  readonly recentSignIn: boolean;
   readonly report: Reporter;
   /** The request reference, for a report's operation. */
   readonly ref: string;
@@ -129,6 +135,14 @@ export interface PageOptions {
    */
   readonly freshActor?: boolean;
   /**
+   * Only with `post` (2.45.0): every POST needs a sign-in within RECENT_SIGN_IN_MS (sessions.ts),
+   * for pages that pause people or lift pauses. A POST from an older session is answered 303 to
+   * /login with this page as the return path, before the form is read further; the page then opens
+   * on a fresh session. The form's text isn't kept (the same accepted loss as a stale form), so
+   * the page's GET says when changes need a new sign-in (PageContext.recentSignIn).
+   */
+  readonly recentSignIn?: boolean;
+  /**
    * Only with `post`: this page's POST body cap in bytes, above WEB_BODY_LIMIT and at most
    * PAGE_BODY_LIMIT_MAX (2.43.0), for a form whose fields the browser lets grow past 64 KiB once
    * urlencoded, so text it allowed comes back as the page's own 422 with the text kept rather than
@@ -157,6 +171,8 @@ export class Page {
   readonly nav: string | undefined;
   readonly navWhen: PageOptions["navWhen"];
   readonly freshActor: boolean;
+  /** POSTs need a recent sign-in (see PageOptions.recentSignIn). */
+  readonly recentSignIn: boolean;
   /** This page's POST body cap in bytes (WEB_BODY_LIMIT unless it declared more). */
   readonly bodyLimit: number;
   readonly icon: IconName | undefined;
@@ -198,6 +214,10 @@ export class Page {
       throw new Error("A page's icon must name one of the icons in icons.ts.");
     if (options.freshActor !== undefined && typeof options.freshActor !== "boolean")
       throw new Error("A page's freshActor must be true or false.");
+    if (options.recentSignIn !== undefined && typeof options.recentSignIn !== "boolean")
+      throw new Error("A page's recentSignIn must be true or false.");
+    if (options.recentSignIn === true && options.post === undefined)
+      throw new Error("A page's recentSignIn needs a post handler.");
     if (
       options.bodyLimit !== undefined &&
       (options.post === undefined ||
@@ -225,6 +245,7 @@ export class Page {
     this.nav = options.nav;
     this.navWhen = options.navWhen;
     this.freshActor = options.freshActor === true;
+    this.recentSignIn = options.recentSignIn === true;
     this.bodyLimit = options.bodyLimit ?? WEB_BODY_LIMIT;
     this.icon = options.icon;
     this.numbered = options.path.endsWith("/:number");

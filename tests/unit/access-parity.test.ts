@@ -10,12 +10,19 @@
  * Rank evidence is an input here, not computed: `officerRoleCounts` is given to both sides, so
  * D1–D3 (which links and roster states make the Officer role count) are tests/unit/ranks.test.ts's
  * subject. memberEligible is an input (`eligible`) for the same reason, which makes D6 visible.
+ *
+ * 2.45.0 (per-person moderation) adds pauses, which 2.43.0 had no notion of. The comparison runs
+ * on people with no pause, so every decision point that gained a pause check (/suggest, mod mail,
+ * My roles, the ledger, the baseline commands) is shown to answer as 2.43.0 did for everyone not
+ * paused; a separate test shows what a pause takes away and what it deliberately leaves open. The
+ * modules and pages 2.45.0 introduced (NEW_IN_2_45_0) have nothing to compare with and are held
+ * to their own stated rules instead, so the inventory check stays exact.
  */
 import { describe, expect, test } from "bun:test";
 import { CONFIG_PERMISSION, LEDGER_PERMISSION } from "../../src/application/service.js";
 import { loadCommands, loadComponents } from "../../src/bot/discovery.js";
 import { type Audience, audienceOf, viewerOf } from "../../src/discord/presenters/audience.js";
-import { mayAccess, mayOpen } from "../../src/domain/modmail.js";
+import { mayAccess, mayUse } from "../../src/domain/modmail.js";
 import {
   type Actor,
   authorize,
@@ -23,15 +30,16 @@ import {
   can,
   isStaff,
   requireAnyPermission,
+  requireNotPaused,
   requirePermission,
   selfServiceAccess,
 } from "../../src/domain/policy.js";
-import type { PermissionId } from "../../src/domain/rbac.js";
+import { PERMISSION_IDS, type PermissionId } from "../../src/domain/rbac.js";
 import { maySuggest } from "../../src/domain/suggestions.js";
 import { Failure } from "../../src/domain/values.js";
 import { admits } from "../../src/web/access.js";
 import { loadPages } from "../../src/web/pages.js";
-import { accessOf } from "../fixtures/actors.js";
+import { type ActorSpec, accessOf } from "../fixtures/actors.js";
 
 // ================================================================================================
 // FROZEN 2.43.0 (origin/main at 174ecd1). Copied verbatim from src/domain/policy.ts,
@@ -203,6 +211,30 @@ const LEGACY_PAGES: Readonly<Record<string, readonly LegacyPageAccess[]>> = {
   "/g/:guild/status": ["officer"],
 };
 
+/**
+ * What 2.45.0 added, which has no 2.43.0 behavior to compare (per-person moderation). Each entry
+ * is the permissions its gate declares. The inventory check is exactly 2.43.0's list plus these,
+ * so a module or page that appears without being named here, or one named here that goes missing,
+ * fails it; the comparison skips them, and "what 2.45.0 added" holds each to its stated rule.
+ */
+const NEW_IN_2_45_0 = {
+  // /moderate's router gate admits any human member of the server: its status subcommand shows
+  // anyone their own pauses. block and lift ask for moderation.block inside the service, and
+  // reading someone else's status for moderation.view.
+  commands: { moderate: [] },
+  components: {},
+  // The Moderation page: moderation.view, which only the Officer role and server managers carry.
+  pages: { "/g/:guild/moderation": ["moderation.view"] },
+} as const satisfies {
+  commands: Readonly<Record<string, readonly PermissionId[]>>;
+  components: Readonly<Record<string, readonly PermissionId[]>>;
+  pages: Readonly<Record<string, readonly PermissionId[]>>;
+};
+
+/** Whether a module or page is one 2.45.0 added. */
+const isNew = (kind: keyof typeof NEW_IN_2_45_0, key: string): boolean =>
+  Object.hasOwn(NEW_IN_2_45_0[kind], key);
+
 /** 2.43.0's Service.configure allowlist (src/application/service.ts), in its order. */
 const LEGACY_CONFIG_FIELDS = [
   "fc_id",
@@ -349,8 +381,11 @@ const legacyNoQ2AActorOf = (person: Person): LegacyActor => ({
   officer: person.officerRoleCounts,
 });
 
-/** 2.44.0's resolved actor, its access from the fixture that mirrors Service.enrichActor. */
-function nextActorOf(person: Person): Actor {
+/**
+ * 2.44.0's resolved actor, its access from the fixture that mirrors Service.enrichActor; with
+ * `paused` (2.45.0), the pauses the resolver would have read for them.
+ */
+function nextActorOf(person: Person, paused?: ActorSpec["paused"]): Actor {
   const spec = {
     guildId: GUILD,
     userId: SELF,
@@ -361,7 +396,10 @@ function nextActorOf(person: Person): Actor {
     guest: person.guest,
     ...administrator(person),
   };
-  return { ...spec, access: accessOf({ ...spec, officer: person.officerRoleCounts }) };
+  return {
+    ...spec,
+    access: accessOf({ ...spec, officer: person.officerRoleCounts, ...(paused && { paused }) }),
+  };
 }
 
 /** Each person with both releases' actors, and 2.43.0's without Q2A's officer, built once. */
@@ -502,6 +540,8 @@ const ledger = (operation: string, id: PermissionId): Decision => ({
     passes(() => {
       if (operation !== "deposit") requirePermission(actor, actor.guildId, id, WITHDRAWALS);
       if (operation === "deposit") {
+        // A pause is reported first, as one (Service.ledger); nobody in this comparison is paused.
+        requireNotPaused(actor, "ledger.deposit");
         if (!can(actor, "ledger.audit") && !facts.eligible) throw membershipNeeded();
         if (!can(actor, "ledger.deposit")) throw memberRoleNeeded("ledger.deposit");
       }
@@ -535,6 +575,7 @@ const ledgerRead = (current: boolean): Decision => ({
           "Only officers can view a previous FC's ledger.",
         );
       if (!can(actor, "ledger.audit")) {
+        requireNotPaused(actor, "ledger.view");
         if (!facts.eligible) throw membershipNeeded();
         if (!can(actor, "ledger.view")) throw memberRoleNeeded("ledger.view");
       }
@@ -628,13 +669,16 @@ const DECISIONS: readonly Decision[] = [
   {
     name: "ModMail.open",
     legacy: (actor) => staticAllows(actor) && legacyMayOpen(actor),
-    next: (actor) => staticAllows(actor) && mayOpen(actor),
+    // ModMail.open: the pause first, then the static checks on what is held (mayUse).
+    next: (actor) =>
+      passes(() => requireNotPaused(actor, "modmail.open")) && staticAllows(actor) && mayUse(actor),
   },
   officerLevel("ModMail.inbox", "modmail.inbox"),
   {
     name: "ModMail.mine",
     legacy: (actor) => legacyMayAccess({ ...actor, officer: false }, actor.userId),
-    next: (actor) => mayOpen(actor),
+    // The list needs mod mail held, not usable: a person who can't open cases still lists theirs.
+    next: (actor) => mayUse(actor),
   },
   { name: "ModMail.caseView reaches the case", reads: ["self"], ...reaches },
   {
@@ -674,13 +718,18 @@ const DECISIONS: readonly Decision[] = [
         requirePermission(actor, actor.guildId, "rolemenu.publish");
       }),
   },
-  ...["SelfRoles.view", "SelfRoles.choose"].map(
-    (name): Decision => ({
-      name,
-      legacy: (actor) => legacySelfServiceAccess(actor),
-      next: (actor) => selfServiceAccess(actor),
-    }),
-  ),
+  {
+    name: "SelfRoles.view",
+    legacy: (actor) => legacySelfServiceAccess(actor),
+    next: (actor) => selfServiceAccess(actor),
+  },
+  {
+    name: "SelfRoles.choose",
+    legacy: (actor) => legacySelfServiceAccess(actor),
+    // The A2 gate first, then the pause (a paused person still opens the page, view above).
+    next: (actor) =>
+      selfServiceAccess(actor) && passes(() => requireNotPaused(actor, "selfroles.use")),
+  },
   {
     name: "SelfRoles.view shows drafts and officer notes",
     legacy: (actor) => legacySelfServiceAccess(actor) && actor.officer,
@@ -712,7 +761,8 @@ const DECISIONS: readonly Decision[] = [
   {
     name: "Suggestions.submit",
     legacy: (actor) => legacyMaySuggest(actor, BINDINGS),
-    next: (actor) => maySuggest(actor),
+    // The pause is reported before the membership card (Suggestions.submit).
+    next: (actor) => passes(() => requireNotPaused(actor, "suggest.use")) && maySuggest(actor),
   },
   anyone("IssueReports.report", "issue.use"),
   // src/commands
@@ -781,20 +831,24 @@ async function discovered(): Promise<{
   ]);
   const gate = (name: string) => commands.get(name)?.permissions ?? [];
   const decisions: Decision[] = [
-    ...[...commands].map(
-      ([name, command]): Decision => ({
-        name: `router /${name}`,
-        legacy: (actor) => legacyGate(actor, LEGACY_COMMANDS[name]),
-        next: (actor) => nextGate(actor, command.permissions),
-      }),
-    ),
-    ...[...components].map(
-      ([prefix, component]): Decision => ({
-        name: `router component ${prefix}`,
-        legacy: (actor) => legacyGate(actor, LEGACY_COMPONENTS[prefix]),
-        next: (actor) => nextGate(actor, component.permissions),
-      }),
-    ),
+    ...[...commands]
+      .filter(([name]) => !isNew("commands", name))
+      .map(
+        ([name, command]): Decision => ({
+          name: `router /${name}`,
+          legacy: (actor) => legacyGate(actor, LEGACY_COMMANDS[name]),
+          next: (actor) => nextGate(actor, command.permissions),
+        }),
+      ),
+    ...[...components]
+      .filter(([prefix]) => !isNew("components", prefix))
+      .map(
+        ([prefix, component]): Decision => ({
+          name: `router component ${prefix}`,
+          legacy: (actor) => legacyGate(actor, LEGACY_COMPONENTS[prefix]),
+          next: (actor) => nextGate(actor, component.permissions),
+        }),
+      ),
     {
       // 2.43.0's execute repeated the officer check; 2.44.0's leaves it to the router and services.
       name: "/config (router, then execute)",
@@ -810,15 +864,19 @@ async function discovered(): Promise<{
       legacy: (actor) => legacyGate(actor, LEGACY_COMMANDS.officer),
       next: (actor) => nextGate(actor, gate("officer")),
     },
-    ...[...pages].map(
-      ([path, page]): Decision => ({
-        name: `page ${path}`,
-        legacy: (actor) => legacyAdmits(actor, LEGACY_PAGES[path] ?? []),
-        next: (actor) => admits(actor, page.access),
-      }),
-    ),
+    ...[...pages]
+      .filter(([path]) => !isNew("pages", path))
+      .map(
+        ([path, page]): Decision => ({
+          name: `page ${path}`,
+          legacy: (actor) => legacyAdmits(actor, LEGACY_PAGES[path] ?? []),
+          next: (actor) => admits(actor, page.access),
+        }),
+      ),
     {
       // listServers: a server is listed, and sign-in admitted, when any page admits the person.
+      // Over every page, the new ones included: that is what shows a new page widens nobody's
+      // sign-in beyond what 2.43.0's pages admitted.
       name: "server list and sign-in",
       legacy: (actor) => Object.values(LEGACY_PAGES).some((flags) => legacyAdmits(actor, flags)),
       next: (actor) => [...pages.values()].some((page) => admits(actor, page.access)),
@@ -990,10 +1048,24 @@ function compare(decisions: readonly Decision[], deltas: readonly Delta[] = DELT
 describe("2.43.0 to 2.44.0 access parity", () => {
   test("every module and page 2.43.0 had is compared, and none is left out", async () => {
     const { decisions, commands, components, pages } = await discovered();
-    // A module or page added later has no 2.43.0 behavior to compare; one removed is a change.
-    expect([...commands.keys()].sort()).toEqual(Object.keys(LEGACY_COMMANDS).sort());
-    expect([...components.keys()].sort()).toEqual(Object.keys(LEGACY_COMPONENTS).sort());
-    expect([...pages.keys()].sort()).toEqual(Object.keys(LEGACY_PAGES).sort());
+    // The inventory is exactly 2.43.0's plus what 2.45.0 names as new: a module or page added
+    // without a line in NEW_IN_2_45_0 fails here, and so does one that went missing.
+    expect([...commands.keys()].sort()).toEqual(
+      [...Object.keys(LEGACY_COMMANDS), ...Object.keys(NEW_IN_2_45_0.commands)].sort(),
+    );
+    expect([...components.keys()].sort()).toEqual(
+      [...Object.keys(LEGACY_COMPONENTS), ...Object.keys(NEW_IN_2_45_0.components)].sort(),
+    );
+    expect([...pages.keys()].sort()).toEqual(
+      [...Object.keys(LEGACY_PAGES), ...Object.keys(NEW_IN_2_45_0.pages)].sort(),
+    );
+    // What is new was never in 2.43.0, so none of it hides behind a legacy entry.
+    for (const [legacy, added] of [
+      [LEGACY_COMMANDS, NEW_IN_2_45_0.commands],
+      [LEGACY_COMPONENTS, NEW_IN_2_45_0.components],
+      [LEGACY_PAGES, NEW_IN_2_45_0.pages],
+    ] as const)
+      for (const key of Object.keys(added)) expect(Object.hasOwn(legacy, key)).toBe(false);
     // The configure and ledger decisions come from src's maps, so each must still name them all.
     expect(Object.keys(CONFIG_PERMISSION).sort()).toEqual([...LEGACY_CONFIG_FIELDS].sort());
     expect(Object.keys(LEDGER_PERMISSION).sort()).toEqual([...LEGACY_LEDGER_OPERATIONS].sort());
@@ -1052,5 +1124,142 @@ describe("2.43.0 to 2.44.0 access parity", () => {
     ).toBe(true);
     // Each delta explains only what it names: with none listed, the real decisions all fail.
     expect(compare(DECISIONS, []).unexplained.length).toBeGreaterThan(0);
+  });
+});
+
+describe("2.45.0: what is new, and what a pause takes away", () => {
+  test("/moderate's router gate declares nothing, so it admits every human in the server", async () => {
+    const { commands } = await discovered();
+    const moderate = commands.get("moderate");
+    expect(moderate?.permissions).toEqual(NEW_IN_2_45_0.commands.moderate);
+    // Everyone, the lobby and the unconfigured included: status shows a person their own pauses,
+    // and block and lift check moderation.block in the service, not at the door.
+    for (const { next } of ACTORS) expect(nextGate(next, moderate?.permissions ?? [])).toBe(true);
+    // The server check still comes first.
+    expect(passes(() => requireAnyPermission(ACTORS[0]?.next as Actor, "another-server", []))).toBe(
+      false,
+    );
+  });
+
+  test("the Moderation page admits exactly the holders of moderation.view, and no one 2.43.0 kept out of every page", async () => {
+    const { pages } = await discovered();
+    const page = pages.get("/g/:guild/moderation");
+    if (!page) throw new Error("The Moderation page is not discovered");
+    expect(page.access).toEqual(NEW_IN_2_45_0.pages["/g/:guild/moderation"]);
+    let admitted = 0;
+    for (const { person, legacy, next } of ACTORS) {
+      // moderation.view is in the Officer template and a server manager holds every permission;
+      // Manage Server alone grants nothing (Q2 A), and a Member, Guest or lobby visitor holds none.
+      const holder = isManager(person) || person.officerRoleCounts;
+      expect(can(next, "moderation.view")).toBe(holder);
+      expect(admits(next, page.access)).toBe(holder);
+      if (!holder) continue;
+      admitted += 1;
+      // A holder was an officer in 2.43.0 (or a manager, one of them), so already had a page.
+      expect(Object.values(LEGACY_PAGES).some((flags) => legacyAdmits(legacy, flags))).toBe(true);
+    }
+    expect(admitted).toBeGreaterThan(0);
+  });
+
+  /**
+   * The decisions a pause on a feature refuses: the writes. `bites` says when the pause matters at
+   * all; the ledger's read skips it for anyone who may audit it (ledger.audit), as the service does.
+   */
+  const REFUSED_WHILE_PAUSED: readonly {
+    readonly decision: string;
+    readonly feature: PermissionId;
+    readonly bites?: (actor: Actor) => boolean;
+  }[] = [
+    { decision: "Suggestions.submit", feature: "suggest.use" },
+    { decision: "Service.claim", feature: "characters.claim" },
+    { decision: "Service.verify", feature: "characters.claim" },
+    { decision: "Service.apply", feature: "guests.apply" },
+    { decision: "Synchronization.refresh", feature: "roster.refresh" },
+    { decision: "IssueReports.report", feature: "issue.use" },
+    { decision: "ModMail.open", feature: "modmail.open" },
+    { decision: "SelfRoles.choose", feature: "selfroles.use" },
+    { decision: "Service.ledger(deposit)", feature: "ledger.deposit" },
+    {
+      decision: "Service.ledgerRead(current FC)",
+      feature: "ledger.view",
+      bites: (actor) => !can(actor, "ledger.audit"),
+    },
+  ];
+
+  /**
+   * The decisions a pause leaves open, because they read what the person holds: the pages they
+   * still open, and the records they already have.
+   */
+  const OPEN_WHILE_PAUSED: readonly {
+    readonly decision: string;
+    readonly features: readonly PermissionId[];
+  }[] = [
+    { decision: "SelfRoles.view", features: ["selfroles.use"] },
+    { decision: "page /g/:guild/my-roles", features: ["selfroles.use"] },
+    { decision: "ModMail.mine", features: ["modmail.open"] },
+    { decision: "ModMail.caseView reaches the case", features: ["modmail.open"] },
+    { decision: "ModMail.caseView audience", features: ["modmail.open"] },
+    { decision: "ModMail.reply", features: ["modmail.open"] },
+    { decision: "ModMail.close", features: ["modmail.open"] },
+    { decision: "page /g/:guild/modmail", features: ["modmail.open"] },
+    { decision: "page /g/:guild/modmail/:number", features: ["modmail.open"] },
+    // Sign-in and the server list ask whether any page admits the person.
+    { decision: "server list and sign-in", features: ["selfroles.use", "modmail.open"] },
+  ];
+
+  const pausedOn = (features: readonly PermissionId[]) =>
+    Object.fromEntries(features.map((feature) => [feature, { reason: "Paused." }]));
+
+  test("a pause refuses the write it names, for exactly the people it can apply to", async () => {
+    const { decisions } = await discovered();
+    const byName = new Map([...DECISIONS, ...decisions].map((d) => [d.name, d]));
+    for (const { decision: name, feature, bites = () => true } of REFUSED_WHILE_PAUSED) {
+      const decision = byName.get(name);
+      if (!decision) throw new Error(`No decision named ${name}`);
+      let refused = 0;
+      for (const facts of situations(decision.reads ?? []))
+        for (const { person, next: unpaused } of ACTORS) {
+          if (!possible(person, facts)) continue;
+          const paused = nextActorOf(person, pausedOn([feature]));
+          const was = decision.next(unpaused, facts);
+          const now = decision.next(paused, facts);
+          // A pause applies to someone who holds the feature and is no server manager.
+          if (paused.access.blocked.has(feature) && bites(paused)) {
+            expect({ name, now }).toEqual({ name, now: false });
+            if (was === true) refused += 1;
+          } else expect({ name, now }).toEqual({ name, now: was });
+        }
+      // Not vacuous: somebody could use the feature, and was refused for the pause.
+      expect({ name, refused: refused > 0 }).toEqual({ name, refused: true });
+    }
+  });
+
+  test("a pause leaves the pages and records the person already has open", async () => {
+    const { decisions } = await discovered();
+    const byName = new Map([...DECISIONS, ...decisions].map((d) => [d.name, d]));
+    for (const { decision: name, features } of OPEN_WHILE_PAUSED) {
+      const decision = byName.get(name);
+      if (!decision) throw new Error(`No decision named ${name}`);
+      let kept = 0;
+      for (const facts of situations(decision.reads ?? []))
+        for (const { person, next: unpaused } of ACTORS) {
+          if (!possible(person, facts)) continue;
+          const paused = nextActorOf(person, pausedOn(features));
+          const was = decision.next(unpaused, facts);
+          expect({ name, now: decision.next(paused, facts) }).toEqual({ name, now: was });
+          if (features.some((feature) => paused.access.blocked.has(feature)) && was) kept += 1;
+        }
+      // Not vacuous: somebody was paused and still got through.
+      expect({ name, kept: kept > 0 }).toEqual({ name, kept: true });
+    }
+  });
+
+  test("a server manager is never paused, whatever is stored for them", () => {
+    const everything = pausedOn(PERMISSION_IDS);
+    for (const { person } of ACTORS.filter(({ person }) => isManager(person))) {
+      const paused = nextActorOf(person, everything);
+      expect(paused.access.blocked.size).toBe(0);
+      expect(paused.access.permissions).toEqual(nextActorOf(person).access.permissions);
+    }
   });
 });

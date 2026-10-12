@@ -7,7 +7,7 @@ sidebar:
 
 TaruBot keeps an exact record of the gil in the Free Company chest. People record what they put in and take out; TaruBot doesn't read the chest itself. Every entry is permanent and numbered, and each one is posted to the server's ledger channel.
 
-The ledger is for **confirmed FC members**: you need the server's Member role and a linked character that an accepted roster lists in the FC. TaruBot gives you the Member role after a roster check confirms that character. Officers can always use it.
+The ledger is for **confirmed FC members**: you need the server's Member role and a linked character that an accepted roster lists in the FC. TaruBot gives you the Member role after a roster check confirms that character. Officers can use it without a linked character, unless a server manager has paused their reading or deposits: a pause stops officers too.
 
 ## Record a deposit
 
@@ -46,3 +46,4 @@ Entries can't be edited or deleted. If an entry is wrong, tell an officer: they 
 - **"FC membership needed."** No linked character of yours is confirmed in the FC yet. [Link your character](/tarubot/use/link-a-character/), and wait for the next roster check if you just joined.
 - **"Ledger isn't set up."** The officers haven't linked the FC or chosen a ledger channel yet.
 - **"Opening balance not set."** An officer has to record the chest's starting balance first.
+- **"Paused for you."** Your reading of the ledger, or your recording of deposits, has been paused for a while, by an officer or, if you are an officer yourself, by a server manager. Officers are stopped too. The card says which, until when and why. See [If your use of a feature is paused](/tarubot/use/progress-and-problems/#if-your-use-of-a-feature-is-paused).

@@ -31,7 +31,26 @@ export interface Access {
    * hand alone counts for nothing.
    */
   readonly roles: readonly ManagedRole[];
+  /**
+   * The permissions the person holds, before any pause. can() is the question a write asks; holds()
+   * is the one that decides whether a page or a person's own record stays open: a member whose
+   * mod mail is paused still reads and answers the cases they already have, and one whose My roles
+   * is paused still opens the page.
+   */
   readonly permissions: ReadonlySet<PermissionId>;
+  /**
+   * Active pauses on this person's use of a feature (2.45.0). Deny-only: a pause removes a held
+   * permission from can() and adds nothing. Empty for server managers, who can't be paused, and
+   * for an actor that skipped resolution.
+   */
+  readonly blocked: ReadonlyMap<PermissionId, Pause>;
+}
+
+/** One active pause, as the paused person is shown it (owner decision Q5 A: never who set it). */
+export interface Pause {
+  /** When it ends, on the database clock; null lasts until someone lifts it. */
+  readonly until: Date | null;
+  readonly reason: string;
 }
 
 /**
@@ -48,14 +67,22 @@ export const NO_ACCESS: Access = accessFor(false, []);
  * Managers add every permission except the member-side ones (/suggest, opening mod mail), which
  * follow their own Member or Guest role, as in 2.43.0.
  */
-export function accessFor(manager: boolean, roles: Iterable<ManagedRole>): Access {
+export function accessFor(
+  manager: boolean,
+  roles: Iterable<ManagedRole>,
+  pauses: ReadonlyMap<PermissionId, Pause> = new Map(),
+): Access {
   const held = [...new Set(roles)];
   const permissions = new Set<PermissionId>(permissionsOfTier("baseline"));
   for (const role of held)
     for (const id of TEMPLATES_V1[role])
       if (ROLE_TIERS[role].includes(PERMISSIONS[id].tier)) permissions.add(id);
   if (manager) for (const id of PERMISSION_IDS) if (!permission(id).memberSide) permissions.add(id);
-  return { manager, roles: held, permissions };
+  // A server manager can't be paused, whatever is stored, and a pause on a permission the person
+  // doesn't hold removes nothing, so only held, non-manager pauses are kept.
+  const blocked = new Map<PermissionId, Pause>();
+  if (!manager) for (const [id, pause] of pauses) if (permissions.has(id)) blocked.set(id, pause);
+  return { manager, roles: held, permissions, blocked };
 }
 
 /**
@@ -104,9 +131,42 @@ export interface Actor {
  */
 export type ActorResolution = "light" | "full";
 
-/** Whether the actor holds a permission here. The one decision every gated function asks. */
+/**
+ * Whether the actor may use a permission now: held and not paused. The one decision every gated
+ * write asks.
+ */
 export const can = (actor: Pick<Actor, "access">, id: PermissionId): boolean =>
+  actor.access.permissions.has(id) && !actor.access.blocked.has(id);
+
+/** Whether the actor holds a permission, a pause aside (see Access.permissions). */
+export const holds = (actor: Pick<Actor, "access">, id: PermissionId): boolean =>
   actor.access.permissions.has(id);
+
+/** The actor's active pause on a permission, if any. */
+export const pauseOn = (actor: Pick<Actor, "access">, id: PermissionId): Pause | undefined =>
+  actor.access.blocked.get(id);
+
+/**
+ * The refusal for a paused feature (2.45.0). It names the permission, the end time and the reason
+ * the person is shown, so the reply never matches on text; it is never mistaken for a missing
+ * role. Sites that decide with can() directly call this first, before their own refusal and
+ * before any external request.
+ */
+export function pausedFailure(id: PermissionId, pause: Pause): Failure {
+  return new Failure("forbidden", "Your use of this feature here is paused.", 0, {
+    kind: "scope",
+    scope: "blocked",
+    permission: id,
+    ...(pause.until && { until: pause.until }),
+    reason: pause.reason,
+  });
+}
+
+/** Throw the pause refusal when the actor's use of `id` is paused. */
+export function requireNotPaused(actor: Pick<Actor, "access">, id: PermissionId): void {
+  const pause = pauseOn(actor, id);
+  if (pause) throw pausedFailure(id, pause);
+}
 
 /**
  * Holds any staff or fixed permission: an officer in the replies' wording (audienceOf), and the
@@ -126,7 +186,7 @@ const STAFF_TIERS: ReadonlySet<string> = new Set(["staff", "fixed"]);
  * admission and the application operation that reauthorizes the save, so the two can't disagree.
  */
 export const selfServiceAccess = (actor: Actor): boolean =>
-  can(actor, "selfroles.use") && (isStaff(actor) || actor.botAdministrator === false);
+  holds(actor, "selfroles.use") && (isStaff(actor) || actor.botAdministrator === false);
 
 /**
  * The fixed-permission refusal. It carries scope 'manager', so the reply names the missing Discord
@@ -183,6 +243,8 @@ export function requirePermission(
   message?: string,
 ): void {
   authorize(actor, guildId);
+  // A pause is reported as one, ahead of any missing-permission card.
+  requireNotPaused(actor, id);
   if (can(actor, id)) return;
   const tier = PERMISSIONS[id].tier;
   if (tier === "fixed")

@@ -60,6 +60,8 @@ TaruBot keeps what it needs to decide access and keep the ledger exact:
 
 Your Lodestone token is never stored; only a one-way fingerprint of it is. A guest application's answers go to the officers' review channel, never to a public reply. TaruBot keeps no record of which roles you [pick for yourself](/tarubot/use/pick-your-roles/#your-privacy): Discord holds them.
 
+If an officer [pauses your use of a feature](/tarubot/use/progress-and-problems/#if-your-use-of-a-feature-is-paused), TaruBot keeps a record of it, with the reason you were shown; you can read your own pauses with [`/moderate status`](/tarubot/reference/commands/#moderate-status).
+
 `/issue` sends a report to the people who run this TaruBot deployment. It includes your description, your Discord username and ID, your linked characters and settings in this server, your recent TaruBot activity, and the bot's health. Known secrets are removed first. See [Progress and problems](/tarubot/use/progress-and-problems/#report-a-problem).
 
 `/suggest` posts an idea publicly on GitHub, in the FC's own server. Only your cleaned text and TaruBot's version are posted, never your name, your characters or anything about the server. See [Suggest a feature](/tarubot/use/suggest-a-feature/#what-goes-public).

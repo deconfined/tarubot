@@ -1,9 +1,9 @@
 /**
  * The reply catalog: one case per reply state, rendered from typed sample results. Each group
- * (characters, ledger, configuration, guests, sync and utilities, posts, setup) exports its catalog as
- * `satisfies ReplyCatalog<GroupReplyKind>` from a sibling module and adds it to CATALOGS, so a new
- * reply kind cannot ship without a case, and reply-consistency.test compares concepts across
- * groups. The timestamp flag of each case comes from its approved card.
+ * (characters, ledger, configuration, guests, sync and utilities, posts, setup, moderation)
+ * exports its catalog as `satisfies ReplyCatalog<GroupReplyKind>` from a sibling module and adds it
+ * to CATALOGS, so a new reply kind cannot ship without a case, and reply-consistency.test compares
+ * concepts across groups. The timestamp flag of each case comes from its approved card.
  */
 import { describe, test } from "bun:test";
 import type { Audience } from "../../../src/discord/presenters/audience.js";
@@ -15,6 +15,7 @@ import { CONFIG_CASES } from "./configuration.js";
 import { FAILURE_CASES } from "./failures.js";
 import { GUEST_CASES } from "./guests.js";
 import { LEDGER_CASES } from "./ledger.js";
+import { MODERATION_CASES } from "./moderation.js";
 import { POST_CASES } from "./posts.js";
 import { SETUP_CASES } from "./setup.js";
 import { SYNC_CASES, UTILITY_CASES, VERSION_CASES } from "./sync-utility.js";
@@ -73,6 +74,8 @@ export const CATALOGS: Readonly<Record<string, ReplyCatalog<string>>> = {
   posts: POST_CASES,
   // 2.35.0 (#46): /setup onboarding's dry run and /setup overrides.
   setup: SETUP_CASES,
+  // 2.45.0: /moderate block, lift and status (per-person moderation).
+  moderation: MODERATION_CASES,
 };
 
 /**
