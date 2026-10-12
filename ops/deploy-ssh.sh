@@ -66,7 +66,7 @@ reason_value() {
     restore:outcome) allowed='^(restored|skipped|failed)$' ;;
     restore:cause) allowed='^(writers-unconfirmed|no-kit|candidate-started|deadline|schema-ahead|db-unknown)$' ;;
     # The restore's own steps and the observation checks it can fail at, never free text.
-    restore:check) allowed='^(restore-probe|restore-register|restore-up|restore-proxy|gone|inspect|not-running|container-restarted|image-identity|labels|health|identity|schema-checksum|readiness|probe|proxy-inspect|proxy-not-running|proxy-health|proxy-restart-policy)$' ;;
+    restore:check) allowed='^(restore-probe|restore-register|restore-up|restore-record|restore-proxy|gone|inspect|not-running|container-restarted|image-identity|labels|health|identity|schema-checksum|readiness|probe|proxy-inspect|proxy-not-running|proxy-health|proxy-restart-policy)$' ;;
     restore:proxy) allowed='^failed$' ;;
     commands:state) allowed='^unknown$' ;;
     candidate:part) allowed='^(identity|config|modules|registration)$' ;;

@@ -5,6 +5,11 @@ record() { printf '%s\n' "$*" >>"$SIM/events"; }
 fail() { [[ ! -e $SIM/fail-$1 ]]; }
 case $1 in
   ps)
+    # Stopped one-off containers a killed `compose run` left behind: whatever oneoffs lists.
+    if [[ $* == *'oneoff=True'* ]]; then
+      if [[ -f $SIM/oneoffs ]]; then cat "$SIM/oneoffs"; fi
+      exit 0
+    fi
     file=$SIM/container.json
     if [[ $* == *'service=caddy'* ]]; then file=$SIM/proxy.json; fi
     # The bot container vanishes once observation has begun.
@@ -34,6 +39,11 @@ case $1 in
     elif [[ $key == target && -e $SIM/fail-digest ]]; then
       jq '.[0].RepoDigests = []' "$SIM/image.json"
     else cat "$SIM/image.json"; fi
+    ;;
+  rm)
+    record reap
+    fail reap
+    : >"$SIM/oneoffs"
     ;;
   pull) record "pull $2"; fail pull ;;
   update)
@@ -73,7 +83,7 @@ case $1 in
       # The release that owns the container being observed: the restored previous one answers as
       # the live release, with its own events and knobs.
       release=target observed=observe probe=probe
-      if [[ $2 == c0ffee000003 ]]; then release=live observed=restore-observe probe=restore-probe; fi
+      if [[ $2 == c0ffee000003 ]]; then release=live observed=restore-observe probe=restore-observe; fi
       record "$observed"
       touch "$SIM/observed"
       [[ ${*: -2:1} == $(jq -r ".$release.version" "$SIM/config.json") && ${*: -1} == 001_initial.sql ]]
@@ -207,6 +217,11 @@ case $1 in
             ;;
           *backup)
             record backup
+            # hold-backup: block here, mid-backup, until the test removes the file (to signal the entry).
+            if [[ -e $SIM/hold-backup ]]; then
+              touch "$SIM/backup-held"
+              while [[ -e $SIM/hold-backup ]]; do /bin/sleep 0.05; done
+            fi
             fail backup
             printf 'database-plaintext-marker'; printf '%8192s' padding
             ;;
@@ -214,6 +229,10 @@ case $1 in
             [[ $* == *'--pull never'* ]]
             record migrate
             if [[ -e $SIM/fail-migrate && -f $SIM/migrate-output ]]; then cat "$SIM/migrate-output" >&2; fi
+            # migrate-commits: the transaction committed although the run failed (a lost acknowledgement),
+            # so the previous image's schema check now refuses the database; migrate-unknown: it can't tell.
+            if [[ -e $SIM/migrate-commits ]]; then printf 'ahead\n' >"$SIM/probe-state"; fi
+            if [[ -e $SIM/migrate-unknown ]]; then printf 'unknown\n' >"$SIM/probe-state"; fi
             fail migrate
             printf '%s\n' 'Schema ready.'
             ;;

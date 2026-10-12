@@ -25,6 +25,7 @@ readonly DEPLOY_TARGET=$1 VERSION=${BASH_REMATCH[2]} COMMIT=${BASH_REMATCH[6]}
 readonly DIGEST=${BASH_REMATCH[7]} RUN=${BASH_REMATCH[8]}
 readonly IMAGE=ghcr.io/deconfined/tarubot
 readonly ROOT=$HOME/tarubot STATE=$HOME/.local/state/tarubot-deploy
+readonly RESTORE_CHECK_FILE=$STATE/restore-check
 readonly WORKTREE=$STATE/releases/$RUN-$COMMIT
 readonly REF=$IMAGE@$DIGEST
 readonly ENTRY=${BASH_SOURCE[0]}
@@ -51,6 +52,21 @@ LOG_MARK=0
 READINESS=''
 REASON=''
 REASONS=()
+# Failure-safe delivery (2026-10-12, issue 115). PREV_* describe the release a failed delivery can
+# restore, captured by the restore kit before the writer boundary; REGISTER_ATTEMPTED and
+# CANDIDATE_CREATED say how far the delivery got, which is what the restore must undo or refuse.
+PREV_KIT=false
+PREV_DIGEST=''
+PREV_WORKTREE=''
+PREV_REF=''
+PREV_SCHEMA=''
+REGISTER_ATTEMPTED=false
+CANDIDATE_CREATED=false
+FENCE=unknown
+PROBE_STATE=none
+RESTORE_CAUSE=''
+RESTORE_CHECK=''
+RESTORE_DEADLINE=0
 # The only shape a diagnostic may take on the public channel; ops/deploy-ssh.sh enforces it again.
 # `reason <kind>` then key=value pairs: bare values from a small set, quoted text in printable
 # ASCII without quotes, %, #, backticks, @, $ or brackets, and never `::`, so a relayed line can't
@@ -77,11 +93,17 @@ refuse() {
   printf '%s\n' 'result refused' >&3
   exit 1
 }
-compose() {
-  TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_RESTART_POLICY=no timeout --kill-after=10 300 docker compose \
-    --project-name tarubot --project-directory "$WORKTREE" --env-file "$ROOT/.env" \
-    -f "$WORKTREE/docker-compose.$DEPLOY_TARGET.yml" "$@"
+# <image digest> <release worktree> <restart policy> <compose arguments...>. COMPOSE_TIMEOUT
+# (default 300 seconds) bounds the call; a restore sets it to what is left of its deadline.
+compose_at() {
+  local digest=$1 worktree=$2 policy=$3
+  shift 3
+  TARUBOT_IMAGE_DIGEST=$digest TARUBOT_RESTART_POLICY=$policy \
+    timeout --kill-after=10 "${COMPOSE_TIMEOUT:-300}" docker compose \
+    --project-name tarubot --project-directory "$worktree" --env-file "$ROOT/.env" \
+    -f "$worktree/docker-compose.$DEPLOY_TARGET.yml" "$@"
 }
+compose() { compose_at "$DIGEST" "$WORKTREE" no "$@"; }
 bot_ids() {
   timeout --kill-after=5 30 docker ps -aq \
     --filter label=com.docker.compose.project=tarubot \
@@ -291,29 +313,158 @@ diagnose() {
   fi
   return 0
 }
+# Seconds a restore step may take: the most it needs, or what is left of its 20 minutes.
+restore_seconds() {
+  local left=$((RESTORE_DEADLINE - SECONDS))
+  if (( left < 1 )); then return 1; fi
+  if (( left > $1 )); then left=$1; fi
+  printf '%s\n' "$left"
+}
+# The durable record of how the last delivery past the writer boundary ended (<result>), written
+# before a rollback clears `pending`: a restored host has no marker, and the next run, or the
+# owner, still learns what happened and how far the schema got.
+last_run() {
+  local at
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || at=unknown
+  jq -n --arg run "$RUN" --arg result "$1" --arg step "$step" --arg check "${2:-}" \
+    --arg fence "$FENCE" --arg head "${PROBE_STATE:-none}" --arg at "$at" \
+    '{run:$run,result:$result,step:$step,check:$check,fence:$fence,head:$head,at:$at}' \
+    >"$STATE/last-run.tmp" &&
+    sync -f "$STATE/last-run.tmp" &&
+    mv "$STATE/last-run.tmp" "$STATE/last-run" &&
+    sync -f "$STATE"
+}
+# Restore the release `current` records after a failure past the writer boundary, once every writer
+# is confirmed stopped. Returns 0 when it runs again, observed, armed and recorded; 1 when the
+# restore itself failed (RESTORE_CHECK names where); 2 when it was not attempted or could not be
+# (RESTORE_CAUSE says why). finish calls it only as `set +e; restore_previous; rrc=$?; set -e`:
+# under `if` or `||` Bash turns errexit off inside the body and in any `( set -e )` it starts, so a
+# failed observation would read as success. Errexit is off here for the same reason, so every
+# command that can fail ends in `|| return`.
+restore_previous() {
+  local t ids status output state snapshot sample
+  local -a containers args
+  RESTORE_DEADLINE=$((SECONDS + 1200))
+  # Stopped one-offs a killed `compose run` left behind would fail the next delivery's preflight
+  # (exactly one bot container) and are not the service the restore recreates.
+  t=$(restore_seconds 60) || { RESTORE_CAUSE=deadline; return 2; }
+  ids=$(timeout --kill-after=5 "$t" docker ps -aq \
+    --filter label=com.docker.compose.project=tarubot \
+    --filter label=com.docker.compose.service=tarubot \
+    --filter label=com.docker.compose.oneoff=True) || { RESTORE_CHECK=restore-up; return 1; }
+  if [[ -n $ids ]]; then
+    mapfile -t containers <<<"$ids"
+    timeout --kill-after=5 "$t" docker rm "${containers[@]}" || { RESTORE_CHECK=restore-up; return 1; }
+  fi
+  # The database decides, never the failed step's name: the previous image's own startup check.
+  t=$(restore_seconds 120) || { RESTORE_CAUSE=deadline; return 2; }
+  output=$(COMPOSE_TIMEOUT=$t compose_at "$PREV_DIGEST" "$PREV_WORKTREE" no run --rm --no-deps \
+    --pull never -T tarubot bun -e "$RESTORE_PROBE")
+  state=$(jq -r '.state // "unknown"' <<<"${output##*$'\n'}") || state=unknown
+  PROBE_STATE=$state
+  case $state in
+    accept) ;;
+    ahead) RESTORE_CAUSE=schema-ahead; return 2 ;;
+    *) RESTORE_CAUSE=db-unknown; return 2 ;;
+  esac
+  # Discord was written before the database: put the previous release's commands back (the bulk
+  # replace is idempotent). A failure here leaves the service up and says so.
+  if [[ $REGISTER_ATTEMPTED == true ]]; then
+    args=(--global)
+    if [[ $DEPLOY_TARGET != production ]]; then args=(--guild "$REGISTRATION_SCOPE"); fi
+    if t=$(restore_seconds 180); then
+      COMPOSE_TIMEOUT=$t compose_at "$PREV_DIGEST" "$PREV_WORKTREE" no run --rm --no-deps --pull never \
+        -T tarubot bun dist/scripts/register.js "${args[@]}" || held_reason 'commands state=unknown'
+    else
+      held_reason 'commands state=unknown'
+    fi
+  fi
+  # Policy `no` until the restored bot is observed, as for any release: only an observed image may
+  # resume by itself after host loss.
+  t=$(restore_seconds 300) || { RESTORE_CAUSE=deadline; return 2; }
+  COMPOSE_TIMEOUT=$t compose_at "$PREV_DIGEST" "$PREV_WORKTREE" no up --detach --no-deps --no-build \
+    --pull never --force-recreate --wait --wait-timeout 180 tarubot || { RESTORE_CHECK=restore-up; return 1; }
+  CID=$(bot_ids) || { RESTORE_CHECK=restore-up; return 1; }
+  [[ $CID =~ ^[0-9a-f]{12,64}$ ]] || { RESTORE_CHECK=restore-up; return 1; }
+  snapshot=$(timeout --kill-after=5 30 docker inspect "$CID") || { RESTORE_CHECK=restore-up; return 1; }
+  RESTARTS=$(jq -er '.[0].RestartCount' <<<"$snapshot") || { RESTORE_CHECK=restore-up; return 1; }
+  jq -e '.[0].HostConfig.RestartPolicy.Name == "no"' <<<"$snapshot" || { RESTORE_CHECK=restore-up; return 1; }
+  # Sustained readiness, as for any release. The subshell's name for the failing check comes back in
+  # a file; the subshell is a plain command here (never under `if` or `||`) so its errexit holds.
+  rm -f -- "$RESTORE_CHECK_FILE" || { RESTORE_CHECK=restore-up; return 1; }
+  PROXY_CID=''
+  (
+    set -e
+    OBSERVE_CHECK_FILE=$RESTORE_CHECK_FILE
+    observe_release "$LIVE_VERSION" "$LIVE_COMMIT" "$PREV_REF" "$LIVE_ID" "$PREV_SCHEMA"
+    for ((sample=0; sample<3; sample++)); do
+      sleep 10
+      observe_release "$LIVE_VERSION" "$LIVE_COMMIT" "$PREV_REF" "$LIVE_ID" "$PREV_SCHEMA"
+    done
+  )
+  status=$?
+  if (( status != 0 )); then
+    RESTORE_CHECK=$(head -n 1 -- "$RESTORE_CHECK_FILE" 2>/dev/null) || RESTORE_CHECK=''
+    return 1
+  fi
+  # Observed: arm it, record the run, and only then clear `pending` (the last write, as in `record`).
+  timeout --kill-after=5 30 docker update --restart unless-stopped "$CID" || { RESTORE_CHECK=restore-record; return 1; }
+  last_run rolled-back "${FAILED_CHECK:-}" || { RESTORE_CHECK=restore-record; return 1; }
+  rm -f -- "$STATE/pending" || { RESTORE_CHECK=restore-record; return 1; }
+  sync -f "$STATE" || { RESTORE_CHECK=restore-record; return 1; }
+  return 0
+}
 finish() {
-  local code=$?
-  trap - EXIT PIPE
+  local code=$? outcome=needs-owner rrc=0 failed_check
+  trap - EXIT
   # Ignore HUP, INT and TERM from here to the end, as the runner's cleanup does: a dropped session
-  # or a stop request during diagnosis must not end the entry before it fences the writer.
-  trap '' HUP INT TERM
+  # or a stop request during diagnosis must not end the entry before it fences the writer. A closed
+  # SSH channel (PIPE) is ignored too, so a write to it fails (and is skipped) instead of killing
+  # the fence or the restore: the state is made right first and only then reported.
+  trap '' HUP INT TERM PIPE
   if [[ $finished != true ]]; then
     printf 'Failure at %s (status %s)\n' "$step" "$code"
+    failed_check=${FAILED_CHECK:-unlabelled}
     diagnose "$code" || :
     if [[ $boundary == true ]]; then
-      # The schema or Discord registration may already have changed. Never restart
-      # an old writer; also stop a partially started target and migration one-offs.
+      # The schema or Discord registration may already have changed. Never restart an old writer
+      # blindly: stop everything first (also a partially started target and migration one-offs),
+      # then restore the release `current` records only if the database still accepts it.
+      if [[ $PREV_KIT == true && $CANDIDATE_CREATED == true ]]; then
+        held_reason 'restore outcome=skipped cause=candidate-started'
+      fi
       if stop_writers; then
-        held_reason 'fence writers=stopped'
+        FENCE=stopped
       else
         printf '%s\n' 'Owner must confirm that every writer is stopped.'
-        held_reason 'fence writers=unconfirmed'
+        FENCE=unconfirmed
       fi
-      if (( ${#REASONS[@]} > 0 )); then printf '%s\n' "${REASONS[@]}" >&3; fi
-      printf '%s\n' 'result needs-owner' >&3
+      held_reason "fence writers=$FENCE"
+      if [[ $PREV_KIT == true && $CANDIDATE_CREATED == false && $FENCE == stopped ]]; then
+        set +e
+        restore_previous
+        rrc=$?
+        set -e
+        case $rrc in
+          0)
+            outcome=rolled-back
+            held_reason 'restore outcome=restored' ;;
+          2) held_reason "restore outcome=skipped cause=$RESTORE_CAUSE" ;;
+          *)
+            # The restore itself failed: whatever it started is fenced again, last, so the runner
+            # reads the final state of the writers.
+            [[ $RESTORE_CHECK =~ ^[a-z][a-z-]{0,31}$ ]] || RESTORE_CHECK=
+            held_reason "restore outcome=failed${RESTORE_CHECK:+ check=$RESTORE_CHECK}"
+            if stop_writers; then FENCE=stopped; else FENCE=unconfirmed; fi
+            held_reason "fence writers=$FENCE" ;;
+        esac
+      fi
+      if [[ $outcome == needs-owner ]]; then last_run needs-owner "$failed_check" || :; fi
+      if (( ${#REASONS[@]} > 0 )); then printf '%s\n' "${REASONS[@]}" >&3 || :; fi
+      printf '%s\n' "result $outcome" >&3 || :
     else
-      if (( ${#REASONS[@]} > 0 )); then printf '%s\n' "${REASONS[@]}" >&3; fi
-      printf '%s\n' 'result refused' >&3
+      if (( ${#REASONS[@]} > 0 )); then printf '%s\n' "${REASONS[@]}" >&3 || :; fi
+      printf '%s\n' 'result refused' >&3 || :
     fi
     (( code != 0 )) || code=1
   fi
@@ -425,6 +576,29 @@ readonly OBSERVE_CHECK='
   console.log(JSON.stringify(out));
   process.exitCode = out.check === "ok" ? 0 : 1;
 '
+# The previous release's own startup schema check, run read-only in the previous image before a
+# delivery stops anything and again before a restore starts it (marker: restore-probe). It asks the
+# previous image's code, not this entry, whether the database is one that image accepts: `accept`, or
+# `ahead` when its exact-match check refuses (a migration already committed), or `unknown` for
+# anything else. It prints one JSON line with the schema file that image was built with.
+readonly RESTORE_PROBE='
+  // restore-probe
+  const out = {state: "unknown"};
+  try {
+    const postgres = await import("./dist/src/infrastructure/postgres/database.js");
+    out.schema = postgres.SCHEMA_VERSION;
+    const db = new postgres.Database(process.env.DATABASE_URL);
+    try {
+      await db.schema();
+      out.state = "accept";
+    } catch (error) {
+      if (error?.name === "Failure" && error?.code === "schema" &&
+          /^Schema version\/checksum mismatch/.test(error.message)) out.state = "ahead";
+    } finally { await db.close(); }
+  } catch (error) {}
+  console.log(JSON.stringify(out));
+  process.exitCode = out.state === "accept" ? 0 : 1;
+'
 # One ordinary running writer is required. Bootstrap/recovery is owner work.
 FAILED_CHECK='live-writer'
 CID=$(bot_ids)
@@ -521,44 +695,53 @@ CANDIDATE_SCOPE=$(compose run --rm --no-deps --pull never -T tarubot bun -e "$SC
 REGISTRATION_SCOPE=$(jq -er .registrationScope <<<"$CANDIDATE_SCOPE")
 # Each sample checks the same container, unchanged restart counter, local image
 # ID, requested immutable digest, labels, ready writer and actual schema checksum.
-# Each check is named first, so a failure says which one (2026-10-10).
-observe() {
-  local snapshot
-  FAILED_CHECK='gone'
+# Each check is named first, so a failure says which one (2026-10-10). `mark` records the name; a
+# restore's observation runs in a subshell, which can't set FAILED_CHECK for its caller, so it also
+# leaves the name in OBSERVE_CHECK_FILE.
+mark() {
+  FAILED_CHECK=$1
+  if [[ -n ${OBSERVE_CHECK_FILE:-} ]]; then printf '%s\n' "$1" >"$OBSERVE_CHECK_FILE"; fi
+}
+# <version> <commit> <image reference> <local image ID> <schema file>: the release the container
+# CID must be, whether the requested one or the previous one a restore started.
+observe_release() {
+  local version=$1 commit=$2 reference=$3 image_id=$4 schema_file=$5 snapshot
+  mark gone
   [[ $(bot_ids) == "$CID" ]]
-  FAILED_CHECK='inspect'
+  mark inspect
   snapshot=$(timeout --kill-after=5 30 docker inspect "$CID")
   jq -e 'length == 1' <<<"$snapshot"
-  FAILED_CHECK='not-running'
+  mark not-running
   jq -e '.[0].State.Running == true' <<<"$snapshot"
-  FAILED_CHECK='container-restarted'
+  mark container-restarted
   jq -e --argjson restarts "$RESTARTS" '.[0].RestartCount == $restarts' <<<"$snapshot"
-  FAILED_CHECK='image-identity'
-  jq -e --arg id "$TARGET_ID" --arg ref "$REF" '.[0].Image == $id and .[0].Config.Image == $ref' <<<"$snapshot"
-  FAILED_CHECK='labels'
-  jq -e --arg version "$VERSION" --arg commit "$COMMIT" \
+  mark image-identity
+  jq -e --arg id "$image_id" --arg ref "$reference" '.[0].Image == $id and .[0].Config.Image == $ref' <<<"$snapshot"
+  mark labels
+  jq -e --arg version "$version" --arg commit "$commit" \
     '.[0].Config.Labels["org.opencontainers.image.version"] == $version and .[0].Config.Labels["org.opencontainers.image.revision"] == $commit' <<<"$snapshot"
-  FAILED_CHECK='health'
+  mark health
   jq -e '.[0].State.Health.Status == "healthy"' <<<"$snapshot"
   # The probe exits non-zero on any failed check; its last line names which (see diagnose).
-  FAILED_CHECK='probe'
+  mark probe
   READINESS=''
-  READINESS=$(timeout --kill-after=5 45 docker exec "$CID" bun -e "$OBSERVE_CHECK" "$VERSION" "$SCHEMA")
+  READINESS=$(timeout --kill-after=5 45 docker exec "$CID" bun -e "$OBSERVE_CHECK" "$version" "$schema_file")
   jq -e '.check == "ok"' <<<"${READINESS##*$'\n'}"
   if [[ -n ${PROXY_CID:-} ]]; then
-    FAILED_CHECK='proxy-inspect'
+    mark proxy-inspect
     snapshot=$(timeout --kill-after=5 30 docker inspect "$PROXY_CID")
     jq -e 'length == 1' <<<"$snapshot"
-    FAILED_CHECK='proxy-not-running'
+    mark proxy-not-running
     jq -e '.[0].State.Running == true' <<<"$snapshot"
-    FAILED_CHECK='proxy-health'
+    mark proxy-health
     jq -e '.[0].State.Health.Status == "healthy"' <<<"$snapshot"
-    FAILED_CHECK='proxy-restart-policy'
+    mark proxy-restart-policy
     jq -e '.[0].HostConfig.RestartPolicy.Name == "no"' <<<"$snapshot"
   fi
   # Every check passed: a later failure must not be blamed on the last one.
   FAILED_CHECK=''
 }
+observe() { observe_release "$VERSION" "$COMMIT" "$REF" "$TARGET_ID" "$SCHEMA"; }
 if [[ $VERSION == "$LIVE_VERSION" ]]; then
   FAILED_CHECK='live-image-id'
   [[ $TARGET_ID == "$LIVE_ID" ]]
@@ -640,6 +823,25 @@ if [[ $CANDIDATE_CHECK_PRESENT == true ]]; then
 else
   held_reason 'candidate check=absent'
 fi
+# The restore kit (2026-10-12): what a failure after the writer boundary restores the previous release
+# from. A delivery that could not be undone is refused here, before anything stops, so a missing
+# record or a pruned release folder is found while the old bot still runs. It needs `current`, the
+# release it names (identity checked above: the running bot's labels and image digest), that
+# release's worktree and Compose manifest, and the previous image's own read-only schema check
+# (RESTORE_PROBE), which is rehearsed on every delivery. A host that has never recorded a release
+# is bootstrapped by an already-live request, which writes `current` before any upgrade.
+FAILED_CHECK='restore-kit'
+[[ -f $STATE/current && ! -L $STATE/current ]] || refuse no-restore-kit
+PREV_DIGEST=$LIVE_DIGEST
+PREV_REF=$IMAGE@$PREV_DIGEST
+PREV_WORKTREE=$(jq -er '.worktree | select(type == "string" and startswith("/"))' "$STATE/current")
+[[ -d $PREV_WORKTREE && -f $PREV_WORKTREE/docker-compose.$DEPLOY_TARGET.yml ]]
+PREV_CONFIG=$(COMPOSE_TIMEOUT=120 compose_at "$PREV_DIGEST" "$PREV_WORKTREE" no config --format json)
+jq -e --arg ref "$PREV_REF" --arg target "$DEPLOY_TARGET" \
+  '.services.tarubot as $bot | $bot.image == $ref and $bot.environment.TARUBOT_ENVIRONMENT == $target and $bot.restart == "no"' <<<"$PREV_CONFIG"
+PROBE_OUTPUT=$(COMPOSE_TIMEOUT=120 compose_at "$PREV_DIGEST" "$PREV_WORKTREE" no run --rm --no-deps --pull never -T tarubot bun -e "$RESTORE_PROBE")
+PREV_SCHEMA=$(jq -er 'select(.state == "accept") | .schema | select(test("^[0-9]{3}_[a-z0-9_]+\\.sql$"))' <<<"${PROBE_OUTPUT##*$'\n'}")
+PREV_KIT=true
 # Set the trap boundary BEFORE writing pending: an uncertain fsync/write is never
 # permission to continue an old writer. This marker is cleared only after success.
 FAILED_CHECK='pending-write'
@@ -663,6 +865,7 @@ COMPOSE_PROFILES=$BACKUP_PROFILE_SELECTION TARUBOT_ROOT=$ROOT \
 # step that is not transactional: a registration that succeeds before a migration that rolls back
 # leaves Discord holding the new release's commands beside the old schema (the recovery steps in
 # docs/DEPLOYMENT.md register the previous release's set again before restarting it).
+REGISTER_ATTEMPTED=true
 public_step register
 FAILED_CHECK='register'
 if [[ $DEPLOY_TARGET == production ]]; then
@@ -676,6 +879,8 @@ FAILED_CHECK='migrate'
 compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
 public_step start
 FAILED_CHECK='compose-up'
+# From here a candidate container exists and may have held the writer lease: no restore (see finish).
+CANDIDATE_CREATED=true
 compose up --detach --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 tarubot
 FAILED_CHECK='start-container'
 CID=$(bot_ids)
