@@ -18,8 +18,10 @@
  * Nothing here reaches Discord or the database, so it can run beside the live bot. It prints one
  * JSON line of booleans and the first failing part, the way the entry's observation probe does;
  * problem text names settings, commands and options (never a value) and goes to stderr, which the
- * entry keeps in its private log. Exit 1 when any part fails, 2 for arguments this script can't
- * read. An image that predates this script has no such file, which the entry reads as "absent".
+ * entry keeps in its private log. Exit 0 when every part passes, 1 when one fails, 2 for arguments
+ * this script can't read. A run that dies before it prints its line (an import fails) also exits 1
+ * with nothing on stdout, and an image that predates the script has no such file, so the entry asks
+ * whether the file exists first and reads the line, not the exit status, to learn which part failed.
  */
 import { readdir } from "node:fs/promises";
 import { loadCommands, loadComponents, loadEvents } from "../src/bot/discovery.js";
@@ -27,8 +29,8 @@ import { configuration } from "../src/config/env.js";
 import { project } from "../src/config/project.js";
 import { assertToolScope, type Launch } from "../src/config/deployment.js";
 import { commandSetProblems, type RegistrableCommand } from "../src/discord/registration-rules.js";
-import { SCHEMA_VERSION } from "../src/infrastructure/postgres/database.js";
-import { registerToolScope, registrationScope, type RegistrationScope } from "./register.js";
+import { MIGRATION_FILE, SCHEMA_VERSION } from "../src/infrastructure/postgres/database.js";
+import { registerToolScope, registrationScope } from "./register.js";
 
 /** The parts, in the order the first failure is named. */
 export const PARTS = ["identity", "config", "modules", "registration"] as const;
@@ -47,7 +49,8 @@ export interface CandidateReport {
 export interface CandidateInputs {
   version: string;
   schema: string;
-  scope: RegistrationScope;
+  /** The register.js scope arguments (`--global` or `--guild ID`), read with the environment. */
+  scopeArguments: readonly string[];
   env: Readonly<Record<string, string | undefined>>;
   /** How the process started, for the deployment guard; tests state it, the image reads its own. */
   launch?: Launch;
@@ -85,9 +88,13 @@ export async function candidateCheck(
       found.push(`the image holds version ${inputs.built.version}, not the requested one`);
     if (inputs.built.schema !== inputs.schema)
       found.push(`the image holds schema ${inputs.built.schema}, not the requested one`);
-    const head = (await inputs.migrations()).filter((file) => /^\d{3}_.+\.sql$/u.test(file)).sort();
-    if (head.at(-1) !== inputs.schema)
-      found.push(`the migrations folder ends at ${head.at(-1) ?? "nothing"}, not the schema`);
+    // As Database.migrate reads the folder: every .sql file, sorted, each one a migration name.
+    const files = (await inputs.migrations()).filter((file) => file.endsWith(".sql")).sort();
+    const misnamed = files.filter((file) => !MIGRATION_FILE.test(file));
+    if (misnamed.length > 0)
+      found.push(`${misnamed.length} file(s) in the migrations folder are not migration names`);
+    if (files.at(-1) !== inputs.schema)
+      found.push(`the migrations folder ends at ${files.at(-1) ?? "nothing"}, not the schema`);
     return found;
   });
 
@@ -102,8 +109,18 @@ export async function candidateCheck(
   });
 
   const registration = await attempt("registration", async () => {
-    assertToolScope(inputs.env, registerToolScope(inputs.scope), inputs.launch);
-    return commandSetProblems(await inputs.commands());
+    const found: string[] = [];
+    try {
+      // The scope is read here with the environment, as register.js does: --global is refused
+      // while TEST_GUILD_ID is set, a fact about this host's settings, not about the arguments.
+      const scope = registrationScope(inputs.scopeArguments, inputs.env);
+      assertToolScope(inputs.env, registerToolScope(scope), inputs.launch);
+    } catch (error) {
+      found.push(error instanceof Error ? error.message : "the deployment guard refused");
+    }
+    // Measured either way, so one run lists every reason the set can't be registered.
+    found.push(...commandSetProblems(await inputs.commands()));
+    return found;
   });
 
   const results = { identity, config, modules, registration };
@@ -111,27 +128,29 @@ export async function candidateCheck(
   return { report: { check: failed ?? "ok", ...results }, problems };
 }
 
-/** VERSION SCHEMA then the register.js scope arguments; anything else is refused unread. */
-export function candidateArguments(
-  argv: readonly string[],
-  env: Readonly<Record<string, string | undefined>>,
-): { version: string; schema: string; scope: RegistrationScope } {
-  const [version, schema, ...rest] = argv;
+/**
+ * VERSION SCHEMA then the register.js scope arguments. Only their shape is read here, so a host
+ * setting that register.js would refuse (--global beside TEST_GUILD_ID) is a failed registration
+ * part, measured with the others, and not an unreadable command line.
+ */
+export function candidateArguments(argv: readonly string[]): {
+  version: string;
+  schema: string;
+  scopeArguments: readonly string[];
+} {
+  const [version, schema, ...scopeArguments] = argv;
   if (!/^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})$/u.test(version ?? ""))
     throw new TypeError("The first argument must be the release version.");
   if (!/^\d{3}_[a-z0-9_]{1,60}\.sql$/u.test(schema ?? ""))
     throw new TypeError("The second argument must be the schema file name.");
-  return {
-    version: version as string,
-    schema: schema as string,
-    scope: registrationScope(rest, env),
-  };
+  registrationScope(scopeArguments, {});
+  return { version: version as string, schema: schema as string, scopeArguments };
 }
 
 if (import.meta.main) {
   let args: ReturnType<typeof candidateArguments>;
   try {
-    args = candidateArguments(process.argv.slice(2), process.env);
+    args = candidateArguments(process.argv.slice(2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Unreadable arguments.");
     process.exit(2);

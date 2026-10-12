@@ -4,7 +4,7 @@
  * never carries a setting's value, and one run of the script itself the way the image runs it.
  */
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,9 +15,8 @@ import {
   candidateCheck,
 } from "../../scripts/candidate-check.js";
 import { project } from "../../src/config/project.js";
-import { type Environment, deployments } from "../../src/config/deployment.js";
+import { type Environment, deployments, STAGING_DATABASE } from "../../src/config/deployment.js";
 import type { RegistrableCommand } from "../../src/discord/registration-rules.js";
-import { Failure } from "../../src/domain/values.js";
 import { SCHEMA_VERSION } from "../../src/infrastructure/postgres/database.js";
 
 // A spawned Bun loads every module, slowly under QEMU in the arm64 image build.
@@ -42,6 +41,18 @@ const productionEnv = (overrides: Environment = {}): Environment => ({
   ...overrides,
 });
 
+/** A filled-in staging environment: DevBot's application, its guild and its own database. */
+const stagingEnv = (): Environment => ({
+  TARUBOT_ENVIRONMENT: "staging",
+  DISCORD_TOKEN: TOKEN,
+  DISCORD_APPLICATION_ID: deployments.devbot.applicationId,
+  TEST_GUILD_ID: deployments.devbot.guilds[0],
+  PUBLIC_TEST_RESPONSES: "true",
+  TEST_PLAN_CHANNEL_ID: "",
+  DATABASE_URL: `postgresql://${STAGING_DATABASE}:${PASSWORD}@primary.managed-db.example:27520/${STAGING_DATABASE}?sslmode=require`,
+  DATABASE_CA_CERT: CA,
+});
+
 const text = ApplicationCommandOptionType.String;
 const subcommand = ApplicationCommandOptionType.Subcommand;
 const option = (name: string, required: boolean) => ({
@@ -61,7 +72,7 @@ function inputs(overrides: Partial<CandidateInputs> = {}): CandidateInputs {
   return {
     version: project.version,
     schema: SCHEMA_VERSION,
-    scope: { kind: "global" },
+    scopeArguments: ["--global"],
     env: productionEnv(),
     launch: { execArgv: [], envFiles: [] },
     built: { version: project.version, schema: SCHEMA_VERSION },
@@ -73,18 +84,18 @@ function inputs(overrides: Partial<CandidateInputs> = {}): CandidateInputs {
 }
 
 describe("candidate check arguments", () => {
-  test("take the version, the schema file and one registration scope", () => {
-    expect(candidateArguments(["2.46.0", "016_x.sql", "--global"], {})).toEqual({
+  test("take the version, the schema file and the register.js scope arguments", () => {
+    expect(candidateArguments(["2.46.0", "016_x.sql", "--global"])).toEqual({
       version: "2.46.0",
       schema: "016_x.sql",
-      scope: { kind: "global" },
+      scopeArguments: ["--global"],
     });
     expect(
-      candidateArguments(["2.46.0", "016_x.sql", "--guild", deployments.devbot.guilds[0]], {}),
+      candidateArguments(["2.46.0", "016_x.sql", "--guild", deployments.devbot.guilds[0]]),
     ).toEqual({
       version: "2.46.0",
       schema: "016_x.sql",
-      scope: { kind: "guild", guild: deployments.devbot.guilds[0] },
+      scopeArguments: ["--guild", deployments.devbot.guilds[0]],
     });
   });
 
@@ -97,13 +108,7 @@ describe("candidate check arguments", () => {
       ["2.46.0", "016_x.sql", "--global", "--clear"],
       ["2.46.0", "016_x.sql", "--global", "--guild", deployments.devbot.guilds[0]],
     ])
-      expect(() => candidateArguments(argv, {})).toThrow();
-    // register.js's own rule: a development environment never replaces the global set.
-    expect(() =>
-      candidateArguments(["2.46.0", "016_x.sql", "--global"], {
-        TEST_GUILD_ID: deployments.devbot.guilds[0],
-      }),
-    ).toThrow(Failure);
+      expect(() => candidateArguments(argv)).toThrow();
   });
 });
 
@@ -202,10 +207,70 @@ describe("candidate check parts", () => {
 
   test("register.js's own deployment guard is part of the registration part", async () => {
     const { report, problems } = await candidateCheck(
-      inputs({ scope: { kind: "guild", guild: deployments.production.guilds[0] } }),
+      inputs({ scopeArguments: ["--guild", deployments.production.guilds[0]] }),
     );
     expect(report).toMatchObject({ check: "registration", registration: false });
     expect(problems.join("\n")).toContain("only in the global scope (--global)");
+  });
+
+  test("--global beside TEST_GUILD_ID is a failed registration part, as register.js refuses it", async () => {
+    const { report, problems } = await candidateCheck(
+      inputs({ env: productionEnv({ TEST_GUILD_ID: deployments.devbot.guilds[0] }) }),
+    );
+    expect(report).toMatchObject({ check: "registration", registration: false });
+    expect(problems.join("\n")).toContain("TEST_GUILD_ID");
+  });
+
+  test("a staging check takes the guild scope under the staging environment", async () => {
+    const guild = deployments.devbot.guilds[0];
+    const { report, problems } = await candidateCheck(
+      inputs({
+        scopeArguments: ["--guild", guild],
+        env: stagingEnv(),
+      }),
+    );
+    expect(problems).toEqual([]);
+    expect(report.check).toBe("ok");
+    // Staging may not replace the global set.
+    const global = await candidateCheck(inputs({ env: stagingEnv() }));
+    expect(global.report).toMatchObject({ check: "registration", registration: false });
+  });
+
+  test("a loader that throws fails its own part and the others still run", async () => {
+    const { report, problems } = await candidateCheck(
+      inputs({
+        migrations: async () => {
+          throw new Error("ENOENT: no such file or directory");
+        },
+        commands: async () => {
+          throw new Error("Cannot find module");
+        },
+      }),
+    );
+    expect(report).toEqual({
+      check: "identity",
+      identity: false,
+      config: true,
+      modules: true,
+      registration: false,
+    });
+    expect(problems).toEqual([
+      "identity: ENOENT: no such file or directory",
+      "registration: Cannot find module",
+    ]);
+  });
+
+  test("a stray .sql file is read as migrate would: it is a migration, and a misnamed one fails", async () => {
+    const real = readdirSync(join(root, "migrations"));
+    const stray = await candidateCheck(
+      inputs({ migrations: async () => [...real, "zz_extra.sql"] }),
+    );
+    expect(stray.report).toMatchObject({ check: "identity", identity: false });
+    expect(stray.problems.join("\n")).toContain("1 file(s) in the migrations folder are not");
+    expect(stray.problems.join("\n")).toContain("ends at zz_extra.sql, not the schema");
+    // Other files in the folder are not migrations, as migrate sees them.
+    const notes = await candidateCheck(inputs({ migrations: async () => [...real, "README.md"] }));
+    expect(notes.report.identity).toBe(true);
   });
 
   test("every part is measured, and the first failure in order names the check", async () => {
@@ -231,13 +296,37 @@ describe("candidate check parts", () => {
   test("a failure names settings and commands, never a setting's value", async () => {
     const { problems } = await candidateCheck(
       inputs({
-        env: productionEnv({ DISCORD_TOKEN: "", ROSTER_INTERVAL_SECONDS: "soon" }),
+        env: productionEnv({
+          // Invalid values that carry secrets, each in a different kind of setting.
+          DATABASE_URL: `not a url with ${PASSWORD}`,
+          LOG_LEVEL: TOKEN,
+          HEALTHCHECKS_PING_URL: `http://health.example.org/${TOKEN}`,
+          ROSTER_INTERVAL_SECONDS: "soon",
+          DISCORD_APPLICATION_ID: `${TOKEN}-id`,
+        }),
         commands: async () => [moderate([option("a", false), option("b", true)])],
       }),
     );
     const everything = problems.join("\n");
+    expect(everything).toContain("DATABASE_URL");
+    expect(everything).toContain("LOG_LEVEL");
+    expect(everything).toContain("HEALTHCHECKS_PING_URL");
     for (const secret of [PASSWORD, TOKEN, CA, "soon"]) expect(everything).not.toContain(secret);
     expect(everything).toContain("moderate/block/b: required option after an optional one");
+  });
+});
+
+describe("the bot never imports the registration rules", () => {
+  test("only the candidate check and tests do", () => {
+    const importers = new Bun.Glob("**/*.ts");
+    for (const file of importers.scanSync({ cwd: join(root, "src") })) {
+      if (file === "discord/registration-rules.ts") continue;
+      const code = readFileSync(join(root, "src", file), "utf8");
+      expect({ file, imports: code.includes("registration-rules") }).toEqual({
+        file,
+        imports: false,
+      });
+    }
   });
 });
 
@@ -247,7 +336,7 @@ describe("candidate check script", () => {
     const directory = mkdtempSync(join(tmpdir(), "candidate-check-"));
     try {
       symlinkSync(join(root, "migrations"), join(directory, "migrations"));
-      const result = Bun.spawnSync([process.execPath, "--no-env-file", script, ...argv], {
+      const result = Bun.spawnSync([process.execPath, script, ...argv], {
         cwd: directory,
         env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: directory, ...env },
         stdin: "ignore",

@@ -60,6 +60,43 @@ test("the rules catch what they are here to catch", () => {
   ]);
 });
 
+test("each remaining rule names what it refuses", () => {
+  const base = { name: "reason", description: "Why", type: Text };
+  const Boolean_ = ApplicationCommandOptionType.Boolean;
+  expect(
+    optionProblems(
+      "x",
+      Array.from({ length: 26 }, (_, i) => ({ ...base, name: `o${i}` })),
+    ),
+  ).toEqual(["x: 26 options (at most 25)"]);
+  expect(optionProblems("x", [base, base])).toEqual(["x/reason: name used twice"]);
+  expect(optionProblems("x", [{ ...base, description: "d".repeat(101) }])).toEqual([
+    "x/reason: description is 101 characters (1 to 100)",
+  ]);
+  expect(optionProblems("x", [{ ...base, name: "has space" }]).length).toBe(1);
+  expect(
+    optionProblems("x", [{ ...base, type: Boolean_, choices: [{ name: "a", value: "a" }] }]),
+  ).toEqual(["x/reason: choices on a type that takes none"]);
+  expect(optionProblems("x", [{ ...base, min_length: -1, max_length: 6001 }])).toEqual([
+    "x/reason: min_length out of range",
+    "x/reason: max_length out of range",
+  ]);
+  const inner = { name: "deep", description: "Deep", type: Subcommand };
+  expect(
+    optionProblems("x", [{ name: "sub", description: "Sub", type: Subcommand, options: [inner] }]),
+  ).toEqual(["x/sub/deep: nested too deep"]);
+  expect(
+    commandSetProblems([
+      { name: "Bad", description: "" },
+      { name: "ok", description: "d".repeat(101) },
+    ]),
+  ).toEqual([
+    "Bad: name must be 1-32 lowercase letters, digits, - or _",
+    "Bad: description is not 1 to 100 characters",
+    "ok: description is not 1 to 100 characters",
+  ]);
+});
+
 test("the 2.45.0 /moderate block shape is refused, and its 2.45.1 order is not", () => {
   const option = (name: string, required: boolean) => ({
     name,
