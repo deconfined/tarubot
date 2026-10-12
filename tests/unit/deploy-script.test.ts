@@ -43,11 +43,14 @@ const boxes: HostSandbox[] = [];
 afterAll(() => {
   for (const box of boxes) rmSync(box.directory, { recursive: true, force: true });
 });
-const sandbox = (releases = true, target: HostTarget = "production") => {
-  const box = hostSandbox(releases, target);
+const sandbox = (releases = true, target: HostTarget = "production", seedCurrent = true) => {
+  const box = hostSandbox(releases, target, seedCurrent);
   boxes.push(box);
   return box;
 };
+/** The digest the host's `current` record names: the release the entry would restore. */
+const recordedDigest = (box: HostSandbox) =>
+  JSON.parse(readFileSync(join(box.state, "current"), "utf8")).digest as string;
 const configureWeb = (box: HostSandbox, overrides: Record<string, string> = {}) => {
   const settings = {
     COMPOSE_PROFILES: "web",
@@ -329,7 +332,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
     expect(result.code).not.toBe(0);
     expect(result.stdout).toEndWith("result needs-owner\n");
     expect(existsSync(join(box.state, "pending"))).toBe(true);
-    expect(existsSync(join(box.state, "current"))).toBe(false);
+    expect(recordedDigest(box)).toBe(box.live.digest);
     expect(events(box)).not.toContain("backup");
     expect(events(box)).not.toContain("start");
   });
@@ -359,7 +362,9 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
         digest: box.target.digest,
         commit: box.target.commit,
       });
-      expect(existsSync(join(box.state, "current"))).toBe(failure === "restart-policy");
+      expect(recordedDigest(box)).toBe(
+        failure === "restart-policy" ? box.target.digest : box.live.digest,
+      );
       expect(
         JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
       ).toBe(false);
@@ -436,7 +441,7 @@ describe.skipIf(!hostToolsAvailable)("isolated production host deployment", () =
         ]);
         const target = JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0];
         expect(target.HostConfig.RestartPolicy.Name).toBe("no");
-        expect(existsSync(join(box.state, "current"))).toBe(false);
+        expect(recordedDigest(box)).toBe(box.live.digest);
         process.kill(signal);
         rmSync(join(box.sim, "hold-observe"));
         expect(await process.exited).not.toBe(0);
@@ -976,7 +981,7 @@ describe.skipIf(!hostToolsAvailable)("offline candidate check (2.45.2)", () => {
     for (const action of ["stop", "backup", "register", "migrate", "start"])
       expect(actions).not.toContain(action);
     expect(existsSync(join(box.state, "pending"))).toBe(false);
-    expect(existsSync(join(box.state, "current"))).toBe(false);
+    expect(recordedDigest(box)).toBe(box.live.digest);
     expect(JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running).toBe(
       true,
     );
@@ -1616,7 +1621,7 @@ describe.skipIf(!hostToolsAvailable)("public failure reasons", () => {
       ]);
       assertPublic({ stdout, stderr: await new Response(child.stderr).text() }, box);
       expect(existsSync(join(box.state, "pending"))).toBe(true);
-      expect(existsSync(join(box.state, "current"))).toBe(false);
+      expect(recordedDigest(box)).toBe(box.live.digest);
       expect(
         JSON.parse(readFileSync(join(box.sim, "container.json"), "utf8"))[0].State.Running,
       ).toBe(false);

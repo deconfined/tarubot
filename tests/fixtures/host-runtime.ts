@@ -72,9 +72,16 @@ export function subprocess(command: string[], environment: Record<string, string
   };
 }
 
+/**
+ * `current` is the record a successful delivery leaves (target, release identity and the worktree
+ * its manifest lives in). A sandbox with releases starts with one for the live release, as every
+ * host does after its first accepted delivery: the entry refuses an upgrade it could not restore
+ * from (no-restore-kit). Pass `seedCurrent: false` for a host that has never recorded one.
+ */
 export function hostSandbox(
   releases = false,
   deploymentTarget: HostTarget = "production",
+  seedCurrent = true,
 ): HostSandbox {
   const directory = mkdtempSync(join(tmpdir(), "tarubot-host-"));
   const home = join(directory, "home");
@@ -211,6 +218,22 @@ export function hostSandbox(
   );
   writeFileSync(join(sim, "events"), "");
   writeFileSync(join(sim, "argv"), "");
+  if (releases && seedCurrent) {
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(state, "current"),
+      `${JSON.stringify({
+        target: deploymentTarget,
+        version: live.version,
+        commit: live.commit,
+        digest: live.digest,
+        run: "1",
+        worktree: root,
+        schema: "001_initial.sql",
+      })}\n`,
+      { mode: 0o600 },
+    );
+  }
   return { directory, root, state, sim, environment, live, target, deploymentTarget };
 }
 export const deployScript = join(repository, "ops/deploy.sh");
