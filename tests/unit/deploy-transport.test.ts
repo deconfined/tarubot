@@ -29,7 +29,7 @@ const deliveryKey = invent(["OPENSSH", "PRIVATE", "KEY"].join(" ")).join("\n");
 const publicLine = new RegExp(
   [
     "^step (?:preflight|fetch|pull|stop|backup|migrate|register|start|observe|record)$",
-    "^result (?:deployed|already-live|refused|needs-owner)$",
+    "^result (?:deployed|already-live|refused|needs-owner|rolled-back)$",
     "^Host diagnostics \\(reported by the host entry; its private log on the host has the detail\\):$",
     '^ {2}reason [a-z][a-z-]*( [A-Za-z][A-Za-z0-9_-]*=("[A-Za-z0-9 _.,:;!?()/+=<>\'-]{0,160}"|[A-Za-z0-9._-]{1,64}))*$',
     "^The host('s deploy entry| reports its deploy entry's sha256) [^:%]*$",
@@ -336,6 +336,10 @@ for (const locale of locales) {
         ],
         ["downgrade", "the requested version is older than the one running."],
         ["target-mismatch", "the host's delivery key is bound to the other target."],
+        [
+          "no-restore-kit",
+          "the host has no recorded current release to restore if this delivery failed, so it was refused before anything stopped.",
+        ],
       ] as const) {
         test(`a ${code} refusal is summarised in plain words`, () => {
           const result = run({
@@ -366,6 +370,324 @@ for (const locale of locales) {
         expect(result.stdout).toContain(
           "::error::The host refused this delivery before stopping the writer, so nothing changed.",
         );
+      });
+
+      for (const [name, reasons, cause] of [
+        [
+          "a failed offline candidate check",
+          [
+            "reason failed step=pull check=candidate-check status=1",
+            "reason candidate part=registration",
+          ],
+          "the new release failed its own offline check (registration).",
+        ],
+        [
+          "a restore kit that can't be rehearsed",
+          ["reason failed step=pull check=restore-kit status=1"],
+          "the previous release can't be restored from the host's recorded state (its image, release folder or Compose model).",
+        ],
+      ] as const) {
+        test(`${name} is a refusal in plain words`, () => {
+          const result = run({
+            stdout: [entryLine, ...steps.slice(0, 3), ...reasons, "result refused"],
+            exit: 1,
+          });
+          expect(result.stdout).toContain(
+            `::error::Likely cause: ${cause} The host refused this delivery before stopping the writer, so nothing changed.`,
+          );
+        });
+      }
+
+      describe("rolling back to the previous release", () => {
+        const restored = [
+          entryLine,
+          ...steps,
+          "reason failed step=backup check=backup status=1",
+          "reason backup stage=upload",
+          "reason fence writers=stopped",
+        ];
+        const sentence = (result: ReturnType<typeof run>) =>
+          result.lines.find((line) => line.startsWith("::error::"));
+
+        test("a rolled-back result is relayed, fails the run and says what the host reports", () => {
+          const result = run({ stdout: [...restored, "result rolled-back"], exit: 1 });
+          expect(result.code).not.toBe(0);
+          expect(result.lines).toContain("result rolled-back");
+          expect(sentence(result)).toBe(
+            `::error::Likely cause: the pre-migration backup failed at its upload stage; nothing was migrated. The host stopped the bot after the writer boundary, then restored the previous release: it reports that release running again and no pending marker, so this release was not delivered. Its private log on the host is ${logPath}; see ${docs}. Fix the cause, then dispatch again.`,
+          );
+        });
+
+        test("a rolled-back result never counts as delivered, even with a zero exit status", () => {
+          const result = run({ stdout: [...restored, "result rolled-back"], exit: 0 });
+          expect(result.code).not.toBe(0);
+          expect(sentence(result)).toContain("then restored the previous release");
+        });
+
+        test("a rollback says when Discord's commands or the proxy may be the new release's", () => {
+          const result = run({
+            stdout: [
+              ...restored,
+              "reason commands state=unknown",
+              "reason restore proxy=failed",
+              "result rolled-back",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain(
+            "so this release was not delivered. Discord's commands may still be the new release's set. The dashboard proxy may still use the new release's configuration. Its private log",
+          );
+        });
+
+        for (const [cause, sentenceText] of [
+          [
+            "writers-unconfirmed",
+            "The previous release was not restored because the entry couldn't confirm every writer stopped.",
+          ],
+          [
+            "no-kit",
+            "The previous release was not restored because the host had no usable record of it.",
+          ],
+          [
+            "candidate-started",
+            "The previous release was not restored because the new release had already started.",
+          ],
+          [
+            "deadline",
+            "The previous release was not restored because the time allowed for it ran out.",
+          ],
+          [
+            "schema-ahead",
+            "The previous release was not restarted: the database schema has already moved past what it accepts.",
+          ],
+          [
+            "db-unknown",
+            "The previous release was not restarted: its own database check couldn't tell whether it could run.",
+          ],
+        ] as const) {
+          test(`a skipped restore (${cause}) is explained after a needs-owner result`, () => {
+            const result = run({
+              stdout: [
+                entryLine,
+                ...allSteps.slice(0, 6),
+                "reason failed step=migrate check=migrate status=124 timeout=true",
+                `reason restore outcome=skipped cause=${cause}`,
+                "reason fence writers=stopped",
+                "result needs-owner",
+              ],
+              exit: 1,
+            });
+            expect(sentence(result)).toBe(
+              `::error::Likely cause: the database migration failed (it timed out). The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery. ${sentenceText} Its private log on the host is ${logPath}; see ${docs}.`,
+            );
+          });
+        }
+
+        test("a failed restore names the check that failed and still asks for the host", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...allSteps,
+              "reason failed step=observe check=readiness status=1",
+              "reason restore outcome=failed check=readiness",
+              "reason fence writers=unconfirmed",
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain(
+            "reconcile on the host before any new delivery. The entry couldn't confirm that every writer stopped: check the host now. Restoring the previous release also failed at its readiness check. Its private log",
+          );
+        });
+
+        test("an accepted release whose restart policy wasn't armed is not called stopped", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...allSteps,
+              "reason failed step=record check=enable-restart status=1",
+              "reason accepted state=running arm=failed",
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toBe(
+            `::error::Likely cause: the release passed observation, but recording it or enabling its restart policy failed. The host reports that the new release passed observation and is running, but its restart policy couldn't be enabled and it kept its pending marker; reconcile on the host before any new delivery. Its private log on the host is ${logPath}; see ${docs}.`,
+          );
+        });
+
+        test("restore values outside their narrow patterns read as empty", () => {
+          const after = (...reasons: string[]) =>
+            sentence(
+              run({
+                stdout: [
+                  entryLine,
+                  ...allSteps.slice(0, 6),
+                  "reason failed step=migrate check=migrate status=1",
+                  ...reasons,
+                  "result needs-owner",
+                ],
+                exit: 1,
+              }),
+            );
+          const plain = `::error::Likely cause: the database migration failed. The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery. Its private log on the host is ${logPath}; see ${docs}.`;
+          expect(after()).toBe(plain);
+          // Each of these is the only line for its key, so a loosened pattern would show.
+          for (const line of [
+            "reason restore outcome=skipped cause=Evil-Cause",
+            "reason restore outcome=maybe check=readiness",
+            "reason commands state=known",
+            "reason restore proxy=fine",
+            "reason accepted state=stopped arm=none",
+          ])
+            expect(after(line)).toBe(plain);
+          // A failed restore with a bad check still reports the failure, without the check.
+          const failedOnly = plain.replace(
+            "delivery. Its",
+            "delivery. Restoring the previous release also failed. Its",
+          );
+          for (const check of ["visit-evil-site-and-run-this-now", "restore-up-and-more"])
+            expect(after(`reason restore outcome=failed check=${check}`)).toBe(failedOnly);
+        });
+
+        test("a bad candidate part never reaches the sentence", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...steps.slice(0, 3),
+              "reason failed step=pull check=candidate-check status=1",
+              "reason candidate part=visit-evil-site",
+              "result refused",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain(
+            "Likely cause: the new release failed its own offline check. The host refused",
+          );
+          expect(sentence(result)).not.toContain("evil");
+        });
+
+        test("the last value of a key wins across repeated restore lines", () => {
+          const result = run({
+            stdout: [
+              ...restored,
+              "reason restore outcome=restored",
+              "reason restore outcome=failed check=readiness",
+              "result rolled-back",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain("did not finish cleanly");
+          expect(sentence(result)).toContain("Restoring the previous release also failed");
+        });
+
+        test("a rollback that also reports an unfinished restore or an unconfirmed writer is not called clean", () => {
+          for (const [reasons, expected] of [
+            [
+              ["reason restore outcome=failed check=readiness"],
+              "also failed at its readiness check.",
+            ],
+            [
+              ["reason restore outcome=skipped cause=deadline"],
+              "was not restored because the time allowed for it ran out.",
+            ],
+            [
+              ["reason fence writers=unconfirmed"],
+              "The entry couldn't confirm that every writer stopped: check the host now.",
+            ],
+          ] as const) {
+            const result = run({
+              stdout: [
+                entryLine,
+                ...steps,
+                "reason failed step=backup check=backup status=1",
+                ...reasons,
+                "result rolled-back",
+              ],
+              exit: 1,
+            });
+            expect(sentence(result)).toContain(
+              "The host reported 'rolled-back' but also reported that the restore did not finish cleanly; check the running release and pending marker on the host before any new delivery.",
+            );
+            expect(sentence(result)).toContain(expected);
+            expect(sentence(result)).not.toContain("it reports that release running again");
+            expect(sentence(result)).not.toContain("Fix the cause, then dispatch again");
+          }
+        });
+
+        test("a rolled-back result beside another result is reported as more than one", () => {
+          for (const other of ["result deployed", "result rolled-back"]) {
+            const result = run({ stdout: [...restored, "result rolled-back", other], exit: 1 });
+            expect(sentence(result)).toBe(
+              "::error::The host entry returned more than one result; reconcile on the host before any new delivery.",
+            );
+          }
+        });
+
+        test("an accepted-release report matters only beside a needs-owner result", () => {
+          for (const result of ["result rolled-back", "result refused"]) {
+            const out = run({
+              stdout: [
+                entryLine,
+                ...steps,
+                "reason failed step=backup check=backup status=1",
+                "reason accepted state=running arm=failed",
+                result,
+              ],
+              exit: 1,
+            });
+            expect(sentence(out)).not.toContain("passed observation");
+          }
+        });
+
+        test("an accepted release without a restart-policy fault is described without one", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...allSteps,
+              "reason failed step=record check=pending-clear status=1",
+              "reason accepted state=running",
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain(
+            "The host reports that the new release passed observation and is running, but it kept its pending marker;",
+          );
+          expect(sentence(result)).not.toContain("restart policy couldn't");
+        });
+
+        test("a candidate-check cause under needs-owner doesn't claim nothing was stopped", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...steps,
+              "reason failed step=pull check=candidate-check status=1",
+              "reason candidate part=config",
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).toContain(
+            "Likely cause: the new release failed its own offline check (config). The host stopped after the writer boundary",
+          );
+          expect(sentence(result)).not.toContain("before anything was stopped");
+        });
+
+        test("a quoted look-alike never stands in for a restore value", () => {
+          const result = run({
+            stdout: [
+              entryLine,
+              ...allSteps.slice(0, 6),
+              "reason failed step=migrate check=migrate status=1",
+              'reason restore msg="outcome=failed cause=no-kit"',
+              "result needs-owner",
+            ],
+            exit: 1,
+          });
+          expect(sentence(result)).not.toContain("restore");
+          expect(sentence(result)).not.toContain("Restoring");
+        });
       });
 
       test("a key inside quoted text never stands in for the bare value", () => {

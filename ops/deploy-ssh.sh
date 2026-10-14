@@ -62,6 +62,16 @@ reason_value() {
   local LC_ALL=C line bare value='' allowed pattern=" $2=([^ ]+)" quoted='^([^"]*)"[^"]*"(.*)$'
   case $1:$2 in
     refused:code) allowed='^[a-z][a-z-]{0,31}$' ;;
+    # Specific kinds first: the generic *:check and *:state patterns below would shadow them.
+    restore:outcome) allowed='^(restored|skipped|failed)$' ;;
+    restore:cause) allowed='^(writers-unconfirmed|no-kit|candidate-started|deadline|schema-ahead|db-unknown)$' ;;
+    # The restore's own steps and the observation checks it can fail at, never free text.
+    restore:check) allowed='^(restore-probe|restore-register|restore-up|restore-proxy|gone|inspect|not-running|container-restarted|image-identity|labels|health|identity|schema-checksum|readiness|probe|proxy-inspect|proxy-not-running|proxy-health|proxy-restart-policy)$' ;;
+    restore:proxy) allowed='^failed$' ;;
+    commands:state) allowed='^unknown$' ;;
+    candidate:part) allowed='^(identity|config|modules|registration)$' ;;
+    accepted:state) allowed='^running$' ;;
+    accepted:arm) allowed='^failed$' ;;
     *:code | *:identityCode | *:schemaCode | *:readinessCode) allowed='^[A-Za-z0-9_]{1,40}$' ;;
     *:line) allowed='^[0-9]{1,6}$' ;;
     *:health) allowed='^[a-z]{1,16}$' ;;
@@ -87,7 +97,7 @@ reason_value() {
 }
 # Plain words for a recognisable reason set, from ops/deploy.sh's fixed checks; nothing if unsure.
 likely_cause() {
-  local refusal check step health running exited oom stage code flags='' timeout='' last=''
+  local refusal check step health running exited oom stage code part flags='' timeout='' last=''
   if [[ $(reason_value entry syntax) == invalid ]]; then
     exited=$(reason_value entry line)
     echo "the host's installed deploy entry doesn't parse (a bash syntax error${exited:+ at line $exited}), so it isn't the reviewed ops/deploy.sh; reinstall it from a verified commit and check it with bash -n."
@@ -108,6 +118,7 @@ likely_cause() {
     same-version-mismatch) echo 'the requested version is already running from a different commit or image digest.' ;;
     scope-mismatch) echo "the new release's Discord application, guild or database scope differs from the running bot's." ;;
     live-reference) echo "the running bot names its image by tag, so an already-live request can't confirm it by digest." ;;
+    no-restore-kit) echo "the host has no recorded current release to restore if this delivery failed, so it was refused before anything stopped." ;;
   esac
   if [[ -n $refusal ]]; then return 0; fi
   if [[ -n $(reason_value failed signal) ]]; then
@@ -190,8 +201,36 @@ likely_cause() {
     settings-file | settings-mode) echo "the host's central .env is missing, a symlink, or not mode 600 and owned by the deploy account." ;;
     host-tools) echo 'a required host tool (docker, git, jq, flock, timeout or sync) is missing.' ;;
     record-write | enable-restart | proxy-enable-restart | pending-clear) echo 'the release passed observation, but recording it or enabling its restart policy failed.' ;;
+    candidate-check)
+      part=$(reason_value candidate part)
+      echo "the new release failed its own offline check${part:+ ($part)}." ;;
+    restore-kit) echo "the previous release can't be restored from the host's recorded state (its image, release folder or Compose model)." ;;
   esac
   return 0
+}
+# What the entry reports about restoring the previous release after a failure, as sentences each
+# starting with a space; nothing when the entry reported none of it (every entry before the restore).
+restore_note() {
+  local note='' outcome cause check
+  outcome=$(reason_value restore outcome)
+  cause=$(reason_value restore cause)
+  check=$(reason_value restore check)
+  case $outcome:$cause in
+    failed:*) note+=" Restoring the previous release also failed${check:+ at its $check check}." ;;
+    skipped:writers-unconfirmed) note+=" The previous release was not restored because the entry couldn't confirm every writer stopped." ;;
+    skipped:no-kit) note+=" The previous release was not restored because the host had no usable record of it." ;;
+    skipped:candidate-started) note+=" The previous release was not restored because the new release had already started." ;;
+    skipped:deadline) note+=" The previous release was not restored because the time allowed for it ran out." ;;
+    skipped:schema-ahead) note+=" The previous release was not restarted: the database schema has already moved past what it accepts." ;;
+    skipped:db-unknown) note+=" The previous release was not restarted: its own database check couldn't tell whether it could run." ;;
+  esac
+  if [[ $(reason_value commands state) == unknown ]]; then
+    note+=" Discord's commands may still be the new release's set."
+  fi
+  if [[ $(reason_value restore proxy) == failed ]]; then
+    note+=" The dashboard proxy may still use the new release's configuration."
+  fi
+  printf '%s' "$note"
 }
 failure_message() {
   local errors=$dir/ssh-errors status=${rc:-0}
@@ -217,7 +256,7 @@ failure_message() {
       elif (( ${results:-0} > 1 )); then
         echo 'The host entry returned more than one result; reconcile on the host before any new delivery.'
       else
-        local cause log fence=''
+        local cause log arm fence=''
         cause=$(likely_cause)
         printf -v log '%s/.local/state/tarubot-deploy/logs/%s-*.log' '~' "${request_id:-<request-id>}"
         if [[ $(reason_value fence writers) == unconfirmed ]]; then
@@ -227,7 +266,23 @@ failure_message() {
           'result deployed'|'result already-live')
             echo "The host reported '${result#result }', but the SSH session ended abnormally; check the running release and pending marker on the host before any new delivery." ;;
           'result refused') echo "${cause:+Likely cause: $cause }The host refused this delivery before stopping the writer, so nothing changed. Its private log on the host, if this run wrote one, is $log; see $reasons_doc. Fix the cause, then re-run or dispatch again." ;;
-          'result needs-owner') echo "${cause:+Likely cause: $cause }The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery.$fence Its private log on the host is $log; see $reasons_doc." ;;
+          'result needs-owner')
+            if [[ $(reason_value accepted state) == running ]]; then
+              arm=''
+              if [[ $(reason_value accepted arm) == failed ]]; then arm=", but its restart policy couldn't be enabled and"; else arm=', but'; fi
+              echo "${cause:+Likely cause: $cause }The host reports that the new release passed observation and is running$arm it kept its pending marker; reconcile on the host before any new delivery. Its private log on the host is $log; see $reasons_doc."
+            else
+              echo "${cause:+Likely cause: $cause }The host stopped after the writer boundary and kept its pending marker; reconcile on the host before any new delivery.$fence$(restore_note) Its private log on the host is $log; see $reasons_doc."
+            fi ;;
+          'result rolled-back')
+            # The invariant is the host's to keep: a restored, running release and no marker. A host
+            # that also reports a restore that didn't finish, or a writer it couldn't confirm
+            # stopped, contradicts itself, so the runner reports that instead of a clean rollback.
+            if [[ -n $fence || $(reason_value restore outcome) =~ ^(failed|skipped)$ ]]; then
+              echo "${cause:+Likely cause: $cause }The host reported 'rolled-back' but also reported that the restore did not finish cleanly; check the running release and pending marker on the host before any new delivery.$fence$(restore_note) Its private log on the host is $log; see $reasons_doc."
+            else
+              echo "${cause:+Likely cause: $cause }The host stopped the bot after the writer boundary, then restored the previous release: it reports that release running again and no pending marker, so this release was not delivered.$(restore_note) Its private log on the host is $log; see $reasons_doc. Fix the cause, then dispatch again."
+            fi ;;
           *) echo "The host entry stopped without a result; inspect its private log on the host ($log) and reconcile before a new delivery." ;;
         esac
       fi ;;
@@ -335,7 +390,7 @@ while IFS= read -r line; do
       host_lines=$((host_lines + 1))
       steps_seen=true
       printf '%s\n' "$line" ;;
-    'result deployed'|'result already-live'|'result refused'|'result needs-owner')
+    'result deployed'|'result already-live'|'result refused'|'result needs-owner'|'result rolled-back')
       result=$line
       results=$((results + 1))
       host_lines=$((host_lines + 1))
