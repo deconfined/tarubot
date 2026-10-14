@@ -27,7 +27,7 @@ Expose only catalog `Failure` diagnostics, never driver messages or bound parame
 ## Durable-work invariants
 
 - The writer lease holds one dedicated PostgreSQL session for the bot's lifetime. Pending migrations take the same gate; stop the bot before migrating. See [single-writer operations](../site/src/content/docs/deploy/operations.md#single-database-writer).
-- Queue claims use a typed CTE, `FOR UPDATE OF jobs SKIP LOCKED` and one `UPDATE … RETURNING`. Preserve lease tokens, expiry, generation and configuration guards.
+- Queue claims use a typed CTE, `FOR UPDATE OF jobs SKIP LOCKED` and one `UPDATE … RETURNING`. Preserve lease tokens, expiry, generation and configuration guards. A worker claims only the kinds in `src/jobs/kinds.ts` (the ones its dispatcher runs); a job of another kind stays queued, so a release restored after a newer one ran never fails that release's work as `invalid_job`. A new kind goes into the dispatcher and that list together; `tests/unit/job-kinds.test.ts` enforces it.
 - Active-job upserts use the literal partial-index predicate so prepared plans can infer it. `scheduleJob` never changes an active job's generation/due time; `enqueue` may pull work forward.
 - Do not prune job history, apart from finished `roles.self` rows after 30 days ([self-service role menus](#self-service-role-menus)). Officer notices rely on `officer.notify` rows matched by `dedupe_key`, status, timestamps and message ID, not payload text. Any future retention design must preserve pending rows and those finished within 24 hours or newer than the FC's last accepted roster.
 - New guild inserts use `NEW_GUILD_ROW`: role layout off even though the existing SQL column default is on. The importer keeps its explicit off value.

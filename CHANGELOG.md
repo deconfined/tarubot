@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.45.2**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.45.3**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.45.3 — Leave another release's background jobs alone
+
+- The background worker now claims only the job kinds its own release knows (`src/jobs/kinds.ts`). Until now it claimed any queued job and failed one it didn't recognise as `invalid_job`, which is lost work if an older release runs again after a newer one has queued something new: a failed delivery that is rolled back, or a restart of the recorded release. A job of an unknown kind now simply stays queued until a release that knows it runs.
+- Tests pin the list to the dispatcher and to every place that queues work, so a new kind can't be added to one without the other.
+- No migration, no setting, no command change, nothing members or officers see.
 
 ## 2.45.2 — Check a release's commands before a deploy stops the bot
 

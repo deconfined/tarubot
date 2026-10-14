@@ -22,6 +22,7 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import * as t from "../infrastructure/postgres/schema.js";
+import { JOB_KINDS } from "./kinds.js";
 
 /** Payload version describes its schema; generation describes superseding work for the same key. */
 export type Job = Pick<
@@ -526,14 +527,22 @@ export class Queue {
    * writer; after a restart a streak simply starts again from the next wait.
    */
   private readonly waitingSince = new Map<string, number>();
-  /** Dispatch and the clock are injected so ownership/recovery behavior can be tested independently. */
+  /**
+   * Dispatch and the clock are injected so ownership/recovery behavior can be tested independently.
+   * `kinds` is what this worker may claim (the dispatcher's own, src/jobs/kinds.ts); tests that
+   * queue a kind of their own widen it.
+   */
   constructor(
     private readonly db: Database,
     private readonly dispatch: (job: Job, guard: () => Promise<void>) => Promise<unknown>,
     private readonly observe: (event: QueueEvent) => void,
     private readonly now: () => number = Date.now,
+    private readonly kinds: readonly string[] = JOB_KINDS,
   ) {}
-  /** SKIP LOCKED lets workers claim distinct rows and reclaim expired leases atomically. */
+  /**
+   * SKIP LOCKED lets workers claim distinct rows and reclaim expired leases atomically. Only kinds
+   * this release knows are claimed: another release's work is left queued, not failed.
+   */
   async claim(): Promise<Job | undefined> {
     const token = randomUUID();
     const db = this.db.orm;
@@ -549,6 +558,7 @@ export class Queue {
               and(eq(t.jobs.status, "running"), lt(t.jobs.lease_until, sql`now()`)),
             ),
             or(isNull(t.jobs.guild_id), eq(t.guilds.active, true)),
+            inArray(t.jobs.kind, [...this.kinds]),
           ),
         )
         .orderBy(asc(t.jobs.due_at))

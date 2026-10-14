@@ -66,6 +66,7 @@ import {
 } from "../../src/jobs/queue.js";
 import { dispatcher } from "../../src/jobs/dispatch.js";
 import { announceChangelog } from "../../src/jobs/queue.js";
+import { JOB_KINDS } from "../../src/jobs/kinds.js";
 import { notesSince } from "../../src/domain/changelog.js";
 import { GuildAccess } from "../../src/application/guild-access.js";
 import { NEW_GUILD_ROW } from "../../src/application/guild-defaults.js";
@@ -96,6 +97,9 @@ import {
   planGrandfathering,
 } from "../../src/application/grandfathering.js";
 import { grandfatherReport, reviewedPlan } from "../../src/domain/grandfathering.js";
+
+/** The kinds a worker claims, widened by the test-only kind the lease tests queue. */
+const probeKinds = [...JOB_KINDS, "probe"];
 
 const url = process.env.TEST_DATABASE_URL;
 // These tests deliberately recreate a disposable schema; production connections are rejected below.
@@ -1304,6 +1308,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       (event) => {
         events.push(event);
       },
+      undefined,
+      probeKinds,
     );
     const old = await queue.claim();
     if (!old) throw new Error("Missing lease");
@@ -1343,6 +1349,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       (event) => {
         events.push(event);
       },
+      undefined,
+      probeKinds,
     );
     const old = await queue.claim();
     if (!old || old.id !== key) throw new Error("Missing lease");
@@ -1390,6 +1398,7 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         events.push(event);
       },
       () => clock,
+      probeKinds,
     );
     /** Make the row due now, run one attempt, and return its job event. */
     const attempt = async () => {
@@ -1555,6 +1564,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
         throw new Failure("invalid_job", "The probe always fails.");
       },
       () => {},
+      undefined,
+      probeKinds,
     );
     const job = await queue.claim();
     if (job?.id !== id) throw new Error("Missing lease");
@@ -4904,6 +4915,36 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
     ).rejects.toBe(rollback);
   });
 
+  test("a worker claims only the job kinds its release knows, leaving another release's work queued", async () => {
+    await db.orm.update(t.jobs).set({ status: "disabled" });
+    const foreign = await enqueue(db.pool, "from.a.newer.release", "kinds:foreign", {});
+    const known = await enqueue(db.pool, "reconcile.user", "kinds:known", {});
+    const queue = new Queue(
+      db,
+      async () => ({ ok: true }),
+      () => {},
+    );
+    // The older job is the unknown kind, yet only the known one is claimed.
+    await db.orm
+      .update(t.jobs)
+      .set({ due_at: sql`now()-interval '1 hour'` })
+      .where(eq(t.jobs.id, foreign));
+    const claimed = await queue.claim();
+    expect(claimed?.id).toBe(known);
+    expect(await queue.claim()).toBeUndefined();
+    const [row] = await db.orm.select().from(t.jobs).where(eq(t.jobs.id, foreign));
+    expect(row).toMatchObject({ status: "queued", attempts: 0, last_error: null });
+    // A release that knows the kind claims it.
+    const newer = new Queue(
+      db,
+      async () => ({ ok: true }),
+      () => {},
+      undefined,
+      ["from.a.newer.release"],
+    );
+    expect((await newer.claim())?.id).toBe(foreign);
+  });
+
   test("ORM queue claims skip held locks and superseding generations cannot publish stale results", async () => {
     // Isolate candidates from other scenarios, then hold the oldest row on a separate session.
     await db.orm.update(t.jobs).set({ status: "disabled" });
@@ -4926,6 +4967,8 @@ describe.skipIf(!url)("PostgreSQL invariants and selected migration fixture", ()
       (event) => {
         events.push(event);
       },
+      undefined,
+      probeKinds,
     );
     const lock = await db.pool.connect();
     try {
