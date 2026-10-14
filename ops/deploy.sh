@@ -615,6 +615,31 @@ if [[ $WEB_PROFILE == true ]]; then
   FAILED_CHECK='proxy-config'
   compose run --rm --no-deps --pull never -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 fi
+# Offline check of the candidate in its own image (scripts/candidate-check.ts, 2.45.2), with the
+# settings it will start with: its version and schema, the bot's startup validation, every module
+# and Discord's registration rules. It reaches neither Discord nor the database, so a release the
+# host or Discord would refuse is turned away here, while the old bot still runs. An image older
+# than the script has none: that is skipped and noted in the private log, never refused.
+FAILED_CHECK='candidate-check'
+CANDIDATE_CHECK_PRESENT=$(compose run --rm --no-deps --pull never -T tarubot bun -e \
+  'console.log(await Bun.file("dist/scripts/candidate-check.js").exists())')
+if [[ $CANDIDATE_CHECK_PRESENT == true ]]; then
+  CANDIDATE_SCOPE_ARGS=(--global)
+  if [[ $DEPLOY_TARGET != production ]]; then CANDIDATE_SCOPE_ARGS=(--guild "$REGISTRATION_SCOPE"); fi
+  CANDIDATE_STATUS=0
+  CANDIDATE_REPORT=$(compose run --rm --no-deps --pull never -T tarubot \
+    bun dist/scripts/candidate-check.js "$VERSION" "$SCHEMA" "${CANDIDATE_SCOPE_ARGS[@]}") || CANDIDATE_STATUS=$?
+  if (( CANDIDATE_STATUS != 0 )); then
+    # Its one stdout line names the first failing part; the problem text is in the private log.
+    CANDIDATE_PART=$(jq -r '.check // ""' <<<"${CANDIDATE_REPORT##*$'\n'}") || CANDIDATE_PART=''
+    if [[ $CANDIDATE_PART =~ ^(identity|config|modules|registration)$ ]]; then
+      held_reason "candidate part=$CANDIDATE_PART"
+    fi
+    exit "$CANDIDATE_STATUS"
+  fi
+else
+  held_reason 'candidate check=absent'
+fi
 # Set the trap boundary BEFORE writing pending: an uncertain fsync/write is never
 # permission to continue an old writer. This marker is cleared only after success.
 FAILED_CHECK='pending-write'
@@ -632,10 +657,12 @@ COMPOSE_PROFILES=$BACKUP_PROFILE_SELECTION TARUBOT_ROOT=$ROOT \
   TARUBOT_COMPOSE_FILE=$WORKTREE/docker-compose.$DEPLOY_TARGET.yml \
   TARUBOT_IMAGE_DIGEST=$DIGEST TARUBOT_HOST_LOCK_HELD=true \
   timeout --kill-after=10 900 bash "$WORKTREE/ops/backup.sh" "$DEPLOY_TARGET"
-public_step migrate
-FAILED_CHECK='migrate'
-# migrate.js uses the existing transactional migration/writer lease guard.
-compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
+# Discord first, then the database (2026-10-12): a rejected command set (2.45.0's /moderate block,
+# Discord error 50035) then stops here with the schema unchanged, where the previous release can
+# still run, instead of after a migration it can no longer start on. The Discord call is the one
+# step that is not transactional: a registration that succeeds before a migration that rolls back
+# leaves Discord holding the new release's commands beside the old schema (the recovery steps in
+# docs/DEPLOYMENT.md register the previous release's set again before restarting it).
 public_step register
 FAILED_CHECK='register'
 if [[ $DEPLOY_TARGET == production ]]; then
@@ -643,6 +670,10 @@ if [[ $DEPLOY_TARGET == production ]]; then
 else
   compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/register.js --guild "$REGISTRATION_SCOPE"
 fi
+public_step migrate
+FAILED_CHECK='migrate'
+# migrate.js uses the existing transactional migration/writer lease guard.
+compose run --rm --no-deps --pull never -T tarubot bun dist/scripts/migrate.js
 public_step start
 FAILED_CHECK='compose-up'
 compose up --detach --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 tarubot

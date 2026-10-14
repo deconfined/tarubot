@@ -7,7 +7,7 @@ sidebar:
 
 These procedures assume the stock `docker-compose.yml` with its bundled PostgreSQL, run from the directory that holds it and `.env`. Every decision TaruBot makes, and all the Discord work it still owes, lives in PostgreSQL, so the database is the one thing to protect.
 
-The upstream instance uses the same Compose runtime with managed PostgreSQL, rather than this guide's `postgres` service. Its automated release stops the writer, backs up, migrates and registers commands from the exact signed image before starting and observing it. Automatic restart stays disabled until sustained observation and durable acceptance. Pending failures require owner reconciliation, with no automatic rollback; see [the deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md). Commands below are for your own stock Compose installation, not that managed instance.
+The upstream instance uses the same Compose runtime with managed PostgreSQL, rather than this guide's `postgres` service. Its automated release checks the new image offline, then stops the writer, backs up, registers commands, migrates (Discord first, so a command set Discord refuses can't follow a migration) from the exact signed image before starting and observing it. Automatic restart stays disabled until sustained observation and durable acceptance. Pending failures require owner reconciliation, with no automatic rollback; see [the deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md). Commands below are for your own stock Compose installation, not that managed instance.
 
 ## Updating to a release
 
