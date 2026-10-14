@@ -1,6 +1,12 @@
 # Version history
 
-The current application version is **2.45.1**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+The current application version is **2.45.2**, with `package.json` as the source of truth. This codebase is a complete rewrite of the original TaruBot and therefore belongs to major version **2**. `/version` reads the manifest included in its compiled build and obtains commit history independently from GitHub's `main` branch.
+
+## 2.45.2 — Check a release's commands before a deploy stops the bot
+
+- Add `candidate-check.js`, an offline check a delivery can run inside a release's own image before it stops anything: the image holds the requested version and schema, the host's settings pass the bot's startup validation, every command, component and event module loads, and the deployment guard and Discord's registration rules accept the command set. It never reaches Discord or the database. Nothing runs it yet; the deploy entry will, in a later change, so a release Discord would refuse is turned away while the old bot is still running (the 2.45.0 failure).
+- Move Discord's registration rules out of the test suite into `src/discord/registration-rules.ts`, which the test and the new check share. The bot itself does not import them.
+- No migration, no setting and no command change.
 
 ## 2.45.1 — Make `/moderate` registrable
 

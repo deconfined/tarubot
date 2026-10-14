@@ -1,6 +1,6 @@
 {
-  "title": "Session: 2.45.1 pauses review",
-  "objective": "Review 2.45.1 on owner-authorized staging: it makes 2.45.0's /moderate registrable (reason before the optional duration). An officer or server manager pauses one person's use of one feature and lifts it again with /moderate or the Moderation page; the person is told the feature, the end and the reason, never who set it. Migration 015 is additive. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.45.2 pauses review",
+  "objective": "Review 2.45.2 on owner-authorized staging: it adds an offline release check for deployment and changes nothing members see; 2.45.1 made 2.45.0's /moderate registrable. An officer or server manager pauses one person's use of one feature and lifts it again with /moderate or the Moderation page; the person is told the feature, the end and the reason, never who set it. Migration 015 is additive. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
     "Before upgrading, take the pre-migration backup: 2.44.0 won't start on migration 015. The deploy registers /moderate (24 roots, 52 paths); registration must succeed.",
     "As an officer (Officer role, no Manage Server): /moderate block a test member from /suggest for 1 hour with a reason. As them, /suggest refuses with the feature, end and reason, naming nobody. /moderate status shows it to you; /moderate lift ends it.",

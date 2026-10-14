@@ -40,6 +40,16 @@ docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --guil
 
 It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. Register again after an update whose changelog says the commands changed. Until you do, members don't see new commands, and a changed option may get an "out of date" reply.
 
+### candidate-check.js
+
+Checks, offline and before you stop anything, the things that most often stop an upgrade: that the new image is the release you meant, that your settings pass the bot's startup validation, that every command, button and listener loads, and that the commands follow Discord's registration rules. It never reaches Discord or the database, so it is safe to run with the new image while the old bot is still running.
+
+```sh
+docker compose run --rm --no-deps -T tarubot bun dist/scripts/candidate-check.js VERSION SCHEMA_FILE --global
+```
+
+`VERSION` and `SCHEMA_FILE` are what you expect this image to hold: the release's version and the name of its newest migration, both in its changelog entry and source (for example `2.45.2` and `015_member_blocks.sql`), not read from the image under test. Use `--guild YOUR_GUILD_ID` where you register with `register.js --guild`. It prints one line of true/false flags, `identity` (the image holds that version and schema, and its migrations folder ends there), `config`, `modules` and `registration` (the deployment guard accepts the scope, and the commands follow the rules, such as required options before optional ones), with `check` naming the first that failed. It exits 0 when everything passes, 1 when a part fails and 2 when its arguments can't be read; the setting or command at fault is named on its error output, never a value. A pass doesn't prove Discord will accept the commands, only that the rules written into the check hold. The upstream deployment will run it before each delivery once its deploy entry is updated.
+
 ### commands.js
 
 Reads command registrations back, and cleans up leftovers. It uses Discord's API only, not the database.
