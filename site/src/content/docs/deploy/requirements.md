@@ -20,7 +20,7 @@ These pages are for people who run TaruBot themselves. A deployment is one bot p
 
   `200` is what you want; `403` means the Lodestone refuses that address.
 - **A small machine is enough** for a Free Company's server: the bot does its heavy lifting (reading Lodestone pages) a page at a time, with a small, bounded amount of parallel work.
-- **Outbound HTTPS** to Discord, the Lodestone (`<region>.finalfantasyxiv.com`), GitHub (`api.github.com` and `raw.githubusercontent.com`, for `/version`, the live Lodestone selectors, and issue reports if you turn them on), the GitHub container registry (`ghcr.io`) for the images, your backup bucket if you set up [backups](#optional-backup-storage), and `hc-ping.com` if you use the optional heartbeat or backup check. **No inbound ports for bot-only operation**: the bot's health endpoint stays inside the container network.
+- **Outbound HTTPS** to Discord, the Lodestone (`<region>.finalfantasyxiv.com`), GitHub (`api.github.com` and `raw.githubusercontent.com`, for `/version`, the live Lodestone selectors, and issue reports if you turn them on), the GitHub container registry (`ghcr.io`, whose image layers come from `pkg-containers.githubusercontent.com`) for the images, Docker Hub (`registry-1.docker.io`, `auth.docker.io` and `production.cloudflare.docker.com`) for the bundled PostgreSQL image if you use it, your backup bucket if you set up [backups](#optional-backup-storage), and `hc-ping.com` if you use the optional heartbeat or backup check. **No inbound ports for bot-only operation**: the bot's health endpoint stays inside the container network.
 
 ### Optional public dashboard
 

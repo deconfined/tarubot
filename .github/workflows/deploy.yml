@@ -242,9 +242,26 @@ jobs:
           reason="GitHub refused $environment's RELEASE_REGISTRY_TOKEN, or didn't answer; check that secret, or re-run once GitHub answers. $unchanged"
           package=$(printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_REGISTRY_TOKEN" \
             | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
-              --output /dev/null --write-out '%{http_code}' --header 'Accept: application/vnd.github+json' \
+              --output /dev/null --dump-header "$private/package-headers" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
               "https://api.github.com/users/$RELEASE_USER/packages/container/tarubot-release")
           [[ $package == 200 || $package == 404 ]]
+          # GitHub ticks repo beside write:packages on a new classic token, and repo would let this
+          # secret read and write every repository its owner can. Every answer lists a classic
+          # token's scopes, so only the package scopes are accepted, write:packages among them.
+          reason="The RELEASE_REGISTRY_TOKEN secret of $environment may hold write:packages and read:packages only: create the token again with repo and every other scope unticked, and replace the secret. $unchanged"
+          scopes=$(tr -d '\r' < "$private/package-headers" \
+            | awk 'tolower($0) ~ /^x-oauth-scopes:/ { sub(/^[^:]*:/, ""); value = $0 } END { print value }')
+          IFS=', ' read -r -a granted <<< "$scopes"
+          writes=false
+          for scope in "${granted[@]}"; do
+            case "$scope" in
+              write:packages) writes=true ;;
+              read:packages) ;;
+              *) false ;;
+            esac
+          done
+          [[ $writes == true ]]
           # A private Docker configuration of its own, removed with this step's directory, holds the
           # token for the writes; the run's token stays in the default one.
           reason="GHCR refused $environment's RELEASE_REGISTRY_TOKEN for $release, or didn't answer; check that secret, or re-run once GHCR answers. $unchanged"

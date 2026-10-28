@@ -4,7 +4,8 @@
  * registering commands once ready in the profile's own scope (an unmanaged installation's
  * COMMAND_REGISTRATION), where a refusal or a Discord error is reported and never stops the bot.
  * Discord and the database are doubles; tests/integration/migrations.test.ts runs the real
- * migration hook, and the last test spawns main.ts itself.
+ * migration hook, the last test spawns main.ts itself, and tests/integration/startup.test.ts
+ * spawns it against a migration that fails.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -449,7 +450,13 @@ describe("startup migration", () => {
     // Any error that is no Failure contributes its class name alone.
     expect(lines).toEqual([
       {
-        fields: { code: "unexpected", source: "Error", diagnostic: undefined, pauseMinutes: 10 },
+        fields: {
+          code: "unexpected",
+          source: "Error",
+          errorCode: undefined,
+          diagnostic: undefined,
+          pauseMinutes: 10,
+        },
         message: FAILED_MIGRATION_PAUSED,
       },
     ]);
@@ -468,10 +475,73 @@ describe("startup migration", () => {
       {
         code: "backup",
         source: "Failure",
+        errorCode: undefined,
         diagnostic: "Backup failed at: dump. Shutdown.",
         pauseMinutes: 10,
       },
     ]);
+
+    // Another error's own code, when it is code-shaped (a Node errno, a SQLSTATE), names the fault;
+    // anything else in that property is left out, like the message.
+    const coded: Record<string, unknown>[] = [];
+    for (const errorCode of ["ECONNRESET", "57014", `x ${TOKEN}`, 42, undefined])
+      await pauseAfterFailedMigration(Object.assign(new Error(TOKEN), { code: errorCode }), {
+        log: (fields) => void coded.push(fields),
+        timer: (_delay, done) => done(),
+      });
+    expect(coded.map((fields) => fields.errorCode)).toEqual([
+      "ECONNRESET",
+      "57014",
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(JSON.stringify(coded)).not.toContain(TOKEN);
+  });
+
+  test("applying is called once pending files hold the lease, before the backup, and never otherwise", async () => {
+    const order: string[] = [];
+    await migrateAtStartup({
+      db: database(["016_next.sql"]).db,
+      backups: {
+        beforeMigration: async () => {
+          order.push("backup");
+          return stored;
+        },
+      },
+      env: productionEnv(),
+      log: () => {},
+      launch: container,
+      applying: () => void order.push("applying"),
+    });
+    expect(order).toEqual(["applying", "backup"]);
+
+    // Nothing pending, a guard refusal and an unreachable database never call it, so main.ts
+    // exits at once for them: none took a backup, and a restarting database is back sooner.
+    const calls: string[] = [];
+    const common = {
+      backups: { beforeMigration: async () => stored },
+      log: () => {},
+      launch: container,
+      applying: () => void calls.push("applying"),
+    };
+    await migrateAtStartup({ ...common, db: database([]).db, env: productionEnv() });
+    await expect(
+      migrateAtStartup({
+        ...common,
+        db: database(["016_next.sql"]).db,
+        env: productionEnv({ DATABASE_URL: "postgresql://tarubot:x@localhost:5432/tarubot" }),
+      }),
+    ).rejects.toMatchObject({ code: "configuration" });
+    const unreachable = {
+      migrate: async (): Promise<MigrationReport> => {
+        throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      },
+    };
+    await expect(
+      migrateAtStartup({ ...common, db: unreachable, env: productionEnv() }),
+    ).rejects.toThrow("ECONNREFUSED");
+    expect(calls).toEqual([]);
   });
 
   test("the deployment guard refuses before any connection, and a failed backup applies nothing", async () => {
@@ -514,70 +584,47 @@ function freePort(): number {
   return port;
 }
 
-describe("main.ts after a failed startup migration", () => {
+describe("main.ts after a refused startup migration", () => {
   // The real composition root, spawned: production settings whose database is local, so the
   // deployment guard refuses the migration before anything connects. No Discord, no database.
-  test("pauses holding nothing, and SIGTERM or SIGINT still ends it at once with exit 0", async () => {
-    for (const signal of ["SIGTERM", "SIGINT"] as const) {
-      const port = freePort();
-      // No .env in the working directory, so Bun loads none and the guard sees no env file.
-      const cwd = mkdtempSync(join(tmpdir(), "tarubot-pause-"));
-      const child = Bun.spawn(
-        [process.execPath, fileURLToPath(new URL("../../src/main.ts", import.meta.url))],
-        {
-          cwd,
-          env: {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            HOME: cwd,
-            ...productionEnv({
-              DATABASE_URL: "postgresql://tarubot:sentinel@localhost:5432/tarubot",
-            }),
-            HEALTH_PORT: String(port),
-          },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
+  // tests/integration/startup.test.ts spawns it against a migration that fails, which pauses.
+  test("a refusal before any pending file exits at once, non-zero, with no pause", async () => {
+    // No .env in the working directory, so Bun loads none and the guard sees no env file.
+    const cwd = mkdtempSync(join(tmpdir(), "tarubot-refused-"));
+    const child = Bun.spawn(
+      [process.execPath, fileURLToPath(new URL("../../src/main.ts", import.meta.url))],
+      {
+        cwd,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: cwd,
+          ...productionEnv({
+            DATABASE_URL: "postgresql://tarubot:sentinel@localhost:5432/tarubot",
+          }),
+          HEALTH_PORT: String(freePort()),
         },
-      );
-      try {
-        // Read the log until the pause begins (or the process ends without one).
-        const reader = child.stdout.getReader();
-        const decoder = new TextDecoder();
-        let text = "";
-        const pauseLine = async () => {
-          for (;;) {
-            const line = text
-              .split("\n")
-              .filter((entry) => entry.startsWith("{"))
-              .map((entry) => JSON.parse(entry) as Record<string, unknown>)
-              .find((record) => record.msg === FAILED_MIGRATION_PAUSED);
-            if (line) return line;
-            const { done, value } = await reader.read();
-            if (done) return null;
-            text += decoder.decode(value, { stream: true });
-          }
-        };
-        const line = await Promise.race([pauseLine(), Bun.sleep(60_000).then(() => null)]);
-        expect(line).toMatchObject({ level: 50, code: "configuration", pauseMinutes: 10 });
-        expect(JSON.stringify(line)).not.toContain("sentinel");
-        // Still running a moment later, with the lifecycle stopped: its health server is closed.
-        await Bun.sleep(500);
-        expect(child.exitCode).toBeNull();
-        expect(
-          await fetch(`http://127.0.0.1:${port}/health/live`).then(
-            () => "listening",
-            () => "closed",
-          ),
-        ).toBe("closed");
-        const sent = performance.now();
-        child.kill(signal);
-        expect(await child.exited).toBe(0);
-        expect(performance.now() - sent).toBeLessThan(5_000);
-        reader.releaseLock();
-      } finally {
-        if (child.exitCode === null) child.kill("SIGKILL");
-        rmSync(cwd, { recursive: true, force: true });
-      }
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    try {
+      const exit = await Promise.race([child.exited, Bun.sleep(60_000).then(() => null)]);
+      expect(exit).not.toBeNull();
+      expect(exit).not.toBe(0);
+      const stdout = await new Response(child.stdout).text();
+      const stderr = await new Response(child.stderr).text();
+      const records = stdout
+        .split("\n")
+        .filter((entry) => entry.startsWith("{"))
+        .map((entry) => JSON.parse(entry) as Record<string, unknown>);
+      expect(records.some((record) => record.msg === FAILED_MIGRATION_PAUSED)).toBe(false);
+      // The refusal itself is what the process ends with, naming the setting and never its value.
+      expect(stderr).toContain("is local; production uses the managed cluster");
+      expect(stdout + stderr).not.toContain("sentinel");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      rmSync(cwd, { recursive: true, force: true });
     }
   }, 120_000);
 });

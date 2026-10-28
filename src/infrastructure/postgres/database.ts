@@ -201,7 +201,7 @@ export class Database {
         );
         if (existing.rows[0]) {
           if (existing.rows[0].checksum !== checksum)
-            throw new Error(`Modified applied migration: ${file}`);
+            throw new Failure("schema", `Modified applied migration: ${file}`);
           continue;
         }
         pending.push({ file, sql, checksum });
@@ -231,7 +231,19 @@ export class Database {
       const leaseAcquiredAt = await clock();
       await options.beforeApply?.(pending.map(({ file }) => file));
       for (const { file, sql, checksum } of pending) {
-        await client.query(sql);
+        try {
+          await client.query(sql);
+        } catch (error) {
+          // The file and the SQLSTATE (57014 is the statement timeout; 23xxx a constraint the
+          // existing rows break) say what failed without any value; the original stays as cause.
+          const state = (error as { code?: unknown } | null)?.code;
+          const failure = new Failure(
+            "schema",
+            `Migration ${file} failed${typeof state === "string" && /^[0-9A-Z]{5}$/u.test(state) ? ` (SQLSTATE ${state})` : ""}; nothing was applied.`,
+          );
+          failure.cause = error;
+          throw failure;
+        }
         await client.query("INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)", [
           file,
           checksum,

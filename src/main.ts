@@ -310,22 +310,32 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
       });
   });
 let migrated = false;
+let applying = false;
 try {
   // Starting the image is the whole upgrade (2.46.0): pending migrations apply here, behind the
   // deployment guard and a pre-migration backup, before this process waits for the writer lease.
-  // A refusal or failure leaves the schema as it was and stops the start: after the pause below,
-  // the process exits non-zero.
-  await migrateAtStartup({ db, backups, env: process.env, log: logTo });
+  // A refusal or failure leaves the schema as it was and stops the start: the process exits
+  // non-zero, after the pause below when migrations were pending.
+  await migrateAtStartup({
+    db,
+    backups,
+    env: process.env,
+    log: logTo,
+    applying: () => {
+      applying = true;
+    },
+  });
   migrated = true;
   await lifecycle.prepare();
   await Promise.all([gateway.client.login(config.DISCORD_TOKEN), lifecycle.whenReady()]);
 } catch (error) {
   unbind();
   await lifecycle.stop();
-  // Only a failed migration pauses (10 minutes, holding nothing): each restart would otherwise
-  // repeat it, and its full pre-migration backup, at Docker's restart pace. A later failure
-  // (Discord login, say) exits at once as before.
-  if (!migrated)
+  // Only a migration that failed once pending files were found pauses (10 minutes, holding
+  // nothing): each restart would otherwise repeat it, and its full pre-migration backup, at
+  // Docker's restart pace. Anything before that (an unreachable database, a guard refusal) or
+  // after it (Discord login, say) exits at once as before.
+  if (!migrated && applying)
     await pauseAfterFailedMigration(error, {
       log: (fields, message) => log.error(fields, message),
     });

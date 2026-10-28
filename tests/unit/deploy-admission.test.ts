@@ -65,6 +65,8 @@ type State = {
   failing: string[];
   /** The GitHub API's answer about the release package; 0 answers 200 or 404 by `release`. */
   packageStatus: number;
+  /** The X-OAuth-Scopes header GitHub sends with that answer (a classic token's); null, none. */
+  packageScopes: string | null;
   /** docker login with the release token fails. */
   loginFails: boolean;
   /** Image labels by index digest; an unknown digest can't be inspected. */
@@ -99,6 +101,7 @@ const release = (target: Target): State => ({
   release: { [target]: PREVIOUS_BOT, [`web-${target}`]: PREVIOUS_WEB },
   failing: [],
   packageStatus: 0,
+  packageScopes: "read:packages, write:packages",
   loginFails: false,
   labels: {
     [BOT]: { revision: COMMIT, version: VERSION },
@@ -188,8 +191,9 @@ else process.exit(70);
  * Answers like GHCR, GitHub's API and curl do, so a script that drops a flag fails here too:
  * credentials come only from --config - on stdin; manifests need the right repository's bearer
  * token and the index media type; --fail turns >= 400 into exit 22; output goes only to
- * --write-out and to --dump-header -. GHCR issues no token for, and won't read, a package that
- * doesn't exist yet (it answers as for a private one); GitHub's packages API says 404.
+ * --write-out and to --dump-header (standard output or a file). GHCR issues no token for, and
+ * won't read, a package that doesn't exist yet (it answers as for a private one); GitHub's
+ * packages API says 404, and lists a classic token's scopes in X-OAuth-Scopes.
  */
 const CURL = `
 const config = await new Response(Bun.stdin.stream()).text();
@@ -201,7 +205,9 @@ const answer = (code, headers = "") => {
     if (flag("--write-out")) process.stdout.write(String(code));
     process.exit(22);
   }
-  if (after("--dump-header") === "-") process.stdout.write("HTTP/2 " + code + "\\r\\n" + headers + "\\r\\n");
+  const head = "HTTP/2 " + code + "\\r\\n" + headers + "\\r\\n";
+  if (after("--dump-header") === "-") process.stdout.write(head);
+  else if (after("--dump-header")) writeFileSync(after("--dump-header"), head);
   if (flag("--write-out")) process.stdout.write(String(code));
   process.exit(0);
 };
@@ -213,7 +219,8 @@ const repositories = {
 if (url === "https://api.github.com/users/deconfined/packages/container/tarubot-release") {
   if (after("--write-out") !== "%{http_code}" || after("--output") !== "/dev/null") process.exit(70);
   if (!config.includes('header = "Authorization: Bearer ${RELEASE_TOKEN}"')) answer(401);
-  answer(state.packageStatus || (state.release ? 200 : 404));
+  const scopes = state.packageScopes === null ? "" : "x-oauth-scopes: " + state.packageScopes + "\\r\\n";
+  answer(state.packageStatus || (state.release ? 200 : 404), "server: GitHub.com\\r\\n" + scopes);
 }
 const token = url?.match(/^https:\\/\\/ghcr\\.io\\/token\\?service=ghcr\\.io&scope=repository:(deconfined\\/[a-z-]+):pull$/);
 if (token) {
@@ -801,6 +808,34 @@ describe("the release package's token", () => {
     refused(wrong, "GitHub refused the staging environment's RELEASE_REGISTRY_TOKEN", {
       RELEASE_REGISTRY_TOKEN: "ghp_another",
     });
+  });
+
+  test("a token with any scope but the package ones, or without write:packages, moves nothing", () => {
+    for (const packageScopes of [
+      // GitHub's default when write:packages is ticked on a new classic token.
+      "repo, write:packages",
+      "read:packages, repo, write:packages",
+      "delete:packages, read:packages, write:packages",
+      "read:packages",
+      "",
+      // No such header: not a classic token's answer.
+      null,
+    ]) {
+      const f = fixture();
+      f.state.packageScopes = packageScopes;
+      refused(
+        f,
+        "The RELEASE_REGISTRY_TOKEN secret of the staging environment may hold write:packages and read:packages only: create the token again with repo and every other scope unticked, and replace the secret.",
+      );
+    }
+    // However GitHub spaces or orders them, the package scopes alone pass.
+    for (const packageScopes of ["write:packages", "write:packages,read:packages"]) {
+      const f = fixture();
+      f.state.packageScopes = packageScopes;
+      const result = f.run();
+      expect(result.exitCode).toBe(0);
+      expect(f.registry().release).toEqual({ staging: BOT, "web-staging": WEB });
+    }
   });
 
   test("refused by GHCR moves nothing", () => {

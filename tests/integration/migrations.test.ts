@@ -4,7 +4,7 @@
  * backfill, the new CHECKs, the guest-application switch, the changelog columns, the status-notice
  * columns, the web sessions table, the self-service role menus with their payload-clearing
  * trigger, the status page's samples, the per-person pauses with their history trigger, an empty
- * database, and the real migrate() runner.
+ * database, and the real migrate() runner, including a failing file and an edited applied one.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asc, eq, sql } from "drizzle-orm";
 import type { PoolClient, QueryResult } from "pg";
+import { Failure } from "../../src/domain/values.js";
 import * as t from "../../src/infrastructure/postgres/schema.js";
 import {
   Database,
@@ -1671,6 +1672,55 @@ describe.skipIf(!url)("the migration guard (writer lease)", () => {
     } finally {
       await other.query("SELECT pg_advisory_unlock_all()");
       other.release();
+      await runner.close();
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await rm(staged, { recursive: true, force: true });
+    }
+  });
+
+  test("a failing file is named with its SQLSTATE and applies nothing; an edited applied file is refused", async () => {
+    const schema = "migration_failure";
+    const staged = await mkdtemp(join(tmpdir(), "tarubot-failure-"));
+    const confined = new URL(url);
+    confined.searchParams.set("options", `${SESSION_OPTIONS} -c search_path=${schema}`);
+    const runner = new Database(confined.toString());
+    try {
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await db.query(`CREATE SCHEMA ${schema}`);
+      await Bun.write(join(staged, "001_first.sql"), "CREATE TABLE first_table(id int);");
+      // Fails whatever the rows, as a migration that breaks on production's data does.
+      await Bun.write(
+        join(staged, "002_fails.sql"),
+        "CREATE TABLE second_table(id int); SELECT 1/0;",
+      );
+      let failure: unknown;
+      try {
+        await runner.migrate(staged);
+      } catch (error) {
+        failure = error;
+      }
+      // The file and its SQLSTATE, never the statement or a value; the driver's error is the cause.
+      expect(failure).toBeInstanceOf(Failure);
+      expect(failure).toMatchObject({
+        code: "schema",
+        message: "Migration 002_fails.sql failed (SQLSTATE 22012); nothing was applied.",
+      });
+      expect((failure as Error).cause).toMatchObject({ code: "22012" });
+      // One transaction: the file before it, and the bookkeeping table, rolled back too.
+      await expect(runner.query("SELECT 1 FROM first_table")).rejects.toThrow();
+      await expect(runner.query("SELECT 1 FROM schema_migrations")).rejects.toThrow();
+
+      // Once applied, an edited file is refused before anything pending runs.
+      await Bun.write(join(staged, "002_fails.sql"), "CREATE TABLE second_table(id int);");
+      expect((await runner.migrate(staged)).applied).toEqual(["001_first.sql", "002_fails.sql"]);
+      await Bun.write(join(staged, "001_first.sql"), "CREATE TABLE first_table(id bigint);");
+      await Bun.write(join(staged, "003_next.sql"), "CREATE TABLE third_table(id int);");
+      await expect(runner.migrate(staged)).rejects.toMatchObject({
+        code: "schema",
+        message: "Modified applied migration: 001_first.sql",
+      });
+      await expect(runner.query("SELECT 1 FROM third_table")).rejects.toThrow();
+    } finally {
       await runner.close();
       await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       await rm(staged, { recursive: true, force: true });

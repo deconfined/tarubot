@@ -55,7 +55,10 @@ export function migrateToolScope(args: { restoreRehearsal: boolean }): ToolScope
  * lease for their one transaction (a previous bot still stopping is waited for, up to 90 s), and
  * the pre-migration backup runs inside it (Backups.beforeMigration: production and staging refuse
  * to migrate without one). With nothing pending this is a checksum check and the lease is never
- * touched. A failure anywhere leaves the schema as it was and stops the start.
+ * touched. A failure anywhere leaves the schema as it was and stops the start. `applying` is
+ * called once pending files hold the lease, just before the pre-migration backup: only a failure
+ * from there on is worth main.ts's pause (a guard refusal, an unreachable database or a busy
+ * lease takes no backup, so it exits at once, as before 2.46.0).
  */
 export async function migrateAtStartup(input: {
   db: Pick<Database, "migrate">;
@@ -64,6 +67,7 @@ export async function migrateAtStartup(input: {
   log: StartupLog;
   launch?: Launch;
   directory?: string;
+  applying?: () => void;
 }): Promise<MigrationReport> {
   const deployment = assertToolScope(
     input.env,
@@ -73,6 +77,7 @@ export async function migrateAtStartup(input: {
   const taken: { backup: StoredBackup | null } = { backup: null };
   const report = await input.db.migrate(input.directory ?? "migrations", {
     beforeApply: async (pending) => {
+      input.applying?.();
       taken.backup = await input.backups.beforeMigration(deployment.name, pending);
     },
   });
@@ -93,13 +98,14 @@ export async function migrateAtStartup(input: {
 }
 
 /**
- * How long the process waits after a failed startup migration before it exits. Docker restarts an
- * exited bot at once or within a minute (its back-off resets after any run of 10 s or more), and
- * every start that reaches pending files first stores a full pre-migration backup, so without a
- * pause a migration that fails on production's rows would upload a full dump (and ping
- * healthchecks.io) every minute or faster until someone rolls back. Ten minutes caps that at six an
- * hour and still retries on its own once a passing fault (a storage outage, a database restart)
- * clears.
+ * How long the process waits after a startup migration fails once pending files were found.
+ * Docker restarts an exited bot at once or within a minute (its back-off resets after any run of
+ * 10 s or more), and every start that reaches pending files first stores a full pre-migration
+ * backup, so without a pause a migration that fails on production's rows would upload a full dump
+ * (and ping healthchecks.io) every minute or faster until someone rolls back. Ten minutes caps
+ * that at six an hour and still retries on its own once a passing fault (a storage outage)
+ * clears. Failures before that point (the database unreachable while it restarts, say) take no
+ * backup and don't pause, so the bot is back as soon as the database is.
  */
 export const FAILED_MIGRATION_PAUSE_MS = 10 * 60_000;
 
@@ -124,8 +130,11 @@ const refTimer: PauseTimer = (delayMs, done) => {
  * pre-migration backup or a migration): called after main.ts has unbound the events and stopped
  * the lifecycle, so the pause holds no writer lease, transaction or connection (the migration's
  * one transaction has rolled back and the pool is closed). Logs one error line with the failure's
- * catalog code and class (and an approved Failure message, as the reporter logs it; never a
- * value), then resolves after `delayMs`, and main.ts rethrows so the process exits non-zero.
+ * catalog code and class (and an approved Failure message, as the reporter logs it, which for a
+ * failed migration names its file and SQLSTATE; or another error's own code, such as a Node
+ * errno; never a value), then resolves after `delayMs`, and main.ts rethrows so the process exits
+ * non-zero. The line is all a stop leaves behind: the rethrown error is printed only when the
+ * pause runs out.
  * SIGTERM and SIGINT still end the pause at once: main.ts's handlers, installed before the
  * migration, call lifecycle.stop() again (it returns the same finished promise) and exit 0, so a
  * rolled-back tag's container swap or a `docker compose stop` is never held up.
@@ -140,8 +149,11 @@ export async function pauseAfterFailedMigration(
 ): Promise<void> {
   const delayMs = input.delayMs ?? FAILED_MIGRATION_PAUSE_MS;
   const { code, source, failure } = classifyFailure(error);
+  // A code-shaped code (a SQLSTATE, a Node errno) names the fault without any value.
+  const raw = failure ? undefined : (error as { code?: unknown } | null)?.code;
+  const errorCode = typeof raw === "string" && /^[A-Za-z0-9_]{1,32}$/u.test(raw) ? raw : undefined;
   input.log(
-    { code, source, diagnostic: failure?.message, pauseMinutes: delayMs / 60_000 },
+    { code, source, errorCode, diagnostic: failure?.message, pauseMinutes: delayMs / 60_000 },
     FAILED_MIGRATION_PAUSED,
   );
   await new Promise<void>((resolve) => (input.timer ?? refTimer)(delayMs, resolve));
