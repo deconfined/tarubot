@@ -36,7 +36,11 @@ import { RecentLogs } from "./application/recent-logs.js";
 import { createReporter, type Reporter } from "./application/reporting.js";
 import { SelfRoles } from "./application/self-roles.js";
 import { Service } from "./application/service.js";
-import { migrateAtStartup, registerAtStartup } from "./application/startup.js";
+import {
+  migrateAtStartup,
+  pauseAfterFailedMigration,
+  registerAtStartup,
+} from "./application/startup.js";
 import { Suggestions, suggestionTarget } from "./application/suggestions.js";
 import { Synchronization } from "./application/synchronization.js";
 import { RoleAdministration } from "./application/role-administration.js";
@@ -289,7 +293,9 @@ log.info(
   "Modules loaded",
 );
 
-// OS signals are process housekeeping; all Discord gateway subscriptions are discovered.
+// OS signals are process housekeeping; all Discord gateway subscriptions are discovered. They also
+// end the pause after a failed startup migration (below) at once: lifecycle.stop() returns the
+// same finished promise a second time, and unbinding twice removes nothing more.
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.once(signal, () => {
     void lifecycle
@@ -303,16 +309,26 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
         process.exit(1);
       });
   });
+let migrated = false;
 try {
   // Starting the image is the whole upgrade (2.46.0): pending migrations apply here, behind the
   // deployment guard and a pre-migration backup, before this process waits for the writer lease.
-  // A refusal or failure leaves the schema as it was and stops the start (exit non-zero).
+  // A refusal or failure leaves the schema as it was and stops the start: after the pause below,
+  // the process exits non-zero.
   await migrateAtStartup({ db, backups, env: process.env, log: logTo });
+  migrated = true;
   await lifecycle.prepare();
   await Promise.all([gateway.client.login(config.DISCORD_TOKEN), lifecycle.whenReady()]);
 } catch (error) {
   unbind();
   await lifecycle.stop();
+  // Only a failed migration pauses (10 minutes, holding nothing): each restart would otherwise
+  // repeat it, and its full pre-migration backup, at Docker's restart pace. A later failure
+  // (Discord login, say) exits at once as before.
+  if (!migrated)
+    await pauseAfterFailedMigration(error, {
+      log: (fields, message) => log.error(fields, message),
+    });
   throw error;
 }
 // The writer lease is held and Discord is ready: sample from now on, web or no web, so the history

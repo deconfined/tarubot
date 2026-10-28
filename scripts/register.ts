@@ -7,8 +7,8 @@
  * The deployment guard runs before any request, and the token's application must equal
  * DISCORD_APPLICATION_ID before the bulk PUT replaces the chosen scope. Read the result back with
  * commands.js list; a global PUT leaves guild-scoped leftovers in place. Since 2.46.0 the bot
- * itself registers its profile's scope at every start (src/application/startup.ts); this is the
- * manual tool for any other time.
+ * itself registers its profile's scope at every start (src/application/startup.ts; an unmanaged
+ * installation only where COMMAND_REGISTRATION says); this is the manual tool for any other time.
  */
 import { REST } from "discord.js";
 import { loadCommands } from "../src/bot/discovery.js";

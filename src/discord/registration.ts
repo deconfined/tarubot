@@ -1,7 +1,8 @@
 /**
  * Command registration: one bulk PUT that replaces a scope's commands with the declared set. The
- * bot runs it at every start once it is ready (2.46.0, src/application/startup.ts), and register.js
- * remains the manual tool; both declare the same tool scope to the deployment guard first.
+ * bot runs it at every start once it is ready (2.46.0, src/application/startup.ts; an unmanaged
+ * installation only where COMMAND_REGISTRATION says), and register.js remains the manual tool;
+ * both declare the same tool scope to the deployment guard first.
  */
 import { Routes } from "discord.js";
 import { z } from "zod";
