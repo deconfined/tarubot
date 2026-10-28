@@ -1599,4 +1599,81 @@ describe.skipIf(!url)("the migration guard (writer lease)", () => {
       await rm(staged, { recursive: true, force: true });
     }
   });
+
+  test("beforeApply (the pre-migration backup) runs only with files pending, under the lease, and a throw applies nothing", async () => {
+    const schema = "migration_hook";
+    const staged = await mkdtemp(join(tmpdir(), "tarubot-hook-"));
+    const confined = new URL(url);
+    // A provider-style idle-in-transaction limit far shorter than a dump: the migration's own
+    // SET LOCAL lifts it, so a slow hook doesn't cost the transaction.
+    confined.searchParams.set(
+      "options",
+      `${SESSION_OPTIONS} -c search_path=${schema} -c idle_in_transaction_session_timeout=200`,
+    );
+    const runner = new Database(confined.toString());
+    // Another session, as a bot starting meanwhile would try the lease.
+    const other = await db.pool.connect();
+    const head = "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1";
+    const tryLease = async () =>
+      (
+        await other.query<{ locked: boolean }>(
+          "SELECT pg_try_advisory_lock($1::bigint) AS locked",
+          [WRITER_LEASE_LOCK],
+        )
+      ).rows[0]?.locked;
+    try {
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await db.query(`CREATE SCHEMA ${schema}`);
+      for (const file of await baseline())
+        await copyFile(join(directory, file), join(staged, file));
+
+      const seen: (readonly string[])[] = [];
+      const leaseFree: (boolean | undefined)[] = [];
+      const report = await runner.migrate(staged, {
+        beforeApply: async (pending) => {
+          seen.push(pending);
+          leaseFree.push(await tryLease());
+          // Longer than the session's idle-in-transaction limit.
+          await Bun.sleep(600);
+        },
+      });
+      expect(seen).toEqual([await baseline()]);
+      // No bot could take the lease while the hook ran.
+      expect(leaseFree).toEqual([false]);
+      expect(report.applied).toEqual(await baseline());
+      // The transaction-scoped lock ended at COMMIT.
+      expect(await tryLease()).toBe(true);
+      await other.query("SELECT pg_advisory_unlock($1::bigint)", [WRITER_LEASE_LOCK]);
+
+      // Nothing pending: the hook is never called.
+      let called = false;
+      await runner.migrate(staged, {
+        beforeApply: async () => {
+          called = true;
+        },
+      });
+      expect(called).toBe(false);
+
+      // A failing hook (a failed backup) leaves every pending file unapplied.
+      await expect(
+        runner.migrate(directory, {
+          beforeApply: async () => {
+            throw new Error("The pre-migration backup failed.");
+          },
+        }),
+      ).rejects.toThrow("The pre-migration backup failed.");
+      expect(await runner.query(head)).toEqual([{ version: (await baseline()).at(-1) }]);
+      await expect(runner.query("SELECT 1 FROM member_blocks")).rejects.toThrow();
+      expect(await tryLease()).toBe(true);
+      await other.query("SELECT pg_advisory_unlock($1::bigint)", [WRITER_LEASE_LOCK]);
+      // The default call shape still migrates everything.
+      expect((await runner.migrate(directory)).applied.at(-1)).toBe(SCHEMA_VERSION);
+    } finally {
+      await other.query("SELECT pg_advisory_unlock_all()");
+      other.release();
+      await runner.close();
+      await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await rm(staged, { recursive: true, force: true });
+    }
+  });
 });

@@ -45,10 +45,19 @@ export const WRITER_LEASE_HOLDER = `SELECT pid FROM pg_locks
     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
     AND classid = 0 AND objid = $1::bigint::oid AND objsubid = 1`;
 
-/** How long migrate() waits for a stopping bot to release the writer lease, and how often it retries. */
+/**
+ * How long migrate() waits for a stopping bot to release the writer lease, how often it retries,
+ * and what runs once the lease is held and before the first pending file.
+ */
 export interface MigrateOptions {
   writerWaitMs?: number;
   writerRetryMs?: number;
+  /**
+   * Called with the pending files, in order, only when there are some: after the writer lease is
+   * taken, so no bot writes from here on, and before the first file runs (2.46.0: the pre-migration
+   * backup). A rejection rolls the whole transaction back, so nothing is applied.
+   */
+  beforeApply?: (pending: readonly string[]) => Promise<void>;
 }
 
 /**
@@ -173,6 +182,9 @@ export class Database {
     const retryMs = options.writerRetryMs ?? 2_000;
     return await this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(714882490)");
+      // The transaction sits idle while it waits for a stopping bot and while beforeApply runs (a
+      // whole database dump); a provider's idle-in-transaction default must not end it meanwhile.
+      await client.query("SET LOCAL idle_in_transaction_session_timeout = 0");
       await client.query(
         "CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
       );
@@ -217,6 +229,7 @@ export class Database {
         (await client.query<{ at: string }>("SELECT clock_timestamp()::text AS at")).rows[0]?.at ??
         null;
       const leaseAcquiredAt = await clock();
+      await options.beforeApply?.(pending.map(({ file }) => file));
       for (const { file, sql, checksum } of pending) {
         await client.query(sql);
         await client.query("INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)", [
