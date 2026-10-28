@@ -250,6 +250,14 @@ jobs:
           reason="GHCR refused $environment's RELEASE_REGISTRY_TOKEN for $release, or didn't answer; check that secret, or re-run once GHCR answers. $unchanged"
           release_config="$private/release-registry"
           mkdir "$release_config"
+          # setup-buildx-action may leave buildx as a user plugin in the default configuration; a
+          # configuration of its own would no longer find it, so copy only that executable (as
+          # scripts/release-scan.ts does), never the default configuration's credentials.
+          if [[ -f ${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins/docker-buildx ]]; then
+            mkdir -m 700 "$release_config/cli-plugins"
+            cp "${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins/docker-buildx" "$release_config/cli-plugins/docker-buildx"
+            chmod 700 "$release_config/cli-plugins/docker-buildx"
+          fi
           printf '%s\n' "$RELEASE_REGISTRY_TOKEN" \
             | DOCKER_CONFIG=$release_config docker login ghcr.io --username "$RELEASE_USER" --password-stdin > /dev/null
           as_release() { DOCKER_CONFIG=$release_config docker "$@"; }
