@@ -16,7 +16,8 @@
  * (an init container, a Compose one-shot, or a migration ahead of a start). It follows the bot's
  * pre-migration rule: with backup settings, an encrypted backup is taken under the lease before
  * the first file runs, and its failure applies nothing; without them production and staging
- * refuse, and other profiles warn. A --restore-rehearsal copy is disposable and takes none.
+ * refuse, and other profiles warn. A --restore-rehearsal copy and the rehearsal profile's
+ * *_rehearsal database are disposable and take none (the latter is Backups.beforeMigration's rule).
  */
 import { Backups, settingsSnapshot } from "../src/application/backups.js";
 import { migrateToolScope } from "../src/application/startup.js";

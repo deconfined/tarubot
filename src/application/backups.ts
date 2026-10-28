@@ -150,10 +150,30 @@ export function storageSettings(
   };
 }
 
-/** age public keys, separated by whitespace or commas; null unless there is one and all are valid. */
+/**
+ * age public keys, separated by whitespace or commas; null unless there is one and all are valid.
+ * Valid means the X25519 shape and a key age-encryption itself decodes: the shape alone passes a
+ * key with one mistyped character (only its Bech32 checksum catches that), which would otherwise
+ * surface only once a backup began encrypting, as a stage `dump` failure that never names this
+ * setting, and on production as every migrating release refused for a pg_dump-side reason.
+ */
 export function ageRecipients(value: string | undefined): string[] | null {
   const keys = (value ?? "").split(/[\s,]+/u).filter(Boolean);
-  return keys.length && keys.every((key) => RECIPIENT.test(key)) ? keys : null;
+  return keys.length && keys.every((key) => RECIPIENT.test(key) && decodes(key)) ? keys : null;
+}
+
+/**
+ * Whether age-encryption accepts the key as a recipient. addRecipient decodes it at once
+ * (checksum, prefix and length) and throws for a bad one; the error, which may quote the key, is
+ * dropped, since problems name settings only.
+ */
+function decodes(key: string): boolean {
+  try {
+    new Encrypter().addRecipient(key);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Read and validate every backup setting (see BackupConfiguration). */
@@ -227,16 +247,24 @@ export function settingsSnapshot(env: Environment, read?: ReadText): SettingsSna
 }
 
 /**
- * One value as Compose's dotenv reads it back exactly: single-quoted (literal: no interpolation or
- * escapes, and it may span lines), or, when the value itself holds a single quote, double-quoted
- * with backslash, double quote and dollar escaped.
+ * One value as Compose's dotenv reads it back exactly (checked against `docker compose --env-file`
+ * itself). Single-quoted only when it holds neither a single quote nor a backslash: Compose reads
+ * such a value literally (no interpolation, and it may span lines). Compose's parser still takes a
+ * backslash before a quote as an escape inside single quotes, so a value ending in a backslash
+ * would run on into the next line and make Compose refuse the whole copy. Any other value is
+ * double-quoted with backslash, double quote and dollar escaped (`\\`, `\"`, `$$`): every
+ * backslash is then part of one of these escapes, so none can start another (`\n`, say), and
+ * Compose reads each back as the one character it stands for.
  */
 export function dotenvValue(value: string): string {
-  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes("'") && !value.includes("\\")) return `'${value}'`;
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("$", "$$$$")}"`;
 }
 
-/** The settings copy: a Compose-compatible env file, one NAME='value' per setting, sorted by name. */
+/**
+ * The settings copy: a Compose-compatible env file, one NAME='value' (or NAME="value", see
+ * dotenvValue) per setting, sorted by name.
+ */
 export function settingsCopy(snapshot: SettingsSnapshot, version: string, stamp: string): string {
   const lines = Object.keys(snapshot)
     .sort()
@@ -390,7 +418,12 @@ export async function takeBackup(
     else if (stage === "upload")
       failure = new BackupFailure(stage, "Storage refused or failed the upload.");
     else failure = new BackupFailure(stage, "Encryption failed.");
-    await ping(fetcher, settings.ping, "/fail", `backup failed at: ${failure.stage}`);
+    // Only a real failure pings /fail. A run abandoned at shutdown (a restart, a tag move) broke
+    // nothing: its /start stays open, the next run's success closes it, and healthchecks.io marks
+    // the check down by itself if none succeeds within its grace time. Skipping the ping also
+    // keeps up to PING_TIMEOUT_MS out of a shutdown that drain caps at 20 s.
+    if (!failure.interrupted)
+      await ping(fetcher, settings.ping, "/fail", `backup failed at: ${failure.stage}`);
     throw failure;
   }
 }
@@ -593,11 +626,24 @@ export class Backups {
    * migration is still pending has never held TaruBot's schema, so it has nothing to back up (and
    * its dump would fail MIN_DUMP_BYTES): a first start skips the backup, not the rule. Resolves
    * with what was stored.
+   *
+   * The rehearsal profile never backs up, configured or not: its *_rehearsal database is
+   * disposable, and its one-off containers inherit production's backup settings, so a backup
+   * would land in production's bucket as the newest daily/ and env/ objects, which
+   * `restore.js database latest` and `settings latest` then choose over production's own.
    */
   async beforeMigration(
     profile: DeploymentName,
     pending: readonly string[],
   ): Promise<StoredBackup | null> {
+    if (profile === "rehearsal") {
+      this.log(
+        "info",
+        { pending: pending.length },
+        "No pre-migration backup: a rehearsal database is disposable",
+      );
+      return null;
+    }
     const fresh = pending.includes(FIRST_MIGRATION);
     if (this.configuration.status !== "off") {
       if (!fresh) return await this.run("pre-migration");

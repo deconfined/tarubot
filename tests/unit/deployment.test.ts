@@ -21,7 +21,7 @@ import {
 import { Failure } from "../../src/domain/values.js";
 import { SCHEMA_VERSION } from "../../src/infrastructure/postgres/database.js";
 import { activateToolScope, parseActivateArguments } from "../../scripts/activate.js";
-import { backupArguments, backupToolScope } from "../../scripts/backup.js";
+import { assertBackupScope, backupArguments, backupToolScope } from "../../scripts/backup.js";
 import { restoreArguments, restoreToolScope } from "../../scripts/check-restore.js";
 import {
   restoreArguments as restoreJsArguments,
@@ -567,6 +567,18 @@ describe("databases", () => {
     );
     expect(() => backupArguments([])).not.toThrow();
     expect(() => backupArguments(["--now"])).toThrow(Failure);
+    // backup.js never backs up a rehearsal: the guard itself accepts its *_rehearsal database,
+    // but its backup would become the newest object in production's bucket.
+    expect(assertBackupScope(productionEnv(), container).name).toBe("production");
+    expect(assertToolScope(rehearsalEnv(), scope.backup, direct).name).toBe("rehearsal");
+    for (const env of [
+      rehearsalEnv(),
+      rehearsalEnv({ DATABASE_URL: managedUrl("tarubot_rehearsal"), DATABASE_CA_CERT: CA }),
+    ])
+      refused(
+        () => assertBackupScope(env, direct),
+        "Refusing backup under the rehearsal profile: a rehearsal database is disposable",
+      );
   });
 
   test("(#50) production's primary is tarubot or tarubot_restore, so a restore can be repointed", () => {

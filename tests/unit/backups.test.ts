@@ -149,6 +149,57 @@ describe("backup settings", () => {
     });
   });
 
+  test("a recipient with one mistyped character is invalid by name, so backups fail at settings", async () => {
+    // One substitution keeps the age1 shape; only the Bech32 checksum catches it. The shape check
+    // alone let it through, and every backup then failed at dump without naming the setting.
+    const index = 20;
+    const typo = `${recipient.slice(0, index)}${recipient[index] === "q" ? "p" : "q"}${recipient.slice(index + 1)}`;
+    expect(typo).toMatch(/^age1[0-9a-z]{58}$/u);
+    expect(typo).not.toBe(recipient);
+    const settings = snapshot({ BACKUP_AGE_RECIPIENTS: `${recipient}, ${typo}` });
+    expect(backupConfiguration(settings)).toEqual({
+      status: "invalid",
+      problems: ["BACKUP_AGE_RECIPIENTS"],
+      ping: PING,
+      time: "03:00",
+    });
+    // Reported once at start, by name and never by value.
+    const reports: unknown[] = [];
+    new Backups(settings, recordingLog().log, { timers: manualTimers() }).start(
+      () => true,
+      (error) => reports.push(error),
+    );
+    expect(reports).toHaveLength(1);
+    expect((reports[0] as Failure).message).toContain("BACKUP_AGE_RECIPIENTS");
+    expect((reports[0] as Failure).message).not.toContain(typo);
+    // Each attempt fails at settings before pg_dump starts, pinging /fail with that stage.
+    const fetcher = recordingFetch();
+    const dump = scriptedTool({ output: DUMP });
+    await expect(
+      takeBackup(settings, {
+        storage: () => new MemoryStorage(),
+        runTool: dump.run,
+        fetch: fetcher.fetch,
+      }),
+    ).rejects.toMatchObject({
+      stage: "settings",
+      message:
+        "Backup failed at: settings. These backup settings are missing or invalid: BACKUP_AGE_RECIPIENTS.",
+    });
+    expect(dump.calls).toEqual([]);
+    expect(fetcher.pings).toEqual([{ url: `${PING}/fail`, body: "backup failed at: settings" }]);
+    // And a migrating release is refused with the setting's name, not a pg_dump-side reason.
+    await expect(
+      new Backups(settings, recordingLog().log, {
+        runTool: dump.run,
+        fetch: recordingFetch().fetch,
+      }).beforeMigration("production", ["016_next.sql"]),
+    ).rejects.toMatchObject({
+      stage: "settings",
+      message: expect.stringContaining("BACKUP_AGE_RECIPIENTS"),
+    });
+  });
+
   test("the committed recipients file holds production's age public key and no private key", async () => {
     const text = await Bun.file(new URL("../../ops/age-recipients.txt", import.meta.url)).text();
     expect(text).not.toContain("AGE-SECRET-KEY");
@@ -196,16 +247,26 @@ describe("the settings copy", () => {
     expect(Object.isFrozen(captured)).toBe(true);
   });
 
-  test("is a Compose env file: sorted, single-quoted, double-quoted only around a single quote", () => {
-    expect(dotenvValue("plain $HOME \\n `x`")).toBe("'plain $HOME \\n `x`'");
+  test("is a Compose env file: sorted, single-quoted, double-quoted around a quote or backslash", () => {
+    expect(dotenvValue(`plain $HOME \${X} \`x\` # = "q"`)).toBe(
+      `'plain $HOME \${X} \`x\` # = "q"'`,
+    );
     expect(dotenvValue(`it's "$5" \\ back`)).toBe(`"it's \\"$$5\\" \\\\ back"`);
+    // A backslash anywhere means double quotes, so a trailing one can't escape a closing quote.
+    expect(dotenvValue("secret\\")).toBe(`"secret\\\\"`);
+    expect(dotenvValue("literal \\n")).toBe(`"literal \\\\n"`);
     expect(
-      settingsCopy({ ZED: "z", CA_CERT: `${CA}\n`, ALPHA: "it's" }, "2.46.0", "20261028T030000Z"),
+      settingsCopy(
+        { ZED: "z", CA_CERT: `${CA}\n`, ALPHA: "it's", KEY: "ends\\" },
+        "2.46.0",
+        "20261028T030000Z",
+      ),
     ).toBe(
       [
         "# TaruBot 2.46.0 settings copy, 20261028T030000Z",
         `ALPHA="it's"`,
         `CA_CERT='${CA}\n'`,
+        `KEY="ends\\\\"`,
         "ZED='z'",
         "",
       ].join("\n"),
@@ -213,14 +274,58 @@ describe("the settings copy", () => {
   });
 
   test("reads back exactly as Compose's dotenv rules read it", () => {
-    // Compose's rules for the two forms written: single quotes are literal; double quotes take
-    // \\, \" and $$ (and would interpolate a lone $, which dotenvValue never leaves).
-    const read = (quoted: string): string =>
-      quoted.startsWith("'")
-        ? quoted.slice(1, -1)
-        : quoted.slice(1, -1).replace(/\\(.)|\$\$/gsu, (_, escaped) => escaped ?? "$");
-    for (const value of ["", "a b", "it's", "'", `"'"`, "$$'$", "\\'\\n", "multi\nline'\n"])
-      expect(read(dotenvValue(value))).toBe(value);
+    // Compose's rules (compose-go's dotenv parser) for the two forms written. In both, a quoted
+    // value ends at the first matching quote with no odd run of backslashes before it: inside
+    // single quotes too, which is how `'secret\'` ran on into the next line. Single-quoted text is
+    // otherwise literal. Double-quoted text takes Go-style escapes (`\n` is a newline), then
+    // interpolation, where $$ is a literal $ (a lone $ would interpolate; dotenvValue never leaves
+    // one). The scratch read-back through `docker compose --env-file ... config` checks the same.
+    const ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", "\\": "\\", '"': '"' };
+    const read = (written: string): string => {
+      const quote = written[0];
+      if (quote !== "'" && quote !== '"') throw new Error(`unquoted: ${written}`);
+      let end = 0;
+      for (;;) {
+        end = written.indexOf(quote, end + 1);
+        if (end < 0) throw new Error(`unterminated: ${written}`);
+        let backslashes = 0;
+        while (written[end - 1 - backslashes] === "\\") backslashes += 1;
+        if (backslashes % 2 === 0) break;
+      }
+      if (end !== written.length - 1) throw new Error(`runs on past its closing quote: ${written}`);
+      const body = written.slice(1, -1);
+      if (quote === "'") return body;
+      return body.replace(/\\(.)|\$(\$|\{|[A-Za-z_])?/gsu, (match, escaped, after) => {
+        if (escaped !== undefined) return ESCAPES[escaped] ?? match;
+        if (after === "$") return "$";
+        throw new Error(`interpolates: ${written}`);
+      });
+    };
+    for (const value of [
+      "",
+      "a b",
+      "it's",
+      "'",
+      `"'"`,
+      "$$'$",
+      "\\'\\n",
+      "multi\nline'\n",
+      // A backslash at the end, alone, doubled, before a quote, a dollar or a newline.
+      "secret\\",
+      "\\",
+      "two\\\\",
+      "it's\\",
+      "a\\'b",
+      'a\\"b',
+      "a\\$b",
+      "literal \\n and \\t",
+      "line\\\nnext\\",
+      // Interpolation, comments and separators stay literal.
+      `\${HOME} $X $$`,
+      "# not a comment = still the value",
+      `${CA}\n`,
+    ])
+      expect({ value, read: read(dotenvValue(value)) }).toEqual({ value, read: value });
   });
 });
 
@@ -418,9 +523,10 @@ describe("one backup", () => {
     const storage = new MemoryStorage();
     const dump = scriptedTool({ output: DUMP, hang: true });
     const stopping = new AbortController();
+    const fetcher = recordingFetch();
     const running = takeBackup(
       snapshot(),
-      { storage: () => storage, runTool: dump.run, fetch: recordingFetch().fetch },
+      { storage: () => storage, runTool: dump.run, fetch: fetcher.fetch },
       stopping.signal,
     );
     await Bun.sleep(50);
@@ -429,6 +535,9 @@ describe("one backup", () => {
     expect(dump.calls[0]?.killed).toBe("SIGTERM");
     expect(storage.attempts).toHaveLength(1);
     expect(storage.objects.size).toBe(0);
+    // Abandoned, not failed: no /fail ping. The open /start is closed by the next run's success,
+    // or healthchecks.io marks the check down itself if none succeeds within its grace time.
+    expect(fetcher.pings).toEqual([{ url: `${PING}/start`, body: "backup starting" }]);
     // Once shutdown has begun, nothing new starts.
     await expect(
       takeBackup(snapshot(), { storage: () => storage, runTool: dump.run }, stopping.signal),
@@ -567,6 +676,39 @@ describe("the backup service", () => {
     });
   });
 
+  test("the rehearsal profile never backs up: its database is disposable", async () => {
+    // A rehearsal one-off inherits production's backup settings; its dump would otherwise become
+    // the newest daily/ object, the one restore.js restores as latest. The rule comes before the
+    // configuration is looked at: configured backs up nothing, invalid doesn't fail, off doesn't
+    // warn.
+    for (const settings of [
+      snapshot(),
+      snapshot({ BACKUP_AGE_RECIPIENTS: "" }),
+      snapshot({ BACKUP_STORAGE_ENDPOINT: "" }),
+    ]) {
+      const storage = new MemoryStorage();
+      const dump = scriptedTool({ output: DUMP });
+      const fetcher = recordingFetch();
+      const { log, lines } = recordingLog();
+      const backups = new Backups(settings, log, {
+        storage: () => storage,
+        runTool: dump.run,
+        fetch: fetcher.fetch,
+      });
+      expect(await backups.beforeMigration("rehearsal", ["016_next.sql", "017_x.sql"])).toBeNull();
+      expect(dump.calls).toEqual([]);
+      expect(storage.attempts).toEqual([]);
+      expect(fetcher.pings).toEqual([]);
+      expect(lines).toEqual([
+        {
+          level: "info",
+          fields: { pending: 2 },
+          message: "No pre-migration backup: a rehearsal database is disposable",
+        },
+      ]);
+    }
+  });
+
   test("daily: scheduled at BACKUP_TIME_UTC, only while holding the writer lease, failures reported", async () => {
     const storage = new MemoryStorage();
     const timers = manualTimers();
@@ -640,16 +782,36 @@ describe("the backup service", () => {
     expect(timers.pending).toHaveLength(1);
   });
 
+  test("a pre-migration backup cut off by shutdown sends no /fail ping", async () => {
+    // A restart or a tag move during the pre-migration backup: the migration rolls back and the
+    // next start backs up again, so nothing failed and healthchecks.io must not be told so.
+    const storage = new MemoryStorage();
+    const fetcher = recordingFetch();
+    const backups = new Backups(snapshot(), recordingLog().log, {
+      storage: () => storage,
+      runTool: scriptedTool({ output: DUMP, hang: true }).run,
+      fetch: fetcher.fetch,
+    });
+    const migrating = backups.beforeMigration("production", ["016_next.sql"]);
+    const settled = migrating.catch((error: unknown) => error);
+    await Bun.sleep(50);
+    await backups.stop();
+    expect(await settled).toMatchObject({ stage: "dump", interrupted: true });
+    expect(storage.objects.size).toBe(0);
+    expect(fetcher.pings).toEqual([{ url: `${PING}/start`, body: "backup starting" }]);
+  });
+
   test("stop abandons a backup in progress and waits for it; a daily one is logged, not reported", async () => {
     const storage = new MemoryStorage();
     const timers = manualTimers();
     const { log, lines } = recordingLog();
     const reports: unknown[] = [];
     const dump = scriptedTool({ output: DUMP, hang: true });
+    const fetcher = recordingFetch();
     const backups = new Backups(snapshot(), log, {
       storage: () => storage,
       runTool: dump.run,
-      fetch: recordingFetch().fetch,
+      fetch: fetcher.fetch,
       timers,
     });
     backups.start(
@@ -667,6 +829,7 @@ describe("the backup service", () => {
       level: "warn",
       message: "Daily backup abandoned at shutdown",
     });
+    expect(fetcher.pings.map((ping) => ping.url)).toEqual([`${PING}/start`]);
     expect(timers.pending).toHaveLength(0);
   });
 });
