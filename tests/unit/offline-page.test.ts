@@ -134,21 +134,98 @@ describe("the Caddyfile", () => {
     expect(from).toMatch(
       /^FROM docker\.io\/library\/caddy:\S+-alpine@sha256:[0-9a-f]{64} AS web$/u,
     );
-    // Only copies: Caddy runs exactly as its image does.
-    expect(stage.every((line) => /^(COPY|LABEL)\s/u.test(line))).toBe(true);
-    const copies = stage
-      .filter((line) => line.startsWith("COPY "))
-      .map((line) =>
-        line
-          .split(/\s+/u)
-          .filter((word) => !word.startsWith("--"))
-          .slice(1),
-      );
-    expect(copies).toEqual([
-      ["ops/Caddyfile", "/etc/caddy/Caddyfile"],
-      ["ops/offline", "/srv/offline"],
-    ]);
+    // Only directories and copies: Caddy runs exactly as its image does, and with no RUN,
+    // publish.yml builds both platforms without emulation.
+    expect(stage.every((line) => /^(WORKDIR|COPY|LABEL)\s/u.test(line))).toBe(true);
+    const words = (line: string) => line.split(/\s+/u).slice(1);
+    const copies = stage.filter((line) => line.startsWith("COPY ")).map(words);
+    // Numeric modes only: Engine 27.x's built-in frontend rejects a symbolic --chmod.
+    for (const copy of copies)
+      expect({ copy, flags: copy.filter((word) => word.startsWith("--")) }).toEqual({
+        copy,
+        flags: ["--chmod=0644"],
+      });
+    // One copy per file directly in ops/offline and one per directory's files, so a new file or
+    // directory there fails until the stage copies and creates it. A COPY --chmod=0644 of a
+    // directory would give any directory inside it that mode, which Caddy couldn't enter, so the
+    // directories hold files only.
+    const expected = [["ops/Caddyfile", "/etc/caddy/Caddyfile"]];
+    const directories = ["/srv/offline"];
+    for (const entry of readdirSync(root("ops/offline"), { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        expected.push([`ops/offline/${entry.name}`, `/srv/offline/${entry.name}`]);
+        continue;
+      }
+      const nested = readdirSync(root(`ops/offline/${entry.name}`), { withFileTypes: true })
+        .filter((inner) => inner.isDirectory())
+        .map((inner) => inner.name);
+      expect({ directory: entry.name, nested }).toEqual({ directory: entry.name, nested: [] });
+      expected.push([`ops/offline/${entry.name}/`, `/srv/offline/${entry.name}/`]);
+      directories.push(`/srv/offline/${entry.name}`);
+    }
+    const sorted = (pairs: string[][]) => pairs.map((pair) => pair.join(" ")).sort();
+    expect(sorted(copies.map((copy) => copy.filter((word) => !word.startsWith("--"))))).toEqual(
+      sorted(expected),
+    );
+    // WORKDIR, before any copy, creates every directory the copies fill (always 0755, where a
+    // COPY's implicit parents take its 0644 on newer engines), and the last restores Caddy's /srv.
+    const workdirs = stage.filter((line) => line.startsWith("WORKDIR ")).map((line) => words(line));
+    expect(workdirs.every((args) => args.length === 1)).toBe(true);
+    const created = workdirs.flatMap(([path = ""]) =>
+      path.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/")),
+    );
+    for (const directory of directories) expect(created).toContain(directory);
+    expect(workdirs.at(-1)).toEqual(["/srv"]);
+    const lastWorkdir = stage.findLastIndex((line) => line.startsWith("WORKDIR "));
+    expect(stage.findIndex((line) => line.startsWith("COPY "))).toBeGreaterThan(lastWorkdir);
   });
+
+  // CI builds this tree's web image first (ci.yml's Caddy fixture); elsewhere this is skipped.
+  const image = process.env.CADDY_FIXTURE_IMAGE;
+  test.skipIf(!image)(
+    "the built web image holds root-owned 0644 files in 0755 directories, whatever the checkout",
+    () => {
+      // Caddy runs as root with every capability dropped, so these modes are what it can read.
+      const listed = Bun.spawnSync(
+        [
+          "docker",
+          "run",
+          "--rm",
+          "--read-only",
+          "--cap-drop",
+          "ALL",
+          "--security-opt",
+          "no-new-privileges:true",
+          "--entrypoint",
+          "find",
+          image ?? "",
+          "/etc/caddy/Caddyfile",
+          "/srv/offline",
+          "-exec",
+          "stat",
+          "-c",
+          "%a %u:%g %n",
+          "{}",
+          ";",
+        ],
+        { stdin: "ignore" },
+      );
+      expect({ status: listed.exitCode, errors: listed.stderr.toString() }).toEqual({
+        status: 0,
+        errors: "",
+      });
+      const expected = ["644 0:0 /etc/caddy/Caddyfile", "755 0:0 /srv/offline"];
+      const walk = (path: string) => {
+        for (const entry of readdirSync(root(`ops/${path}`), { withFileTypes: true })) {
+          const inside = `${path}/${entry.name}`;
+          expected.push(`${entry.isDirectory() ? "755" : "644"} 0:0 /srv/${inside}`);
+          if (entry.isDirectory()) walk(inside);
+        }
+      };
+      walk("offline");
+      expect(listed.stdout.toString().trim().split("\n").sort()).toEqual(expected.sort());
+    },
+  );
 
   test("docker-compose.web.yml runs the release's web image and mounts nothing from ops/", async () => {
     const compose = Bun.YAML.parse(await read("docker-compose.web.yml")) as {

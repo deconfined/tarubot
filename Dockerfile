@@ -53,10 +53,19 @@ CMD ["bun", "test", "tests"]
 
 # The web proxy (published as ghcr.io/deconfined/tarubot:web-X.Y.Z beside each release): the stock
 # Caddy image with TaruBot's Caddyfile and offline page, so the proxy needs no bind mounts and
-# follows the release like the bot. Files 0644, directories 0755, nothing else.
+# follows the release like the bot. Root-owned files 0644 and directories 0755, nothing else,
+# whatever the checkout's modes, on every BuildKit Docker engine: older built-in frontends (Engine
+# 27.x) reject a symbolic --chmod, and newer ones give a COPY's implicitly created parents its file
+# mode, so a 0644 directory the cap-dropped Caddy couldn't enter. So WORKDIR creates the two
+# directories (always 0755) and restores the image's own /srv, and each COPY sets numeric file
+# modes. Only COPY and WORKDIR: publish.yml builds both platforms without emulation. ops/offline is
+# one level deep (offline-page.test.ts fails if it gains a subdirectory this doesn't create).
 FROM docker.io/library/caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f AS web
+WORKDIR /srv/offline/assets
+WORKDIR /srv
 COPY --chmod=0644 ops/Caddyfile /etc/caddy/Caddyfile
-COPY --chmod=u=rwX,go=rX ops/offline /srv/offline
+COPY --chmod=0644 ops/offline/index.html /srv/offline/index.html
+COPY --chmod=0644 ops/offline/assets/ /srv/offline/assets/
 
 # Preserve directory layout: discovery resolves compiled modules relative to import.meta.url.
 # Last, so a plain `docker build` produces the bot.
