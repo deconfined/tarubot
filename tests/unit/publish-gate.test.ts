@@ -327,7 +327,7 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
     expect(workflow.jobs.verify?.if).toBe("needs.gate.outputs.tested != 'true'");
   });
 
-  test("both images are signed and promoted, and production deploys them with no secret", () => {
+  test("both images are signed and promoted, and production deploys them with only the release token's name", () => {
     const signed = (workflow.jobs.attest?.steps ?? [])
       .filter((step) => step.uses?.startsWith("actions/attest@"))
       .map((step) => step.with);
@@ -352,11 +352,17 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
       target: "production",
       version: `\${{ needs.gate.outputs.version }}`,
     });
-    expect(deploy?.secrets).toBeUndefined();
+    // The caller has no environment, so it binds only the name; the approved `production` job
+    // resolves the environment's own value. Never `inherit`, which would hand over every secret.
+    expect(deploy?.secrets).toEqual({
+      RELEASE_REGISTRY_TOKEN: `\${{ secrets.RELEASE_REGISTRY_TOKEN }}`,
+    });
     const called = Bun.YAML.parse(
       readFileSync(new URL("../../.github/workflows/deploy.yml", import.meta.url), "utf8"),
     ) as { permissions: Record<string, string> };
     expect(deploy?.permissions).toEqual(called.permissions);
+    // This run's token never writes the package Deploy's channel tags would otherwise live in.
+    expect(deploy?.permissions?.packages).toBe("read");
   });
 
   test("re-runs retry for real: no publication or delivery job is limited to the first attempt", () => {

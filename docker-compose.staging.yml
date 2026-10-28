@@ -3,6 +3,8 @@
 # works like docker-compose.production.yml: start it once with the project's settings in its
 # environment (staging.env.example lists them); the approved Deploy workflow then only moves the
 # tags, and Watchtower replaces the stale containers, stopping the old bot before the new one starts.
+# As in production, the tags live in TARUBOT_IMAGE_REPOSITORY, ghcr.io/deconfined/tarubot-release,
+# which only an approved Deploy can write.
 name: tarubot
 
 include:
@@ -16,10 +18,17 @@ x-logging: &logging
 
 services:
   tarubot:
-    image: ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to staging}
-    # The fixed name is how the updater finds the bot (see watchtower below).
+    image: ${TARUBOT_IMAGE_REPOSITORY:?Set TARUBOT_IMAGE_REPOSITORY to ghcr.io/deconfined/tarubot-release}:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to staging}
+    # The fixed name and the scope label are how the updater finds the bot (see watchtower below).
     container_name: tarubot
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
+      # The Compose project's own settings, which the bot ignores, so that each backup's settings
+      # copy starts this project again as it was (see docker-compose.production.yml).
+      TARUBOT_IMAGE_REPOSITORY: ${TARUBOT_IMAGE_REPOSITORY}
+      TARUBOT_IMAGE_TAG: ${TARUBOT_IMAGE_TAG}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed staging database}
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN to the staging bot token}
@@ -81,11 +90,15 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
-  # The same pinned updater and flags as production (see docker-compose.production.yml), following
-  # the `staging` tags. The Docker socket is root-equivalent on this Docker host.
+  # The same pinned updater, scope and flags as production (see docker-compose.production.yml),
+  # following the `staging` tags. The Docker socket is root-equivalent on this Docker host.
   watchtower:
     image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     command:
+      - --scope
+      - tarubot
       - --interval
       - "300"
       - --stop-timeout

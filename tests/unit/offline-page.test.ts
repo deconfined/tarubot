@@ -234,7 +234,9 @@ describe("the Caddyfile", () => {
       };
     };
     const { caddy } = compose.services;
-    expect(caddy.image).toBe(`ghcr.io/deconfined/tarubot:web-\${TARUBOT_IMAGE_TAG:-latest}`);
+    expect(caddy.image).toBe(
+      `\${TARUBOT_IMAGE_REPOSITORY:-ghcr.io/deconfined/tarubot}:web-\${TARUBOT_IMAGE_TAG:-latest}`,
+    );
     expect(caddy.volumes).toEqual(["caddy_data:/data", "caddy_config:/config"]);
     expect(caddy.read_only).toBe(true);
     expect(caddy.cap_drop).toEqual(["ALL"]);

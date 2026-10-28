@@ -118,6 +118,7 @@ jobs:
           set -Eeuo pipefail
           # Invented settings only, the backup settings included.
           managed=(
+            TARUBOT_IMAGE_REPOSITORY=ghcr.io/deconfined/tarubot-release
             DISCORD_APPLICATION_ID=123456789012345678 DATABASE_CA_CERT=x DISCORD_TOKEN=x
             BACKUP_STORAGE_ENDPOINT=backups.example.org/tarubot BACKUP_STORAGE_REGION=example-1
             BACKUP_STORAGE_ACCESS_KEY=fixture-only BACKUP_STORAGE_SECRET_KEY=fixture-only

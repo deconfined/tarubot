@@ -3,6 +3,9 @@
 # environment (production.env.example lists them); after that the approved Deploy workflow only
 # moves the tags, and Watchtower replaces each container when its tag moves, keeping the settings
 # and hardening the container was created with. Changing a setting needs `up` again.
+# The tags live in TARUBOT_IMAGE_REPOSITORY, ghcr.io/deconfined/tarubot-release: only an approved
+# Deploy can write that package (with its environment's own token), while every workflow of the
+# repository can write ghcr.io/deconfined/tarubot, so a runtime must never follow a tag there.
 # Exactly one writer holds the database lease: Watchtower stops the old bot before it starts the
 # new one, and the new bot applies pending migrations, after an encrypted backup, before it takes
 # the lease. Tools run as one-off containers of the same image (docker compose run --rm tarubot).
@@ -20,10 +23,19 @@ x-logging: &logging
 
 services:
   tarubot:
-    image: ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to production}
-    # The fixed name is how the updater finds the bot (see watchtower below).
+    image: ${TARUBOT_IMAGE_REPOSITORY:?Set TARUBOT_IMAGE_REPOSITORY to ghcr.io/deconfined/tarubot-release}:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to production}
+    # The fixed name and the scope label are how the updater finds the bot (see watchtower below).
     container_name: tarubot
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
+      # The Compose project's own settings, which the bot ignores, so that each backup's settings
+      # copy (the bot's environment) starts this project again as it was: restore.js settings, then
+      # --env-file. Without them a rebuilt runtime would stop at the image or silently drop the web
+      # profile.
+      TARUBOT_IMAGE_REPOSITORY: ${TARUBOT_IMAGE_REPOSITORY}
+      TARUBOT_IMAGE_TAG: ${TARUBOT_IMAGE_TAG}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       # The managed cluster's direct connection, verified with its CA.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed tarubot database}
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
@@ -102,16 +114,24 @@ services:
   # in its command with their tags in the registry and, when a tag moved, pulls it, stops the old
   # container (within its own stop_grace_period, the bot's 30 seconds; --stop-timeout covers the
   # proxy), starts the new one with the old one's configuration, then removes the old image.
-  # Choosing containers by name, not by label, leaves one-off tool runs alone: `docker compose run`
-  # names them tarubot-tarubot-run-<id> and copies the service's labels, so a labelled bot would
-  # have its restore or backup run stopped and run again on a tag move. The proxy doesn't depend
-  # on the bot, so it keeps serving the offline page while the bot is swapped, and a missing name
+  # It touches only containers that have one of those names and also carry the tarubot scope
+  # label, so one-off tool runs are left alone: `docker compose run` copies the service's labels,
+  # the scope included, but names them tarubot-tarubot-run-<id>, so a restore or backup run is
+  # never stopped and run again on a tag move. The scope (flag and label, this service's own
+  # included) also keeps it apart from any other Watchtower on this Docker host: an unscoped one
+  # stops and removes every other unscoped updater when it starts, and leaves scoped containers
+  # alone. Running containers get changed labels only from `up -d`. The proxy doesn't depend on
+  # the bot, so it keeps serving the offline page while the bot is swapped, and a missing name
   # (no web profile) is skipped. --include-restarting also replaces a crash-looping bot, so
   # deploying the previous version still rolls back a release that never stays up. The Docker
   # socket is root-equivalent on this Docker host: only this pinned image gets it.
   watchtower:
     image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     command:
+      - --scope
+      - tarubot
       - --interval
       - "300"
       - --stop-timeout

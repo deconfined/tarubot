@@ -1,14 +1,18 @@
 /**
  * Execute deploy.yml's real Bash/jq step against invented GitHub API, registry and attestation
  * answers only. A deployment moves exactly the target's two channel tags (`<target>` and
- * `web-<target>`) to one release's verified digests, and only when its target is switched on, its
- * version is published as both images, the bot image's source commit is on main and carries that
- * version, both digests carry that commit's signed provenance, and the owner approved this attempt.
- * Anything else moves nothing.
+ * `web-<target>`) in ghcr.io/deconfined/tarubot-release to one release's verified digests, and
+ * writes nothing to ghcr.io/deconfined/tarubot, where publish.yml put the release. It does so only
+ * with the selected environment's RELEASE_REGISTRY_TOKEN (the only credential that can write the
+ * release package; every workflow's GITHUB_TOKEN can write the other), when its target is
+ * switched on, its version is published as both images, the bot image's source commit is on main
+ * and carries that version, both digests carry that commit's signed provenance, the owner
+ * approved this attempt, and, for a publication (publish.yml's call, a push), the channel doesn't
+ * already name a newer release. Anything else moves nothing.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +42,7 @@ const deploy = scripts[0]?.run ?? "";
 if (!job || scripts.length !== 1 || !deploy) throw new Error("missing-executable-deployment");
 
 const IMAGE = "ghcr.io/deconfined/tarubot";
+const RELEASE = "ghcr.io/deconfined/tarubot-release";
 const VERSION = "2.46.0";
 const COMMIT = "a".repeat(40);
 const PREVIOUS_COMMIT = "e".repeat(40);
@@ -46,14 +51,22 @@ const BOT = digest("bot 2.46.0");
 const WEB = digest("web 2.46.0");
 const PREVIOUS_BOT = digest("bot 2.45.2");
 const PREVIOUS_WEB = digest("web 2.45.2");
+/** The environment's release package token; it must never reach a log or an argument list. */
+const RELEASE_TOKEN = "ghp_inventedReleaseToken0123456789abcdef";
 
 type Target = "production" | "staging";
 type Labels = { revision?: string; version?: string; arm64Revision?: string };
 type State = {
-  /** Registry tag -> index digest. */
+  /** ghcr.io/deconfined/tarubot, where publish.yml put the release: tag -> index digest. */
   tags: Record<string, string>;
-  /** Tags whose reads fail with a server error. */
+  /** ghcr.io/deconfined/tarubot-release's channel tags; null while the package doesn't exist. */
+  release: Record<string, string> | null;
+  /** Tags whose reads fail with a server error, in either repository. */
   failing: string[];
+  /** The GitHub API's answer about the release package; 0 answers 200 or 404 by `release`. */
+  packageStatus: number;
+  /** docker login with the release token fails. */
+  loginFails: boolean;
   /** Image labels by index digest; an unknown digest can't be inspected. */
   labels: Record<string, Labels>;
   /** The commit whose signed provenance each digest carries. */
@@ -80,10 +93,13 @@ const release = (target: Target): State => ({
     [`web-${VERSION}`]: WEB,
     "2.45.2": PREVIOUS_BOT,
     "web-2.45.2": PREVIOUS_WEB,
-    [target]: PREVIOUS_BOT,
-    [`web-${target}`]: PREVIOUS_WEB,
+    latest: BOT,
+    "web-latest": WEB,
   },
+  release: { [target]: PREVIOUS_BOT, [`web-${target}`]: PREVIOUS_WEB },
   failing: [],
+  packageStatus: 0,
+  loginFails: false,
   labels: {
     [BOT]: { revision: COMMIT, version: VERSION },
     [WEB]: { revision: COMMIT, version: VERSION },
@@ -106,9 +122,24 @@ const release = (target: Target): State => ({
   approvalApiExit: 0,
 });
 
+/** Adds a published, signed release X.Y.Z of its own commit to the registry; its two digests. */
+function publish(state: State, version: string) {
+  const commit = createHash("sha1").update(version).digest("hex");
+  const [bot, web] = [digest(`bot ${version}`), digest(`web ${version}`)];
+  state.tags[version] = bot;
+  state.tags[`web-${version}`] = web;
+  for (const image of [bot, web]) {
+    state.labels[image] = { revision: commit, version };
+    state.signed[image] = commit;
+  }
+  return { bot, web };
+}
+
 /** Answers like gh: the approval lookups, the commit checks and attestation verification. */
 const GH = `
 const diagnostic = "invented-private-api-diagnostic.example.org\\n::error::injected-diagnostic";
+// gh only ever holds this run's own token.
+if (process.env.GH_TOKEN !== "invented-github-token") process.exit(70);
 if (args[0] === "attestation" && args[1] === "verify") {
   const subject = args[2]?.match(/^oci:\\/\\/ghcr\\.io\\/deconfined\\/tarubot@(sha256:[0-9a-f]{64})$/)?.[1];
   const value = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -154,9 +185,11 @@ else process.exit(70);
 `;
 
 /**
- * Answers like GHCR and curl do, so a script that drops a flag fails here too: credentials come
- * only from --config - on stdin; manifests need the bearer token and the index media type; --fail
- * turns >= 400 into exit 22; output goes only to --write-out and to --dump-header -.
+ * Answers like GHCR, GitHub's API and curl do, so a script that drops a flag fails here too:
+ * credentials come only from --config - on stdin; manifests need the right repository's bearer
+ * token and the index media type; --fail turns >= 400 into exit 22; output goes only to
+ * --write-out and to --dump-header -. GHCR issues no token for, and won't read, a package that
+ * doesn't exist yet (it answers as for a private one); GitHub's packages API says 404.
  */
 const CURL = `
 const config = await new Response(Bun.stdin.stream()).text();
@@ -173,44 +206,86 @@ const answer = (code, headers = "") => {
   process.exit(0);
 };
 if (after("--config") !== "-") process.exit(70);
-if (url === "https://ghcr.io/token?service=ghcr.io&scope=repository:deconfined/tarubot:pull") {
-  if (!config.includes('user = "invented-user:invented-github-token"')) answer(401);
-  process.stdout.write(JSON.stringify({ token: "invented-registry-token" }));
+const repositories = {
+  "deconfined/tarubot": { user: 'user = "invented-user:invented-github-token"', token: "invented-registry-token", tags: state.tags },
+  "deconfined/tarubot-release": { user: 'user = "deconfined:${RELEASE_TOKEN}"', token: "invented-release-registry-token", tags: state.release },
+};
+if (url === "https://api.github.com/users/deconfined/packages/container/tarubot-release") {
+  if (after("--write-out") !== "%{http_code}" || after("--output") !== "/dev/null") process.exit(70);
+  if (!config.includes('header = "Authorization: Bearer ${RELEASE_TOKEN}"')) answer(401);
+  answer(state.packageStatus || (state.release ? 200 : 404));
+}
+const token = url?.match(/^https:\\/\\/ghcr\\.io\\/token\\?service=ghcr\\.io&scope=repository:(deconfined\\/[a-z-]+):pull$/);
+if (token) {
+  const repository = repositories[token[1]];
+  if (!repository || !config.includes(repository.user)) answer(401);
+  if (!repository.tags) answer(403);
+  process.stdout.write(JSON.stringify({ token: repository.token }));
   process.exit(0);
 }
-const match = url?.match(/^https:\\/\\/ghcr\\.io\\/v2\\/deconfined\\/tarubot\\/manifests\\/([A-Za-z0-9._-]+)$/);
-if (!match || !flag("--head")) process.exit(70);
-if (!config.includes('header = "Authorization: Bearer invented-registry-token"')) answer(401);
+const match = url?.match(/^https:\\/\\/ghcr\\.io\\/v2\\/(deconfined\\/[a-z-]+)\\/manifests\\/([A-Za-z0-9._-]+)$/);
+const repository = repositories[match?.[1]];
+if (!match || !repository || !flag("--head")) process.exit(70);
+if (!config.includes('header = "Authorization: Bearer ' + repository.token + '"')) answer(401);
+if (!repository.tags) answer(403);
 if (!(after("--header") ?? "").includes("application/vnd.oci.image.index.v1+json")) answer(404);
-if (state.failing.includes(match[1])) answer(500);
-if (!state.tags[match[1]]) answer(404);
-answer(200, "docker-content-digest: " + state.tags[match[1]] + "\\r\\n");
+if (state.failing.includes(match[2])) answer(500);
+if (!repository.tags[match[2]]) answer(404);
+answer(200, "docker-content-digest: " + repository.tags[match[2]] + "\\r\\n");
 `;
 
-/** imagetools inspect prints a multi-platform index's image configs; create re-tags one index. */
+/**
+ * docker login stores the release token in DOCKER_CONFIG (only a private one under RUNNER_TEMP);
+ * imagetools inspect prints a multi-platform index's image configs; create copies one index of
+ * the release images to a tag. The release package is read and written only with that login.
+ */
 const DOCKER = `
+const config = process.env.DOCKER_CONFIG;
+const privateConfig = !!config && config.startsWith(process.env.RUNNER_TEMP + "/");
+const loggedIn = () => {
+  if (!privateConfig) return false;
+  try { return JSON.parse(readFileSync(config + "/config.json", "utf8")).auths["ghcr.io"].secret === "${RELEASE_TOKEN}"; }
+  catch { return false; }
+};
+if (args[0] === "login") {
+  if (args.join(" ") !== "login ghcr.io --username deconfined --password-stdin" || !privateConfig) process.exit(70);
+  const secret = (await new Response(Bun.stdin.stream()).text()).trim();
+  if (state.loginFails) { console.error("invented-private-registry-diagnostic"); process.exit(1); }
+  mkdirSync(config, { recursive: true });
+  writeFileSync(config + "/config.json", JSON.stringify({ auths: { "ghcr.io": { secret } } }));
+  process.exit(0);
+}
 if (args[0] !== "buildx" || args[1] !== "imagetools") process.exit(70);
+const reference = (text, separator) =>
+  text?.match(new RegExp("^ghcr\\\\.io\\\\/(deconfined\\\\/tarubot(?:-release)?)" + separator + "([A-Za-z0-9._:-]+)$"));
 if (args[2] === "inspect") {
-  const subject = args[3]?.match(/^ghcr\\.io\\/deconfined\\/tarubot@(sha256:[0-9a-f]{64})$/)?.[1];
+  const subject = reference(args[3], "@");
   if (!subject || args[4] !== "--format" || args[5] !== "{{json .Image}}" || args.length !== 6) process.exit(70);
-  const labels = state.labels[subject];
-  if (!labels) { console.error("invented-private-registry-diagnostic"); process.exit(1); }
-  const config = (revision) => ({ config: { Labels: {
+  const inRelease = subject[1] === "deconfined/tarubot-release";
+  const labels = state.labels[subject[2]];
+  const present = inRelease ? loggedIn() && Object.values(state.release ?? {}).includes(subject[2]) : true;
+  if (!labels || !present) { console.error("invented-private-registry-diagnostic"); process.exit(1); }
+  const image = (revision) => ({ config: { Labels: {
     ...(revision === undefined ? {} : { "org.opencontainers.image.revision": revision }),
     ...(labels.version === undefined ? {} : { "org.opencontainers.image.version": labels.version }),
   } } });
   console.log(JSON.stringify({
-    "linux/amd64": config(labels.revision),
-    "linux/arm64": config(labels.arm64Revision ?? labels.revision),
+    "linux/amd64": image(labels.revision),
+    "linux/arm64": image(labels.arm64Revision ?? labels.revision),
   }));
   process.exit(0);
 }
 if (args[2] !== "create" || args[3] !== "--tag" || args.length !== 6) process.exit(70);
-const tag = args[4].match(/^ghcr\\.io\\/deconfined\\/tarubot:([A-Za-z0-9._-]+)$/)?.[1];
-const from = args[5].match(/^ghcr\\.io\\/deconfined\\/tarubot@(sha256:[0-9a-f]{64})$/)?.[1];
-if (!tag || !from) process.exit(70);
+const target = reference(args[4], ":");
+const from = reference(args[5], "@");
+// Copies come only from the release images publish.yml pushed.
+if (!target || !from || from[1] !== "deconfined/tarubot") process.exit(70);
+const [, repository, tag] = target;
+if (repository === "deconfined/tarubot-release" && !loggedIn()) { console.error("invented-private-registry-diagnostic"); process.exit(1); }
 if (state.createFails.includes(tag)) { console.error("invented-private-registry-diagnostic"); process.exit(1); }
-state.tags[tag] = state.createFails.includes("drift:" + tag) ? "sha256:" + "f".repeat(64) : from;
+const moved = state.createFails.includes("drift:" + tag) ? "sha256:" + "f".repeat(64) : from[2];
+if (repository === "deconfined/tarubot-release") state.release = { ...(state.release ?? {}), [tag]: moved };
+else state.tags[tag] = moved;
 writeFileSync(STATE, JSON.stringify(state));
 `;
 
@@ -220,6 +295,8 @@ type Fixture = {
   /** The registry after the run. */
   registry: () => State;
   summary: () => string;
+  /** What the step left in RUNNER_TEMP. */
+  leftovers: () => string[];
   run: (changes?: Record<string, string>) => Bun.SyncSubprocess<"pipe", "pipe">;
 };
 
@@ -242,7 +319,7 @@ function fixture(target: Target = "staging"): Fixture {
     writeFileSync(
       join(bin, name),
       `#!${process.execPath}
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 const STATE = ${JSON.stringify(statePath)};
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify([${JSON.stringify(name)}, ...args]) + "\\n");
@@ -260,6 +337,7 @@ ${body}`,
         .map((line) => JSON.parse(line) as string[]),
     registry: () => JSON.parse(readFileSync(statePath, "utf8")) as State,
     summary: () => readFileSync(summary, "utf8"),
+    leftovers: () => readdirSync(runner),
     run: (changes: Record<string, string> = {}) => {
       writeFileSync(statePath, JSON.stringify(state));
       return Bun.spawnSync(["/bin/bash", "--noprofile", "--norc", "-c", deploy], {
@@ -270,9 +348,13 @@ ${body}`,
           RUNNER_TEMP: runner,
           GITHUB_STEP_SUMMARY: summary,
           GITHUB_REPOSITORY: "deconfined/tarubot",
+          // publish.yml's call: a called workflow sees its caller's push.
+          GITHUB_EVENT_NAME: "push",
           GH_TOKEN: "invented-github-token",
           GHCR_USER: "invented-user",
           GHCR_TOKEN: "invented-github-token",
+          RELEASE_USER: "deconfined",
+          RELEASE_REGISTRY_TOKEN: RELEASE_TOKEN,
           TARGET: target,
           PRODUCTION_ENABLED: target === "production" ? "true" : "false",
           STAGING_ENABLED: target === "staging" ? "true" : "false",
@@ -291,46 +373,51 @@ ${body}`,
   };
 }
 
-/** Diagnostics, the GitHub token and private paths never reach the public log. */
-function redacted(result: Bun.SyncSubprocess<"pipe", "pipe">) {
+/** Diagnostics, both tokens and private paths never reach the public log or an argument list. */
+function redacted(f: Fixture, result: Bun.SyncSubprocess<"pipe", "pipe">) {
   const logs = result.stdout.toString() + result.stderr.toString();
   for (const privateText of [
     "invented-private-api-diagnostic",
     "injected-diagnostic",
     "invented-private-registry-diagnostic",
     "invented-github-token",
+    RELEASE_TOKEN,
     scratch,
   ])
     expect(logs).not.toContain(privateText);
-  // The registry token appears only where the runner masks it.
+  // The registry tokens appear only where the runner masks them.
   for (const line of logs.split("\n"))
-    if (line.includes("invented-registry-token"))
-      expect(line).toBe("::add-mask::invented-registry-token");
+    for (const token of ["invented-registry-token", "invented-release-registry-token"])
+      if (line.includes(token)) expect(line).toBe(`::add-mask::${token}`);
+  // The release token travels only on standard input (login, curl's configuration).
+  for (const call of f.calls()) expect(call.join(" ")).not.toContain(RELEASE_TOKEN);
+  // Its private Docker configuration goes with the step's private directory.
+  expect(f.leftovers()).toEqual([]);
 }
 
 const creates = (f: Fixture) =>
   f.calls().filter((args) => args[0] === "docker" && args[3] === "create");
 
-/** Refused with this reason on the public log, and no tag moved. */
+/** Refused with this reason on the public log, and no tag moved in either repository. */
 function refused(f: Fixture, reason: string, changes: Record<string, string> = {}) {
-  const before = { ...f.state.tags };
+  const before = structuredClone({ tags: f.state.tags, release: f.state.release });
   const result = f.run(changes);
   expect(result.exitCode).not.toBe(0);
   const stdout = result.stdout.toString();
   expect(stdout).toContain(`::error::${reason}`);
   expect(stdout).toContain("No tag was moved.");
-  redacted(result);
+  redacted(f, result);
   expect(creates(f)).toEqual([]);
-  expect(f.registry().tags).toEqual(before);
+  const after = f.registry();
+  expect({ tags: after.tags, release: after.release }).toEqual(before);
   return stdout;
 }
 
 describe("the workflow's shape", () => {
-  test("one approved job per target, its switch, main only, and no secret or host tooling", () => {
+  test("one approved job per target, its switch, main only, and no host tooling", () => {
     expect(Object.keys(workflow.jobs)).toEqual(["deploy"]);
     expect(Object.keys(workflow.on.workflow_call?.inputs ?? {})).toEqual(["target", "version"]);
     expect(Object.keys(workflow.on.workflow_dispatch?.inputs ?? {})).toEqual(["target", "version"]);
-    expect(workflow.on.workflow_call?.secrets).toBeUndefined();
     expect(job.name).toBe(`Deploy \${{ inputs.target }}`);
     expect(job.environment).toBe(`\${{ inputs.target }}`);
     expect(job.concurrency).toEqual({
@@ -343,18 +430,6 @@ describe("the workflow's shape", () => {
       "inputs.target == 'staging' && vars.STAGING_DEPLOY_ENABLED == 'true'",
     ])
       expect(job.if).toContain(condition);
-    expect(workflow.permissions).toEqual({
-      contents: "read",
-      actions: "read",
-      attestations: "read",
-      deployments: "read",
-      packages: "write",
-    });
-    // Only the run's own token; no checkout, SSH or deploy key.
-    const secrets = new Set(
-      [...source.matchAll(/secrets\.([A-Za-z_]+)/gu)].map((match) => match[1]),
-    );
-    expect(secrets).toEqual(new Set(["GITHUB_TOKEN"]));
     expect(job.steps.map((step) => step.uses?.split("@")[0] ?? "run")).toEqual([
       "docker/setup-buildx-action",
       "docker/login-action",
@@ -362,18 +437,49 @@ describe("the workflow's shape", () => {
     ]);
     expect(source.toLowerCase()).not.toContain("ssh");
   });
+
+  test("this run's token only reads packages; the environment's token is the only writer", () => {
+    expect(workflow.permissions).toEqual({
+      contents: "read",
+      actions: "read",
+      attestations: "read",
+      deployments: "read",
+      packages: "read",
+    });
+    // Declared for publish.yml's call, never required of it: the caller has no environment, so
+    // only the approved environment job resolves a value.
+    expect(workflow.on.workflow_call?.secrets).toEqual({
+      RELEASE_REGISTRY_TOKEN: {
+        description: expect.any(String),
+        required: false,
+      },
+    });
+    const secrets = new Set(
+      [...source.matchAll(/secrets\.([A-Za-z_]+)/gu)].map((match) => match[1]),
+    );
+    expect(secrets).toEqual(new Set(["GITHUB_TOKEN", "RELEASE_REGISTRY_TOKEN"]));
+    // Only the deployment step receives it; the registry login action holds the run's token.
+    const holders = job.steps.filter((step) => JSON.stringify(step).includes("RELEASE_REGISTRY"));
+    expect(holders).toEqual(scripts);
+    expect(scripts[0]?.env?.RELEASE_REGISTRY_TOKEN).toBe(`\${{ secrets.RELEASE_REGISTRY_TOKEN }}`);
+    expect(scripts[0]?.env?.RELEASE_USER).toBe(`\${{ github.repository_owner }}`);
+    expect(JSON.stringify(job.env ?? {})).not.toContain("secrets.");
+  });
 });
 
 for (const target of ["staging", "production"] as const) {
   const other = target === "staging" ? "production" : "staging";
   describe(`a ${target} deployment`, () => {
-    test("moves exactly its two tags to exactly the verified digests, web first", () => {
+    test("moves exactly its two tags in the release package to exactly the verified digests, web first", () => {
       const f = fixture(target);
-      f.state.tags[other] = PREVIOUS_BOT;
-      f.state.tags[`web-${other}`] = PREVIOUS_WEB;
+      f.state.release = {
+        ...f.state.release,
+        [other]: PREVIOUS_BOT,
+        [`web-${other}`]: PREVIOUS_WEB,
+      };
       const result = f.run();
       expect(result.exitCode).toBe(0);
-      redacted(result);
+      redacted(f, result);
       expect(creates(f)).toEqual([
         [
           "docker",
@@ -381,7 +487,7 @@ for (const target of ["staging", "production"] as const) {
           "imagetools",
           "create",
           "--tag",
-          `${IMAGE}:web-${target}`,
+          `${RELEASE}:web-${target}`,
           `${IMAGE}@${WEB}`,
         ],
         [
@@ -390,15 +496,22 @@ for (const target of ["staging", "production"] as const) {
           "imagetools",
           "create",
           "--tag",
-          `${IMAGE}:${target}`,
+          `${RELEASE}:${target}`,
           `${IMAGE}@${BOT}`,
         ],
       ]);
-      expect(f.registry().tags).toEqual({
-        ...f.state.tags,
+      const after = f.registry();
+      expect(after.release).toEqual({
+        ...f.state.release,
         [target]: BOT,
         [`web-${target}`]: WEB,
       });
+      // Nothing is written where every workflow's token could write too.
+      expect(after.tags).toEqual(f.state.tags);
+      // Logged in once, privately, with the release token on standard input.
+      expect(f.calls().filter((args) => args[0] === "docker" && args[1] === "login")).toEqual([
+        ["docker", "login", "ghcr.io", "--username", "deconfined", "--password-stdin"],
+      ]);
       // Both digests were verified against the release's own commit before anything moved.
       const verified = f
         .calls()
@@ -411,8 +524,8 @@ for (const target of ["staging", "production"] as const) {
       const summary = f.summary();
       for (const text of [
         `### TaruBot ${VERSION} on ${target}`,
-        `| \`${IMAGE}:${target}\` | \`${BOT}\` | \`${PREVIOUS_BOT}\` |`,
-        `| \`${IMAGE}:web-${target}\` | \`${WEB}\` | \`${PREVIOUS_WEB}\` |`,
+        `| \`${RELEASE}:${target}\` | \`${BOT}\` | \`${PREVIOUS_BOT}\` |`,
+        `| \`${RELEASE}:web-${target}\` | \`${WEB}\` | \`${PREVIOUS_WEB}\` |`,
         `Source commit \`${COMMIT}\`; the channel named 2.45.2 before.`,
         `To roll back, run Deploy for ${target} with the earlier version.`,
       ])
@@ -428,7 +541,7 @@ for (const target of ["staging", "production"] as const) {
         jobs: [{ id: 777, name: `Production release / Deploy ${target}`, status: "in_progress" }],
       };
       expect(f.run().exitCode).toBe(0);
-      expect(f.registry().tags[target]).toBe(BOT);
+      expect(f.registry().release?.[target]).toBe(BOT);
     });
 
     test("the other target's switch can't enable this one", () => {
@@ -444,8 +557,35 @@ for (const target of ["staging", "production"] as const) {
         expect(f.calls()).toEqual([]);
       }
     });
+
+    test("without its environment's release token nothing is checked, read or moved", () => {
+      for (const token of ["", 'ghp_invented"\nurl = "https://example.org', "ghp_with space"]) {
+        const f = fixture(target);
+        refused(
+          f,
+          `Deploy needs the RELEASE_REGISTRY_TOKEN secret of the ${target} environment: a classic personal access token with write:packages, the only credential that moves the channel tags in ${RELEASE}.`,
+          { RELEASE_REGISTRY_TOKEN: token },
+        );
+        expect(f.calls()).toEqual([]);
+      }
+    });
   });
 }
+
+test("an empty release token is reported first, naming no unchecked target", () => {
+  const f = fixture();
+  const stdout = refused(
+    f,
+    "Deploy needs the RELEASE_REGISTRY_TOKEN secret of the selected environment",
+    {
+      RELEASE_REGISTRY_TOKEN: "",
+      TARGET: "staging\n::error::injected",
+      VERSION: "latest",
+    },
+  );
+  expect(stdout).not.toContain("injected");
+  expect(f.calls()).toEqual([]);
+});
 
 test("an unsupported or injected target never reaches GitHub or the registry", () => {
   for (const target of [
@@ -466,7 +606,7 @@ test("an unsupported or injected target never reaches GitHub or the registry", (
   }
 });
 
-test("a malformed version or repository fails before any GitHub or registry call", () => {
+test("a malformed version, repository or package owner fails before any GitHub or registry call", () => {
   for (const changes of [
     { VERSION: "" },
     { VERSION: "02.46.0" },
@@ -477,6 +617,8 @@ test("a malformed version or repository fails before any GitHub or registry call
     { VERSION: "2.46.0\nlatest" },
     { VERSION: "latest" },
     { GITHUB_REPOSITORY: "invented/tarubot" },
+    { RELEASE_USER: "invented" },
+    { RELEASE_USER: "" },
   ]) {
     const f = fixture();
     refused(f, "Deploy needs an enabled target", changes);
@@ -575,11 +717,24 @@ describe("the release must be published, on main and signed", () => {
     }
   });
 
+  test("a release only in the release package is not published", () => {
+    // Verification reads where publish.yml put the release, never the channel package.
+    const f = fixture();
+    delete f.state.tags[VERSION];
+    f.state.release = { ...f.state.release, [VERSION]: BOT };
+    refused(f, `Release ${VERSION} is not published as both`);
+  });
+
   test("an unreadable registry asks for a re-run", () => {
-    for (const failing of [VERSION, `web-${VERSION}`, "staging", "web-staging"]) {
+    for (const failing of [VERSION, `web-${VERSION}`]) {
       const f = fixture();
       f.state.failing = [failing];
       refused(f, "Could not read the published tags; re-run once GHCR answers.");
+    }
+    for (const failing of ["staging", "web-staging"]) {
+      const f = fixture();
+      f.state.failing = [failing];
+      refused(f, `Could not read the channel tags in ${RELEASE}; re-run once GHCR answers.`);
     }
   });
 
@@ -631,48 +786,151 @@ describe("the release must be published, on main and signed", () => {
   });
 });
 
-describe("rollbacks, first deployments and repeats", () => {
-  test("an earlier version is deployed like any other: that is the rollback", () => {
-    const f = fixture("production");
-    f.state.tags.production = BOT;
-    f.state.tags["web-production"] = WEB;
-    f.state.labels[PREVIOUS_BOT] = { revision: PREVIOUS_COMMIT, version: "2.45.2" };
-    f.state.version = "2.45.2";
-    const result = f.run({ VERSION: "2.45.2" });
-    expect(result.exitCode).toBe(0);
-    expect(f.registry().tags.production).toBe(PREVIOUS_BOT);
-    expect(f.registry().tags["web-production"]).toBe(PREVIOUS_WEB);
-    expect(f.summary()).toContain(`the channel named ${VERSION} before.`);
+describe("the release package's token", () => {
+  test("refused by GitHub, or GitHub unreadable, moves nothing", () => {
+    for (const packageStatus of [401, 403, 500]) {
+      const f = fixture();
+      f.state.packageStatus = packageStatus;
+      refused(
+        f,
+        "GitHub refused the staging environment's RELEASE_REGISTRY_TOKEN, or didn't answer; check that secret, or re-run once GitHub answers.",
+      );
+    }
+    // A token GitHub doesn't know as this account's.
+    const wrong = fixture();
+    refused(wrong, "GitHub refused the staging environment's RELEASE_REGISTRY_TOKEN", {
+      RELEASE_REGISTRY_TOKEN: "ghp_another",
+    });
   });
 
-  test("a first deployment has no previous tags to name", () => {
+  test("refused by GHCR moves nothing", () => {
     const f = fixture();
-    delete f.state.tags.staging;
-    delete f.state.tags["web-staging"];
-    expect(f.run().exitCode).toBe(0);
-    expect(f.registry().tags.staging).toBe(BOT);
-    expect(f.summary()).toContain(`| \`${IMAGE}:staging\` | \`${BOT}\` | \`none\` |`);
+    f.state.loginFails = true;
+    refused(
+      f,
+      `GHCR refused the staging environment's RELEASE_REGISTRY_TOKEN for ${RELEASE}, or didn't answer; check that secret, or re-run once GHCR answers.`,
+    );
+  });
+});
+
+describe("first deployments", () => {
+  test("the first deployment creates the release package, which GHCR wouldn't read before", () => {
+    const f = fixture();
+    f.state.release = null;
+    const result = f.run();
+    expect(result.exitCode).toBe(0);
+    redacted(f, result);
+    expect(f.registry().release).toEqual({ staging: BOT, "web-staging": WEB });
+    expect(f.registry().tags).toEqual(f.state.tags);
+    expect(f.summary()).toContain(`| \`${RELEASE}:staging\` | \`${BOT}\` | \`none\` |`);
     expect(f.summary()).toContain("the channel named none before.");
   });
 
-  test("an unreadable previous version is only unknown in the summary", () => {
+  test("a target's first deployment beside the other target's channel", () => {
     const f = fixture();
-    f.state.labels[PREVIOUS_BOT] = { revision: PREVIOUS_COMMIT, version: "| injected |" };
+    f.state.release = { production: PREVIOUS_BOT, "web-production": PREVIOUS_WEB };
     expect(f.run().exitCode).toBe(0);
-    expect(f.summary()).toContain("the channel named unknown before.");
-    expect(f.summary()).not.toContain("injected");
+    expect(f.registry().release).toEqual({
+      production: PREVIOUS_BOT,
+      "web-production": PREVIOUS_WEB,
+      staging: BOT,
+      "web-staging": WEB,
+    });
+    expect(f.summary()).toContain("the channel named none before.");
+  });
+});
+
+describe("rollbacks and repeats", () => {
+  const dispatched = { GITHUB_EVENT_NAME: "workflow_dispatch" };
+
+  test("a dispatched earlier version is deployed like any other: that is the rollback", () => {
+    const f = fixture("production");
+    f.state.release = { production: BOT, "web-production": WEB };
+    f.state.version = "2.45.2";
+    const result = f.run({ ...dispatched, VERSION: "2.45.2" });
+    expect(result.exitCode).toBe(0);
+    expect(f.registry().release).toEqual({
+      production: PREVIOUS_BOT,
+      "web-production": PREVIOUS_WEB,
+    });
+    expect(f.summary()).toContain(`the channel named ${VERSION} before.`);
+  });
+
+  test("a publication never moves a channel back", () => {
+    for (const event of ["push", "", "schedule"]) {
+      const f = fixture("production");
+      f.state.release = { production: BOT, "web-production": WEB };
+      f.state.version = "2.45.2";
+      refused(
+        f,
+        `A publication never moves production back from ${VERSION} to 2.45.2; dispatch Deploy with the earlier version to roll back.`,
+        { GITHUB_EVENT_NAME: event, VERSION: "2.45.2" },
+      );
+    }
+  });
+
+  test("versions compare as numbers, component by component", () => {
+    for (const [current, next, moves] of [
+      ["2.9.0", "2.10.0", true],
+      ["2.46.9", "2.46.10", true],
+      ["1.99.99", "2.0.0", true],
+      ["2.10.0", "2.9.0", false],
+      ["2.46.10", "2.46.9", false],
+      ["10.0.0", "9.99.99", false],
+    ] as const) {
+      const f = fixture();
+      const live = publish(f.state, current);
+      const wanted = publish(f.state, next);
+      f.state.release = { staging: live.bot, "web-staging": live.web };
+      f.state.version = next;
+      if (moves) {
+        expect({ current, next, status: f.run({ VERSION: next }).exitCode }).toEqual({
+          current,
+          next,
+          status: 0,
+        });
+        expect(f.registry().release).toEqual({ staging: wanted.bot, "web-staging": wanted.web });
+      } else
+        refused(f, `A publication never moves staging back from ${current} to ${next};`, {
+          VERSION: next,
+        });
+    }
+  });
+
+  test("an unreadable current version stops a publication, but not a dispatch", () => {
+    const labels = (f: Fixture) => {
+      f.state.labels[PREVIOUS_BOT] = { revision: PREVIOUS_COMMIT, version: "| injected |" };
+    };
+    const published = fixture();
+    labels(published);
+    const stdout = refused(
+      published,
+      `A publication can't tell which release staging runs now (${RELEASE}:staging has no readable version), so it moves nothing; re-run once GHCR answers, or dispatch Deploy to choose the release.`,
+    );
+    expect(stdout).not.toContain("injected");
+    // The same when the channel's image can't be inspected at all.
+    const uninspectable = fixture();
+    delete uninspectable.state.labels[PREVIOUS_BOT];
+    refused(uninspectable, "A publication can't tell which release staging runs now");
+    const chosen = fixture();
+    labels(chosen);
+    expect(chosen.run(dispatched).exitCode).toBe(0);
+    expect(chosen.registry().release?.staging).toBe(BOT);
+    expect(chosen.summary()).toContain("the channel named unknown before.");
+    expect(chosen.summary()).not.toContain("injected");
   });
 
   test("deploying the live release again changes nothing and says so", () => {
-    const f = fixture();
-    f.state.tags.staging = BOT;
-    f.state.tags["web-staging"] = WEB;
-    const result = f.run();
-    expect(result.exitCode).toBe(0);
-    expect(f.registry().tags).toEqual(f.state.tags);
-    expect(result.stdout.toString()).toContain(
-      `::notice::${VERSION} was already the staging release; both tags are unchanged.`,
-    );
+    for (const event of ["push", "workflow_dispatch"]) {
+      const f = fixture();
+      f.state.release = { staging: BOT, "web-staging": WEB };
+      const result = f.run({ GITHUB_EVENT_NAME: event });
+      expect(result.exitCode).toBe(0);
+      expect(f.registry().release).toEqual(f.state.release);
+      expect(result.stdout.toString()).toContain(
+        `::notice::${VERSION} was already the staging release; both tags are unchanged.`,
+      );
+    }
   });
 });
 
@@ -683,13 +941,12 @@ describe("moving the tags", () => {
     const first = web.run();
     expect(first.exitCode).not.toBe(0);
     expect(first.stdout.toString()).toContain("::error::Moving the channel tags failed");
-    redacted(first);
-    expect(web.registry().tags.staging).toBe(PREVIOUS_BOT);
-    expect(web.registry().tags["web-staging"]).toBe(PREVIOUS_WEB);
+    redacted(web, first);
+    expect(web.registry().release).toEqual(web.state.release);
     const bot = fixture();
     bot.state.createFails = ["staging"];
     expect(bot.run().exitCode).not.toBe(0);
-    expect(bot.registry().tags.staging).toBe(PREVIOUS_BOT);
+    expect(bot.registry().release?.staging).toBe(PREVIOUS_BOT);
   });
 
   test("a tag that names another digest afterwards fails the deployment", () => {
@@ -701,7 +958,7 @@ describe("moving the tags", () => {
       expect(result.stdout.toString()).toContain(
         "::error::A channel tag does not name the verified digest after the move",
       );
-      redacted(result);
+      redacted(f, result);
     }
   });
 });

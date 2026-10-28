@@ -22,11 +22,24 @@ services:
     restart: unless-stopped
   tarubot:
     # Runtime credentials are supplied here, independently of the compiled image.
-    image: ${TARUBOT_IMAGE:-ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:-latest}}
-    # Only the `updates` profile's Watchtower reads these; without it they do nothing.
-    # The fixed name is how the updater finds the bot (see watchtower below).
+    image: ${TARUBOT_IMAGE:-${TARUBOT_IMAGE_REPOSITORY:-ghcr.io/deconfined/tarubot}:${TARUBOT_IMAGE_TAG:-latest}}
+    # The fixed name and the scope label are how the `updates` profile's Watchtower finds the bot
+    # (see watchtower below); without it they do nothing.
     container_name: tarubot
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
+      # The Compose project's own settings, which the bot ignores, so that each backup's settings
+      # copy (the bot's environment) starts this project again as it was: restore.js settings, then
+      # --env-file. The password is also inside DATABASE_URL.
+      TARUBOT_IMAGE: ${TARUBOT_IMAGE:-}
+      TARUBOT_IMAGE_REPOSITORY: ${TARUBOT_IMAGE_REPOSITORY:-}
+      TARUBOT_IMAGE_TAG: ${TARUBOT_IMAGE_TAG:-latest}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Startup command registration (2.46.0): global, a server ID, or off; empty is off, as for an
+      # install that registers with register.js. .env.example sets global for new installs.
+      COMMAND_REGISTRATION: ${COMMAND_REGISTRATION:-}
       DATABASE_URL: postgresql://tarubot:${POSTGRES_PASSWORD}@postgres:5432/tarubot
       # Optional provider root CA for deployments using an external TLS PostgreSQL endpoint.
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:-}
@@ -99,14 +112,22 @@ services:
     tmpfs: ["/tmp:size=1m,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-  # Opt-in updates (COMPOSE_PROFILES=updates): the managed manifests' pinned Watchtower and flags,
-  # following TARUBOT_IMAGE_TAG for the bot and the web profile's proxy. When the tag moves it
-  # stops the old container, then starts the new image with the same configuration; the bot
-  # migrates on start. The Docker socket is root-equivalent on this Docker host.
+  # Opt-in updates (COMPOSE_PROFILES=updates): the managed manifests' pinned Watchtower, scope and
+  # flags, following TARUBOT_IMAGE_TAG for the bot and the web profile's proxy. When the tag moves
+  # it stops the old container, then starts the new image with the same configuration; the bot
+  # migrates on start. It touches only the two named containers that carry the tarubot scope
+  # label, so one-off `docker compose run` containers (other names) are left alone, and the scope
+  # keeps it from removing, or being removed by, another Watchtower on this Docker host. Another
+  # Watchtower of this fork without a scope skips scoped containers, so this profile is what
+  # updates TaruBot. The Docker socket is root-equivalent on this Docker host.
   watchtower:
     image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
     profiles: [updates]
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     command:
+      - --scope
+      - tarubot
       - --interval
       - "300"
       - --stop-timeout

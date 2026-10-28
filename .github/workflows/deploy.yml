@@ -7,6 +7,16 @@ run-name: Deploy ${{ inputs.target }} ${{ inputs.version }}
 # and starting the new image is the whole upgrade. GitHub never connects to the runtime, so it
 # can't watch the result or roll back by itself: deploying an earlier version is the rollback, and
 # an earlier image refuses a database migrated past it by itself.
+#
+# The channel tags live in their own package, ghcr.io/deconfined/tarubot-release, which only an
+# approved run of this job can write (the owner's decision of 2026-10-28). Every workflow in this
+# repository can ask for a GITHUB_TOKEN that writes ghcr.io/deconfined/tarubot, so a tag there
+# would let any branch's workflow deploy without approval or provenance checks; the release
+# package is written only with RELEASE_REGISTRY_TOKEN, a secret of the `production` and `staging`
+# environments alone (main only, the owner's approval). It must never be a repository or
+# organization secret, and the release package must grant this repository's Actions no write
+# access. The release images are still verified where publish.yml put them, with this run's own
+# read-only token, and copied index for index, so the channel names exactly the verified digests.
 on:
   workflow_call:
     inputs:
@@ -16,6 +26,12 @@ on:
       version:
         type: string
         required: true
+    # The caller has no environment, so it can only bind this name: the approved environment job
+    # resolves the environment's own value, as the delivery key was before 2.46.0.
+    secrets:
+      RELEASE_REGISTRY_TOKEN:
+        description: "Optional caller binding; the selected environment supplies the release package's write token."
+        required: false
   workflow_dispatch:
     inputs:
       target:
@@ -34,7 +50,8 @@ permissions:
   actions: read
   attestations: read
   deployments: read
-  packages: write
+  # Read only: this run's token never writes a package, the channel tags included.
+  packages: read
 
 defaults:
   run:
@@ -64,6 +81,7 @@ jobs:
       STAGING_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
     steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # This run's read-only token, for reading the release images in ghcr.io/deconfined/tarubot.
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -74,6 +92,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The release package's owner and write token (a classic personal access token with
+          # write:packages); only this environment's approved job receives the token.
+          RELEASE_USER: ${{ github.repository_owner }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.RELEASE_REGISTRY_TOKEN }}
         run: |
           set -Eeuo pipefail
           umask 077
@@ -81,17 +103,29 @@ jobs:
           trap 'rm -rf -- "$private"' EXIT
           # Each phase names what failed; command diagnostics stay out of the public log.
           unchanged='No tag was moved.'
-          reason="Deploy needs an enabled target (production or staging) and a release X.Y.Z with at most four digits per component. $unchanged"
+          # The first message can't wait for the target check, so it names the environment only
+          # when the target is one of the two: anything else must not reach the public log.
+          case "$TARGET" in
+            production | staging) environment="the $TARGET environment" ;;
+            *) environment='the selected environment' ;;
+          esac
+          # First of all: without the environment's own token nothing can move, and an empty value
+          # means the environment has no such secret (a re-run won't help). Its shape is checked
+          # too, since it goes into curl's configuration.
+          reason="Deploy needs the RELEASE_REGISTRY_TOKEN secret of $environment: a classic personal access token with write:packages, the only credential that moves the channel tags in ghcr.io/deconfined/tarubot-release. $unchanged"
           trap 'echo "::error::$reason"' ERR
           exec 2> "$private/errors"
+          [[ ${RELEASE_REGISTRY_TOKEN:-} =~ ^[A-Za-z0-9_]{1,255}$ ]]
+          reason="Deploy needs an enabled target (production or staging) and a release X.Y.Z with at most four digits per component. $unchanged"
           case "$TARGET" in
             production) [[ $PRODUCTION_ENABLED == true ]] ;;
             staging) [[ $STAGING_ENABLED == true ]] ;;
             *) false ;;
           esac
           [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
-          [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
+          [[ $GITHUB_REPOSITORY == deconfined/tarubot && ${RELEASE_USER:-} == deconfined ]]
           image=ghcr.io/deconfined/tarubot
+          release=ghcr.io/deconfined/tarubot-release
 
           # The owner's approval must belong to this attempt (@deconfined, 2026-10-08). GitHub gives
           # each environment job its own deployment, whose first status is "waiting" only while the
@@ -129,41 +163,46 @@ jobs:
           done
           [[ $held == true ]]
 
-          # The release's two index digests and the channel tags' current ones, read exactly:
-          # a channel tag is absent only before its first deployment.
-          reason="Could not read the published tags; re-run once GHCR answers. $unchanged"
-          token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
-            | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
-              "https://ghcr.io/token?service=ghcr.io&scope=repository:deconfined/tarubot:pull" \
-            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
-          echo "::add-mask::$token"
+          # A GHCR pull token for one repository (owner/name), asked with a user and a secret that
+          # reach curl only on its standard input (printf is a shell builtin, so no argument list).
+          pull_token() {
+            printf 'user = "%s:%s"\n' "$2" "$3" \
+              | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+                "https://ghcr.io/token?service=ghcr.io&scope=repository:$1:pull" \
+              | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))'
+          }
           accept='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          # A tag's HTTP status, and its index digest once present: repository, token, tag.
           status_of() {
-            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            printf 'header = "Authorization: Bearer %s"\n' "$2" \
               | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
                 --head --output /dev/null --write-out '%{http_code}' --header "$accept" \
-                "https://ghcr.io/v2/deconfined/tarubot/manifests/$1"
+                "https://ghcr.io/v2/$1/manifests/$3"
           }
           digest_of() {
-            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+            printf 'header = "Authorization: Bearer %s"\n' "$2" \
               | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
                 --head --output /dev/null --dump-header - --header "$accept" \
-                "https://ghcr.io/v2/deconfined/tarubot/manifests/$1" \
+                "https://ghcr.io/v2/$1/manifests/$3" \
               | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
           }
           # A tag's index digest, or "none" while it is absent.
           tagged() {
             local digest
-            case "$(status_of "$1")" in
-              200) digest=$(digest_of "$1") && [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] && echo "$digest" ;;
+            case "$(status_of "$@")" in
+              200) digest=$(digest_of "$@") && [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] && echo "$digest" ;;
               404) echo none ;;
               *) return 1 ;;
             esac
           }
-          bot=$(tagged "$VERSION")
-          web=$(tagged "web-$VERSION")
-          previous_bot=$(tagged "$TARGET")
-          previous_web=$(tagged "web-$TARGET")
+
+          # The release's two index digests, read exactly where publish.yml put them, with this
+          # run's own token.
+          reason="Could not read the published tags; re-run once GHCR answers. $unchanged"
+          token=$(pull_token deconfined/tarubot "$GHCR_USER" "$GHCR_TOKEN")
+          echo "::add-mask::$token"
+          bot=$(tagged deconfined/tarubot "$token" "$VERSION")
+          web=$(tagged deconfined/tarubot "$token" "web-$VERSION")
           reason="Release $VERSION is not published as both $image:$VERSION and $image:web-$VERSION. $unchanged"
           [[ $bot != none && $web != none ]]
 
@@ -195,30 +234,92 @@ jobs:
               --format json > "$private/attestation"
             jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
           done
-          # For the summary only: which release the channel named before, so a rollback can name it.
+
+          # The channel package, with the environment's token only. GHCR won't even issue a pull
+          # token for a package that doesn't exist yet (it answers as for a private one), so ask
+          # GitHub, with the same token, whether the owner's package exists: before the first
+          # deployment it doesn't, and both channel tags are then absent.
+          reason="GitHub refused $environment's RELEASE_REGISTRY_TOKEN, or didn't answer; check that secret, or re-run once GitHub answers. $unchanged"
+          package=$(printf 'header = "Authorization: Bearer %s"\n' "$RELEASE_REGISTRY_TOKEN" \
+            | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+              --output /dev/null --write-out '%{http_code}' --header 'Accept: application/vnd.github+json' \
+              "https://api.github.com/users/$RELEASE_USER/packages/container/tarubot-release")
+          [[ $package == 200 || $package == 404 ]]
+          # A private Docker configuration of its own, removed with this step's directory, holds the
+          # token for the writes; the run's token stays in the default one.
+          reason="GHCR refused $environment's RELEASE_REGISTRY_TOKEN for $release, or didn't answer; check that secret, or re-run once GHCR answers. $unchanged"
+          release_config="$private/release-registry"
+          mkdir "$release_config"
+          printf '%s\n' "$RELEASE_REGISTRY_TOKEN" \
+            | DOCKER_CONFIG=$release_config docker login ghcr.io --username "$RELEASE_USER" --password-stdin > /dev/null
+          as_release() { DOCKER_CONFIG=$release_config docker "$@"; }
+          previous_bot=none
+          previous_web=none
+          if [[ $package == 200 ]]; then
+            release_token=$(pull_token deconfined/tarubot-release "$RELEASE_USER" "$RELEASE_REGISTRY_TOKEN")
+            echo "::add-mask::$release_token"
+            # Within an existing package, a channel tag is absent only before its first deployment.
+            reason="Could not read the channel tags in $release; re-run once GHCR answers. $unchanged"
+            previous_bot=$(tagged deconfined/tarubot-release "$release_token" "$TARGET")
+            previous_web=$(tagged deconfined/tarubot-release "$release_token" "web-$TARGET")
+          fi
+          # Which release the channel names now, from its bot image's version label.
           previous_version=none
           if [[ $previous_bot != none ]]; then
-            previous_version=$(docker buildx imagetools inspect "$image@$previous_bot" --format '{{json .Image}}' \
+            previous_version=$(as_release buildx imagetools inspect "$release@$previous_bot" --format '{{json .Image}}' \
               | jq -er '[if has("config") then . else .[] end
-                | .config.Labels["org.opencontainers.image.version"]] | unique | .[0] | strings') ||
+                | .config.Labels["org.opencontainers.image.version"]]
+                | unique | if length == 1 then .[0] else empty end | strings') ||
               previous_version=unknown
             [[ $previous_version =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]] || previous_version=unknown
           fi
 
+          # Whether X.Y.Z $1 is newer than $2, component by component, as base-10 numbers.
+          newer() {
+            local -a a b
+            IFS=. read -r -a a <<< "$1"
+            IFS=. read -r -a b <<< "$2"
+            local i
+            for i in 0 1 2; do
+              if (( 10#${a[i]} != 10#${b[i]} )); then
+                (( 10#${a[i]} > 10#${b[i]} ))
+                return
+              fi
+            done
+            return 1
+          }
+          # A publication never rolls back. publish.yml's call runs as a push; re-running an older
+          # release's publication after a newer one went out would otherwise offer the routine
+          # approval for a move back onto a schema the older release refuses. Only a dispatched
+          # Deploy goes back: that is the rollback. A version that can't be read can't be compared,
+          # so a publication then moves nothing either.
+          if [[ ${GITHUB_EVENT_NAME:-} != workflow_dispatch && $previous_version != none ]]; then
+            reason="A publication can't tell which release $TARGET runs now ($release:$TARGET has no readable version), so it moves nothing; re-run once GHCR answers, or dispatch Deploy to choose the release. $unchanged"
+            [[ $previous_version != unknown ]]
+            if newer "$previous_version" "$VERSION"; then
+              reason="A publication never moves $TARGET back from $previous_version to $VERSION; dispatch Deploy with the earlier version to roll back. $unchanged"
+              false
+            fi
+          fi
+
           # Web first: a failure between the two leaves the bot, and so the database, on the
-          # previous release. A single index source is re-tagged byte for byte.
+          # previous release. A single index source is copied byte for byte, so the release
+          # package names exactly the digests verified above.
           reason="Moving the channel tags failed; re-run to move both again (the previous digests: $previous_bot and web $previous_web)."
-          docker buildx imagetools create --tag "$image:web-$TARGET" "$image@$web"
-          docker buildx imagetools create --tag "$image:$TARGET" "$image@$bot"
-          reason="A channel tag does not name the verified digest after the move; re-run to move both again."
-          [[ $(tagged "web-$TARGET") == "$web" && $(tagged "$TARGET") == "$bot" ]]
+          as_release buildx imagetools create --tag "$release:web-$TARGET" "$image@$web"
+          as_release buildx imagetools create --tag "$release:$TARGET" "$image@$bot"
+          reason="A channel tag does not name the verified digest after the move (or couldn't be read back); re-run to move both again."
+          release_token=$(pull_token deconfined/tarubot-release "$RELEASE_USER" "$RELEASE_REGISTRY_TOKEN")
+          echo "::add-mask::$release_token"
+          [[ $(tagged deconfined/tarubot-release "$release_token" "web-$TARGET") == "$web" &&
+            $(tagged deconfined/tarubot-release "$release_token" "$TARGET") == "$bot" ]]
           {
             echo "### TaruBot $VERSION on $TARGET"
             echo
             echo '| Tag | Now | Before |'
             echo '| --- | --- | --- |'
-            echo "| \`$image:$TARGET\` | \`$bot\` | \`$previous_bot\` |"
-            echo "| \`$image:web-$TARGET\` | \`$web\` | \`$previous_web\` |"
+            echo "| \`$release:$TARGET\` | \`$bot\` | \`$previous_bot\` |"
+            echo "| \`$release:web-$TARGET\` | \`$web\` | \`$previous_web\` |"
             echo
             echo "Source commit \`$commit\`; the channel named $previous_version before. The $TARGET runtime's Watchtower replaces its containers within its poll interval, and \`/version\` shows the release that runs. To roll back, run Deploy for $TARGET with the earlier version."
           } >> "$GITHUB_STEP_SUMMARY"

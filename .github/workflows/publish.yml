@@ -537,13 +537,19 @@ jobs:
       needs.publish.result == 'success' && needs.web.result == 'success' &&
       needs.attest.result == 'success' && needs.latest.result == 'success'
     uses: ./.github/workflows/deploy.yml
-    # Deploy holds no secret: once the owner approves, it only moves the production tags.
+    # Bind only the release package's write token's name. This job has no environment (and the
+    # token must never be a repository or organization secret), so it passes nothing: the approved
+    # `production` environment job resolves the environment's own secret, as the delivery key was
+    # before 2.46.0, and only that job can move the production tags.
+    secrets:
+      RELEASE_REGISTRY_TOKEN: ${{ secrets.RELEASE_REGISTRY_TOKEN }}
+    # Read only: the channel tags are written with that token, never with this run's.
     permissions:
       contents: read
       actions: read
       attestations: read
       deployments: read
-      packages: write
+      packages: read
     with:
       target: production
       version: ${{ needs.gate.outputs.version }}

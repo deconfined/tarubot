@@ -3,10 +3,14 @@
 # tag as the bot. The bot and its readiness port stay on the private network.
 services:
   caddy:
-    image: ghcr.io/deconfined/tarubot:web-${TARUBOT_IMAGE_TAG:-latest}
+    # The same repository as the bot: the managed manifests' ghcr.io/deconfined/tarubot-release.
+    image: ${TARUBOT_IMAGE_REPOSITORY:-ghcr.io/deconfined/tarubot}:web-${TARUBOT_IMAGE_TAG:-latest}
     profiles: [web]
-    # The fixed name is how a tag-following updater (the managed manifests' Watchtower) finds it.
+    # The fixed name and the scope label are how the bot's tag-following updater (the managed
+    # manifests' Watchtower, or the stock file's `updates` profile) finds it.
     container_name: tarubot-web
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
       WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
       WEB_PORT: ${WEB_PORT:-8080}
