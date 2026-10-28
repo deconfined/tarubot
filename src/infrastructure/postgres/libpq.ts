@@ -23,15 +23,43 @@ export interface ToolDatabase {
   readonly ca: string | undefined;
 }
 
-/** libpq's sslmode values; anything else in a URL is refused rather than passed on. */
-const SSL_MODES = ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"];
+/**
+ * The sslmode values a URL may name: libpq's own, plus node-postgres's no-verify (encrypted, not
+ * verified; libpq's require). Anything else is refused rather than passed on.
+ */
+const SSL_MODES = [
+  "disable",
+  "allow",
+  "prefer",
+  "require",
+  "verify-ca",
+  "verify-full",
+  "no-verify",
+];
+
+/** The CA setting that goes with a URL setting, for refusals that need one. */
+const caSetting = (setting: string): string =>
+  setting === "RESTORE_DATABASE_URL"
+    ? "RESTORE_DATABASE_CA_CERT (or DATABASE_CA_CERT)"
+    : "DATABASE_CA_CERT";
 
 /**
  * The child environment for one tool run: the URL's parts as libpq variables (decoded), a 10 s
  * connect timeout and the application name, plus only PATH, HOME and TMPDIR from this process.
- * `rootCert` is the path of the CA file when there is one: then verify-full, whatever sslmode the
- * URL names, as the bot's own pool does (connection.ts). Without one the URL's sslmode is kept, and
- * an absent sslmode leaves libpq's default. Refusals name the setting, never a value.
+ * `rootCert` is the path of the CA file when there is one: then verify-full, whatever TLS the URL
+ * names, as the bot's own pool does (connection.ts). Refusals name the setting, never a value.
+ *
+ * Without a CA the tool must connect wherever the bot's driver (node-postgres) does, or a backup
+ * fails, and with it every migrating start, where the bot itself connects fine. The URL never
+ * reaches the tool (its parts travel as variables), so its TLS parameters are translated:
+ * sslrootcert, sslcert and sslkey become PGSSLROOTCERT, PGSSLCERT and PGSSLKEY (the bot reads the
+ * same files); node-postgres's no-verify becomes libpq's require, without a root certificate
+ * (libpq verifies the chain whenever one is named, and no-verify verifies nothing); verify-full
+ * with no sslrootcert checks against the system's roots (PGSSLROOTCERT=system: libpq 16 and later
+ * with the image's CA bundle), where node-postgres uses Node's; verify-ca with no sslrootcert is
+ * refused, as libpq can't check it against the system's roots. disable, allow, prefer and require
+ * keep libpq's meaning, which never asks more of the server than node-postgres does (it reads
+ * those as verify-full), and an absent sslmode leaves libpq's default.
  */
 export function libpqEnvironment(
   database: ToolDatabase,
@@ -42,17 +70,29 @@ export function libpqEnvironment(
   // Refuses host, port, user and database parameters that would redirect the connection.
   const target = databaseIdentity(database.url, database.setting);
   let password: string;
-  let sslmode: string | null;
+  let tls: Record<"sslmode" | "sslrootcert" | "sslcert" | "sslkey", string | null>;
   try {
     const endpoint = new URL(database.url);
     password = decodeURIComponent(endpoint.password);
-    sslmode = endpoint.searchParams.get("sslmode");
+    const parameter = (name: string) => endpoint.searchParams.get(name) || null;
+    tls = {
+      sslmode: endpoint.searchParams.get("sslmode"),
+      sslrootcert: parameter("sslrootcert"),
+      sslcert: parameter("sslcert"),
+      sslkey: parameter("sslkey"),
+    };
   } catch {
     // A malformed escape: the error itself carries no value, but say only which setting.
     throw new Failure("configuration", `${database.setting} must be a PostgreSQL URL.`);
   }
+  const { sslmode } = tls;
   if (rootCert === null && sslmode !== null && !SSL_MODES.includes(sslmode))
     throw new Failure("configuration", `${database.setting} names an sslmode libpq doesn't know.`);
+  if (rootCert === null && sslmode === "verify-ca" && tls.sslrootcert === null)
+    throw new Failure(
+      "configuration",
+      `${database.setting} names sslmode=verify-ca without sslrootcert, which pg_dump and pg_restore can't check against the system's roots. Set ${caSetting(database.setting)} to the provider's CA certificate, or name sslrootcert in the URL.`,
+    );
   const environment: Record<string, string> = {
     PATH: inherited.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     PGHOST: target.host,
@@ -71,7 +111,17 @@ export function libpqEnvironment(
   if (rootCert !== null) {
     environment.PGSSLMODE = "verify-full";
     environment.PGSSLROOTCERT = rootCert;
-  } else if (sslmode !== null) environment.PGSSLMODE = sslmode;
+    return environment;
+  }
+  if (tls.sslcert !== null) environment.PGSSLCERT = tls.sslcert;
+  if (tls.sslkey !== null) environment.PGSSLKEY = tls.sslkey;
+  if (sslmode === "no-verify") {
+    environment.PGSSLMODE = "require";
+    return environment;
+  }
+  if (sslmode !== null) environment.PGSSLMODE = sslmode;
+  if (tls.sslrootcert !== null) environment.PGSSLROOTCERT = tls.sslrootcert;
+  else if (sslmode === "verify-full") environment.PGSSLROOTCERT = "system";
   return environment;
 }
 
