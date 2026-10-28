@@ -14,13 +14,15 @@
 #   src/infrastructure/lodestone/upstream-revisions.json and runs the contract suite. (Nodestone and
 #   its submodule were removed in 2.20.0, and the sidecar in 2.21.0.)
 # - The CI PostgreSQL service image in .github/workflows/ci.yml: Dependabot reads only `uses:` in
-#   workflows. tests/unit/runtime-pins.test.ts keeps the service image equal to docker-compose.yml.
+#   workflows. tests/unit/compose-manifests.test.ts keeps the service image equal to
+#   docker-compose.yml's.
 version: 2
 
 updates:
-  # Bun runtime image: every Dockerfile stage derives from oven/bun, so all FROM lines update together.
-  # The maintainer completes the runtime upgrade in packageManager, engines.bun, and @types/bun;
-  # tests/unit/runtime-pins.test.ts fails until they agree.
+  # The Dockerfile's FROM lines, each tag with its digest: the Bun image (the runtime's Bun binary),
+  # the Alpine base and the web stage's Caddy. For Bun, the maintainer completes the runtime upgrade
+  # in packageManager, engines.bun, and @types/bun; tests/unit/runtime-pins.test.ts fails until they
+  # agree.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -42,7 +44,10 @@ updates:
       site:
         patterns: ["*"]
 
-  # Compose images: only postgres has a fixed tag; the GHCR images are parameterized and skipped.
+  # Compose images with a fixed tag: the stock file's postgres, and the Watchtower pin (tag and
+  # digest) that the managed manifests and the stock `updates` profile share, which one update moves
+  # in every file; tests/unit/compose-manifests.test.ts keeps them equal. The TaruBot images are
+  # parameterized and skipped.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:

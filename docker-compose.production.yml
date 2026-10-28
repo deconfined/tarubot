@@ -1,7 +1,13 @@
-# Production bot against external managed PostgreSQL. Deploy with an exact digest;
-# the private host .env supplies settings, not release identity. ops/deploy.sh passes
-# --project-name tarubot, the central --env-file and the release worktree manifest.
-# Exactly one writer holds the database lease; migrations run only while it is stopped.
+# Production: the bot against the external managed PostgreSQL, the release's web proxy, and the
+# updater that follows the `production` tags. Start it once with the project's settings in its
+# environment (production.env.example lists them); after that the approved Deploy workflow only
+# moves the tags, and Watchtower replaces each container when its tag moves, keeping the settings
+# and hardening the container was created with. Changing a setting needs `up` again.
+# Exactly one writer holds the database lease: Watchtower stops the old bot before it starts the
+# new one, and the new bot applies pending migrations, after an encrypted backup, before it takes
+# the lease. Tools run as one-off containers of the same image (docker compose run --rm tarubot).
+name: tarubot
+
 include:
   - ./docker-compose.web.yml
 
@@ -14,7 +20,10 @@ x-logging: &logging
 
 services:
   tarubot:
-    image: ghcr.io/deconfined/tarubot@${TARUBOT_IMAGE_DIGEST:?Set TARUBOT_IMAGE_DIGEST to the approved release digest}
+    image: ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to production}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
       # The managed cluster's direct connection, verified with its CA.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed tarubot database}
@@ -48,61 +57,77 @@ services:
       LODESTONE_ATTEMPTS: ${LODESTONE_ATTEMPTS:-3}
       LODESTONE_MAX_PAGES: ${LODESTONE_MAX_PAGES:-100}
       LODESTONE_SELECTOR_CHECK_SECONDS: ${LODESTONE_SELECTOR_CHECK_SECONDS:-900}
-      # Issue reports (2.18.0): the token lives in the host's .env; empty saves reports unsent.
+      # Issue reports (2.18.0): empty saves reports unsent.
       GITHUB_REPORTS_TOKEN: ${GITHUB_REPORTS_TOKEN:-}
       GITHUB_REPORTS_REPO: ${GITHUB_REPORTS_REPO:-deconfined/tarubot-reports}
       # Public suggestions (2.28.0): the TaruBot GitHub App that opens /suggest issues in the public
       # repository. Production only: docker-compose.yml never passes them. The key is a PEM quoted
-      # across lines in the host's .env, like the CA; either one empty switches /suggest off.
+      # across lines, like the CA; either one empty switches /suggest off.
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
-      # Heartbeat (2.22.0): the production check's ping URL lives in the host's .env; empty turns the
-      # heartbeat off, and healthchecks.io then alerts because the pings stopped.
+      # Heartbeat (2.22.0): empty turns the heartbeat off, and healthchecks.io then alerts because
+      # the pings stopped.
       HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
       MODMAIL_KEY: ${MODMAIL_KEY:-}
+      # Backups (2.46.0): the bot takes the daily backup and the one before it migrates, so the
+      # production profile refuses to migrate without these. Each backup also carries an encrypted
+      # copy of these settings, the mod mail key included.
+      BACKUP_STORAGE_ENDPOINT: ${BACKUP_STORAGE_ENDPOINT:-}
+      BACKUP_STORAGE_ACCESS_KEY: ${BACKUP_STORAGE_ACCESS_KEY:-}
+      BACKUP_STORAGE_SECRET_KEY: ${BACKUP_STORAGE_SECRET_KEY:-}
+      BACKUP_STORAGE_REGION: ${BACKUP_STORAGE_REGION:-}
+      BACKUP_AGE_RECIPIENTS: ${BACKUP_AGE_RECIPIENTS:-}
+      BACKUP_TIME_UTC: ${BACKUP_TIME_UTC:-03:00}
+      HEALTHCHECKS_BACKUP_URL: ${HEALTHCHECKS_BACKUP_URL:-}
+      # Only for one-off restore and restore-check runs of this service; empty for the bot.
+      RESTORE_DATABASE_URL: ${RESTORE_DATABASE_URL:-}
+      RESTORE_DATABASE_CA_CERT: ${RESTORE_DATABASE_CA_CERT:-}
     healthcheck:
       test: [CMD, bun, -e, "const r=await fetch('http://localhost:3000/health/ready');process.exit(r.ok?0:1)"]
       interval: 15s
       timeout: 5s
       retries: 3
-      # A new bot waits (unready) for the writer lease while a previous one stops.
-      start_period: 60s
-    # Delivery forces "no" until sustained observation and durable acceptance.
-    restart: ${TARUBOT_RESTART_POLICY:-unless-stopped}
+      # A new bot is unready while it backs up, migrates and waits for the writer lease.
+      start_period: 300s
+    restart: unless-stopped
     stop_grace_period: 30s
     logging: *logging
-    # The bot writes no runtime file: read-only root, no writable mounts, no
-    # capabilities, and no opportunity to gain privileges.
+    # Read-only root, no capabilities and no way to gain privileges. The only writable path is a
+    # small /tmp, where pg_dump and pg_restore read the database CA from a private file.
     read_only: true
+    tmpfs: ["/tmp:size=1m,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
-  # The daily database dump (2.24.0): ops/backup.sh runs it with `docker compose run -T backup`,
-  # encrypts its output with age as it streams, and uploads it. The profile keeps `up` from ever
-  # starting it. pg_dump reads the bot's own connection settings; $$ defers expansion to the
-  # container's shell, so Compose doesn't splice the multi-line CA into the command. Its stdout is
-  # the unencrypted dump, and a logging driver would copy it to disk even while it is piped, so
-  # logging is off; `docker compose run` still streams stdout to the pipe.
-  backup:
-    image: docker.io/library/postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
-    profiles: [backup]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed tarubot database}
-      DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
-      PGSSLMODE: verify-full
-      PGSSLROOTCERT: /tmp/ca.crt
-    entrypoint:
-      - sh
-      - -c
-      - umask 077 && printf '%s\n' "$$DATABASE_CA_CERT" > /tmp/ca.crt && exec pg_dump --format=custom --no-owner --no-privileges "$$DATABASE_URL"
-    logging:
-      driver: none
-    # Container hardening (2.30.3, #51): /tmp/ca.crt is the only file the job writes (tested), so
-    # the root filesystem is read-only and /tmp is a small tmpfs, private to the image's root user
-    # (who runs pg_dump) and gone when the run ends. The job keeps no capability and gains no
-    # privilege.
+  # Follows the `production` tags: every 300 seconds it compares each labelled container's image
+  # with its tag in the registry and, when the tag moved, pulls it, stops the old container (within
+  # its own stop_grace_period, the bot's 30 seconds; --stop-timeout covers the proxy, which it
+  # stops first because it depends on the bot), starts the new one with the old one's
+  # configuration, then removes the old image. --include-restarting also replaces a crash-looping
+  # bot, so deploying the previous version still rolls back a release that never stays up.
+  # A `docker compose run` of the bot carries its labels too: a tool run that may outlast a tag
+  # move needs --label com.centurylinklabs.watchtower.enable=false, or Watchtower replaces it and
+  # runs its command again. The Docker socket is root-equivalent on this Docker host: only this
+  # pinned image gets it.
+  watchtower:
+    image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
+    command:
+      - --label-enable
+      - --scope
+      - tarubot
+      - --interval
+      - "300"
+      - --stop-timeout
+      - 40s
+      - --include-restarting
+      - --cleanup
+      - --no-startup-message
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging: *logging
     read_only: true
-    tmpfs:
-      - /tmp:size=1m,mode=0700
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

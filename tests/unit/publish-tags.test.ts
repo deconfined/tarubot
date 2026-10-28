@@ -1,7 +1,8 @@
 /**
  * Execute publish.yml's real version-publication and tagging scripts against a fake registry.
- * A release version is tagged once, never over another commit's release; a re-run of this
- * commit's own run resumes with its own index; an unreadable registry asks for a re-run.
+ * A release version, and its web image's web-X.Y.Z, is tagged once, never over another commit's
+ * release; a re-run of this commit's own run resumes with its own index; an unreadable registry
+ * asks for a re-run.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -23,19 +24,25 @@ const step = (job: string, id: string) =>
   workflow.jobs[job]?.steps?.find((candidate) => candidate.id === id)?.run ?? "";
 const prepare = step("prepare", "publication");
 const merge = step("publish", "merge");
-if (!prepare || !merge) throw new Error("missing-publication-scripts");
+const web = step("web", "tag");
+if (!prepare || !merge || !web) throw new Error("missing-publication-scripts");
 
 const SHA = "c".repeat(40);
 const digest = (seed: string) => `sha256:${createHash("sha256").update(seed).digest("hex")}`;
 const AMD64 = digest("amd64");
 const ARM64 = digest("arm64");
 const OTHER = digest("another commit's release");
+const BUILT = digest("this attempt's web build");
 
 type Registry = {
   /** Tag -> index digest. */
   tags: Record<string, string>;
   /** Tags whose reads fail with a server error. */
   failing: string[];
+  /** Index digest -> the source commit its images' labels name; others can't be inspected. */
+  revisions?: Record<string, string>;
+  /** Tags that imagetools create points at some other digest, as a concurrent writer would. */
+  drift?: string[];
 };
 
 function fixture(registry: Registry) {
@@ -88,7 +95,8 @@ answer(200, "docker-content-digest: " + registry.tags[tag] + "\\r\\n");
     { mode: 0o700 },
   );
   // imagetools create: one index source is re-tagged byte for byte; several are merged into a
-  // new index whose digest depends on its sources.
+  // new index whose digest depends on its sources. imagetools inspect prints both platforms'
+  // image configs, with the source label the registry state names.
   writeFileSync(
     join(bin, "docker"),
     `#!${process.execPath}
@@ -96,6 +104,15 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(["docker", ...args]) + "\\n");
+if (args[0] === "buildx" && args[1] === "imagetools" && args[2] === "inspect") {
+  const subject = args[3]?.match(/^ghcr\\.io\\/deconfined\\/tarubot@(sha256:[0-9a-f]{64})$/)?.[1];
+  if (!subject || args[4] !== "--format" || args[5] !== "{{json .Image}}") process.exit(70);
+  const revision = JSON.parse(readFileSync(${JSON.stringify(state)}, "utf8")).revisions?.[subject];
+  if (!revision) process.exit(1);
+  const config = { config: { Labels: { "org.opencontainers.image.revision": revision } } };
+  console.log(JSON.stringify({ "linux/amd64": config, "linux/arm64": config }));
+  process.exit(0);
+}
 if (args[0] !== "buildx" || args[1] !== "imagetools" || args[2] !== "create") process.exit(70);
 const tags = [], sources = [];
 for (let i = 3; i < args.length; i++) {
@@ -104,7 +121,7 @@ for (let i = 3; i < args.length; i++) {
 }
 const registry = JSON.parse(readFileSync(${JSON.stringify(state)}, "utf8"));
 const merged = sources.length === 1 ? sources[0] : "sha256:" + createHash("sha256").update(sources.join(",")).digest("hex");
-for (const tag of tags) registry.tags[tag] = merged;
+for (const tag of tags) registry.tags[tag] = registry.drift?.includes(tag) ? "sha256:" + "f".repeat(64) : merged;
 writeFileSync(${JSON.stringify(state)}, JSON.stringify(registry));
 `,
     { mode: 0o700 },
@@ -125,6 +142,7 @@ writeFileSync(${JSON.stringify(state)}, JSON.stringify(registry));
         RELEASE_REQUESTED: "true",
         AMD64,
         ARM64,
+        BUILT,
         ...changes,
       },
       stdin: "ignore",
@@ -282,5 +300,84 @@ describe("tagging one index of both platforms", () => {
     expect(unreadable.code).toBe(1);
     expect(unreadable.creates()).toEqual([]);
     expect(unreadable.stdout).toContain("re-run once GHCR answers");
+  });
+});
+
+describe("tagging the web image", () => {
+  const tag = "web-2.38.0";
+  const created = (run: { creates: () => string[][] }) =>
+    run.creates().filter((args) => args[3] === "create");
+
+  test("tags this attempt's build while the version is absent", () => {
+    const run = fixture({ tags: { "2.38.0": mergedIndex }, failing: [] }).run(web);
+    expect(run.code).toBe(0);
+    expect(created(run)).toEqual([
+      [
+        "docker",
+        "buildx",
+        "imagetools",
+        "create",
+        "--tag",
+        `ghcr.io/deconfined/tarubot:${tag}`,
+        `ghcr.io/deconfined/tarubot@${BUILT}`,
+      ],
+    ]);
+    expect(run.registry().tags[tag]).toBe(BUILT);
+    expect(run.output).toEqual([`digest=${BUILT}`]);
+  });
+
+  test("a re-run resumes with this commit's own web image and tags nothing", () => {
+    const earlier = digest("an earlier attempt's web build");
+    const run = fixture({
+      tags: { [tag]: earlier },
+      failing: [],
+      revisions: { [earlier]: SHA },
+    }).run(web);
+    expect(run.code).toBe(0);
+    expect(created(run)).toEqual([]);
+    expect(run.output).toEqual([`digest=${earlier}`]);
+    expect(run.stdout).toContain("resuming with that index");
+  });
+
+  test("a web tag that names another digest once written publishes nothing", () => {
+    const run = fixture({ tags: {}, failing: [], drift: [tag] }).run(web);
+    expect(run.code).not.toBe(0);
+    expect(run.output).toEqual([]);
+  });
+
+  test("never overwrites another commit's web image", () => {
+    const run = fixture({
+      tags: { [tag]: OTHER },
+      failing: [],
+      revisions: { [OTHER]: "f".repeat(40) },
+    }).run(web);
+    expect(run.code).toBe(1);
+    expect(created(run)).toEqual([]);
+    expect(run.registry().tags[tag]).toBe(OTHER);
+    expect(run.output).toEqual([]);
+    expect(run.stdout).toContain("already published from another commit");
+  });
+
+  test("an unreadable tag or image asks for a re-run instead of blaming another commit", () => {
+    for (const registry of [
+      { tags: { [tag]: OTHER }, failing: [tag] },
+      { tags: { [tag]: OTHER }, failing: [] },
+    ]) {
+      const run = fixture(registry).run(web);
+      expect(run.code).toBe(1);
+      expect(created(run)).toEqual([]);
+      expect(run.output).toEqual([]);
+      expect(run.stdout).toContain("re-run once GHCR answers");
+      expect(run.stdout).not.toContain("another commit");
+    }
+  });
+
+  test("a malformed build digest or version tags nothing", () => {
+    for (const changes of [{ BUILT: "latest" }, { BUILT: "" }, { VERSION: "2.38.0-rc.1" }]) {
+      const run = fixture({ tags: {}, failing: [] }).run(web, changes);
+      expect(run.code).not.toBe(0);
+      expect(run.creates()).toEqual([]);
+      expect(run.output).toEqual([]);
+    }
   });
 });

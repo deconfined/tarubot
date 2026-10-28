@@ -15,7 +15,15 @@ setDefaultTimeout(60_000);
 const scratch = mkdtempSync(join(tmpdir(), "publish-gate-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-type Job = { if?: string; needs?: string | string[]; steps?: { id?: string; run?: string }[] };
+type Job = {
+  if?: string;
+  needs?: string | string[];
+  uses?: string;
+  with?: Record<string, unknown>;
+  secrets?: unknown;
+  permissions?: Record<string, string>;
+  steps?: { id?: string; run?: string; uses?: string; with?: Record<string, unknown> }[];
+};
 const workflow = Bun.YAML.parse(
   readFileSync(new URL("../../.github/workflows/publish.yml", import.meta.url), "utf8"),
 ) as { jobs: Record<string, Job> };
@@ -299,6 +307,7 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
       "amd64",
       "arm64",
       "publish",
+      "web",
       "scan",
       "attest",
       "latest",
@@ -316,6 +325,38 @@ describe("publication jobs never depend on a deliberately skipped fallback", () 
       "(needs.gate.outputs.tested == 'true' || needs.verify.result == 'success')",
     );
     expect(workflow.jobs.verify?.if).toBe("needs.gate.outputs.tested != 'true'");
+  });
+
+  test("both images are signed and promoted, and production deploys them with no secret", () => {
+    const signed = (workflow.jobs.attest?.steps ?? [])
+      .filter((step) => step.uses?.startsWith("actions/attest@"))
+      .map((step) => step.with);
+    expect(signed).toEqual([
+      {
+        "subject-name": "ghcr.io/deconfined/tarubot",
+        "subject-digest": `\${{ needs.publish.outputs.digest }}`,
+        "push-to-registry": false,
+      },
+      {
+        "subject-name": "ghcr.io/deconfined/tarubot",
+        "subject-digest": `\${{ needs.web.outputs.digest }}`,
+        "push-to-registry": false,
+      },
+    ]);
+    const promote = workflow.jobs.latest?.steps?.find((step) => step.run)?.run ?? "";
+    expect(promote).toContain('--tag "$image:web-latest" "$image@$WEB_DIGEST"');
+    expect(promote).toContain('--tag "$image:latest" "$image@$DIGEST"');
+    const deploy = workflow.jobs.deploy;
+    expect(deploy?.uses).toBe("./.github/workflows/deploy.yml");
+    expect(deploy?.with).toEqual({
+      target: "production",
+      version: `\${{ needs.gate.outputs.version }}`,
+    });
+    expect(deploy?.secrets).toBeUndefined();
+    const called = Bun.YAML.parse(
+      readFileSync(new URL("../../.github/workflows/deploy.yml", import.meta.url), "utf8"),
+    ) as { permissions: Record<string, string> };
+    expect(deploy?.permissions).toEqual(called.permissions);
   });
 
   test("re-runs retry for real: no publication or delivery job is limited to the first attempt", () => {

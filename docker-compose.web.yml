@@ -1,8 +1,15 @@
-# Shared optional ingress. The bot and its readiness port stay on the private network.
+# Shared optional ingress: the release's own web image, the stock Caddy binary with TaruBot's
+# Caddyfile and offline page built in (the Dockerfile's web stage), so the proxy follows the same
+# tag as the bot. The bot and its readiness port stay on the private network.
 services:
   caddy:
-    image: docker.io/library/caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    image: ghcr.io/deconfined/tarubot:web-${TARUBOT_IMAGE_TAG:-latest}
     profiles: [web]
+    labels:
+      # A tag-following updater (the managed manifests' Watchtower) replaces this container when
+      # its tag moves; without one these labels do nothing.
+      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
       WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
       WEB_PORT: ${WEB_PORT:-8080}
@@ -14,12 +21,6 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      # Shared read-only source also serves one-off validation on SELinux hosts.
-      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro,z
-      # The static offline page Caddy shows while the bot can't answer (2.41.0). Its files
-      # must be readable by others: Caddy holds no DAC_OVERRIDE. Missing or unreadable, the
-      # Caddyfile falls back to a one-line text answer.
-      - ./ops/offline:/srv/offline:ro,z
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
@@ -38,7 +39,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    restart: ${TARUBOT_RESTART_POLICY:-unless-stopped}
+    restart: unless-stopped
     logging:
       driver: json-file
       options:

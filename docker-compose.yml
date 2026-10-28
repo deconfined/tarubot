@@ -1,4 +1,6 @@
 # Registry deployment: pull published images; source builds use docker-compose.build.yml.
+# The bot applies its own pending migrations when it starts, so upgrading is starting a newer
+# image. The optional `updates` profile follows the image tag (latest by default) with Watchtower.
 include:
   - ./docker-compose.web.yml
 
@@ -21,6 +23,10 @@ services:
   tarubot:
     # Runtime credentials are supplied here, independently of the compiled image.
     image: ${TARUBOT_IMAGE:-ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:-latest}}
+    # Only the `updates` profile's Watchtower reads these; without it they do nothing.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
       DATABASE_URL: postgresql://tarubot:${POSTGRES_PASSWORD}@postgres:5432/tarubot
       # Optional provider root CA for deployments using an external TLS PostgreSQL endpoint.
@@ -60,6 +66,18 @@ services:
       HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
       # Mod mail's encryption key (2.43.0): base64 for 32 bytes; empty leaves mod mail unavailable.
       MODMAIL_KEY: ${MODMAIL_KEY:-}
+      # Optional backups (2.46.0): an empty endpoint turns daily backups off, and migrations then
+      # apply without a backup first.
+      BACKUP_STORAGE_ENDPOINT: ${BACKUP_STORAGE_ENDPOINT:-}
+      BACKUP_STORAGE_ACCESS_KEY: ${BACKUP_STORAGE_ACCESS_KEY:-}
+      BACKUP_STORAGE_SECRET_KEY: ${BACKUP_STORAGE_SECRET_KEY:-}
+      BACKUP_STORAGE_REGION: ${BACKUP_STORAGE_REGION:-}
+      BACKUP_AGE_RECIPIENTS: ${BACKUP_AGE_RECIPIENTS:-}
+      BACKUP_TIME_UTC: ${BACKUP_TIME_UTC:-03:00}
+      HEALTHCHECKS_BACKUP_URL: ${HEALTHCHECKS_BACKUP_URL:-}
+      # Only for one-off restore and restore-check runs of this service; empty for the bot.
+      RESTORE_DATABASE_URL: ${RESTORE_DATABASE_URL:-}
+      RESTORE_DATABASE_CA_CERT: ${RESTORE_DATABASE_CA_CERT:-}
     depends_on:
       # Local capabilities can operate while Lodestone is degraded; storage must be ready.
       postgres:
@@ -69,13 +87,47 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+      # A new bot is unready while it backs up and migrates.
+      start_period: 300s
     restart: unless-stopped
     stop_grace_period: 30s
-    # Container hardening (2.30.3, #51): the bot writes no file at runtime (tested with its tools
-    # and health check), so its root filesystem is read-only with no tmpfs.
+    # Container hardening (2.30.3, #51): the root filesystem is read-only, and the only writable
+    # path is a small /tmp, where pg_dump and pg_restore read the database CA from a private file.
     # It binds no privileged port and needs no capability, and nothing in it may gain privileges.
     # The DevBot overlay inherits these; docker-compose.production.yml and docker-compose.staging.yml
     # repeat them.
+    read_only: true
+    tmpfs: ["/tmp:size=1m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+  # Opt-in updates (COMPOSE_PROFILES=updates): the managed manifests' pinned Watchtower and flags,
+  # following TARUBOT_IMAGE_TAG for the bot and the web profile's proxy. When the tag moves it
+  # stops the old container, then starts the new image with the same configuration; the bot
+  # migrates on start. The Docker socket is root-equivalent on this Docker host.
+  watchtower:
+    image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
+    profiles: [updates]
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
+    command:
+      - --label-enable
+      - --scope
+      - tarubot
+      - --interval
+      - "300"
+      - --stop-timeout
+      - 40s
+      - --include-restarting
+      - --cleanup
+      - --no-startup-message
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

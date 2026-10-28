@@ -48,10 +48,9 @@ jobs:
           --health-cmd "pg_isready -U tarubot -d tarubot_test"
           --health-interval 5s --health-timeout 3s --health-retries 20
     env:
-      # These database and DNS fixtures contain synthetic test data only.
+      # These database fixtures contain synthetic test data only.
       TEST_DATABASE_URL: postgresql://tarubot:ci-only-password@localhost:5432/tarubot_test
       LEGACY_FIXTURE_PATH: .cache/ci/legacy.sql
-      SSHFP_FIXTURE_IMAGE: tarubot-sshfp-test
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,14 +85,11 @@ jobs:
         run: bun run lint
       - name: Check formatting
         run: bun run format:check
-      - name: Check the host scripts with ShellCheck
-        run: |
-          for script in ops/*.sh; do bash -n "$script"; done
-          command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
-          shellcheck -S warning ops/*.sh
       - name: Validate GitHub workflows
         run: |
           set -Eeuo pipefail
+          # actionlint checks every run: block with ShellCheck, but only when ShellCheck is on PATH.
+          command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           tool_dir=$(mktemp -d "$RUNNER_TEMP/actionlint.XXXXXX")
           trap 'rm -rf -- "$tool_dir"' EXIT
           curl --fail --silent --show-error --location --connect-timeout 10 --max-time 120 \
@@ -105,21 +101,14 @@ jobs:
           "$tool_dir/actionlint" -color
       - name: Compile the application
         run: bun run build
-      - name: Exercise native SSH resolver under Ubuntu AppArmor
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends openssh-client unbound dns-root-data
-          sudo -n unshare --mount --net -- \
-            python3 tests/fixtures/sshfp/host-profile-smoke.py \
-            "$USER" "$GITHUB_WORKSPACE/ops/deploy-ssh.sh" "$RUNNER_TEMP"
-      - name: Build the credential-free DNSSEC SSHFP fixture
-        run: docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
-      - name: Pull the credential-free Caddy fixture
+      # docker-compose.web.yml runs the release's web image. CI builds this tree's own, so the
+      # Caddy tests and the Caddyfile check below never pull a published tag (which may not exist
+      # yet, and would carry another tree's Caddyfile and offline page).
+      - name: Build this tree's web image for the Caddy fixture
         run: |
           set -Eeuo pipefail
-          image=$(docker compose --env-file .env.example --profile web config --format json | jq -r '.services.caddy.image')
-          docker pull "$image"
-          printf 'CADDY_FIXTURE_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+          docker build --target web -t ghcr.io/deconfined/tarubot:web-ci .
+          echo 'CADDY_FIXTURE_IMAGE=ghcr.io/deconfined/tarubot:web-ci' >> "$GITHUB_ENV"
       - name: Generate synthetic integration input
         run: bun run test:fixture
       - name: Run unit, contract, and PostgreSQL integration tests
@@ -127,7 +116,15 @@ jobs:
       - name: Validate deployment and source-build Compose models
         run: |
           set -Eeuo pipefail
-          # Check both bot-only and optional-web models with invented settings.
+          # Invented settings only, the backup settings included.
+          managed=(
+            DISCORD_APPLICATION_ID=123456789012345678 DATABASE_CA_CERT=x DISCORD_TOKEN=x
+            BACKUP_STORAGE_ENDPOINT=backups.example.org/tarubot BACKUP_STORAGE_REGION=example-1
+            BACKUP_STORAGE_ACCESS_KEY=fixture-only BACKUP_STORAGE_SECRET_KEY=fixture-only
+            BACKUP_AGE_RECIPIENTS=age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+            BACKUP_TIME_UTC=03:00 HEALTHCHECKS_BACKUP_URL=https://hc-ping.example.org/fixture-only
+          )
+          # Check both bot-only and optional-web models.
           for profiles in '' web; do
             export COMPOSE_PROFILES="$profiles"
             export WEB_PUBLIC_ORIGIN='' DISCORD_CLIENT_SECRET=''
@@ -136,18 +133,18 @@ jobs:
             fi
             docker compose --env-file .env.example config --quiet
             docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.build.yml config --quiet
-            TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-              DISCORD_APPLICATION_ID=123456789012345678 DATABASE_URL=postgresql://tarubot:x@db.example.org:27520/tarubot \
-              DATABASE_CA_CERT=x DISCORD_TOKEN=x \
+            env "${managed[@]}" TARUBOT_IMAGE_TAG=production \
+              DATABASE_URL=postgresql://tarubot:x@db.example.org:27520/tarubot \
               docker compose --env-file /dev/null -f docker-compose.production.yml config --quiet
-            TARUBOT_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-              DISCORD_APPLICATION_ID=123456789012345678 TEST_GUILD_ID=123456789012345679 \
+            env "${managed[@]}" TARUBOT_IMAGE_TAG=staging TEST_GUILD_ID=123456789012345679 \
               DATABASE_URL=postgresql://tarubot_staging:x@db.example.org:27520/tarubot_staging \
-              DATABASE_CA_CERT=x DISCORD_TOKEN=x \
               docker compose --env-file /dev/null -f docker-compose.staging.yml config --quiet
           done
-          # Exercise the digest-pinned official binary under the service's hardening.
-          docker compose --env-file .env.example run --rm --no-deps caddy \
+          # A self-hoster's opt-in updater beside the bundled proxy.
+          docker compose --env-file .env.example --profile updates --profile web config --quiet
+          # This tree's web image (built above) validates its own Caddyfile under the service's
+          # hardening; --pull never keeps a published tag out of it.
+          TARUBOT_IMAGE_TAG=ci docker compose --env-file .env.example run --rm --no-deps --pull never caddy \
             caddy validate --config /etc/caddy/Caddyfile
       # Maintenance passes all checks without a release bump. Only a known version increase
       # declares a release; manual verification has no predecessor and never infers one.

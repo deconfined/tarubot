@@ -1,6 +1,12 @@
 name: Deploy
 run-name: Deploy ${{ inputs.target }} ${{ inputs.version }}
 
+# The pull model (2.46.0): an approved deployment only moves the target's channel tags,
+# `<target>` and `web-<target>`, to one release's exact signed digests. The runtime's updater
+# (Watchtower in docker-compose.production.yml and docker-compose.staging.yml) follows those tags,
+# and starting the new image is the whole upgrade. GitHub never connects to the runtime, so it
+# can't watch the result or roll back by itself: deploying an earlier version is the rollback, and
+# an earlier image refuses a database migrated past it by itself.
 on:
   workflow_call:
     inputs:
@@ -10,16 +16,6 @@ on:
       version:
         type: string
         required: true
-      commit:
-        type: string
-        required: true
-      digest:
-        type: string
-        required: true
-    secrets:
-      DEPLOY_SSH_KEY:
-        description: "Optional caller binding; the selected environment supplies the delivery key."
-        required: false
   workflow_dispatch:
     inputs:
       target:
@@ -29,15 +25,7 @@ on:
         default: staging
         required: true
       version:
-        description: "Reviewed release X.Y.Z (never a downgrade)"
-        type: string
-        required: true
-      commit:
-        description: "Exact 40-character source commit on main"
-        type: string
-        required: true
-      digest:
-        description: "Exact signed image index sha256:digest; never a tag"
+        description: "Published release X.Y.Z (an earlier one rolls back)"
         type: string
         required: true
 
@@ -46,154 +34,91 @@ permissions:
   actions: read
   attestations: read
   deployments: read
+  packages: write
 
 defaults:
   run:
     shell: bash
 
-env:
-  TARGET: ${{ inputs.target }}
-  # Bind repository activation before a selected environment can supply runner variables.
-  REPO_PRODUCTION_DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
-  REPO_STAGING_DEPLOY_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
-  VERSION: ${{ inputs.version }}
-  COMMIT: ${{ inputs.commit }}
-  DIGEST: ${{ inputs.digest }}
-
 jobs:
-  validate:
-    name: Validate signed release
-    # A re-run validates again, and delivery proceeds only on an approval given in its own attempt;
-    # the host entry then decides (already-live, refused while another delivery or a pending marker
-    # holds the host, or a deployment). Each attempt sends its own request ID (ops/deploy-ssh.sh).
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      target: ${{ steps.admission.outputs.target }}
-    steps:
-      - name: Validate request, main ancestry, approval policy and provenance
-        id: admission
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          umask 077
-          private=$(mktemp -d "$RUNNER_TEMP/release-validation.XXXXXX")
-          trap 'rm -rf -- "$private"' EXIT
-          trap 'echo "::error::Release validation failed; no host connection was made."' ERR
-          exec 2> "$private/errors"
-          case "$TARGET" in
-            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
-            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
-            *) exit 1 ;;
-          esac
-          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
-          [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
-          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$COMMIT...main" --jq .status)
-          [[ $status == identical || $status == ahead ]]
-          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
-            "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
-          [[ $version == "$VERSION" ]]
-          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET" > "$private/environment"
-          jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
-            and .can_admins_bypass == false
-            and ([.protection_rules[] | select(.type == "required_reviewers")]
-              | length == 1 and .[0].prevent_self_review == false
-                and ([.[0].reviewers[] | {type, login: .reviewer.login}]
-                  == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
-          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET/deployment-branch-policies" \
-            | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
-          gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
-            --repo deconfined/tarubot \
-            --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
-            --source-ref refs/heads/main --source-digest "$COMMIT" \
-            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
-            --format json > "$private/attestation"
-          jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
-          printf 'target=%s\n' "$TARGET" >> "$GITHUB_OUTPUT"
-          echo 'Signed release validated; selected environment approval is required.'
-
-  deliver:
-    name: Deploy ${{ needs.validate.outputs.target }}
-    needs: validate
+  deploy:
+    # Called from publish.yml, GitHub shows this job as "Production release / Deploy production";
+    # the approval check finds this job by either name.
+    name: Deploy ${{ inputs.target }}
     if: >-
       github.ref == 'refs/heads/main' &&
-      ((needs.validate.outputs.target == 'production' && vars.DEPLOY_ENABLED == 'true') ||
-       (needs.validate.outputs.target == 'staging' && vars.STAGING_DEPLOY_ENABLED == 'true'))
+      ((inputs.target == 'production' && vars.DEPLOY_ENABLED == 'true') ||
+       (inputs.target == 'staging' && vars.STAGING_DEPLOY_ENABLED == 'true'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      TARGET: ${{ needs.validate.outputs.target }}
+    timeout-minutes: 10
+    # The selected environment holds this job for the owner's approval, the routine production gate.
+    environment: ${{ inputs.target }}
     concurrency:
-      group: ${{ needs.validate.outputs.target }}-deploy
+      group: deploy-${{ inputs.target }}
       cancel-in-progress: false
-    # Exactly one selected environment job, including the routine production approval.
-    environment: ${{ needs.validate.outputs.target }}
+    env:
+      TARGET: ${{ inputs.target }}
+      VERSION: ${{ inputs.version }}
+      # The step checks the selected target's switch again, so the job condition is not the only one.
+      PRODUCTION_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+      STAGING_ENABLED: ${{ vars.STAGING_DEPLOY_ENABLED }}
     steps:
-      - name: Recheck release and owner policy after approval and queue waits
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the release and this attempt's approval, then move the channel tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           umask 077
-          private=$(mktemp -d "$RUNNER_TEMP/release-validation.XXXXXX")
+          private=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXX")
           trap 'rm -rf -- "$private"' EXIT
-          trap 'echo "::error::Release revalidation failed; no host connection was made."' ERR
+          # Each phase names what failed; command diagnostics stay out of the public log.
+          unchanged='No tag was moved.'
+          reason="Deploy needs an enabled target (production or staging) and a release X.Y.Z with at most four digits per component. $unchanged"
+          trap 'echo "::error::$reason"' ERR
           exec 2> "$private/errors"
           case "$TARGET" in
-            production) [[ $REPO_PRODUCTION_DEPLOY_ENABLED == true ]] ;;
-            staging) [[ $REPO_STAGING_DEPLOY_ENABLED == true ]] ;;
-            *) exit 1 ;;
+            production) [[ $PRODUCTION_ENABLED == true ]] ;;
+            staging) [[ $STAGING_ENABLED == true ]] ;;
+            *) false ;;
           esac
           [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
-          [[ $COMMIT =~ ^[0-9a-f]{40}$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ $GITHUB_REPOSITORY == deconfined/tarubot ]]
-          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$COMMIT...main" --jq .status)
-          [[ $status == identical || $status == ahead ]]
-          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
-            "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$COMMIT" | jq -er .version)
-          [[ $version == "$VERSION" ]]
-          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET" > "$private/environment"
-          jq -e '.deployment_branch_policy == {protected_branches: false, custom_branch_policies: true}
-            and .can_admins_bypass == false
-            and ([.protection_rules[] | select(.type == "required_reviewers")]
-              | length == 1 and .[0].prevent_self_review == false
-                and ([.[0].reviewers[] | {type, login: .reviewer.login}]
-                  == [{type: "User", login: "deconfined"}]))' "$private/environment" > /dev/null
-          gh api "repos/$GITHUB_REPOSITORY/environments/$TARGET/deployment-branch-policies" \
-            | jq -e '[.branch_policies[] | {name, type}] == [{name: "main", type: "branch"}]' > /dev/null
-          gh attestation verify "oci://ghcr.io/deconfined/tarubot@$DIGEST" \
-            --repo deconfined/tarubot \
-            --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
-            --source-ref refs/heads/main --source-digest "$COMMIT" \
-            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
-            --format json > "$private/attestation"
-          jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
+          image=ghcr.io/deconfined/tarubot
+
           # The owner's approval must belong to this attempt (@deconfined, 2026-10-08). GitHub gives
           # each environment job its own deployment, whose first status is "waiting" only while the
-          # job is held for the required reviewer; every status links to the run and the job ID,
-          # and a re-run gets a new job ID. So this job finds its own deployment and requires that
-          # it began "waiting": a re-run let through on an earlier approval is refused here, before
-          # any host contact. Re-run all jobs and a fresh dispatch both ask for approval again.
-          trap 'echo "::error::Could not read this attempt'"'"'s approval record from GitHub; re-run once its API answers. No host connection was made."' ERR
+          # job is held for the required reviewer; every status links to the run and the job's ID,
+          # and a re-run gets a new job ID. So this job finds itself among this attempt's jobs, then
+          # the deployment whose statuses link to it, and requires that it began "waiting": a re-run
+          # let through on an earlier approval, or an environment that no longer asks for one, is
+          # refused here. GitHub records the run's commit (GITHUB_SHA) on the deployment, which for
+          # a dispatched rollback is main's head, not the release's commit.
+          reason="This run's ID, attempt or commit is malformed. $unchanged"
           [[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]{0,19}$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]{0,2}$ ]]
           [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ ]]
+          unreadable="Could not read this attempt's approval record from GitHub; re-run once its API answers. $unchanged"
+          not_held="This deployment was not held for the $TARGET approval in this attempt, so it will not use an earlier approval. Re-run all jobs or dispatch Deploy again to be asked. $unchanged"
+          reason=$unreadable
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$private/jobs"
           gh api "repos/$GITHUB_REPOSITORY/deployments?environment=$TARGET&sha=$GITHUB_SHA&per_page=30" > "$private/deployments"
-          not_held="This delivery was not held for the $TARGET approval in this attempt, so it will not use an earlier approval. Re-run all jobs or dispatch Deploy again to be asked; no host connection was made."
-          trap 'echo "::error::$not_held"' ERR
+          reason=$not_held
           job=$(jq -er --arg name "Deploy $TARGET" '
             [.jobs[] | select(.status == "in_progress" and (.name == $name or (.name | endswith(" / " + $name)))) | .id]
             | if length == 1 then .[0] else empty end' "$private/jobs")
           [[ $job =~ ^[1-9][0-9]{0,19}$ ]]
           held=false
           for deployment in $(jq -r '.[] | .id | select(type == "number")' "$private/deployments"); do
-            if ! gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses?per_page=100" > "$private/statuses"; then
-              echo "::error::Could not read this attempt's approval record from GitHub; re-run once its API answers. No host connection was made."
-              exit 1
-            fi
+            reason=$unreadable
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses?per_page=100" > "$private/statuses"
+            reason=$not_held
             # Statuses arrive newest first, so the last of this job's statuses is its first.
             if jq -e --arg job "/actions/runs/$GITHUB_RUN_ID/job/$job" '
                 [.[] | select((.target_url // "") | endswith($job))] as $mine
@@ -203,21 +128,102 @@ jobs:
             fi
           done
           [[ $held == true ]]
-          echo 'Signed release, selected environment policy and this attempt'"'"'s approval revalidated.'
-      - name: Check out the reviewed workflow transport
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install the DNSSEC SSH transport
-        run: |
-          # A mirror hiccup here would fail delivery before any host contact; retry it.
-          sudo apt-get -o Acquire::Retries=5 update -q
-          sudo apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends \
-            openssh-client unbound dns-root-data
-          # The transport starts and cleans up its own validating resolver.
-          sudo systemctl stop unbound
-      - name: Send the exact release to the DNSSEC-authenticated host entry
-        env:
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: exec bash ops/deploy-ssh.sh
+
+          # The release's two index digests and the channel tags' current ones, read exactly:
+          # a channel tag is absent only before its first deployment.
+          reason="Could not read the published tags; re-run once GHCR answers. $unchanged"
+          token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+            | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:deconfined/tarubot:pull" \
+            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
+          echo "::add-mask::$token"
+          accept='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          status_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --write-out '%{http_code}' --header "$accept" \
+                "https://ghcr.io/v2/deconfined/tarubot/manifests/$1"
+          }
+          digest_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --dump-header - --header "$accept" \
+                "https://ghcr.io/v2/deconfined/tarubot/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+          # A tag's index digest, or "none" while it is absent.
+          tagged() {
+            local digest
+            case "$(status_of "$1")" in
+              200) digest=$(digest_of "$1") && [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] && echo "$digest" ;;
+              404) echo none ;;
+              *) return 1 ;;
+            esac
+          }
+          bot=$(tagged "$VERSION")
+          web=$(tagged "web-$VERSION")
+          previous_bot=$(tagged "$TARGET")
+          previous_web=$(tagged "web-$TARGET")
+          reason="Release $VERSION is not published as both $image:$VERSION and $image:web-$VERSION. $unchanged"
+          [[ $bot != none && $web != none ]]
+
+          # The release's source commit, from its signed bot image, must be on main and carry this
+          # version. Any version on main may be deployed: an earlier one is the rollback.
+          reason="Could not read the labels of $image@$bot; re-run once GHCR answers. $unchanged"
+          docker buildx imagetools inspect "$image@$bot" --format '{{json .Image}}' > "$private/image"
+          reason="$image:$VERSION names no single source commit. $unchanged"
+          commit=$(jq -er '[if has("config") then . else .[] end
+            | .config.Labels["org.opencontainers.image.revision"]]
+            | unique | if length == 1 then .[0] else empty end' "$private/image")
+          [[ $commit =~ ^[0-9a-f]{40}$ ]]
+          reason="Could not read commit $commit from GitHub; re-run once its API answers. $unchanged"
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
+          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$commit" | jq -er .version)
+          reason="Release $VERSION's commit $commit is not on main. $unchanged"
+          [[ $status == identical || $status == ahead ]]
+          reason="package.json at $commit is version $version, not $VERSION. $unchanged"
+          [[ $version == "$VERSION" ]]
+          # Both images must carry this commit's signed provenance from publish.yml on main.
+          reason="The signed build provenance of $image:$VERSION or $image:web-$VERSION did not verify. $unchanged"
+          for digest in "$bot" "$web"; do
+            gh attestation verify "oci://$image@$digest" \
+              --repo deconfined/tarubot \
+              --cert-identity https://github.com/deconfined/tarubot/.github/workflows/publish.yml@refs/heads/main \
+              --source-ref refs/heads/main --source-digest "$commit" \
+              --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
+              --format json > "$private/attestation"
+            jq -e 'type == "array" and length >= 1' "$private/attestation" > /dev/null
+          done
+          # For the summary only: which release the channel named before, so a rollback can name it.
+          previous_version=none
+          if [[ $previous_bot != none ]]; then
+            previous_version=$(docker buildx imagetools inspect "$image@$previous_bot" --format '{{json .Image}}' \
+              | jq -er '[if has("config") then . else .[] end
+                | .config.Labels["org.opencontainers.image.version"]] | unique | .[0] | strings') ||
+              previous_version=unknown
+            [[ $previous_version =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]] || previous_version=unknown
+          fi
+
+          # Web first: a failure between the two leaves the bot, and so the database, on the
+          # previous release. A single index source is re-tagged byte for byte.
+          reason="Moving the channel tags failed; re-run to move both again (the previous digests: $previous_bot and web $previous_web)."
+          docker buildx imagetools create --tag "$image:web-$TARGET" "$image@$web"
+          docker buildx imagetools create --tag "$image:$TARGET" "$image@$bot"
+          reason="A channel tag does not name the verified digest after the move; re-run to move both again."
+          [[ $(tagged "web-$TARGET") == "$web" && $(tagged "$TARGET") == "$bot" ]]
+          {
+            echo "### TaruBot $VERSION on $TARGET"
+            echo
+            echo '| Tag | Now | Before |'
+            echo '| --- | --- | --- |'
+            echo "| \`$image:$TARGET\` | \`$bot\` | \`$previous_bot\` |"
+            echo "| \`$image:web-$TARGET\` | \`$web\` | \`$previous_web\` |"
+            echo
+            echo "Source commit \`$commit\`; the channel named $previous_version before. The $TARGET runtime's Watchtower replaces its containers within its poll interval, and \`/version\` shows the release that runs. To roll back, run Deploy for $TARGET with the earlier version."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ $previous_bot == "$bot" && $previous_web == "$web" ]]; then
+            echo "::notice::$VERSION was already the $TARGET release; both tags are unchanged."
+          else
+            echo "::notice::$TARGET now names $VERSION ($bot, web $web); it named $previous_version before."
+          fi

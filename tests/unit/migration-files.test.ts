@@ -45,8 +45,8 @@ const TRANSACTION_CONTROL =
   /^\s*(?:BEGIN\b(?!\s+ATOMIC)|COMMIT\b|ROLLBACK\b|END\s*(?:WORK|TRANSACTION)?\s*;|START\s+TRANSACTION\b|SAVEPOINT\b|RELEASE\b)/imu;
 
 test("no migration controls its own transaction", async () => {
-  // migrate() applies every pending file in one transaction, which the automated deploy's
-  // recovery relies on (ops/deploy.sh, 2.30.0): a migration that failed changed nothing. A file
+  // migrate() applies every pending file in one transaction, which recovery from a failed
+  // release relies on: a migration that failed changed nothing. A file
   // that commits, rolls back or opens a savepoint would break that. CONCURRENTLY and VACUUM
   // aren't listed: inside the transaction they fail, which is safe.
   const files = (await readdir(directory)).filter((name) => name.endsWith(".sql")).sort();

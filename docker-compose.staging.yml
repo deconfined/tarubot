@@ -1,5 +1,10 @@
-# Standalone staging bot against its external managed database, never a local DB.
-# Use staging's separate owner-controlled Docker host with an approved digest.
+# Staging: the bot against its own external managed database (never a local one), the release's
+# web proxy, and the updater that follows the `staging` tags, on staging's own Docker host. It
+# works like docker-compose.production.yml: start it once with the project's settings in its
+# environment (staging.env.example lists them); the approved Deploy workflow then only moves the
+# tags, and Watchtower replaces the stale containers, stopping the old bot before the new one starts.
+name: tarubot
+
 include:
   - ./docker-compose.web.yml
 
@@ -11,7 +16,10 @@ x-logging: &logging
 
 services:
   tarubot:
-    image: ghcr.io/deconfined/tarubot@${TARUBOT_IMAGE_DIGEST:?Set TARUBOT_IMAGE_DIGEST to the approved release digest}
+    image: ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to staging}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.scope: tarubot
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed staging database}
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
@@ -47,38 +55,54 @@ services:
       HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
       # Staging's own mod mail key (2.43.0), never production's.
       MODMAIL_KEY: ${MODMAIL_KEY:-}
+      # Backups (2.46.0) into staging's own bucket, for staging's own age recipients; the staging
+      # profile refuses to migrate without them.
+      BACKUP_STORAGE_ENDPOINT: ${BACKUP_STORAGE_ENDPOINT:-}
+      BACKUP_STORAGE_ACCESS_KEY: ${BACKUP_STORAGE_ACCESS_KEY:-}
+      BACKUP_STORAGE_SECRET_KEY: ${BACKUP_STORAGE_SECRET_KEY:-}
+      BACKUP_STORAGE_REGION: ${BACKUP_STORAGE_REGION:-}
+      BACKUP_AGE_RECIPIENTS: ${BACKUP_AGE_RECIPIENTS:-}
+      BACKUP_TIME_UTC: ${BACKUP_TIME_UTC:-03:00}
+      HEALTHCHECKS_BACKUP_URL: ${HEALTHCHECKS_BACKUP_URL:-}
+      # Only for one-off restore and restore-check runs of this service; empty for the bot.
+      RESTORE_DATABASE_URL: ${RESTORE_DATABASE_URL:-}
+      RESTORE_DATABASE_CA_CERT: ${RESTORE_DATABASE_CA_CERT:-}
     healthcheck:
       test: [CMD, bun, -e, "const r=await fetch('http://localhost:3000/health/ready');process.exit(r.ok?0:1)"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 60s
-    # Delivery keeps automatic restarts disabled until durable acceptance.
-    restart: ${TARUBOT_RESTART_POLICY:-unless-stopped}
+      # A new bot is unready while it backs up, migrates and waits for the writer lease.
+      start_period: 300s
+    restart: unless-stopped
     stop_grace_period: 30s
     logging: *logging
     read_only: true
+    tmpfs: ["/tmp:size=1m,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
-  # Only ops/backup.sh starts this client; no database server runs on staging.
-  # Plaintext stdout streams to age, never the logging driver or a host file.
-  backup:
-    image: docker.io/library/postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
-    profiles: [backup]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed staging database}
-      DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
-      PGSSLMODE: verify-full
-      PGSSLROOTCERT: /tmp/ca.crt
-    entrypoint:
-      - sh
-      - -c
-      - umask 077 && printf '%s\n' "$$DATABASE_CA_CERT" > /tmp/ca.crt && exec pg_dump --format=custom --no-owner --no-privileges "$$DATABASE_URL"
-    logging:
-      driver: none
+  # The same pinned updater and flags as production (see docker-compose.production.yml), following
+  # the `staging` tags. The Docker socket is root-equivalent on this Docker host.
+  watchtower:
+    image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
+    labels:
+      com.centurylinklabs.watchtower.scope: tarubot
+    command:
+      - --label-enable
+      - --scope
+      - tarubot
+      - --interval
+      - "300"
+      - --stop-timeout
+      - 40s
+      - --include-restarting
+      - --cleanup
+      - --no-startup-message
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging: *logging
     read_only: true
-    tmpfs:
-      - /tmp:size=1m,mode=0700
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

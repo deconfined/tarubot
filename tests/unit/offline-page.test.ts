@@ -7,8 +7,10 @@
  * exists. Caddy serves whatever the directory holds and follows symlinks, so it holds regular
  * files only, each tracked as an ordinary file, and dotfiles stay hidden all the same. The page
  * always goes out whole: the conditional and range headers are dropped before file_server.
- * docker-compose.web.yml, which every Compose manifest includes, mounts the directory read-only. tests/unit/web-parity.test.ts keeps its copied files identical to the docs site's;
- * docs-site.test.ts scans it as public content. Native Caddy validates and serves it in
+ * The Dockerfile's web stage copies the Caddyfile and the directory into the release's web image
+ * (2.46.0), which docker-compose.web.yml, included by every Compose manifest, runs with nothing
+ * mounted from ops/. tests/unit/web-parity.test.ts keeps its copied files identical to the docs
+ * site's; docs-site.test.ts scans it as public content. Native Caddy validates and serves it in
  * web-server.test.ts's CADDY_FIXTURE_IMAGE test.
  */
 import { describe, expect, test } from "bun:test";
@@ -117,13 +119,46 @@ describe("the Caddyfile", () => {
     ]);
   });
 
-  test("docker-compose.web.yml mounts the page read-only, labelled like the Caddyfile", async () => {
+  test("the release's web image carries the Caddyfile and the page, and nothing else", async () => {
+    // The Dockerfile's instructions, continuation lines joined and comments dropped.
+    const instructions = (await read("Dockerfile"))
+      .replace(/\\\n/gu, " ")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    const start = instructions.findIndex((line) => /^FROM\s+\S+\s+AS\s+web$/iu.test(line));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = instructions.findIndex((line, index) => index > start && /^FROM\s/iu.test(line));
+    const [from = "", ...stage] = instructions.slice(start, next < 0 ? undefined : next);
+    // The stock Caddy image, pinned by tag and digest like every other base.
+    expect(from).toMatch(
+      /^FROM docker\.io\/library\/caddy:\S+-alpine@sha256:[0-9a-f]{64} AS web$/u,
+    );
+    // Only copies: Caddy runs exactly as its image does.
+    expect(stage.every((line) => /^(COPY|LABEL)\s/u.test(line))).toBe(true);
+    const copies = stage
+      .filter((line) => line.startsWith("COPY "))
+      .map((line) =>
+        line
+          .split(/\s+/u)
+          .filter((word) => !word.startsWith("--"))
+          .slice(1),
+      );
+    expect(copies).toEqual([
+      ["ops/Caddyfile", "/etc/caddy/Caddyfile"],
+      ["ops/offline", "/srv/offline"],
+    ]);
+  });
+
+  test("docker-compose.web.yml runs the release's web image and mounts nothing from ops/", async () => {
     const compose = Bun.YAML.parse(await read("docker-compose.web.yml")) as {
-      services: { caddy: { volumes: string[]; read_only: boolean; cap_drop: string[] } };
+      services: {
+        caddy: { image: string; volumes: string[]; read_only: boolean; cap_drop: string[] };
+      };
     };
     const { caddy } = compose.services;
-    expect(caddy.volumes).toContain("./ops/Caddyfile:/etc/caddy/Caddyfile:ro,z");
-    expect(caddy.volumes).toContain("./ops/offline:/srv/offline:ro,z");
+    expect(caddy.image).toBe(`ghcr.io/deconfined/tarubot:web-\${TARUBOT_IMAGE_TAG:-latest}`);
+    expect(caddy.volumes).toEqual(["caddy_data:/data", "caddy_config:/config"]);
     expect(caddy.read_only).toBe(true);
     expect(caddy.cap_drop).toEqual(["ALL"]);
     // Every manifest that runs bundled Caddy gets it through the one shared include.

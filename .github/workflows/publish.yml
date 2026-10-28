@@ -12,11 +12,13 @@ concurrency:
   group: publish-${{ github.sha }}
   cancel-in-progress: false
 
-# Every job may be re-run after a failure, and re-running really retries: publication resumes only
-# with this commit's own tagged index, never over another commit's release, and a deployment
-# re-validates, proceeds only on an approval given in its own attempt (deploy.yml) and lets the
-# host entry decide. Downstream jobs name the results they need rather than relying on success(),
-# which a deliberately skipped fallback would make false.
+# A release is two images: ghcr.io/deconfined/tarubot:X.Y.Z (the bot and its tools) and :web-X.Y.Z
+# (Caddy with TaruBot's Caddyfile and offline page, the Dockerfile's web stage). Every job may be
+# re-run after a failure, and re-running really retries: publication resumes only with this
+# commit's own tagged images, never over another commit's release, and a deployment verifies the
+# release again and proceeds only on an approval given in its own attempt (deploy.yml). Downstream
+# jobs name the results they need rather than relying on success(), which a deliberately skipped
+# fallback would make false.
 jobs:
   gate:
     name: Release gate
@@ -320,6 +322,114 @@ jobs:
           [[ $digest =~ ^sha256:[0-9a-f]{64}$ && $digest == "$(digest_of "sha-$GITHUB_SHA")" ]]
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
+  web:
+    name: Publish web image
+    needs: [gate, publish]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.publish.result == 'success' &&
+      needs.publish.outputs.digest != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Serializes the final absence check and tagging per version; never overwrites a release.
+    concurrency:
+      group: publish-web-${{ needs.gate.outputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.tag.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The web stage only copies files onto the pinned Caddy index, so both platforms build here
+      # without emulation. It is pushed by digest; the next step tags it only while it is absent.
+      - name: Build and push both platforms of the web image by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: web
+          platforms: linux/amd64,linux/arm64
+          labels: |
+            org.opencontainers.image.title=tarubot-web
+            org.opencontainers.image.description=TaruBot's web proxy: Caddy with TaruBot's Caddyfile and offline page
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-only AND Apache-2.0
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+      - name: Tag the web image while its version is absent
+        id: tag
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          BUILT: ${{ steps.build.outputs.digest }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ $VERSION =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$ ]]
+          [[ $BUILT =~ ^sha256:[0-9a-f]{64}$ ]]
+          repository="${GITHUB_REPOSITORY,,}"
+          token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+            | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" \
+            | jq -er '(.token // .access_token) | strings | select(test("\\A[A-Za-z0-9._~+/-]+=*\\z"))')
+          echo "::add-mask::$token"
+          accept='Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          # A tag's HTTP status (404 absent, 200 present), and its index digest once present.
+          status_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --write-out '%{http_code}' --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1"
+          }
+          digest_of() {
+            printf 'header = "Authorization: Bearer %s"\n' "$token" \
+              | curl --config - --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+                --head --output /dev/null --dump-header - --header "$accept" \
+                "https://ghcr.io/v2/${repository}/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+          image="ghcr.io/$repository"
+          tag="web-$VERSION"
+          status=$(status_of "$tag")
+          case "$status" in
+            404)
+              # A single index source is re-tagged byte for byte.
+              docker buildx imagetools create --tag "$image:$tag" "$image@$BUILT"
+              digest=$(digest_of "$tag")
+              [[ $digest == "$BUILT" ]] ;;
+            200)
+              # Only this commit's own earlier attempt may have tagged it, as the image's source
+              # label says: resume with that index (a rebuild's digest differs), never retag it.
+              digest=$(digest_of "$tag")
+              [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+              if ! revision=$(docker buildx imagetools inspect "$image@$digest" --format '{{json .Image}}' \
+                | jq -er '[if has("config") then . else .[] end
+                  | .config.Labels["org.opencontainers.image.revision"]]
+                  | unique | if length == 1 then .[0] else empty end | strings'); then
+                echo '::error::Could not read the published web image; re-run once GHCR answers.'
+                exit 1
+              fi
+              if [[ $revision != "$GITHUB_SHA" ]]; then
+                echo "::error::This release version's web image was already published from another commit; release a new version."
+                exit 1
+              fi
+              echo '::notice::This commit already tagged its web image; resuming with that index.' ;;
+            *) echo '::error::Could not read the published web tag; re-run once GHCR answers.'; exit 1 ;;
+          esac
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
   scan:
     name: Scan built platforms
     needs: publish
@@ -332,10 +442,11 @@ jobs:
 
   attest:
     name: Sign build provenance
-    needs: [publish, scan]
+    needs: [publish, scan, web]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
-      needs.publish.result == 'success' && needs.scan.result == 'success'
+      needs.publish.result == 'success' && needs.scan.result == 'success' &&
+      needs.web.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The signing job neither installs dependencies nor holds registry write credentials.
@@ -350,24 +461,33 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
-      - name: Validate exact subject and reviewed exception freshness
+      - name: Validate exact subjects and reviewed exception freshness
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
+          WEB_DIGEST: ${{ needs.web.outputs.digest }}
         run: |
-          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ && $WEB_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           bun --no-env-file scripts/release-scan-exceptions.ts sign
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      - name: Sign the bot image's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ghcr.io/deconfined/tarubot
           subject-digest: ${{ needs.publish.outputs.digest }}
           push-to-registry: false
+      - name: Sign the web image's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/deconfined/tarubot
+          subject-digest: ${{ needs.web.outputs.digest }}
+          push-to-registry: false
 
   latest:
     name: Promote latest
-    needs: [publish, attest]
+    needs: [publish, web, attest]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
-      needs.publish.result == 'success' && needs.attest.result == 'success'
+      needs.publish.result == 'success' && needs.web.result == 'success' &&
+      needs.attest.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -389,13 +509,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Promote signed digest only while main is current
+      - name: Promote signed digests only while main is current
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST: ${{ needs.publish.outputs.digest }}
+          WEB_DIGEST: ${{ needs.web.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ && $WEB_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           bun --no-env-file scripts/release-scan-exceptions.ts promote
           current=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
           if [[ $current != "$GITHUB_SHA" ]]; then
@@ -403,27 +524,26 @@ jobs:
             exit 0
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # Web first, as in deploy.yml: a failure between the two leaves the bot where it was.
+          docker buildx imagetools create --tag "$image:web-latest" "$image@$WEB_DIGEST"
           docker buildx imagetools create --tag "$image:latest" "$image@$DIGEST"
 
   deploy:
     name: Production release
-    needs: [gate, publish, attest, latest]
+    needs: [gate, publish, web, attest, latest]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
       vars.DEPLOY_ENABLED == 'true' && needs.gate.result == 'success' &&
-      needs.publish.result == 'success' && needs.attest.result == 'success' &&
-      needs.latest.result == 'success'
+      needs.publish.result == 'success' && needs.web.result == 'success' &&
+      needs.attest.result == 'success' && needs.latest.result == 'success'
     uses: ./.github/workflows/deploy.yml
-    # Bind only the delivery secret; its value comes from the approved environment.
-    secrets:
-      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+    # Deploy holds no secret: once the owner approves, it only moves the production tags.
     permissions:
       contents: read
       actions: read
       attestations: read
       deployments: read
+      packages: write
     with:
       target: production
       version: ${{ needs.gate.outputs.version }}
-      commit: ${{ github.sha }}
-      digest: ${{ needs.publish.outputs.digest }}
