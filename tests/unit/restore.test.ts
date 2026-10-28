@@ -147,8 +147,8 @@ test("a settings copy decrypts with the identity, and a wrong identity is refuse
   ).rejects.toMatchObject({ code: "input", message: expect.not.stringContaining(other) });
 });
 
-/** A target database double: its table count, the SQL it ran and its schema head. */
-function target(tables = 0, webSessions = true) {
+/** A target database double: its table count, server version, the SQL it ran and its schema head. */
+function target(tables = 0, webSessions = true, version = 180006) {
   const statements: string[] = [];
   const client = {
     query: async (text: string) => {
@@ -162,7 +162,9 @@ function target(tables = 0, webSessions = true) {
   const db: Pick<Database, "query" | "transaction"> = {
     query: async <T>(text: string) => {
       statements.push(text);
-      if (text.includes("pg_tables")) return [{ tables }] as T[];
+      // The server's version comes from the same statement as the emptiness check.
+      if (text.includes("pg_tables") && text.includes("current_setting('server_version_num')"))
+        return [{ tables, version }] as T[];
       if (text.includes("schema_migrations")) return [{ version: "015_member_blocks.sql" }] as T[];
       throw new Error(`unexpected ${text}`);
     },
@@ -249,6 +251,53 @@ describe("a database restore", () => {
     });
     expect(tool.calls).toEqual([]);
     expect(statements).toHaveLength(1);
+  });
+
+  test("a target server older than PostgreSQL 17 is refused before anything is read", async () => {
+    // pg_restore 18 starts with SET transaction_timeout, which PostgreSQL 16 and older reject.
+    for (const [version, named] of [
+      [160004, "PostgreSQL 16.4"],
+      [150012, "PostgreSQL 15.12"],
+      [90624, "PostgreSQL 9.6.24"],
+    ] as const) {
+      const storage = new MemoryStorage();
+      storage.objects.set(KEY, (await encrypter.encrypt(DUMP)).slice());
+      const tool = scriptedTool();
+      // Refused even when empty, and ahead of the emptiness refusal.
+      for (const tables of [0, 4]) {
+        const { db, statements } = target(tables, true, version);
+        await expect(
+          restoreDatabase({
+            storage,
+            key: KEY,
+            identities: [identity],
+            target: TARGET,
+            db,
+            runTool: tool.run,
+          }),
+        ).rejects.toMatchObject({
+          code: "configuration",
+          message: `RESTORE_DATABASE_URL (db.example.org/tarubot_restore) runs ${named}; restore targets must run PostgreSQL 17 or newer (TaruBot supports 18), because restore.js's pg_restore 18 sets transaction_timeout, which older servers reject.`,
+        });
+        expect(statements).toHaveLength(1);
+      }
+      expect(tool.calls).toEqual([]);
+    }
+    // PostgreSQL 17 and 18 are restored into.
+    for (const version of [170000, 180006]) {
+      const storage = new MemoryStorage();
+      storage.objects.set(KEY, (await encrypter.encrypt(DUMP)).slice());
+      const tool = scriptedTool();
+      await restoreDatabase({
+        storage,
+        key: KEY,
+        identities: [identity],
+        target: TARGET,
+        db: target(0, true, version).db,
+        runTool: tool.run,
+      });
+      expect(tool.calls).toHaveLength(1);
+    }
   });
 
   test("a failed pg_restore leaves the closing statements unrun", async () => {

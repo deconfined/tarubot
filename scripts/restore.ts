@@ -9,10 +9,11 @@
  * `list` prints keys and sizes, newest first. `database` restores a daily or monthly dump into the
  * empty database RESTORE_DATABASE_URL names (CA RESTORE_DATABASE_CA_CERT, else DATABASE_CA_CERT),
  * after the deployment guard's restore-target rules, the ones check-restore.js uses; it refuses a
- * target whose public schema already has tables. pg_restore runs as one transaction, so a failure
- * leaves the target empty. It then runs the two statements every restored database needs before a
- * bot starts on it, in one transaction: every web session is deleted (signed-in browsers sign in
- * again) and roles.self jobs the backup caught waiting are closed (RESTORED_ROLE_JOBS_SQL).
+ * target server older than PostgreSQL 17 and a target whose public schema already has tables.
+ * pg_restore runs as one transaction, so a failure leaves the target empty. It then runs the two
+ * statements every restored database needs before a bot starts on it, in one transaction: every
+ * web session is deleted (signed-in browsers sign in again) and roles.self jobs the backup caught
+ * waiting are closed (RESTORED_ROLE_JOBS_SQL).
  * `settings` writes a decrypted settings copy (env/) to standard output. `latest` is the newest
  * daily dump, or the newest settings copy.
  *
@@ -238,25 +239,49 @@ export async function closeRestoredDatabase(
 }
 
 /**
+ * The oldest target server restore.js restores into, as server_version_num: PostgreSQL 17.
+ * pg_restore 18 (the image's client) starts every restore with `SET transaction_timeout = 0`, a
+ * setting PostgreSQL 17 introduced; an older server rejects it at the first statement, and an
+ * older pg_restore can't read pg_dump 18's archives at all. TaruBot supports PostgreSQL 18.
+ */
+export const MIN_RESTORE_SERVER_VERSION = 170000;
+
+/** server_version_num as people write it: 160004 is 16.4, 90624 is 9.6.24. */
+export function serverVersion(versionNumber: number): string {
+  const major = Math.floor(versionNumber / 10000);
+  return versionNumber >= 100000
+    ? `${major}.${versionNumber % 10000}`
+    : `${major}.${Math.floor(versionNumber / 100) % 100}.${versionNumber % 100}`;
+}
+
+/**
  * Restore one dump into an empty target. pg_restore reads the decrypted stream as one transaction
  * and stops at the first error; if the download or decryption fails part-way, pg_restore is killed
- * before it can reach the end of its input, so it never commits a partial restore.
+ * before it can reach the end of its input, so it never commits a partial restore. A server older
+ * than MIN_RESTORE_SERVER_VERSION is refused first, before anything is read.
  */
 export async function restoreDatabase(input: {
   storage: BackupStorage;
   key: string;
   identities: readonly string[];
   target: ToolDatabase;
-  /** A connection to the same target, for the emptiness check and the closing statements. */
+  /** A connection to the same target, for its checks and the closing statements. */
   db: Pick<Database, "query" | "transaction">;
   runTool?: RunTool;
 }): Promise<RestoredDatabase> {
   const identity = databaseIdentity(input.target.url, input.target.setting);
   const where = `${identity.host}/${identity.name}`;
-  const tables = await input.db.query<{ tables: number }>(
-    "SELECT count(*)::int AS tables FROM pg_tables WHERE schemaname = 'public'",
+  // One statement, so the server's version and the emptiness come from the same connection.
+  const [checked] = await input.db.query<{ tables: number; version: number }>(
+    "SELECT count(*)::int AS tables, current_setting('server_version_num')::int AS version FROM pg_tables WHERE schemaname = 'public'",
   );
-  if ((tables[0]?.tables ?? 0) > 0)
+  const version = checked?.version ?? 0;
+  if (version < MIN_RESTORE_SERVER_VERSION)
+    throw new Failure(
+      "configuration",
+      `${input.target.setting} (${where}) runs PostgreSQL ${serverVersion(version)}; restore targets must run PostgreSQL 17 or newer (TaruBot supports 18), because restore.js's pg_restore 18 sets transaction_timeout, which older servers reject.`,
+    );
+  if ((checked?.tables ?? 0) > 0)
     throw new Failure(
       "conflict",
       `${input.target.setting} (${where}) already has tables in its public schema; restore into an empty database.`,
