@@ -15,7 +15,7 @@
 #   its submodule were removed in 2.20.0, and the sidecar in 2.21.0.)
 # - The CI PostgreSQL service image in .github/workflows/ci.yml: Dependabot reads only `uses:` in
 #   workflows. tests/unit/compose-manifests.test.ts keeps the service image equal to
-#   docker-compose.yml's.
+#   docker-compose.yml's, and the PostgreSQL client CI installs from PGDG the same major.
 version: 2
 
 updates:

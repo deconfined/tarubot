@@ -111,6 +111,20 @@ jobs:
           echo 'CADDY_FIXTURE_IMAGE=ghcr.io/deconfined/tarubot:web-ci' >> "$GITHUB_ENV"
       - name: Generate synthetic integration input
         run: bun run test:fixture
+      # pg_dump refuses a server newer than itself and Ubuntu 24.04's client is 16, so without
+      # PostgreSQL 18's own client tests/integration/backups.test.ts would skip its real backup
+      # and restore here. PGDG's client, the service's major (compose-manifests.test.ts keeps them
+      # equal), first on PATH: /usr/bin's wrapper would pick the runner's own PostgreSQL 16.
+      - name: Install the PostgreSQL 18 client
+        run: |
+          set -Eeuo pipefail
+          # A mirror hiccup would fail the checks: every apt call retries, the PGDG script's included.
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries > /dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q --no-install-recommends postgresql-client-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
       - name: Run unit, contract, and PostgreSQL integration tests
         run: bun run test
       - name: Validate deployment and source-build Compose models

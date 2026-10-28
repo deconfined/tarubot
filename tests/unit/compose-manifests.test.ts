@@ -244,4 +244,34 @@ describe("settings", () => {
       (await manifest("docker-compose.yml")).services.postgres?.image ?? "",
     );
   });
+
+  test("CI installs that server's PostgreSQL client first on PATH, before the tests run", async () => {
+    // pg_dump refuses a newer server, and the runner's own client is older: without its own
+    // major's client, tests/integration/backups.test.ts would skip the real backup and restore.
+    const ci = Bun.YAML.parse(await read(".github/workflows/ci.yml")) as {
+      jobs: {
+        checks: {
+          services: { postgres: { image: string } };
+          steps: { name?: string; run?: string }[];
+        };
+      };
+    };
+    const { services, steps } = ci.jobs.checks;
+    const major = /^postgres:(\d+)\./u.exec(services.postgres.image)?.[1] ?? "";
+    expect(major).toMatch(/^\d+$/u);
+    const install = steps.findIndex(
+      (step) => step.name === `Install the PostgreSQL ${major} client`,
+    );
+    const tests = steps.findIndex((step) => step.run === "bun run test");
+    expect(install).toBeGreaterThan(-1);
+    expect(install).toBeLessThan(tests);
+    const run = steps[install]?.run ?? "";
+    for (const command of [
+      'Acquire::Retries "5";',
+      "sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y",
+      `postgresql-client-${major}`,
+      `echo /usr/lib/postgresql/${major}/bin >> "$GITHUB_PATH"`,
+    ])
+      expect(run).toContain(command);
+  });
 });
