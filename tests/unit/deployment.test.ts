@@ -21,7 +21,12 @@ import {
 import { Failure } from "../../src/domain/values.js";
 import { SCHEMA_VERSION } from "../../src/infrastructure/postgres/database.js";
 import { activateToolScope, parseActivateArguments } from "../../scripts/activate.js";
+import { backupArguments, backupToolScope } from "../../scripts/backup.js";
 import { restoreArguments, restoreToolScope } from "../../scripts/check-restore.js";
+import {
+  restoreArguments as restoreJsArguments,
+  restoreToolScope as restoreJsToolScope,
+} from "../../scripts/restore.js";
 import { commandToolScope, parseArguments as commandArguments } from "../../scripts/commands.js";
 import { migrateArguments, migrateToolScope } from "../../scripts/migrate.js";
 import { parsePreviewArguments, previewToolScope } from "../../scripts/preview.js";
@@ -124,6 +129,11 @@ const scope = {
   register: (guild?: string): ToolScope =>
     registerToolScope(registrationScope(guild ? ["--guild", guild] : ["--global"], {})),
   restore: restoreToolScope(),
+  /** restore.js database KEY: check-restore's databases, so its restore-target rules. */
+  restoreDump: restoreJsToolScope(restoreJsArguments(["database", "latest"])),
+  /** restore.js list and settings touch no database. */
+  restoreList: restoreJsToolScope(restoreJsArguments(["list"])),
+  backup: backupToolScope(),
 } satisfies Record<string, ToolScope | ((guild: string) => ToolScope)>;
 
 /** Assert a configuration refusal whose message contains `fragment` and no credential. */
@@ -515,6 +525,48 @@ describe("databases", () => {
         ),
       "*_restore_test",
     );
+  });
+
+  test("(2.46.0) restore.js restores only where check-restore checks; backup.js reads DATABASE_URL", () => {
+    expect(scope.restoreDump.databases).toEqual(scope.restore.databases);
+    expect(scope.restoreList.databases).toEqual([]);
+    const production = (restore: string) => productionEnv({ RESTORE_DATABASE_URL: restore });
+    for (const restore of [managedUrl("tarubot", FORK), managedUrl("tarubot_restore")])
+      expect(assertToolScope(production(restore), scope.restoreDump, container).name).toBe(
+        "production",
+      );
+    for (const [restore, fragment] of [
+      [managedUrl("tarubot"), "different database"],
+      [managedUrl("tarubot_restore", FORK), "tarubot on a PITR fork"],
+      [localUrl("tarubot_restore"), "is local"],
+    ] as const)
+      refused(() => assertToolScope(production(restore), scope.restoreDump, container), fragment);
+    // Staging resets in place, so it has no restore target; listing its bucket is still allowed.
+    refused(
+      () =>
+        assertToolScope(
+          stagingEnv({ RESTORE_DATABASE_URL: managedUrl("tarubot_restore") }),
+          scope.restoreDump,
+          container,
+        ),
+      "RESTORE_DATABASE_URL has no staging procedure",
+    );
+    expect(assertToolScope(stagingEnv(), scope.restoreList, container).name).toBe("staging");
+    // A backup reads the profile's own database, as migrate.js does.
+    expect(scope.backup.databases).toEqual(["DATABASE_URL"]);
+    expect(scope.backup.discord).toBe("none");
+    expect(assertToolScope(productionEnv(), scope.backup, container).name).toBe("production");
+    refused(
+      () =>
+        assertToolScope(
+          productionEnv({ DATABASE_URL: localUrl("tarubot") }),
+          scope.backup,
+          container,
+        ),
+      "is local",
+    );
+    expect(() => backupArguments([])).not.toThrow();
+    expect(() => backupArguments(["--now"])).toThrow(Failure);
   });
 
   test("(#50) production's primary is tarubot or tarubot_restore, so a restore can be repointed", () => {

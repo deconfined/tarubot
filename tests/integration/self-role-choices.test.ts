@@ -16,6 +16,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ChannelType, PermissionFlagsBits as P } from "discord.js";
 import { and, asc, eq } from "drizzle-orm";
+import { RESTORED_ROLE_JOBS_SQL } from "../../src/application/backups.js";
 import { GuildAccess } from "../../src/application/guild-access.js";
 import { IssueReports } from "../../src/application/issue-reports.js";
 import type { DiscordPort } from "../../src/application/records.js";
@@ -204,8 +205,8 @@ const squash = (text: string): string => text.replace(/\s+/gu, " ").trim();
 
 /**
  * The restore step's SQL from the owner's restore checklist, checked to match the copies in
- * docs/PERSISTENCE.md and the site's recovery steps, so the statement this file runs is the one
- * people are told to run.
+ * docs/PERSISTENCE.md, the site's recovery steps and restore.js (RESTORED_ROLE_JOBS_SQL), so the
+ * statement this file runs is the one people are told to run and the one the tool runs.
  */
 async function restoreStep(): Promise<string> {
   const statement = (text: string): string => {
@@ -220,6 +221,8 @@ async function restoreStep(): Promise<string> {
   const checklist = statement(await read("docs/DEPLOYMENT.md"));
   expect(statement(await read("docs/PERSISTENCE.md"))).toBe(checklist);
   expect(statement(await read("site/src/content/docs/deploy/operations.md"))).toBe(checklist);
+  // restore.js (2.46.0) runs its own copy after every database restore.
+  expect(squash(RESTORED_ROLE_JOBS_SQL)).toBe(checklist);
   return checklist;
 }
 
