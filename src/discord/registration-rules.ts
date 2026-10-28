@@ -1,16 +1,17 @@
 /**
  * Discord's own rules for a registered command set, as one pure function over definitions. The
- * bulk PUT that scripts/register.ts sends refuses a whole set for a single violation, and neither
- * discord.js (it builds a definition without checking most of these) nor the router's shape check
- * (which accepts any option order) notices first: 2.45.0's /moderate block listed an optional
- * option before a required one, so its delivery stopped at the register step with the bot down.
+ * bulk PUT registration sends (the bot at startup, and register.js) refuses a whole set for a
+ * single violation, and neither discord.js (it builds a definition without checking most of these)
+ * nor the router's shape check (which accepts any option order) notices first: 2.45.0's /moderate
+ * block listed an optional option before a required one, so its delivery stopped at the register
+ * step with the bot down.
  *
- * Two callers keep the rules honest: tests/unit/command-registration.test.ts runs them on every
- * discovered command in CI, and scripts/candidate-check.ts runs them inside the candidate image
- * before a delivery stops anything. They are a hand-written approximation of Discord's rules, so a
- * pass proves only that the rules written here hold; a rule Discord enforces and this file doesn't
- * model still fails at the PUT. Nothing here is imported by the bot at runtime, because a false
- * positive in the running bot would be an outage and in the check it only refuses a delivery.
+ * tests/unit/command-registration.test.ts runs them on every discovered command in CI, before
+ * merge. They are a hand-written approximation of Discord's rules, so a pass proves only that the
+ * rules written here hold; a rule Discord enforces and this file doesn't model still fails at the
+ * PUT, which the bot reports while it keeps running (2.46.0). Nothing here is imported by the bot
+ * at runtime, because a false positive there would withhold a set Discord would have accepted;
+ * in CI it only fails a pull request.
  */
 import { ApplicationCommandOptionType } from "discord.js";
 

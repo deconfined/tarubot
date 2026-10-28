@@ -1,5 +1,6 @@
 /** Composition root: create capabilities once, discover modules, then connect the bot. */
 import { multistream, pino } from "pino";
+import { Backups, type SettingsSnapshot, settingsSnapshot } from "./application/backups.js";
 import { Dashboard } from "./application/dashboard.js";
 import { GuildEvents } from "./application/guild-events.js";
 import { GuildAccess } from "./application/guild-access.js";
@@ -35,6 +36,7 @@ import { RecentLogs } from "./application/recent-logs.js";
 import { createReporter, type Reporter } from "./application/reporting.js";
 import { SelfRoles } from "./application/self-roles.js";
 import { Service } from "./application/service.js";
+import { migrateAtStartup, registerAtStartup } from "./application/startup.js";
 import { Suggestions, suggestionTarget } from "./application/suggestions.js";
 import { Synchronization } from "./application/synchronization.js";
 import { RoleAdministration } from "./application/role-administration.js";
@@ -65,16 +67,23 @@ import { webSettings } from "./web/settings.js";
  * The configuration, without MODMAIL_KEY (2.43.0): the key is decoded here once into the cipher,
  * deleted from process.env, and left out of the configuration every service receives, so no log,
  * report or later reader of either finds it. The original string can't be wiped (JavaScript
- * strings are immutable); once this function returns nothing references it.
+ * strings are immutable); once this function returns, only the cipher and the settings snapshot
+ * reference it. The snapshot (2.46.0) is taken first, key included, for the backups' encrypted
+ * settings copy (the owner's 2026-10-11 trade-off), and only the backup service holds it.
  */
-function startupSettings(): { config: Configuration; modmail: ModMailKey } {
+function startupSettings(): {
+  config: Configuration;
+  modmail: ModMailKey;
+  snapshot: SettingsSnapshot;
+} {
   const settings = configuration();
+  const snapshot = settingsSnapshot(process.env);
   const modmail = readModMailKey(settings.MODMAIL_KEY);
   delete process.env.MODMAIL_KEY;
   const { MODMAIL_KEY: _key, ...rest } = settings;
-  return { config: rest, modmail };
+  return { config: rest, modmail, snapshot };
 }
-const { config, modmail: modmailCipher } = startupSettings();
+const { config, modmail: modmailCipher, snapshot } = startupSettings();
 // Issue reports include the newest log records (info and above, after this redaction).
 const recentLogs = new RecentLogs();
 const log = pino(
@@ -91,6 +100,13 @@ const log = pino(
 // catalog code, error class and approved Failure messages. Interactions pass their classified
 // level; lifecycle, gateway-event, queue-worker and shutdown reports keep the error default.
 const logReport = createReporter(log);
+/** The log shape the backup and startup helpers take. */
+const logTo = (level: "info" | "warn", fields: Record<string, unknown>, message: string) =>
+  log[level](fields, message);
+// Encrypted offsite backups (2.46.0): the pre-migration backup below, then daily at
+// BACKUP_TIME_UTC under the writer lease. Settings are read from the snapshot; a bad one never
+// stops the bot (it is reported once the lease is held, and each backup then fails).
+const backups = new Backups(snapshot, logTo);
 
 // Discovery is independent of login, database connections, and feature construction.
 const [commands, components, events] = await Promise.all([
@@ -192,7 +208,9 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
   // a /setup overrides run stops and writes its audit row (2.35.0); the web stops listening, and
   // connections still open after 5 s are closed (their handlers aren't cancelled, like in-flight
   // slash commands); the status page's timer stops, and a sample being written finishes (2.41.0);
-  // mod mail's retention timer stops, and a pass in progress finishes (2.43.0). None ever rejects.
+  // mod mail's retention timer stops, and a pass in progress finishes (2.43.0); a backup in
+  // progress, the pre-migration one included, is abandoned: pg_dump is killed and the upload
+  // aborted, leaving no object (2.46.0). None ever rejects.
   drain: () =>
     Promise.all([
       suggestions.drain(),
@@ -200,6 +218,7 @@ const lifecycle = new ApplicationLifecycle(config, db, gateway, app, sync, queue
       web?.stop(),
       publicStatus.stop(),
       modmailRetention.stop(),
+      backups.stop(),
     ]).then(() => {}),
 });
 // The public status page (2.41.0): a snapshot refreshed every minute from readiness, the Lodestone
@@ -281,6 +300,10 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
       });
   });
 try {
+  // Starting the image is the whole upgrade (2.46.0): pending migrations apply here, behind the
+  // deployment guard and a pre-migration backup, before this process waits for the writer lease.
+  // A refusal or failure leaves the schema as it was and stops the start (exit non-zero).
+  await migrateAtStartup({ db, backups, env: process.env, log: logTo });
   await lifecycle.prepare();
   await Promise.all([gateway.client.login(config.DISCORD_TOKEN), lifecycle.whenReady()]);
 } catch (error) {
@@ -297,6 +320,9 @@ modmailRetention.start(() => lifecycle.status().writerLease, {
   deleted: (deleted) => log.info({ deleted }, "Mod mail cases deleted after retention"),
   report,
 });
+// Daily backups (2.46.0) on their own timer, under the writer lease like retention; invalid
+// backup settings are reported here, so only the writer files them. Never rejects.
+backups.start(() => lifecycle.status().writerLease, report);
 // Reported here, under the lease like the web's invalid settings, so only the writer files it.
 if (modmailCipher.status === "invalid")
   report(new Failure("configuration", INVALID_KEY_PROBLEM), "modmail key");
@@ -307,3 +333,13 @@ web = await startWeb(
   { ...context, guilds: () => gateway.client.guilds.cache.map(({ id, name }) => ({ id, name })) },
   log,
 );
+// The declared commands, in this profile's registration scope (2.46.0). Never rejects: a refusal
+// or a Discord error is reported and the bot keeps the command set Discord already holds.
+await registerAtStartup({
+  env: process.env,
+  rest: gateway.client.rest,
+  applicationId: config.DISCORD_APPLICATION_ID,
+  commands: [...commands.values()].map((command) => command.toJSON()),
+  log: logTo,
+  report,
+});

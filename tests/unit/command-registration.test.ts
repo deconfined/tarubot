@@ -2,12 +2,15 @@
  * Discord's own rules for a registered command set, checked against every discovered command.
  * discord.js builds a definition without checking most of them, and the router's shape check
  * (command-shape.test.ts) accepts any order, so a command can pass every other test and still be
- * refused by the bulk PUT that scripts/register.ts sends, which stops a deploy at its register
- * step (2.45.0's /moderate block listed an optional option before a required one). The rules
- * themselves live in src/discord/registration-rules.ts, which the candidate check
- * (scripts/candidate-check.ts) runs in the release image before a delivery stops anything.
+ * refused by the bulk PUT registration sends (2.45.0's /moderate block listed an optional option
+ * before a required one, which stopped its delivery). Since 2.46.0 the bot registers at startup
+ * and only reports a refusal, so this test, before merge, is the check. The rules themselves live
+ * in src/discord/registration-rules.ts, which the bot never imports.
  */
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ApplicationCommandOptionType } from "discord.js";
 import { loadCommands } from "../../src/bot/discovery.js";
 import {
@@ -178,4 +181,18 @@ test("whole-set rules: roots, subcommand shape, size and count", () => {
   expect(commandSetProblems(many as RegistrableCommand[])).toEqual([
     `${MAX_COMMANDS + 1} commands (at most ${MAX_COMMANDS})`,
   ]);
+});
+
+test("the bot never imports the registration rules, so a false positive can't withhold a set", () => {
+  const src = fileURLToPath(new URL("../../src", import.meta.url));
+  // A static or dynamic import of the module; comments may still name it.
+  const specifier = /(?:\bfrom|\bimport)\s*\(?\s*["'][^"']*registration-rules(?:\.[jt]s)?["']/u;
+  for (const file of new Bun.Glob("**/*.ts").scanSync({ cwd: src })) {
+    if (file === "discord/registration-rules.ts") continue;
+    const code = readFileSync(join(src, file), "utf8");
+    expect({ file, imports: specifier.test(code) }).toEqual({
+      file,
+      imports: false,
+    });
+  }
 });

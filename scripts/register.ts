@@ -6,18 +6,24 @@
  *
  * The deployment guard runs before any request, and the token's application must equal
  * DISCORD_APPLICATION_ID before the bulk PUT replaces the chosen scope. Read the result back with
- * commands.js list; a global PUT leaves guild-scoped leftovers in place.
+ * commands.js list; a global PUT leaves guild-scoped leftovers in place. Since 2.46.0 the bot
+ * itself registers its profile's scope at every start (src/application/startup.ts); this is the
+ * manual tool for any other time.
  */
-import { REST, Routes } from "discord.js";
-import { z } from "zod";
+import { REST } from "discord.js";
 import { loadCommands } from "../src/bot/discovery.js";
-import { assertToolScope, type ToolScope } from "../src/config/deployment.js";
+import { assertToolScope } from "../src/config/deployment.js";
 import { secretSetting } from "../src/config/secrets.js";
-import { commandPaths } from "../src/discord/inspection.js";
-import { Failure, id, idSchema, json } from "../src/domain/values.js";
-import type { CommandRest, DeclaredCommand } from "./commands.js";
+import {
+  type RegistrationScope,
+  registerCommands,
+  registerToolScope,
+} from "../src/discord/registration.js";
+import { Failure, id, json } from "../src/domain/values.js";
 
-export type RegistrationScope = { kind: "guild"; guild: string } | { kind: "global" };
+// The bot registers at startup with the same functions (2.46.0), so they live in src/; existing
+// importers keep reading them here.
+export { type RegistrationScope, registerCommands, registerToolScope };
 
 /**
  * Exactly one of --guild GUILD_ID or --global. --global is refused while TEST_GUILD_ID is set, so a
@@ -49,52 +55,6 @@ export function registrationScope(
       "--global is refused while TEST_GUILD_ID is set; development registers one guild scope.",
     );
   return guild === null ? { kind: "global" } : { kind: "guild", guild };
-}
-
-/**
- * The deployment guard's view of one registration. Managed profiles register only in their
- * declared scope, so production may replace only the global set: a production --guild registration
- * would shadow it with duplicate commands. Exported so tests check exactly what register.js declares.
- */
-export function registerToolScope(scope: RegistrationScope): ToolScope {
-  return {
-    tool: "register",
-    guilds: scope.kind === "guild" ? [scope.guild] : [],
-    discord: "write",
-    databases: [],
-    globalCommands: scope.kind === "global",
-    registerScope: scope.kind === "global" ? "global" : scope.guild,
-  };
-}
-
-/**
- * Replace one scope with the declared commands, after confirming the token's application. Returns
- * what was registered: the application, the scope, and the root and path counts.
- */
-export async function registerCommands(
-  rest: CommandRest,
-  applicationId: string,
-  scope: RegistrationScope,
-  commands: readonly DeclaredCommand[],
-): Promise<{ application: string; scope: string; roots: number; paths: number }> {
-  const application = z.object({ id: idSchema }).parse(await rest.get(Routes.currentApplication()));
-  if (application.id !== applicationId)
-    throw new Failure(
-      "configuration",
-      `The token belongs to application ${application.id}, not DISCORD_APPLICATION_ID ${applicationId}.`,
-    );
-  await rest.put(
-    scope.kind === "guild"
-      ? Routes.applicationGuildCommands(applicationId, scope.guild)
-      : Routes.applicationCommands(applicationId),
-    { body: [...commands] },
-  );
-  return {
-    application: applicationId,
-    scope: scope.kind === "guild" ? `guild:${scope.guild}` : "global",
-    roots: commands.length,
-    paths: commands.flatMap((command) => commandPaths(command.name, command.options)).length,
-  };
 }
 
 if (import.meta.main) {

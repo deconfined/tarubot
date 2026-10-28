@@ -38,8 +38,7 @@
     "test:fixture": "bun tests/fixtures/legacy.ts",
     "ci:version": "bun scripts/ci-version.ts",
     "selectors:check": "bun scripts/selectors-update.ts --check",
-    "selectors:update": "bun scripts/selectors-update.ts --update",
-    "host:env-backup": "bun scripts/host-env-backup.ts"
+    "selectors:update": "bun scripts/selectors-update.ts --update"
   },
   "dependencies": {
     "age-encryption": "0.3.1",

@@ -17,14 +17,12 @@ import { z } from "zod";
 import { loadCommands } from "../src/bot/discovery.js";
 import { assertToolScope, type Deployment, type Launch } from "../src/config/deployment.js";
 import { resolveSettings } from "../src/config/secrets.js";
-import { commandPaths, type CommandOption, inventoryDiff } from "../src/discord/inspection.js";
+import { commandPaths, inventoryDiff } from "../src/discord/inspection.js";
+import type { CommandRest, DeclaredCommand } from "../src/discord/registration.js";
 import { Failure, id, idSchema, json } from "../src/domain/values.js";
 
-/** The REST subset these tools use; discord.js REST satisfies it and tests supply a fake. */
-export interface CommandRest {
-  get(route: `/${string}`): Promise<unknown>;
-  put(route: `/${string}`, options: { body: unknown[] }): Promise<unknown>;
-}
+// The REST subset and a declared command's shape, shared with registration (src/discord/).
+export type { CommandRest, DeclaredCommand };
 
 /** A parsed invocation. `declaredScope` null means the deployment profile's registration scope. */
 export type Mode =
@@ -109,13 +107,6 @@ export const registeredSchema = z.array(
   }),
 );
 export type Registered = z.infer<typeof registeredSchema>[number];
-
-/** A declared command as discovery's toJSON produces it. */
-export interface DeclaredCommand {
-  name: string;
-  options?: readonly CommandOption[] | undefined;
-  default_member_permissions?: string | null | undefined;
-}
 
 /**
  * Bind a confirmation to exactly the commands reviewed: sha256 over the sorted `id:name:version`
