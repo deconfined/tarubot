@@ -65,10 +65,10 @@ Logs are structured JSON lines. Tokens, passwords, message payloads and command 
 - `Modules loaded`, once its commands, buttons and listeners are found.
 - `Migrations applied`, only when files were pending: the files, the `restorePoint` and `committingAt` times, and `backup`, the key of the backup taken just before (or `null`). A warning says when a migration ran without one, because backups are off.
 - `Database writer lease acquired`.
-- `Commands registered`, with the scope and how many commands and paths it registered. A refused registration files an [issue report](#issue-reports) instead.
+- `Commands registered`, with the scope and how many commands and paths it registered. A refused registration, or an invalid `COMMAND_REGISTRATION`, files an [issue report](#issue-reports) instead, and with the setting empty or `off` the bot logs `Startup command registration is off: …`.
 - `Daily backups scheduled (UTC)` with the time, or `Daily backups are off` when the endpoint is empty. Each stored backup logs `Backup stored` with why it ran (`daily` or `pre-migration`; [`backup.js`](/tarubot/deploy/tools/#backupjs) prints its own), its keys, their sizes and how long it took; a failed one files an issue report naming the stage that failed.
 
-A `LOG_LEVEL` above `info` hides these lines without anything being wrong.
+A `LOG_LEVEL` above `info` hides these lines without anything being wrong. When the migration step fails (the deployment guard, the backup before it or a migration), the bot logs `Startup migration failed; waiting before exiting, …` at error, with the failure's `code`, and exits 10 minutes later ([what a start does](/tarubot/deploy/operations/#what-a-start-does)).
 
 The upstream deploy workflow never sees these logs: it only moves registry tags, and the owner reads the runtime's own logs ([owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-operations)). Repository checks do not establish which release is live.
 
@@ -243,7 +243,7 @@ With `GITHUB_REPORTS_TOKEN` and your own `GITHUB_REPORTS_REPO` set, TaruBot open
 **What opens an issue:**
 
 - `/issue` from any member: one per member every 10 minutes, and 20 per server a day.
-- Every error-level report: unexpected failures in commands, events, startup and the job worker, a failed backup, and command registration that Discord or the deployment guard refused at startup.
+- Every error-level report: unexpected failures in commands, events, startup and the job worker, a failed backup, and command registration that Discord or the deployment guard refused at startup, or that an invalid `COMMAND_REGISTRATION` skipped.
 - Every job that ends failed at error level.
 - Repeated trouble, checked every five minutes: a linked FC whose roster hasn't been accepted for 12 hours, and no Lodestone answer for an hour while requests keep failing.
 
@@ -316,4 +316,4 @@ The [backups](/tarubot/deploy/operations/#backups) can ping a check of their own
 1. Create a second check at healthchecks.io with a period of 1 day and a grace time of a few hours.
 2. Copy its private ping URL into `.env` as `HEALTHCHECKS_BACKUP_URL`, and recreate the bot with `docker compose up -d --wait`.
 
-Each backup, daily or otherwise, pings `<url>/start` with `backup starting`, then `<url>` with the stored keys and sizes, or `<url>/fail` with `backup failed at:` and the stage: `settings` (a backup setting is missing or invalid), `dump`, `settings-copy` or `upload`. Pings are best effort and never fail a backup. Keep this URL private too.
+Each backup, daily or otherwise, pings `<url>/start` with `backup starting`, then `<url>` with the stored keys and sizes, or `<url>/fail` with `backup failed at:` and the stage: `settings` (a backup setting is missing or invalid, such as a mistyped age key), `dump`, `settings-copy` or `upload`. A backup cut off by a stop or a restart sends no `/fail`, since nothing broke: its start stays open until a later backup succeeds, and the check goes down by itself if none does within its grace time. Pings are best effort and never fail a backup. Keep this URL private too.

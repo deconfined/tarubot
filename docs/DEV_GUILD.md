@@ -8,7 +8,7 @@ DevBot runs on the staging host, from `docker-compose.staging.yml`: the explicit
 
 ## Update DevBot
 
-DevBot is updated only by the owner's Deploy dispatch with `target: staging` ([staging](DEPLOYMENT.md#staging)), from a published, signed release on `main`. Deploy verifies the release as for production and moves the `staging` tags; staging's Watchtower then replaces the containers. The new bot applies any pending migration after staging's own pre-migration backup, takes the writer lease and registers its commands in DevBot's guild. Agents dispatch it only when the owner asks in that session.
+DevBot is updated only by the owner's Deploy dispatch with `target: staging` ([staging](DEPLOYMENT.md#staging)), from a published, signed release on `main`. Deploy verifies the release as for production and points the `staging` tags of `ghcr.io/deconfined/tarubot-release` at it, with the `staging` environment's own release token; staging's Watchtower then replaces the containers. The new bot applies any pending migration after staging's own pre-migration backup, takes the writer lease and registers its commands in DevBot's guild. Agents dispatch it only when the owner asks in that session.
 
 Afterwards, check `/version`, readiness (including the writer lease), logs, DevBot's guild command inventory and the [startup plan](#startup-test-session-plans). Owner-run inspection and tools use one-off containers of the staging manifest with staging's private settings copy ([everyday operations](DEPLOYMENT.md#everyday-operations)); obey [tool-profile guards](CONFIGURATION.md#maintenance-tool-profiles). Record human acceptance separately from automated regression.
 

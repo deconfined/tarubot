@@ -4,7 +4,8 @@
  * pg_restore into a second, empty database, its closing statements included, and the settings
  * copy opened again. pg_dump refuses a server newer than itself, so this needs PostgreSQL client
  * tools at least as new as the test server: the image carries Alpine's postgresql18-client, so
- * the Docker test stage (bun run test:docker) runs it; a host with older tools skips it.
+ * the Docker test stage (bun run test:docker) runs it, and CI's Checks job installs PostgreSQL
+ * 18's client from PGDG, so it runs there too; a host with older tools skips it.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";

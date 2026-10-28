@@ -19,13 +19,14 @@ Read by the running bot.
 | --- | --- | --- |
 | `DISCORD_TOKEN` | (required) | The bot token from the Developer Portal. Secret. |
 | `DISCORD_APPLICATION_ID` | (required) | The application's ID. The bot checks that the token belongs to it. |
+| `COMMAND_REGISTRATION` | (empty) | Where the bot registers its slash commands each time it starts (2.46.0): `global`, one server's ID, or `off`. Empty or unset is off, so an installation upgraded from an earlier release keeps registering by hand until you choose; the template sets `global`, so a new installation registers by itself. Use a server ID only where you registered with `register.js --guild` before: a server with both scopes shows every command twice. `global` is refused while `TEST_GUILD_ID` is set; use that server's ID. A bad value files an [issue report](/tarubot/deploy/monitoring/#issue-reports) and skips registration, and never stops the bot. See [what a start does](/tarubot/deploy/operations/#what-a-start-does). |
 | `ENABLE_EFFECTS` | `false` | The deployment-wide switch for Discord changes. With `false`, decisions are saved and Discord changes wait as paused work; a restart with `true` requeues them. Set `true` for a working deployment. |
 | `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Logs are structured JSON; tokens and option values are never logged. |
 | `ROSTER_INTERVAL_SECONDS` | `21600` | How often each linked FC's roster is read (at least 60), and how old a roster may be before it counts as stale. |
 | `VERIFICATION_SECONDS` | `1800` | How long a `/claim` token stays valid, from 60 to 86,400. |
 | `GUEST_COOLDOWN_SECONDS` | `86400` | How long a denied applicant waits before applying again (0 or more). |
 | `HEALTH_PORT` | `3000` | The port of `/health/live` and `/health/ready` inside the container. |
-| `DATABASE_CA_CERT` | (empty) | A PEM root certificate for an external PostgreSQL over TLS. With it set, certificate and hostname checks are enforced, whatever the URL's SSL options say. Not needed for the bundled database. |
+| `DATABASE_CA_CERT` | (empty) | A PEM root certificate for an external PostgreSQL over TLS. With it set, certificate and hostname checks are enforced, whatever the URL's SSL options say. Not needed for the bundled database. Without it, the URL's own TLS options apply, to [backups and restores](#backups) too. |
 | `GITHUB_REPORTS_TOKEN` | (empty) | A fine-grained GitHub token with read and write access to the issues of one repository, for [issue reports](/tarubot/deploy/monitoring/#issue-reports). Empty saves reports in the database without sending them. Secret. |
 | `GITHUB_REPORTS_REPO` | `deconfined/tarubot-reports` | The `owner/name` repository reports open issues in. The default is the upstream project's own private repository, so **set your own whenever you set the token**, or leave the token empty. It may never name TaruBot's public repository, `deconfined/tarubot`, in any letter case: the bot refuses to start, so private reports can't go public. |
 | `HEALTHCHECKS_PING_URL` | (empty) | The private ping URL of your [healthchecks.io](https://healthchecks.io) check, which the ready bot pings every five minutes. Empty turns the [heartbeat](/tarubot/deploy/monitoring/#heartbeat) off. Never publish the URL: anyone with it can ping your check. |
@@ -68,13 +69,13 @@ The stock, production and staging manifests pass these settings to the bot, whic
 | `BACKUP_STORAGE_ACCESS_KEY` | (empty) | The access key ID of a key pair that can read and write the bucket. Required with an endpoint. |
 | `BACKUP_STORAGE_SECRET_KEY` | (empty) | That key pair's secret. Required with an endpoint. Secret. |
 | `BACKUP_STORAGE_REGION` | (empty) | The bucket's signing region, as your provider names it: lowercase letters, digits and `-`. Required with an endpoint; there's no default, because a wrong region fails every request. |
-| `BACKUP_AGE_RECIPIENTS` | (empty) | The [age](https://age-encryption.org) public keys every backup is encrypted to, each starting `age1`, separated by spaces or commas. Required with an endpoint. Not secret: only the matching identities can open a backup. |
+| `BACKUP_AGE_RECIPIENTS` | (empty) | The [age](https://age-encryption.org) public keys every backup is encrypted to, each starting `age1`, separated by spaces or commas. Each must be a real age key: a mistyped character fails its checksum, and the setting counts as invalid. Required with an endpoint. Not secret: only the matching identities can open a backup. |
 | `BACKUP_TIME_UTC` | `03:00` | When the daily backup runs, as `HH:MM` in UTC. Only the process holding the writer lease takes it. |
 | `HEALTHCHECKS_BACKUP_URL` | (empty) | The private ping URL of a [healthchecks.io](https://healthchecks.io) check for backups (a [backup check](/tarubot/deploy/monitoring/#backup-check)), separate from the heartbeat's. Empty sends no pings. Never publish it. |
 
 A missing or invalid backup setting never stops the bot. Once it holds the writer lease, it files one [issue report](/tarubot/deploy/monitoring/#issue-reports) naming the settings at fault, never their values, and every backup then fails, the one before a migration included, so that migration waits until they're fixed. With the endpoint empty, there are no daily backups (the bot logs that once), and migrations apply after a warning, without a backup first. Issue reports remove the two keys and the ping URL.
 
-A backup reads the database through `DATABASE_URL` and `DATABASE_CA_CERT`, like the bot. [`restore.js`](/tarubot/deploy/tools/#restorejs) needs the four `BACKUP_STORAGE_*` settings, and for a database restore `RESTORE_DATABASE_URL` too ([maintenance tools only](#maintenance-tools-only)).
+A backup reads the database through `DATABASE_URL` and `DATABASE_CA_CERT`, like the bot. Without a CA, `pg_dump` and `pg_restore` follow the URL's TLS options the way the bot does: `sslrootcert`, `sslcert` and `sslkey` name files inside the container, `sslmode=no-verify` encrypts without verifying, and `sslmode=verify-full` without `sslrootcert` checks against the image's system certificates. `sslmode=verify-ca` without `sslrootcert` is refused: set `DATABASE_CA_CERT`, or name `sslrootcert`. [`restore.js`](/tarubot/deploy/tools/#restorejs) needs the four `BACKUP_STORAGE_*` settings, and for a database restore `RESTORE_DATABASE_URL` too ([maintenance tools only](#maintenance-tools-only)), on PostgreSQL 17 or newer.
 
 ## Lodestone
 
@@ -97,13 +98,14 @@ After a Lodestone "429 Too Many Requests", the bot pauses every Lodestone reques
 
 ## Compose only
 
-Read by `docker-compose.yml`, not by the bot.
+Read by `docker-compose.yml`, not by the bot. Since 2.46.0 the stock file also passes them to the bot, which ignores them, so that each backup's settings copy works as `.env` again ([what a backup holds](/tarubot/deploy/operations/#what-a-backup-holds)). Set profiles here rather than with `--profile` on the command line, which never reaches that copy.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | (required) | The bundled database's password, set when its volume is first created. Use letters, digits, `-` and `_`, because Compose builds the bot's connection URL from it. Changing it later doesn't change the existing database's password. Secret. |
 | `TARUBOT_IMAGE_TAG` | `latest` | The release to run: a published version (recommended), `latest`, or `sha-<commit>`. The bundled proxy runs the same release's `web-<tag>` image, which exists for versions and `latest` only, so with the `web` profile don't use `sha-<commit>`. |
-| `TARUBOT_IMAGE` | (empty) | A complete image reference that overrides `TARUBOT_IMAGE_TAG` for the bot only, for example one pinned by `@sha256:` digest. Keep `TARUBOT_IMAGE_TAG` at the same version for the proxy. |
+| `TARUBOT_IMAGE_REPOSITORY` | (empty) | The repository both images come from, without a tag; empty is `ghcr.io/deconfined/tarubot`. Set it only to another repository that carries the same tags, such as your own mirror. The upstream instance's manifests set it to the separate package only its approved deploy writes. |
+| `TARUBOT_IMAGE` | (empty) | A complete image reference that overrides `TARUBOT_IMAGE_REPOSITORY` and `TARUBOT_IMAGE_TAG` for the bot only, for example one pinned by `@sha256:` digest. Keep `TARUBOT_IMAGE_TAG` at the same version for the proxy. |
 | `COMPOSE_PROFILES` | (empty) | Optional services, separated by commas: `web` starts bundled Caddy, and `updates` starts the updater that follows `TARUBOT_IMAGE_TAG` ([automatic updates](/tarubot/deploy/operations/#automatic-updates)). Empty keeps the bot-only default or allows an external proxy. The included web file is still required when its profile is off. |
 
 ## Maintenance tools only
@@ -155,7 +157,7 @@ For a development deployment attached to one test server. Leave them at these va
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `TEST_GUILD_ID` | (empty) | Confines the bot to one test server: it ignores every other server, posts the test-session plan there at startup, labels issue reports as development ones, and refuses global command registration. `/suggest` then works in that server and posts its previews into `GITHUB_REPORTS_REPO` with `GITHUB_REPORTS_TOKEN` (never publicly); without the token it is off. |
+| `TEST_GUILD_ID` | (empty) | Confines the bot to one test server: it ignores every other server, posts the test-session plan there at startup, labels issue reports as development ones, and refuses global command registration, `COMMAND_REGISTRATION=global` included: set `COMMAND_REGISTRATION` to this server's ID. `/suggest` then works in that server and posts its previews into `GITHUB_REPORTS_REPO` with `GITHUB_REPORTS_TOKEN` (never publicly); without the token it is off. |
 | `PUBLIC_TEST_RESPONSES` | `false` | With `true`, replies in the test server are visible to everyone there, so testers can watch a session. |
 | `TEST_PLAN_CHANNEL_ID` | (empty) | Where the test-session plan is posted; empty looks for the test server's `#chat`. |
 | `TEST_PLAN_FILE` | `test-plans/current.json` | The plan file posted at startup. |

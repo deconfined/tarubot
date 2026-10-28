@@ -7,7 +7,7 @@ sidebar:
 
 These procedures assume the stock `docker-compose.yml` with its bundled PostgreSQL, run from the directory that holds it and `.env`. Every decision TaruBot makes, and all the Discord work it still owes, lives in PostgreSQL, so the database is the one thing to protect.
 
-The upstream instance runs the same image with managed PostgreSQL and its own manifests. An owner-approved deploy moves a registry tag there, an updater on its Docker host follows it, and starting the new image is the whole upgrade, as it is here; there's no automatic rollback. Its runbook is [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#how-a-release-reaches-production). The commands below are for your own stock Compose installation, not that managed instance.
+The upstream instance runs the same image with managed PostgreSQL and its own manifests. An owner-approved deploy moves a registry tag there, in a package only that deploy can write, an updater on its Docker host follows it, and starting the new image is the whole upgrade, as it is here; there's no automatic rollback. Its runbook is [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#how-a-release-reaches-production). The commands below are for your own stock Compose installation, not that managed instance.
 
 ## Updating to a release
 
@@ -58,9 +58,9 @@ Every start of the bot's image, the first one included, runs the same steps:
 1. **The deployment guard.** Its settings and database must belong to its deployment profile; yours is the unmanaged one.
 2. **Pending migrations,** when there are any, in one transaction that takes the [writer lease](#single-database-writer), so no bot writes meanwhile. A previous bot that is still stopping is waited for, up to 90 seconds. With backups set up, an encrypted backup is taken under that lease, immediately before the first file runs, so nothing can change between the backup and the migration. Without backups, the bot logs a warning and migrates without one. A new database, with nothing in it yet, gets no backup either way.
 3. **The writer lease, Discord and readiness,** as described under [single database writer](#single-database-writer).
-4. **Command registration,** once ready: the release's commands replace the whole set in one go, globally (in `TEST_GUILD_ID`'s server instead when that's set). If Discord refuses the set, the bot files an [issue report](/tarubot/deploy/monitoring/#issue-reports) and keeps running with the commands Discord already has.
+4. **Command registration,** once ready, where [`COMMAND_REGISTRATION`](/tarubot/deploy/configuration/#runtime) says: `global`, or one server's ID. The release's commands replace that scope's whole set in one go. Empty or `off` registers nothing and logs `Startup command registration is off: set COMMAND_REGISTRATION to global or a server ID, or register with register.js`. If Discord refuses the set, or the setting is invalid, the bot files an [issue report](/tarubot/deploy/monitoring/#issue-reports) and keeps running with the commands Discord already has.
 
-If the backup or a migration fails, nothing is applied: the database stays as the previous release left it, and the bot exits. Docker starts it again, with a pause that grows to a minute, so it keeps retrying until you fix the cause (often a backup setting, which the log names) or [roll back](#rollback). An image older than the database's schema refuses to start with `Schema version/checksum mismatch`.
+If the guard refuses, or the backup or a migration fails, nothing is applied: the database stays as the previous release left it. The bot stops its work, holding no database connection, logs `Startup migration failed; waiting before exiting, so a restart doesn't repeat it (and its pre-migration backup) at once` at error, with the failure's `code`, and waits 10 minutes before it exits. Docker then starts it again, so it retries about every 10 minutes until you fix the cause (often a backup setting, which the log names) or [roll back](#rollback), and a migration that keeps failing stores at most about six backups an hour. During the wait the container shows as unhealthy. Stopping it, or `docker compose up -d` after you fix a setting, ends the wait at once. A later failure, such as a refused Discord login, exits at once, and Docker restarts it within a minute. An image older than the database's schema refuses to start with `Schema version/checksum mismatch`.
 
 ### Automatic updates
 
@@ -71,19 +71,21 @@ TARUBOT_IMAGE_TAG=latest
 COMPOSE_PROFILES=updates
 ```
 
-With the dashboard, use `COMPOSE_PROFILES=web,updates`. Then run `docker compose up -d --wait`. Every five minutes Watchtower checks the tags of the containers named `tarubot` and `tarubot-web`. When `latest` has moved to a new release, it pulls the new image, stops the old container (the bot within its 30 seconds), starts the new one with the old one's configuration, and removes the old image. The new bot then does what [every start](#what-a-start-does) does.
+With the dashboard, use `COMPOSE_PROFILES=web,updates`. Then run `docker compose up -d --wait`. Every five minutes Watchtower checks the tags of the containers named `tarubot` and `tarubot-web` that carry its scope label, `com.centurylinklabs.watchtower.scope: tarubot` (the stock files set it, and `up -d` applies it). When `latest` has moved to a new release, it pulls the new image, stops the old container (the bot within its 30 seconds), starts the new one with the old one's configuration, and removes the old image. The new bot then does what [every start](#what-a-start-does) does.
 
 - **Every release arrives without you,** migrations included, and a migration can't be undone by changing the tag back. Set up [backups](#backups) first, so each migration is preceded by one.
 - **Only images change.** A release whose changelog says its Compose files or settings changed still needs steps 3 and 4 of an update by hand.
 - **The Docker socket.** Watchtower needs it, and it is root on that Docker host. Only this pinned image gets it.
-- **Only the two named containers.** One-off tool runs (`docker compose run`) are named differently and left alone, and a stopped container stays stopped. Because the names are fixed, one Docker host runs one installation from the stock file.
-- **A version tag never moves,** so with a version pinned Watchtower has nothing to do. To stop following `latest`, pin a version, or take `updates` out of `COMPOSE_PROFILES` and remove the updater with `docker compose --profile updates rm -sf watchtower`.
+- **Only the two named containers.** One-off tool runs (`docker compose run`) are named differently and left alone, though they inherit the scope label, and a stopped container stays stopped. Because the names are fixed, one Docker host runs one installation from the stock file.
+- **Its own scope.** It runs with `--scope tarubot`, so it never stops another Watchtower on the host. Another updater you run there is your own tool: Watchtower of this fork without a scope skips TaruBot's scoped containers, so use the `updates` profile for TaruBot, or instead of it give yours `--scope tarubot`; the original Watchtower without a scope still updates them and stops this one as a duplicate when it starts.
+- **`latest` is a moving tag.** Publication moves it only after a release's checks and signing, but any workflow of the project's repository that may write its packages could move it too. A digest pinned with `TARUBOT_IMAGE` after a [provenance check](/tarubot/deploy/install/#checking-where-an-image-came-from) is the only reference a tag can't change.
+- **Publication never moves a version tag,** so with a version pinned Watchtower has nothing to do. To stop following `latest`, pin a version, or take `updates` out of `COMPOSE_PROFILES` and remove the updater with `docker compose --profile updates rm -sf watchtower`.
 - **Not with a local build:** `docker-compose.build.yml` builds images that have no registry tag to follow.
 
 ### From a release before 2.46.0
 
 1. Update to 2.46.0 or newer as above. Its Compose files replace the old ones: the proxy's configuration and offline page are now inside its image, so the `ops` folder beside your Compose files is no longer used, and you can delete it once the new release runs.
-2. Migrations and command registration are no longer steps of their own: the bot does both whenever it starts. If you registered the commands in one server with `register.js --guild`, remove that server's copy, because the bot now registers them globally and a server with both sees every command twice: run [`commands.js clear-guild`](/tarubot/deploy/tools/#commandsjs) for that server, once as a dry run and again with its `--confirm` fingerprint.
+2. Migrations are no longer a step of their own: the bot applies them whenever it starts. It registers its commands too, once you choose where: your `.env` has no `COMMAND_REGISTRATION` yet (the `comm` line in step 3 of an update lists it), which is off, so the bot registers nothing and logs `Startup command registration is off: …` at every start. If you registered globally (`register.js --global`), set `COMMAND_REGISTRATION=global`. If you registered in one server with `register.js --guild`, set it to that server's ID: registering globally too would show every command twice there. To move that server to global registration instead, set `global` and remove the server's copy with [`commands.js clear-guild`](/tarubot/deploy/tools/#commandsjs), once as a dry run and again with its `--confirm` fingerprint. Then `docker compose up -d --wait`.
 3. The containers now have fixed names, `tarubot` and, with the `web` profile, `tarubot-web`. Compose replaces the old ones, and the volumes stay.
 4. A backup job you scheduled yourself keeps working. Once the built-in [backups](#backups) run, you can retire it.
 
@@ -162,7 +164,7 @@ Compose and the updater stop the old bot before they start the new one, so a sta
 
 ## Shutdown and restart
 
-The Compose stop grace period is 30 seconds. On SIGTERM the bot stops taking new interactions and scheduling work, cancels Lodestone requests, waits up to 20 seconds for its workers, then closes Discord and the database. It exits within 27 seconds in any case. Work in progress is leased in the database: a job a stopped worker held is picked up again after its lease expires, and work superseded by a newer change is recomputed. A backup in progress is abandoned: `pg_dump` is stopped and the upload aborted, so nothing half-written is stored.
+The Compose stop grace period is 30 seconds. On SIGTERM the bot stops taking new interactions and scheduling work, cancels Lodestone requests, waits up to 20 seconds for its workers, then closes Discord and the database. It exits within 27 seconds in any case. Work in progress is leased in the database: a job a stopped worker held is picked up again after its lease expires, and work superseded by a newer change is recomputed. A backup in progress is abandoned: `pg_dump` is stopped and the upload aborted, so nothing half-written is stored, and no failure ping is sent.
 
 ## Backups
 
@@ -202,11 +204,11 @@ Each backup stores up to three objects, all encrypted to `BACKUP_AGE_RECIPIENTS`
 
 - `daily/tarubot-<stamp>.dump.age`: the database, as a `pg_dump` custom-format archive. `<stamp>` is the UTC time, such as `20260101T030000Z`.
 - `monthly/tarubot-<stamp>.dump.age`: the same file again, on the 1st of each month (UTC).
-- An encrypted copy of the bot's settings under `env/`: every setting the container received, the bot token, the database password and `MODMAIL_KEY` included, as an env file Compose reads back.
+- An encrypted copy of the bot's settings under `env/`: every setting the container received, the bot token, the database password and `MODMAIL_KEY` included, as an env file Compose reads back. The stock file also passes the bot its own Compose settings (`POSTGRES_PASSWORD`, `TARUBOT_IMAGE_TAG`, `TARUBOT_IMAGE`, `TARUBOT_IMAGE_REPOSITORY`, `COMPOSE_PROFILES` and `COMMAND_REGISTRATION`), which it ignores, so the copy works as the `.env` of a rebuilt installation. Profiles reach it only from `COMPOSE_PROFILES`, never from `--profile` on the command line.
 
 The settings copy is what rebuilds a lost installation, and how a lost mod mail key is recovered. It also means that **whoever holds your backups' age identity can read everything in them**: every setting, and every mod mail case in the dumps. That's deliberate; guard the identity as you would the settings themselves.
 
-Each backup streams the dump through the encryption straight into the bucket, so nothing unencrypted touches a disk or a log. A dump that fails part-way, an encrypted dump of 4096 bytes or less, or a stored size that differs from what was sent fails the backup, and an interrupted upload leaves no object. A failed backup files an issue report, and with `HEALTHCHECKS_BACKUP_URL` set it also alerts a [backup check](/tarubot/deploy/monitoring/#backup-check). They're ordinary age files: `age --decrypt -i backup-identity.txt` opens one too.
+Each backup streams the dump through the encryption straight into the bucket, so nothing unencrypted touches a disk or a log. A dump that fails part-way, an encrypted dump of 4096 bytes or less, or a stored size that differs from what was sent fails the backup, and an interrupted upload leaves no object. A failed backup files an issue report, and with `HEALTHCHECKS_BACKUP_URL` set it also alerts a [backup check](/tarubot/deploy/monitoring/#backup-check). A backup cut off by a stop or a restart isn't a failure: it stores nothing and sends no failure ping. They're ordinary age files: `age --decrypt -i backup-identity.txt` opens one too.
 
 The upstream instances use these same backups, each with its own bucket, credentials and recipients; see [their runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#backups-and-restore).
 
@@ -335,7 +337,7 @@ To recover from a broken or lost database:
 
 6. Start exactly one bot: `docker compose up -d --wait`, and check readiness and `/config validate`. A backup from an older release is migrated as the bot starts, after its own pre-migration backup when backups are set up. Once you're satisfied with the restore, drop `tarubot_before_restore`.
 
-Mod mail cases read only with the same `MODMAIL_KEY` the backup was taken with. If you've lost it, the backup's settings copy holds it: `restore.js settings` writes that copy, every secret included, so create it privately, take what you need and delete it:
+Mod mail cases read only with the same `MODMAIL_KEY` the backup was taken with. If you've lost it, the backup's settings copy holds it: `restore.js settings` writes that copy, every secret included, to standard output, so create it privately, take what you need and delete it. Keep the `--rm`, since Docker keeps a container's output in its log until the container is removed:
 
 ```sh
 (umask 077 && docker compose run --rm --no-deps -T tarubot \

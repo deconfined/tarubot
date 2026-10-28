@@ -46,7 +46,8 @@ ENABLE_EFFECTS=true
 
 Leave these as the template has them:
 
-- **`TEST_GUILD_ID`** and **`TEST_PLAN_CHANNEL_ID`** empty, and **`PUBLIC_TEST_RESPONSES=false`**. They're development settings: with `TEST_GUILD_ID` set, the bot answers only in that one server, registers its commands there instead of globally, posts the development session plan to its `#chat` at every startup, labels its issue reports as development ones, and refuses `register.js --global`.
+- **`COMMAND_REGISTRATION=global`**, so the bot registers its slash commands globally each time it starts ([step 3](#3-start-the-bot)).
+- **`TEST_GUILD_ID`** and **`TEST_PLAN_CHANNEL_ID`** empty, and **`PUBLIC_TEST_RESPONSES=false`**. They're development settings: with `TEST_GUILD_ID` set, the bot answers only in that one server, posts the development session plan to its `#chat` at every startup, labels its issue reports as development ones, and refuses global registration, `COMMAND_REGISTRATION=global` and `register.js --global` alike (a development install sets `COMMAND_REGISTRATION` to that server's ID).
 - **`TARUBOT_ENVIRONMENT`** empty, so the bot and its tools use the unmanaged profile.
 - **`DATABASE_URL`** is only for tools you run outside the container. The stock Compose file gives the bot its own connection to the bundled database. If you do run local tools, set the same password in it.
 - **The backup settings** (`BACKUP_STORAGE_ENDPOINT` and the rest) as they are for now. Backups are optional and off while the endpoint is empty; [set them up](/tarubot/deploy/operations/#backups) before you rely on the bot, because with them set the bot also backs up before every migration.
@@ -79,7 +80,7 @@ The first start does everything in order, and logs each step:
 
 1. **The schema.** The bot applies every migration in one transaction (`Migrations applied`). A new database holds nothing to back up, so it takes no backup first; with backups still off, it also warns that it migrated without one, which is expected here. On every later start it applies only what's pending, which is usually nothing.
 2. **The writer lease.** It takes the [single writer's lease](/tarubot/deploy/operations/#single-database-writer) (`Database writer lease acquired`), logs in to Discord and becomes ready.
-3. **The commands.** Once ready, it registers its slash commands globally, in every server it joins (`Commands registered`). It does this at every start, replacing the whole set at once, so a restart changes nothing and an update brings its new commands. Global commands can take a little longer to show up everywhere. If Discord refuses the set, the bot files an [issue report](/tarubot/deploy/monitoring/#issue-reports) and keeps running with the commands Discord already has.
+3. **The commands.** Once ready, it registers its slash commands where `COMMAND_REGISTRATION` says, which with the template's `global` means globally, in every server it joins (`Commands registered`). It does this at every start, replacing the whole set at once, so a restart changes nothing and an update brings its new commands. Empty or `off` registers nothing and logs `Startup command registration is off: …` instead. Global commands can take a little longer to show up everywhere. If Discord refuses the set, the bot files an [issue report](/tarubot/deploy/monitoring/#issue-reports) and keeps running with the commands Discord already has.
 
 Don't also register the commands in one server with `register.js --guild`: a server that has both sees every command twice. `commands.js list` checks the result; see [Maintenance tools](/tarubot/deploy/tools/).
 
@@ -91,7 +92,7 @@ docker compose exec -T tarubot \
 docker compose logs --since 10m tarubot
 ```
 
-Readiness must report `database`, `writerLease`, `discord` and `effects` as `true`. See [Monitoring](/tarubot/deploy/monitoring/) for the rest. If the bot exits at startup instead, its log names the setting or step at fault; Docker starts it again, with a growing pause, until you fix it.
+Readiness must report `database`, `writerLease`, `discord` and `effects` as `true`. See [Monitoring](/tarubot/deploy/monitoring/) for the rest. If the bot stops at startup instead, its log names the setting or step at fault, and Docker starts it again until you fix it. When the migration step fails, the bot first waits 10 minutes, unhealthy, so the retries don't repeat a full backup every minute ([what a start does](/tarubot/deploy/operations/#what-a-start-does)); anything else exits at once.
 
 If web is enabled, `--wait` also checks Caddy's private health: its loopback admin process and a ready answer from the bot's private web listener. Caddy doesn't wait for the bot: it starts at once and shows the offline page until the bot is ready. This is not proof of public DNS, TLS or OAuth. From outside the host, open `https://tarubot.example.org`, check a trusted certificate and the HTTP-to-HTTPS redirect, then verify Discord login returns to the exact registered `/auth/callback` URL and only authorized servers are visible. Do not bypass certificate verification to call this accepted.
 
@@ -103,7 +104,7 @@ Next: set up [backups](/tarubot/deploy/operations/#backups), and read [Updates, 
 
 ## Pinning an exact image
 
-`TARUBOT_IMAGE_TAG` also accepts `sha-<commit>`, the full commit that published an image. Those tags exist for the bot image only, so with the `web` profile pin a version instead. To pin the bot by digest, set `TARUBOT_IMAGE` to the complete reference, such as `ghcr.io/deconfined/tarubot@sha256:<digest>`; it overrides `TARUBOT_IMAGE_TAG` for the bot only, so keep `TARUBOT_IMAGE_TAG` at the same version for the proxy.
+`TARUBOT_IMAGE_TAG` also accepts `sha-<commit>`, the full commit that published an image. Those tags exist for the bot image only, so with the `web` profile pin a version instead. To pin the bot by digest, set `TARUBOT_IMAGE` to the complete reference, such as `ghcr.io/deconfined/tarubot@sha256:<digest>`; it overrides `TARUBOT_IMAGE_REPOSITORY` and `TARUBOT_IMAGE_TAG` for the bot only, so keep `TARUBOT_IMAGE_TAG` at the same version for the proxy. A tag can be moved; a digest you checked can't.
 
 New bot releases publish version and commit tags after their checks pass. Documentation and pipeline maintenance can merge without a bot release, so some commits on `main` have no image. A maintenance fix can finish the same release if its build failed before publishing a version tag. Existing version tags are preserved.
 

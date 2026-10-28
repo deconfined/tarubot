@@ -38,7 +38,7 @@ docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --glob
 docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --guild YOUR_GUILD_ID
 ```
 
-It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. The bot registers its commands globally (or in `TEST_GUILD_ID`'s server) whenever it starts, so you need this only to repair that set between releases. Don't use `--guild` beside the bot's own global registration: a server with both sees every command twice.
+It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. The bot registers its commands whenever it starts, where [`COMMAND_REGISTRATION`](/tarubot/deploy/configuration/#runtime) says, so you need this only while that setting is off, or to repair the set between releases. Register in the same scope the setting names: `--guild` beside the bot's own global registration makes a server with both show every command twice.
 
 ### commands.js
 
@@ -82,8 +82,8 @@ docker compose run --rm --no-deps -T tarubot \
 ```
 
 - **`list [daily|monthly|env]`** prints each backup's key and size, newest first; without a group, all three.
-- **`database KEY|latest`** restores a `daily/` or `monthly/` dump (`latest` is the newest daily one) into the database `RESTORE_DATABASE_URL` names, which must exist, be empty and differ from `DATABASE_URL`. It runs `pg_restore` as one transaction, so a failure leaves the target empty. Then, in one more transaction, it signs everyone out of the dashboard and closes the role changes the backup caught waiting, the two steps every restored database needs before a bot starts on it. It prints the restored key, the target's host and database, the schema's newest migration, and what it closed.
-- **`settings KEY|latest`** writes a settings copy (`latest` is the newest) to standard output. It holds every secret: write it only to a private file, and delete it once you've taken what you need.
+- **`database KEY|latest`** restores a `daily/` or `monthly/` dump (`latest` is the newest daily one) into the database `RESTORE_DATABASE_URL` names, which must exist, be empty and differ from `DATABASE_URL`, on a server running PostgreSQL 17 or newer (the bundled one runs 18): the image's `pg_restore` 18 sets `transaction_timeout`, which older servers reject, so `restore.js` refuses them before reading anything. It runs `pg_restore` as one transaction, so a failure leaves the target empty. Then, in one more transaction, it signs everyone out of the dashboard and closes the role changes the backup caught waiting, the two steps every restored database needs before a bot starts on it. It prints the restored key, the target's host and database, the schema's newest migration, and what it closed.
+- **`settings KEY|latest`** writes a settings copy (`latest` is the newest) to standard output. It holds every secret: write it only to a private file, delete it once you've taken what you need, and always run it with `--rm`, since Docker keeps a container's output in its log until the container is removed. With the stock file it also holds the Compose settings (`POSTGRES_PASSWORD`, `TARUBOT_IMAGE_TAG`, `COMPOSE_PROFILES` and the rest), so it works as `.env` again.
 
 Bad arguments print the usage and exit 2. [Recovery](/tarubot/deploy/operations/#recovery) and [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal) show it in use.
 
