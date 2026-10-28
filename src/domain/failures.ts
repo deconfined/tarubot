@@ -83,6 +83,8 @@ export const FAILURE_CATEGORY = {
   lease_lost: "unexpected",
   ordered: "unexpected",
   dm_blocked: "unexpected",
+  // A backup that failed at a named stage (src/application/backups.ts, 2.46.0).
+  backup: "unexpected",
   configuration: "unexpected",
   schema: "unexpected",
   test_plan: "unexpected",

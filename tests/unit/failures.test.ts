@@ -65,6 +65,7 @@ const EXPECTED: Record<FailureCode, FailureCategory> = {
   lease_lost: "unexpected",
   ordered: "unexpected",
   dm_blocked: "unexpected",
+  backup: "unexpected",
   configuration: "unexpected",
   schema: "unexpected",
   test_plan: "unexpected",
