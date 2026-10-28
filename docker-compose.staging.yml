@@ -17,9 +17,8 @@ x-logging: &logging
 services:
   tarubot:
     image: ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to staging}
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-      com.centurylinklabs.watchtower.scope: tarubot
+    # The fixed name is how the updater finds the bot (see watchtower below).
+    container_name: tarubot
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the managed staging database}
       DATABASE_CA_CERT: ${DATABASE_CA_CERT:?Set DATABASE_CA_CERT to the managed cluster CA}
@@ -86,12 +85,7 @@ services:
   # the `staging` tags. The Docker socket is root-equivalent on this Docker host.
   watchtower:
     image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
-    labels:
-      com.centurylinklabs.watchtower.scope: tarubot
     command:
-      - --label-enable
-      - --scope
-      - tarubot
       - --interval
       - "300"
       - --stop-timeout
@@ -99,6 +93,8 @@ services:
       - --include-restarting
       - --cleanup
       - --no-startup-message
+      - tarubot
+      - tarubot-web
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

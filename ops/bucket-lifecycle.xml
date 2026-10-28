@@ -3,6 +3,9 @@
   Owner-applied backup retention; see docs/DEPLOYMENT.md "Backups and restore".
   Apply this common policy separately to the production and staging buckets:
   daily/settings copies for 30 days, and dumps from the 1st of each month for 365 days.
+  A backup interrupted mid-upload (a stopped container, a lost connection) can leave an incomplete
+  multipart upload: never an object, but it holds storage until it is aborted, so abort any after
+  a day.
 -->
 <LifecycleConfiguration>
   <Rule>
@@ -22,5 +25,11 @@
     <Filter><Prefix>monthly/</Prefix></Filter>
     <Status>Enabled</Status>
     <Expiration><Days>365</Days></Expiration>
+  </Rule>
+  <Rule>
+    <ID>incomplete-uploads-1-day</ID>
+    <Filter><Prefix></Prefix></Filter>
+    <Status>Enabled</Status>
+    <AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload>
   </Rule>
 </LifecycleConfiguration>

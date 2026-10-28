@@ -418,6 +418,28 @@ describe("the readers", () => {
     });
   });
 
+  test("issue reports redact the backups' credentials, which live outside the configuration", () => {
+    const config = configuration({
+      DISCORD_APPLICATION_ID: deployments.devbot.applicationId,
+      DATABASE_URL: URL_VALUE,
+      DISCORD_TOKEN: TOKEN,
+    });
+    const key = "invented-backup-secret-key";
+    const reports = new IssueReports(
+      config,
+      null as unknown as Database,
+      null as unknown as Lodestone,
+      new RecentLogs(),
+      null,
+      [key, ""],
+    );
+    const secrets = (reports as unknown as { secrets: string[] }).secrets;
+    expect(secrets).toContain(key);
+    // An unset setting adds nothing that would match every text.
+    expect(secrets).not.toContain("");
+    expect(redact(`storage said ${key}`, secrets)).toBe("storage said [secret redacted]");
+  });
+
   test("commands.js reads DISCORD_TOKEN_FILE, and refuses both forms before any client exists", async () => {
     const devbot = {
       DISCORD_APPLICATION_ID: deployments.devbot.applicationId,

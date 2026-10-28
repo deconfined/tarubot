@@ -135,6 +135,10 @@ const reports = new IssueReports(
   config.GITHUB_REPORTS_TOKEN
     ? new GitHubIssues(config.GITHUB_REPORTS_TOKEN, config.GITHUB_REPORTS_REPO)
     : null,
+  // The backups' credentials and check URL (2.46.0) live outside the configuration object.
+  ["BACKUP_STORAGE_ACCESS_KEY", "BACKUP_STORAGE_SECRET_KEY", "HEALTHCHECKS_BACKUP_URL"].map(
+    (name) => snapshot[name] ?? "",
+  ),
 );
 // Every error-level report (an unexpected failure) also becomes an issue report, grouped by kind.
 const report: Reporter = (error, operation, options = {}) => {

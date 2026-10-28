@@ -134,7 +134,7 @@ process.exit(reply.exitCode ?? 0);
     GH_CONFIG_DIR: callerHome,
     GH_DEBUG: "api",
     AWS_SECRET_ACCESS_KEY: "invented-provider-secret",
-    DEPLOY_SSH_KEY: "invented-host-secret",
+    BACKUP_STORAGE_SECRET_KEY: "invented-host-secret",
     SSH_AUTH_SOCK: "/tmp/invented-agent.sock",
     DOCKER_CONFIG: join(callerHome, ".docker"),
     TRIVY_USERNAME: "invented-registry-user",
@@ -191,7 +191,7 @@ function isolated(call: Call, home: string) {
   for (const { mode } of call.files) expect(mode).toBe(0o600);
   for (const key of [
     "AWS_SECRET_ACCESS_KEY",
-    "DEPLOY_SSH_KEY",
+    "BACKUP_STORAGE_SECRET_KEY",
     "SSH_AUTH_SOCK",
     "TRIVY_USERNAME",
     "TRIVY_PASSWORD",

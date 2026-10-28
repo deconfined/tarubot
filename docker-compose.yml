@@ -24,9 +24,8 @@ services:
     # Runtime credentials are supplied here, independently of the compiled image.
     image: ${TARUBOT_IMAGE:-ghcr.io/deconfined/tarubot:${TARUBOT_IMAGE_TAG:-latest}}
     # Only the `updates` profile's Watchtower reads these; without it they do nothing.
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-      com.centurylinklabs.watchtower.scope: tarubot
+    # The fixed name is how the updater finds the bot (see watchtower below).
+    container_name: tarubot
     environment:
       DATABASE_URL: postgresql://tarubot:${POSTGRES_PASSWORD}@postgres:5432/tarubot
       # Optional provider root CA for deployments using an external TLS PostgreSQL endpoint.
@@ -107,12 +106,7 @@ services:
   watchtower:
     image: ghcr.io/nicholas-fedor/watchtower:1.23.2@sha256:62fb91130ddb493f869cad7e198fa260dd16c5da293ed092cbd5d8781566f7a6
     profiles: [updates]
-    labels:
-      com.centurylinklabs.watchtower.scope: tarubot
     command:
-      - --label-enable
-      - --scope
-      - tarubot
       - --interval
       - "300"
       - --stop-timeout
@@ -120,6 +114,8 @@ services:
       - --include-restarting
       - --cleanup
       - --no-startup-message
+      - tarubot
+      - tarubot-web
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

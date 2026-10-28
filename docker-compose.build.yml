@@ -1,15 +1,13 @@
 # Explicit source-build override for contributors; normal deployments use published GHCR images.
 # Local build: docker compose -f docker-compose.yml -f docker-compose.build.yml ... (DevBot runs only
 # published releases on the staging host; never start its application from a local build).
-# A local build has no registry tag to follow, so the `updates` profile's Watchtower leaves it be.
+# A local build has no registry tag to follow: don't combine it with the `updates` profile.
 services:
   tarubot:
     image: tarubot:local
     build:
       context: .
       target: tarubot
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
     # Source-based sessions can update their plan without rebuilding; registry images carry a default.
     volumes:
       - ./test-plans:/app/test-plans:ro
@@ -19,5 +17,3 @@ services:
     build:
       context: .
       target: web
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"

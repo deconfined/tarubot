@@ -1,9 +1,11 @@
 /**
  * The Compose manifests' delivery contract (2.46.0). The managed manifests run the channel tag
  * that deploy.yml moves, never a digest or a delivery-controlled restart policy, and Watchtower
- * follows only TaruBot's labelled containers: one scope, one pinned image and the same flags in
- * every manifest, so a Dependabot update moves them together. A misspelled label or scope would
- * leave a deployment silently unfollowed, which nothing at runtime would report. Every manifest
+ * follows exactly the two named containers, the bot and its web proxy: one pinned image and the
+ * same flags in every manifest, so a Dependabot update moves them together. Names, not labels,
+ * because `docker compose run` copies a service's labels onto one-off tool runs, which a labelled
+ * updater would stop and run again. A misspelled name would leave a deployment silently
+ * unfollowed, which nothing at runtime would report. Every manifest
  * passes the bot its backup and restore settings, none of them required, so a bad backup setting
  * never stops Compose: the bot reports it (ci.yml checks each manifest's syntax).
  */
@@ -12,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 type Service = {
   image?: string;
   profiles?: string[];
+  container_name?: string;
   labels?: Record<string, string>;
+  depends_on?: unknown;
   command?: string[];
   environment?: Record<string, string>;
   volumes?: string[];
@@ -35,10 +39,8 @@ const MANAGED = {
   staging: "docker-compose.staging.yml",
 } as const;
 const UPDATED = [...Object.values(MANAGED), "docker-compose.yml"];
-const FOLLOWED = {
-  "com.centurylinklabs.watchtower.enable": "true",
-  "com.centurylinklabs.watchtower.scope": "tarubot",
-};
+/** The container names the updater follows: the bot and the web profile's proxy. */
+const FOLLOWED = ["tarubot", "tarubot-web"];
 const BACKUP_SETTINGS = [
   "BACKUP_STORAGE_ENDPOINT",
   "BACKUP_STORAGE_ACCESS_KEY",
@@ -74,7 +76,8 @@ describe("the managed manifests", () => {
       expect(bot.image).toBe(
         `ghcr.io/deconfined/tarubot:\${TARUBOT_IMAGE_TAG:?Set TARUBOT_IMAGE_TAG to ${target}}`,
       );
-      expect(bot.labels).toEqual(FOLLOWED);
+      expect(bot.container_name).toBe(FOLLOWED[0]);
+      expect(bot.labels).toBeUndefined();
       expect(bot.environment?.TARUBOT_ENVIRONMENT).toBe(target);
       expect(bot.restart).toBe("unless-stopped");
       expect(bot.stop_grace_period).toBe("30s");
@@ -87,12 +90,16 @@ describe("the managed manifests", () => {
     });
   }
 
-  test("the web proxy follows the same tag as the bot, labelled for the same updater", async () => {
+  test("the web proxy follows the same tag as the bot, named for the same updater", async () => {
     const { services } = await manifest("docker-compose.web.yml");
     expect(services.caddy?.image).toBe(
       `ghcr.io/deconfined/tarubot:web-\${TARUBOT_IMAGE_TAG:-latest}`,
     );
-    expect(services.caddy?.labels).toEqual(FOLLOWED);
+    expect(services.caddy?.container_name).toBe(FOLLOWED[1]);
+    expect(services.caddy?.labels).toBeUndefined();
+    // Swapping the bot must not take the proxy down with it: Watchtower also stops a container's
+    // Compose dependents, and the offline page is for exactly the time the bot is away.
+    expect(services.caddy?.depends_on).toBeUndefined();
     expect(services.caddy?.restart).toBe("unless-stopped");
   });
 });
@@ -109,9 +116,6 @@ describe("Watchtower", () => {
     for (const updater of updaters) {
       expect(updater.image).toBe(first.image ?? "");
       expect(updater.command).toEqual([
-        "--label-enable",
-        "--scope",
-        "tarubot",
         "--interval",
         "300",
         "--stop-timeout",
@@ -119,10 +123,11 @@ describe("Watchtower", () => {
         "--include-restarting",
         "--cleanup",
         "--no-startup-message",
+        ...FOLLOWED,
       ]);
       expect(updater.volumes).toEqual(["/var/run/docker.sock:/var/run/docker.sock"]);
-      // Its own scope label, but never the enable label: it does not replace itself.
-      expect(updater.labels).toEqual({ "com.centurylinklabs.watchtower.scope": "tarubot" });
+      // It isn't one of the names it follows, so it never replaces itself.
+      expect(updater.labels).toBeUndefined();
       expect(updater.restart).toBe("unless-stopped");
       expect(hardening(updater)).toEqual(HARDENED);
     }
@@ -134,11 +139,10 @@ describe("Watchtower", () => {
     ]);
   });
 
-  test("the stock bot is labelled for the opt-in updater, and a local build never is", async () => {
-    expect((await manifest("docker-compose.yml")).services.tarubot?.labels).toEqual(FOLLOWED);
-    const { services } = await manifest("docker-compose.build.yml");
-    for (const name of ["tarubot", "caddy"])
-      expect(services[name]?.labels).toEqual({ "com.centurylinklabs.watchtower.enable": "false" });
+  test("the stock bot carries the name the opt-in updater follows", async () => {
+    const { services } = await manifest("docker-compose.yml");
+    expect(services.tarubot?.container_name).toBe(FOLLOWED[0]);
+    expect(services.tarubot?.labels).toBeUndefined();
   });
 });
 

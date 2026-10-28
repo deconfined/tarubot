@@ -5,11 +5,8 @@ services:
   caddy:
     image: ghcr.io/deconfined/tarubot:web-${TARUBOT_IMAGE_TAG:-latest}
     profiles: [web]
-    labels:
-      # A tag-following updater (the managed manifests' Watchtower) replaces this container when
-      # its tag moves; without one these labels do nothing.
-      com.centurylinklabs.watchtower.enable: "true"
-      com.centurylinklabs.watchtower.scope: tarubot
+    # The fixed name is how a tag-following updater (the managed manifests' Watchtower) finds it.
+    container_name: tarubot-web
     environment:
       WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
       WEB_PORT: ${WEB_PORT:-8080}
@@ -23,11 +20,10 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-    depends_on:
-      tarubot:
-        condition: service_healthy
-    # The booleans-only web contract distinguishes its listener from the main
-    # health port, so a port collision cannot falsely mark the proxy ready.
+    # No depends_on: the proxy starts with the bot and answers with the offline page until the bot
+    # is ready, and an updater swapping the bot leaves the proxy running (a dependency would make
+    # Watchtower stop it too). The booleans-only web contract distinguishes its listener from the
+    # main health port, so a port collision cannot falsely mark the proxy ready.
     # Public DNS and certificate issuance still need an external HTTPS check.
     healthcheck:
       test:

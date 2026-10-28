@@ -150,6 +150,8 @@ export class IssueReports {
     private readonly lodestone: Lodestone,
     private readonly logs: RecentLogs,
     private readonly github: GitHubIssues | null,
+    /** Further secret values to redact: the backups' storage keys and ping URL (2.46.0). */
+    extraSecrets: readonly string[] = [],
   ) {
     const password = (() => {
       try {
@@ -168,6 +170,7 @@ export class IssueReports {
       // (main.ts), so this matters only to a caller that keeps it there, such as a tool or test.
       config.MODMAIL_KEY ?? "",
       password,
+      ...extraSecrets,
     ].filter(Boolean);
   }
 
