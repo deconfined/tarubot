@@ -51,7 +51,7 @@ TaruBot is a single TypeScript process on [Bun](https://bun.sh), with [discord.j
 
 ## Modules are discovered
 
-Every command, button namespace and gateway listener lives in its own file (`*.command.ts`, `*.component.ts`, `*.event.ts`), found by recursive discovery at startup. There is no central switch to edit. The same discovered definitions drive both the running bot and command registration, so what `register.js` deploys is exactly what the bot answers. Duplicate names, invalid modules and missing services stop startup with a clear error.
+Every command, button namespace and gateway listener lives in its own file (`*.command.ts`, `*.component.ts`, `*.event.ts`), found by recursive discovery at startup. There is no central switch to edit. The same discovered definitions drive both the running bot and command registration, which the bot runs itself at every start, so what Discord offers is exactly what the bot answers. Duplicate names, invalid modules and missing services stop startup with a clear error.
 
 ## From a command to a Discord change
 
@@ -81,4 +81,4 @@ The contributor notes in the repository go deeper:
 - [CONTRIBUTING.md](https://github.com/deconfined/tarubot/blob/main/CONTRIBUTING.md): credential-free checks, releases and dependency updates.
 - [REPLIES.md](https://github.com/deconfined/tarubot/blob/main/docs/REPLIES.md): the reply house style.
 - [DEV_GUILD.md](https://github.com/deconfined/tarubot/blob/main/docs/DEV_GUILD.md): owner-authorized development acceptance and startup plans.
-- [DEPLOYMENT.md](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md): exact-digest Compose delivery, manual provisioning/cutover and recovery.
+- [DEPLOYMENT.md](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md): tag-following Compose delivery, the owner's cutover, backups and recovery.

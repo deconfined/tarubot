@@ -128,4 +128,5 @@ export const NO_RELEASE_NOTE: Readonly<Record<string, string>> = {
   "2.37.1": "Deployment tooling only: a proxy configuration fix.",
   "2.45.1": "Fixes the 2.45.0 /moderate option order; 2.45.0's note covers the feature.",
   "2.45.2": "Deployment tooling only: an offline check of a release before it is delivered.",
+  "2.46.0": "Deployment tooling only: container delivery, startup upgrades and backups.",
 };

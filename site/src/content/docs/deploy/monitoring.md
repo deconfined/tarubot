@@ -1,6 +1,6 @@
 ---
 title: Monitoring
-description: Health probes, the public status page and the offline page, logs, background jobs, members' role choices, dashboard sign-ins, Lodestone refreshes, officer notices, member status posts, update posts, issue reports, public suggestions and the optional heartbeat.
+description: Health probes, the public status page and the offline page, logs, background jobs, members' role choices, dashboard sign-ins, Lodestone refreshes, officer notices, member status posts, update posts, issue reports, public suggestions, and the optional heartbeat and backup check.
 sidebar:
   order: 6
 ---
@@ -48,9 +48,9 @@ From 2.41.0, once the [dashboard](/tarubot/deploy/install/#optional-https-dashbo
 
 When Caddy gets no complete answer from the bot (it's stopped, restarting during an update or crashed, or the connection dropped, as it does for a request body over 64 KiB), bundled Caddy answers with a static "TaruBot is offline right now" page instead of an empty error: a 503 with `Cache-Control: no-store`, `Retry-After: 60` and a strict content security policy that admits only the page's own styles and fonts. It names nothing about the upstream, and always sends the whole page, whatever the request's method or its conditional and range headers. The bot's own answers, its 503 pages included, pass through unchanged, so this page means Caddy couldn't get an answer from the bot.
 
-The page lives in `ops/offline/`, which `docker-compose.web.yml` mounts read-only into Caddy; its stylesheet and fonts are served from `/_offline/`, a path the bot never uses, so they load while the bot is down. Caddy serves whatever that folder holds and follows symbolic links, so keep it to the files the release ships (it never serves dotfiles). The page has no script and makes no request elsewhere. It links the start page, the [status page](#public-status-page), which comes back with TaruBot, and this documentation site, which is hosted separately.
+The page is built into the release's web image (`ghcr.io/deconfined/tarubot:web-X.Y.Z`, from 2.46.0), with the Caddyfile, so there's nothing to fetch or mount, and it always matches the release. Its stylesheet and fonts are served from `/_offline/`, a path the bot never uses, so they load while the bot is down. The page has no script and makes no request elsewhere. It links the start page, the [status page](#public-status-page), which comes back with TaruBot, and this documentation site, which is hosted separately. If the page's files can't be read, Caddy answers a one-line "TaruBot is offline right now" text instead.
 
-Caddy runs without the right to read other users' private files, so `ops/offline` must be readable by everyone (`chmod -R a+rX ops/offline`); [installation](/tarubot/deploy/install/#1-get-the-compose-file-and-settings-template) fetches it that way, and managed deployments do it with the [2.41.0 deploy entry](/tarubot/deploy/operations/#dashboard-enable-change-and-disable). If the directory is missing or unreadable, Caddy answers a one-line "TaruBot is offline right now" text instead. If Caddy started before you fetched the folder, Docker created an empty `ops/offline` owned by root in its place: remove it with `sudo rmdir ops/offline` before fetching. To check it, stop the bot for a moment and open the dashboard: you should see the page, and `curl -sI https://tarubot.example.org/` should show `503` with `retry-after: 60`.
+The proxy doesn't wait for the bot: it starts at once and shows this page until the bot is ready, and it keeps running while an update replaces the bot. To check it, stop the bot for a moment and open the dashboard: you should see the page, and `curl -sI https://tarubot.example.org/` should show `503` with `retry-after: 60`.
 
 ## Logs
 
@@ -60,7 +60,17 @@ docker compose logs --since 1h tarubot
 
 Logs are structured JSON lines. Tokens, passwords, message payloads and command option values are never logged.
 
-For upstream automated delivery, Actions receives only fixed step/result tokens and, when a delivery fails, fixed-shape reasons: which check failed, exit statuses, container facts, readiness flags and error codes, never settings, messages or IDs. Detailed host diagnostics stay in private deployment logs; inspect them privately as the owner ([reading a failed delivery](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#reading-a-failed-delivery)). Repository checks do not establish which release is live. The [owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-observation-and-outcomes) covers exact image/schema/writer observation.
+**Starting up.** Each start logs its steps ([what a start does](/tarubot/deploy/operations/#what-a-start-does)), at info:
+
+- `Modules loaded`, once its commands, buttons and listeners are found.
+- `Migrations applied`, only when files were pending: the files, the `restorePoint` and `committingAt` times, and `backup`, the key of the backup taken just before (or `null`). A warning says when a migration ran without one, because backups are off.
+- `Database writer lease acquired`.
+- `Commands registered`, with the scope and how many commands and paths it registered. A refused registration files an [issue report](#issue-reports) instead.
+- `Daily backups scheduled (UTC)` with the time, or `Daily backups are off` when the endpoint is empty. Each stored backup logs `Backup stored` with why it ran (`daily` or `pre-migration`; [`backup.js`](/tarubot/deploy/tools/#backupjs) prints its own), its keys, their sizes and how long it took; a failed one files an issue report naming the stage that failed.
+
+A `LOG_LEVEL` above `info` hides these lines without anything being wrong.
+
+The upstream deploy workflow never sees these logs: it only moves registry tags, and the owner reads the runtime's own logs ([owner runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-operations)). Repository checks do not establish which release is live.
 
 **Finding a member's error.** Every failure reply ends with `Code <code> · Ref <interaction ID>`, and the log entry for it carries the same ID in `operation`:
 
@@ -113,7 +123,7 @@ From 2.40.0, each save on the dashboard's [My roles](/tarubot/use/pick-your-role
 - **Retention.** Finished `roles.self` jobs are deleted 30 days after they end: the one kind of job history TaruBot removes by itself. They say only who changed their roles, and when.
 - **Who.** Officers' Background work shows someone else's role choices as "A member", `/sync status` and its JSON leave the user out, and `/guest status` records never list them. The member sees their own as **Role choices** in `/sync status`.
 - **Issue reports.** A report shows that a role change happened only in its queue tables, which count waiting work by kind and list the day's failures by kind, never naming the member. Its member section leaves role changes out, even in the member's own `/issue`, and an automatic report about a failed one has no member section.
-- **Restores.** After restoring a backup, close the changes it caught waiting before the bot starts ([recovery](/tarubot/deploy/operations/#recovery), step 7).
+- **Restores.** A restored backup's waiting changes are closed as `restored` before the bot starts on it: `restore.js` does it, and after a restore made any other way you run the statement yourself ([recovery](/tarubot/deploy/operations/#recovery), step 3).
 
 When a `reconcile.user` pass leaves someone with none of the Member, Guest, Officer and FC Leader roles, it also removes the channel-opening menu roles they hold ([why](/tarubot/admin/self-service-roles/#opt-in-channels)). Its stored result and [`preview.js`](/tarubot/deploy/tools/#previewjs) record only how many, as `selfRoles`, never which, and they're left out of the `applied` list.
 
@@ -233,7 +243,7 @@ With `GITHUB_REPORTS_TOKEN` and your own `GITHUB_REPORTS_REPO` set, TaruBot open
 **What opens an issue:**
 
 - `/issue` from any member: one per member every 10 minutes, and 20 per server a day.
-- Every error-level report: unexpected failures in commands, events, startup and the job worker.
+- Every error-level report: unexpected failures in commands, events, startup and the job worker, a failed backup, and command registration that Discord or the deployment guard refused at startup.
 - Every job that ends failed at error level.
 - Repeated trouble, checked every five minutes: a linked FC whose roster hasn't been accepted for 12 hours, and no Lodestone answer for an hour while requests keep failing.
 
@@ -298,3 +308,12 @@ The optional heartbeat catches what issue reports can't, because they come from 
 While readiness is fully green, the bot pings every five minutes, with a one-line status (version, pending and blocked work, failing FCs, the Lodestone cooldown, the selectors). It never sends a failure ping: an unready bot stays silent, and the check's grace time decides when that alerts, so an update restart or a Discord reconnect doesn't. A failed ping is retried a minute later and logged once as a warning.
 
 Keep the URL private: anyone who has it can ping your check and hide an outage. Pause the check before planned maintenance longer than the grace time.
+
+### Backup check
+
+The [backups](/tarubot/deploy/operations/#backups) can ping a check of their own, so a backup that stops running or keeps failing alerts you too:
+
+1. Create a second check at healthchecks.io with a period of 1 day and a grace time of a few hours.
+2. Copy its private ping URL into `.env` as `HEALTHCHECKS_BACKUP_URL`, and recreate the bot with `docker compose up -d --wait`.
+
+Each backup, daily or otherwise, pings `<url>/start` with `backup starting`, then `<url>` with the stored keys and sizes, or `<url>/fail` with `backup failed at:` and the stage: `settings` (a backup setting is missing or invalid), `dump`, `settings-copy` or `upload`. Pings are best effort and never fail a backup. Keep this URL private too.

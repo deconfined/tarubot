@@ -13,6 +13,6 @@ The [threat model](THREAT_MODEL.md) defines engineering scope: minimal complexit
 | Build a Discord reply | [REPLIES](REPLIES.md) |
 | Prepare development testing and startup plans | [DEV_GUILD](DEV_GUILD.md) |
 | Change CI or update dependencies | [CONTRIBUTING](../CONTRIBUTING.md) |
-| Release, provision, cut over, back up or recover | [DEPLOYMENT](DEPLOYMENT.md) |
+| Release, deploy, roll back, cut over, back up or restore | [DEPLOYMENT](DEPLOYMENT.md) |
 
 Use issues for remaining work and PRs/CI for review and verification. Record important manual acceptance there with version/commit, target role, outcome and unexercised cases. Historical designs and rollout details remain in Git; keep current instructions in one place.

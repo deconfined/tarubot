@@ -1,6 +1,6 @@
 ---
 title: Maintenance tools
-description: The one-shot tools for migrations, command registration, retries and restore checks, run inside the bot's image.
+description: The one-shot tools for migrations, command registration, backups, restores, retries and restore checks, run inside the bot's image.
 sidebar:
   order: 7
 ---
@@ -11,23 +11,23 @@ TaruBot's maintenance tools are compiled scripts in the bot's image. Run them in
 docker compose run --rm --no-deps -T tarubot bun dist/scripts/<tool>.js [arguments]
 ```
 
-`--no-deps` leaves the running services alone, and `-T` keeps the output plain for scripts and logs. The container's filesystem is [read-only](/tarubot/deploy/install/#the-bots-container). Most tools only print, so to keep their output, redirect it on the host (`… > output.json`). The two that write a file, `preview.js --output` and `snapshot.js`, need [a writable mount](#previewjs) for that run. Each tool checks its settings against its deployment profile before it touches Discord or the database; yours is the unmanaged profile (see [Requirements](/tarubot/deploy/requirements/#maintenance-tools-and-profiles)). A tool that refuses exits without changing anything, and names the setting at fault, never its value.
+Always name the tool: a `run` without a command starts a second bot, which waits for the writer lease and takes over as soon as the first one stops. `--no-deps` leaves the running services alone, and `-T` keeps the output plain for scripts and logs. The container's filesystem is [read-only](/tarubot/deploy/install/#the-bots-container). Most tools only print, so to keep their output, redirect it on the host (`… > output.json`). The two that write a file, `preview.js --output` and `snapshot.js`, need [a writable mount](#previewjs) for that run. Each tool checks its settings against its deployment profile before it touches Discord or the database; yours is the unmanaged profile (see [Requirements](/tarubot/deploy/requirements/#maintenance-tools-and-profiles)). A tool that refuses exits without changing anything, and names the setting at fault, never its value.
 
-The upstream Linode deployment uses this same Compose tool model with its private central settings and exact release worktree/image, not the stock bundled database. Owner-only commands and recovery are in [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md); do not run generic examples against its managed application/database.
+The upstream deployment runs these same tools as one-off containers of its own Compose project, with its own settings and managed database, not the stock bundled one. Its owner commands are in [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#everyday-operations); do not run generic examples against its managed application/database.
 
 ## The tools
 
 ### migrate.js
 
-Applies pending database migrations, checksum-verified, in one transaction, and prints `Schema ready.`
+Applies pending database migrations, checksum-verified, in one transaction, and prints `Schema ready.` The bot does the same itself whenever it starts ([what a start does](/tarubot/deploy/operations/#what-a-start-does)), so you need this only to migrate ahead of a start, or as a separate step on a platform that runs one.
 
 ```sh
 docker compose run --rm --no-deps -T tarubot bun dist/scripts/migrate.js
 ```
 
-Stop the bot first: with a migration pending, `migrate.js` waits up to `MIGRATE_WRITER_WAIT_SECONDS` for a running bot to stop, then refuses. See [the migration guard](/tarubot/deploy/operations/#migration-guard).
+It follows the bot's backup rule: with [backups](/tarubot/deploy/operations/#backups) set up, it takes an encrypted backup under the writer lease before the first file runs, and a failed backup applies nothing; without them it warns and migrates. Stop the bot first: with a migration pending, `migrate.js` waits up to `MIGRATE_WRITER_WAIT_SECONDS` for a running bot to stop, then refuses. See [the migration guard](/tarubot/deploy/operations/#migration-guard).
 
-`--restore-rehearsal` migrates a restored copy first, to rehearse a migration before the live database. It accepts only a `DATABASE_URL` whose database name ends in `_restore_test`; see [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal).
+`--restore-rehearsal` migrates a restored copy first, to rehearse a migration before the live database. It accepts only a `DATABASE_URL` whose database name ends in `_restore_test`, and takes no backup of that disposable copy; see [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal).
 
 ### register.js
 
@@ -38,17 +38,7 @@ docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --glob
 docker compose run --rm --no-deps -T tarubot bun dist/scripts/register.js --guild YOUR_GUILD_ID
 ```
 
-It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. Register again after an update whose changelog says the commands changed. Until you do, members don't see new commands, and a changed option may get an "out of date" reply.
-
-### candidate-check.js
-
-Checks, offline and before you stop anything, the things that most often stop an upgrade: that the new image is the release you meant, that your settings pass the bot's startup validation, that every command, button and listener loads, and that the commands follow Discord's registration rules. It never reaches Discord or the database, so it is safe to run with the new image while the old bot is still running.
-
-```sh
-docker compose run --rm --no-deps -T tarubot bun dist/scripts/candidate-check.js VERSION SCHEMA_FILE --global
-```
-
-`VERSION` and `SCHEMA_FILE` are what you expect this image to hold: the release's version and the name of its newest migration, both in its changelog entry and source (for example `2.45.2` and `015_member_blocks.sql`), not read from the image under test. Use `--guild YOUR_GUILD_ID` where you register with `register.js --guild`. It prints one line of true/false flags, `identity` (the image holds that version and schema, and its migrations folder ends there), `config`, `modules` and `registration` (the deployment guard accepts the scope, and the commands follow the rules, such as required options before optional ones), with `check` naming the first that failed. It exits 0 when everything passes, 1 when a part fails and 2 when its arguments can't be read; the setting or command at fault is named on its error output, never a value. A pass doesn't prove Discord will accept the commands, only that the rules written into the check hold. The upstream deployment will run it before each delivery once its deploy entry is updated.
+It first confirms that the token belongs to `DISCORD_APPLICATION_ID`. `--global` is refused while `TEST_GUILD_ID` is set. The bot registers its commands globally (or in `TEST_GUILD_ID`'s server) whenever it starts, so you need this only to repair that set between releases. Don't use `--guild` beside the bot's own global registration: a server with both sees every command twice.
 
 ### commands.js
 
@@ -67,6 +57,35 @@ docker compose run --rm --no-deps -T tarubot \
 ```
 
 `clear-guild` removes one server's leftover commands, for example after moving from `--guild` to `--global` registration. Without `--confirm` it's a dry run that lists the commands and prints a fingerprint; run it again with `--confirm <fingerprint>` to remove exactly those. Nothing here ever changes the global scope.
+
+### backup.js
+
+Takes one encrypted backup now, the same as the bot's daily one, with the bot's own [backup settings](/tarubot/deploy/configuration/#backups):
+
+```sh
+docker compose run --rm --no-deps -T tarubot bun dist/scripts/backup.js
+```
+
+It prints what it stored as JSON: the stamp, the `daily` key and size, the `monthly` copy (on the 1st of a month, otherwise `null`) and the settings copy under `env`. It exits non-zero when the backup fails, or when backups aren't set up. It doesn't need the bot stopped: `pg_dump` reads one consistent snapshot whatever the bot writes meanwhile. See [Backups](/tarubot/deploy/operations/#backups).
+
+### restore.js
+
+Lists the backups in the bucket, restores a database from one, or recovers a settings copy. It needs the four `BACKUP_STORAGE_*` settings, and reads the age identity (the file `age-keygen` wrote, as it is: its `#` comment lines are fine) from standard input only, never from an argument or a setting:
+
+```sh
+docker compose run --rm --no-deps -T tarubot bun dist/scripts/restore.js list
+docker compose run --rm --no-deps -T tarubot \
+  sh -c 'RESTORE_DATABASE_URL="${DATABASE_URL%/*}/tarubot_restored" exec bun dist/scripts/restore.js database latest' \
+  < backup-identity.txt
+docker compose run --rm --no-deps -T tarubot \
+  bun dist/scripts/restore.js settings latest < backup-identity.txt > recovered-settings.env
+```
+
+- **`list [daily|monthly|env]`** prints each backup's key and size, newest first; without a group, all three.
+- **`database KEY|latest`** restores a `daily/` or `monthly/` dump (`latest` is the newest daily one) into the database `RESTORE_DATABASE_URL` names, which must exist, be empty and differ from `DATABASE_URL`. It runs `pg_restore` as one transaction, so a failure leaves the target empty. Then, in one more transaction, it signs everyone out of the dashboard and closes the role changes the backup caught waiting, the two steps every restored database needs before a bot starts on it. It prints the restored key, the target's host and database, the schema's newest migration, and what it closed.
+- **`settings KEY|latest`** writes a settings copy (`latest` is the newest) to standard output. It holds every secret: write it only to a private file, and delete it once you've taken what you need.
+
+Bad arguments print the usage and exit 2. [Recovery](/tarubot/deploy/operations/#recovery) and [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal) show it in use.
 
 ### retry.js
 
@@ -87,7 +106,7 @@ docker compose run --rm --no-deps -T tarubot \
   sh -c 'RESTORE_DATABASE_URL="${DATABASE_URL%/*}/tarubot_restore_test" exec bun dist/scripts/check-restore.js'
 ```
 
-Both databases must be at this release's schema. `--schema-version <file>.sql` names an earlier migration instead, for a check before migrating. See [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal).
+Both databases must be at this release's schema. `--schema-version <file>.sql` names an earlier migration instead, for a check before migrating. A copy `restore.js` made differs in `web_sessions` or `jobs` whenever its closing steps changed something there; its output says. See [Restore rehearsal](/tarubot/deploy/operations/#restore-rehearsal).
 
 ### preview.js
 

@@ -7,9 +7,9 @@ sidebar:
 
 Settings live in `.env` next to `docker-compose.yml`, copied from your release's [`.env.example`](https://github.com/deconfined/tarubot/blob/main/.env.example) as [Install](/tarubot/deploy/install/#1-get-the-compose-file-and-settings-template) shows. Keep it private (`chmod 600 .env`) and out of Git: it holds the bot token and the database password.
 
-The bot validates its settings at startup and refuses to start with an invalid one, naming the setting but never its value. Compose passes the bot container only the settings `docker-compose.yml` lists; a one-off `docker compose run` can add others with `-e NAME=value`. Settings removed in earlier releases are ignored; the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) records each removal.
+The bot validates its settings at startup and refuses to start with an invalid one, naming the setting but never its value. The web, mod mail and backup settings are the exception: a bad one only leaves its feature off or failing, and is reported by name. Compose passes the bot container only the settings `docker-compose.yml` lists; a one-off `docker compose run` can add others with `-e NAME=value`. Settings removed in earlier releases are ignored; the [changelog](https://github.com/deconfined/tarubot/blob/main/CHANGELOG.md) records each removal.
 
-These settings describe the stock self-hosting Compose path. The upstream Linode/managed-PostgreSQL instance keeps a central host-only `.env` reused by exact release worktrees; its GitHub runner receives no database or Discord credentials. See [the owner deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md).
+These settings describe the stock self-hosting Compose path. The upstream instance's settings are its own Compose project's environment, kept privately by its owner; its GitHub deploy workflow holds none of them, no database or Discord credentials included. See [the owner deployment runbook](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#what-runs-on-a-docker-host).
 
 ## Runtime
 
@@ -52,11 +52,29 @@ The stock, production and staging manifests pass this setting to the bot. [Mod m
 | --- | --- | --- |
 | `MODMAIL_KEY` | (empty) | The key that encrypts every mod mail topic and message: base64 for exactly 32 bytes. Generate one with `openssl rand -base64 32`. Empty, or a value that isn't base64 for 32 bytes, leaves mod mail unavailable (an invalid value is reported by name, never shown) without stopping the bot; `/health/ready` reports only `modmail: true` or `false`. Secret; plain environment only, with no `MODMAIL_KEY_FILE` form. |
 
-The key never enters the database, so a database dump, the provider's point-in-time recovery and anyone who can only read the database see the text encrypted. It doesn't help against someone who can write to the database (they could delete cases, or make themselves an officer and read them on the dashboard) or who controls the host.
+The key never enters the database, so a database dump, the provider's point-in-time recovery and anyone who can only read the database see the text encrypted. It doesn't help against someone who can write to the database (they could delete cases, or make themselves an officer and read them on the dashboard) or who controls the bot's container or its settings.
 
-**Losing the key loses every case**, for good. Keep it in the host's `.env` and one more copy off the host, such as in a password manager. The managed daily backup encrypts the whole `.env`, key included, next to the database dump and to the same recipients: that copy is how a lost key is recovered, and it means **whoever holds your backups' age identity can read every mod mail case in them**. That's deliberate, so a lost host restores fully, cases included; guard the age identity as you would the key. A database restore needs the same key to read its cases.
+**Losing the key loses every case**, for good. Keep it in `.env` and one more copy somewhere else, such as in a password manager. With [backups](#backups) set up, each backup carries an encrypted copy of the bot's settings, key included, next to the database dump and to the same recipients: that copy is how a lost key is recovered, and it means **whoever holds your backups' age identity can read every mod mail case in them**. That's deliberate, so a lost installation restores fully, cases included; guard the age identity as you would the key. A database restore needs the same key to read its cases.
 
 Don't change the key while cases matter: 2.43.0 has no key rotation, so a different key makes every existing case unreadable (the pages say so, and TaruBot files one issue report). Give each deployment its own key, as you would its other secrets. Apply a change by recreating the container, not restarting it.
+
+## Backups
+
+The stock, production and staging manifests pass these settings to the bot, which takes its own encrypted backups with them: daily, and immediately before it applies a migration. [Backups](/tarubot/deploy/operations/#backups) walks through setting them up. They're plain environment settings with no `_FILE` form.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `BACKUP_STORAGE_ENDPOINT` | (empty) | The bucket's own HTTPS address (virtual-hosted style), such as `https://your-bucket.s3.example.org`. `https://` may be left off, and a port is allowed. A path after the host, such as `/tarubot`, becomes a prefix of every key, so lifecycle rules must include it too. Empty turns backups off. |
+| `BACKUP_STORAGE_ACCESS_KEY` | (empty) | The access key ID of a key pair that can read and write the bucket. Required with an endpoint. |
+| `BACKUP_STORAGE_SECRET_KEY` | (empty) | That key pair's secret. Required with an endpoint. Secret. |
+| `BACKUP_STORAGE_REGION` | (empty) | The bucket's signing region, as your provider names it: lowercase letters, digits and `-`. Required with an endpoint; there's no default, because a wrong region fails every request. |
+| `BACKUP_AGE_RECIPIENTS` | (empty) | The [age](https://age-encryption.org) public keys every backup is encrypted to, each starting `age1`, separated by spaces or commas. Required with an endpoint. Not secret: only the matching identities can open a backup. |
+| `BACKUP_TIME_UTC` | `03:00` | When the daily backup runs, as `HH:MM` in UTC. Only the process holding the writer lease takes it. |
+| `HEALTHCHECKS_BACKUP_URL` | (empty) | The private ping URL of a [healthchecks.io](https://healthchecks.io) check for backups (a [backup check](/tarubot/deploy/monitoring/#backup-check)), separate from the heartbeat's. Empty sends no pings. Never publish it. |
+
+A missing or invalid backup setting never stops the bot. Once it holds the writer lease, it files one [issue report](/tarubot/deploy/monitoring/#issue-reports) naming the settings at fault, never their values, and every backup then fails, the one before a migration included, so that migration waits until they're fixed. With the endpoint empty, there are no daily backups (the bot logs that once), and migrations apply after a warning, without a backup first. Issue reports remove the two keys and the ping URL.
+
+A backup reads the database through `DATABASE_URL` and `DATABASE_CA_CERT`, like the bot. [`restore.js`](/tarubot/deploy/tools/#restorejs) needs the four `BACKUP_STORAGE_*` settings, and for a database restore `RESTORE_DATABASE_URL` too ([maintenance tools only](#maintenance-tools-only)).
 
 ## Lodestone
 
@@ -84,13 +102,13 @@ Read by `docker-compose.yml`, not by the bot.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | (required) | The bundled database's password, set when its volume is first created. Use letters, digits, `-` and `_`, because Compose builds the bot's connection URL from it. Changing it later doesn't change the existing database's password. Secret. |
-| `TARUBOT_IMAGE_TAG` | `latest` | The image tag to run: a published version (recommended), `latest`, or `sha-<commit>`. |
-| `TARUBOT_IMAGE` | (empty) | A complete image reference that overrides `TARUBOT_IMAGE_TAG`, for example one pinned by `@sha256:` digest. |
-| `COMPOSE_PROFILES` | (empty) | Optional `web` starts bundled Caddy. Empty keeps the bot-only default or allows an external proxy. Shared included files are still required when the profile is off. |
+| `TARUBOT_IMAGE_TAG` | `latest` | The release to run: a published version (recommended), `latest`, or `sha-<commit>`. The bundled proxy runs the same release's `web-<tag>` image, which exists for versions and `latest` only, so with the `web` profile don't use `sha-<commit>`. |
+| `TARUBOT_IMAGE` | (empty) | A complete image reference that overrides `TARUBOT_IMAGE_TAG` for the bot only, for example one pinned by `@sha256:` digest. Keep `TARUBOT_IMAGE_TAG` at the same version for the proxy. |
+| `COMPOSE_PROFILES` | (empty) | Optional services, separated by commas: `web` starts bundled Caddy, and `updates` starts the updater that follows `TARUBOT_IMAGE_TAG` ([automatic updates](/tarubot/deploy/operations/#automatic-updates)). Empty keeps the bot-only default or allows an external proxy. The included web file is still required when its profile is off. |
 
 ## Maintenance tools only
 
-Read by the [one-shot tools](/tarubot/deploy/tools/), not by the running bot. `docker-compose.yml` doesn't pass these to the container, so a value in `.env` reaches only tools run outside it. For a tool in the container, pass the setting with that run:
+Read by the [one-shot tools](/tarubot/deploy/tools/), not by the running bot. `docker-compose.yml` passes the bot's container only the two `RESTORE_*` settings, empty unless set, so any other value in `.env` reaches only tools run outside the container. For a tool in the container, pass the setting with that run:
 
 ```sh
 docker compose run --rm --no-deps -e MIGRATE_WRITER_WAIT_SECONDS=300 tarubot bun dist/scripts/migrate.js
@@ -102,9 +120,9 @@ A setting derived from the bot's own connection, such as `RESTORE_DATABASE_URL`,
 | --- | --- | --- |
 | `DATABASE_URL` | (template value) | The connection string for tools run **outside** the container, for example with the loopback port override. Under the stock Compose file the bot and the tools in its container get their own URL to the bundled database, and this line is unused. |
 | `TARUBOT_ENVIRONMENT` | (empty) | The tools' deployment profile. Leave it empty: your deployment uses the unmanaged profile. The other values belong to the upstream project's own instances. |
-| `RESTORE_DATABASE_URL` | (not set) | The restored copy that `check-restore.js` compares with `DATABASE_URL`. Set it only for that run, never in `.env`. |
+| `RESTORE_DATABASE_URL` | (not set) | The empty database `restore.js database` restores into, or the restored copy `check-restore.js` compares with `DATABASE_URL`; it must be a different database from `DATABASE_URL`. Set it only for that run, never in `.env`. |
 | `RESTORE_DATABASE_CA_CERT` | (empty) | A CA for `RESTORE_DATABASE_URL` when it differs from the primary's; empty reuses `DATABASE_CA_CERT`. |
-| `MIGRATE_WRITER_WAIT_SECONDS` | `90` | How long `migrate.js` waits for a stopping bot to release the database before refusing a pending migration, 0 to 600. In the container, pass it with `-e` as above. |
+| `MIGRATE_WRITER_WAIT_SECONDS` | `90` | How long `migrate.js` waits for a stopping bot to release the database before refusing a pending migration, 0 to 600. In the container, pass it with `-e` as above. The bot's own migration at startup always waits 90 seconds. |
 
 ## Upstream production only
 
@@ -128,7 +146,8 @@ Since 2.33.0 the bot and its maintenance tools can read six secrets from files i
 - **One form per secret.** Set `NAME` or `NAME_FILE`, never both: the bot refuses to start, and the tools refuse to run, naming both settings but never a value or a path. A file that can't be read is refused the same way, naming `NAME_FILE`.
 - **With the stock Compose file.** `docker-compose.yml` passes the plain variables only. To use a file, add your own Compose override that mounts it and passes `NAME_FILE`, and leave `NAME` empty in `.env`. Compose's `secrets:` element mounts a file read-only at `/run/secrets/<name>`, which suits the bot's read-only container. The file must be readable by uid 1000, the image's `bun` user that the bot runs as.
 - **`DATABASE_URL` with the bundled database** stays as it is: the stock file builds that URL itself, so a `DATABASE_URL_FILE` there would be refused as both forms.
-- **Maintenance tools** in the container read the same `NAME_FILE` settings, so they need nothing extra. `RESTORE_DATABASE_URL` and `RESTORE_DATABASE_CA_CERT` have no file form.
+- **Maintenance tools** in the container read the same `NAME_FILE` settings, so they need nothing extra. `RESTORE_DATABASE_URL`, `RESTORE_DATABASE_CA_CERT` and the [backup settings](#backups) have no file form.
+- **Backups' settings copy** holds each such secret's value under `NAME`, not the `NAME_FILE` path, so a copy restored from a backup works without the files.
 
 ## Development only
 

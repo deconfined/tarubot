@@ -1,15 +1,15 @@
 {
-  "title": "Session: 2.45.2 pauses review",
-  "objective": "Review 2.45.2 on owner-authorized staging: it adds an offline release check for deployment and changes nothing members see; 2.45.1 made 2.45.0's /moderate registrable. An officer or server manager pauses one person's use of one feature and lifts it again with /moderate or the Moderation page; the person is told the feature, the end and the reason, never who set it. Migration 015 is additive. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
+  "title": "Session: 2.46.0 pauses review",
+  "objective": "Review 2.46.0 on owner-authorized staging: Deploy now only moves the staging tags, Watchtower follows them, and the bot backs up, migrates and registers its commands itself; nothing members see changes. An officer or server manager pauses one person's use of one feature and lifts it again with /moderate or the Moderation page; the person is told the feature, the end and the reason, never who set it. Preserve one DevBot writer; production requires separate readiness and GitHub approval.",
   "user": [
-    "Before upgrading, take the pre-migration backup: 2.44.0 won't start on migration 015. The deploy registers /moderate (24 roots, 52 paths); registration must succeed.",
+    "2.44.0 won't start on migration 015. The bot backs up before any pending migration and registers /moderate (24 roots, 52 paths) itself once ready; Commands registered must be logged.",
     "As an officer (Officer role, no Manage Server): /moderate block a test member from /suggest for 1 hour with a reason. As them, /suggest refuses with the feature, end and reason, naming nobody. /moderate status shows it to you; /moderate lift ends it.",
     "As that officer, try to pause yourself, a server manager, another officer, a bot and mod mail opening: each refuses. As a server manager, pause mod mail opening: the member can't open a case but can still reply to theirs.",
     "On the Moderation page, look up a suggestion's sender by its number. Wait 15 minutes, change a pause: nothing changes and the page offers a Sign in again link; follow it, then repeat the change. A paused officer sees their own pauses there, not who set them.",
     "Pause My roles for the test member: the page opens, says until when and why, with Save off."
   ],
   "assistant": [
-    "Before release, run the full suite with disposable PostgreSQL, the migration 015 rehearsal, the pause enforcement and access parity tests, the version gate and the documentation site build.",
+    "Before release, run the full suite with disposable PostgreSQL (the real backup and restore included), the migration 015 rehearsal, the pause enforcement and access parity tests, the version gate and the documentation site build.",
     "Diagnose owner-reported results, preserve scope and record exercised verification separately from unverified live acceptance.",
     "Perform no live host, token, key, database, Discord, environment or deployment operations. This plan grants no live-operation authorization."
   ],
@@ -18,6 +18,6 @@
     "Read each non-manager's active pauses on the database clock at every resolution; a pause removes a held permission and grants none. Server managers and bots carry none.",
     "Refuse a paused feature before any limit, GitHub request or Lodestone read (/claim before its search, /modmail and /apply before their form opens), naming the feature, end and reason, never who set it. Keep My roles open, Save off, and existing mod mail cases usable.",
     "Write each pause and lift in one transaction with its audit row, no reason in the audit, and no Discord change, DM or job.",
-    "Expose database, Discord and writer-lease readiness; report 2.45.1, startup time and effect state without pinging members."
+    "Expose database, Discord and writer-lease readiness; report 2.46.0, startup time and effect state without pinging members."
   ]
 }

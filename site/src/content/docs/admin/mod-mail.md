@@ -15,7 +15,7 @@ Mod mail needs a **2.43.0 or newer** release with the [dashboard](/tarubot/admin
 
 Mod mail is off in every server until an officer turns it on. Choose **Mod mail** in the server's navigation (officers always see it). The card beside the inbox says whether it's on, and lists what it needs, each **[OK]** or **[FAIL]**:
 
-- **Encryption key is set.** Whoever runs your TaruBot sets `MODMAIL_KEY` on its host ([configuration](/tarubot/deploy/configuration/#optional-mod-mail)). Without it nothing can be opened or read.
+- **Encryption key is set.** Whoever runs your TaruBot sets `MODMAIL_KEY` in its settings ([configuration](/tarubot/deploy/configuration/#optional-mod-mail)). Without it nothing can be opened or read.
 - **Dashboard is on.** Always true when you're looking at the page.
 - **Officer notifications channel is set**, with [`/config officer_notifications`](/tarubot/reference/commands/#config-officer_notifications): that's where TaruBot pings officers about cases. Without it officers would never hear about a case, so mod mail can't be turned on.
 
@@ -89,7 +89,7 @@ The Mod mail pages check who you are on every visit, so an officer who is demote
 
 ## What TaruBot keeps
 
-- **The text is encrypted.** Topics and messages are stored encrypted with the deployment's mod mail key, which never enters the database, so a database copy alone shows only scrambled text. Whoever runs your TaruBot holds the key. Its daily backup keeps an encrypted copy of the settings, key included, next to the database dump, so whoever can open the backups can read mod mail cases too: that's deliberate, so a lost host can be restored in full. TaruBot never puts the text in its logs, issue reports, audit log, pings or DMs.
+- **The text is encrypted.** Topics and messages are stored encrypted with the deployment's mod mail key, which never enters the database, so a database copy alone shows only scrambled text. Whoever runs your TaruBot holds the key. If they set up TaruBot's own backups, each one keeps an encrypted copy of the settings, key included, next to the database dump, so whoever can open the backups can read mod mail cases too: that's deliberate, so a lost installation can be restored in full. TaruBot never puts the text in its logs, issue reports, audit log, pings or DMs.
 - **Nothing in Discord.** TaruBot doesn't read messages or DMs: the member's first message comes with the `/modmail` form, or from the dashboard's form.
 - **No deleting by hand.** Neither officers nor members can delete a case; TaruBot deletes it 90 days after it's closed. Mod mail isn't in TaruBot's long-lived audit log, apart from turning it on and off, so nothing there keeps who opened cases once they're gone.
 - **Limits.** Each member can have 3 open cases and open 5 a day, counted together whether they use `/modmail` or the dashboard; messages are up to 4,000 characters, and a case holds up to 500 messages.

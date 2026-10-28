@@ -13,7 +13,7 @@ These are the current design choices and their engineering rationale. Implementa
 
 **Why.** Correctness rests on ordered decisions: ledger sequences, departure confirmations, one active job per piece of work. Two writers would race on all of them. A "run one replica" setting is only a scaling hint, while a lock in the database itself holds even when a deployment overlaps, a container is started twice, or a migration runs next to an old bot. A second process waits, unready, instead of writing. The lease is checked every 30 seconds, and a bot that can't prove it still holds it exits instead of carrying on.
 
-**Consequence.** The database connection must be a direct session, never a transaction-mode pool, and an update stops the old bot before migrating.
+**Consequence.** The database connection must be a direct session, never a transaction-mode pool, and an update stops the old bot before the new one migrates: a migration waits for the lease, and refuses while a bot still holds it.
 
 ## Durable decisions, then effects
 
@@ -45,11 +45,11 @@ These are the current design choices and their engineering rationale. Implementa
 
 **Why.** The database enforces the invariants that matter most (exact IDs, non-negative balances, immutable entries, one active job per key) regardless of the code that talks to it. Immutable, checksummed migrations make every deployment's schema reproducible, and the bot refuses to start on a schema it doesn't expect.
 
-## One image, Docker Compose
+## Starting the image is the upgrade
 
-**Decision.** TaruBot ships as one scanned, attested AMD64/ARM64 image from protected `main` and runs with Docker Compose. The stock installation bundles PostgreSQL; upstream production uses an owner-provisioned Linode host and managed PostgreSQL.
+**Decision.** TaruBot ships as attested AMD64/ARM64 images from protected `main`, run with Docker Compose: the scanned bot image, which carries its migrations and every tool, and a web image, the stock Caddy image with TaruBot's proxy configuration and offline page. Starting the bot's image is the whole upgrade: before it takes the writer lease it applies its own pending migrations, immediately after an encrypted backup, and once ready it registers its own commands. Backups run inside the bot, and restores are one-off containers of the same image. The stock installation bundles PostgreSQL; upstream production uses managed PostgreSQL on its own Docker host.
 
-**Why.** The image carries its matching migrations/tools; exact digest pinning makes updates deliberate. Upstream delivery automates backup, migration, command registration and startup under one production approval, while infrastructure provisioning and initial cutover remain owner operations. [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md) distinguishes implementation from observed live acceptance.
+**Why.** Nothing outside the image can drift from the release: no host script, scheduled job or host tool takes part, so an operator needs access to the containers only, and an updater that just replaces a container (Watchtower, a platform's redeploy) still runs every step. A backup taken under the migration's own lock is exactly the state that migration started from. Command registration that Discord refuses is reported and leaves the bot running, rather than stopping a release that has already migrated. Upstream delivery is one owner approval that moves a registry tag the runtime follows; GitHub never connects to the runtime, so it can't watch the result or roll back by itself, and a rollback is deploying the earlier version again. [DEPLOYMENT](https://github.com/deconfined/tarubot/blob/main/docs/DEPLOYMENT.md#how-a-release-reaches-production) distinguishes implementation from observed live acceptance.
 
 ## A host the Lodestone accepts
 

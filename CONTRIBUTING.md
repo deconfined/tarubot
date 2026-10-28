@@ -20,28 +20,19 @@ LEGACY_FIXTURE_PATH=.cache/ci/legacy.sql bun run test:docker
 
 Run one test file with `bun test tests/unit/NAME.test.ts`. `test:docker` creates and removes its own containers and database volume. Without `LEGACY_FIXTURE_PATH`, it expects the owner's local `tarubot_backup.sql`; never commit that dump. `test:integration` recreates the selected `_test` database's `public` schema: use disposable databases only.
 
-The native Caddy regressions exercise an accepted trailing-slash origin through trusted local HTTPS, fake Discord login and protected dashboard routes, then the offline page once the harness stops (2.41.0: whole for any method and for conditional or range requests, with dotfiles hidden), plus managed deployment validation from a private Git worktree, whose offline page Caddy must be able to read:
+The native Caddy regressions exercise an accepted trailing-slash origin through trusted local HTTPS, fake Discord login and protected dashboard routes, then the offline page once the harness stops (2.41.0: whole for any method and for conditional or range requests, with dotfiles hidden). They run this tree's own web image, the Dockerfile's `web` stage (the pinned stock Caddy image with `ops/Caddyfile` and `ops/offline` built in). Build it locally rather than pulling a published `web-` tag, which may not exist yet and carries another tree's files:
 
 ```sh
-image=$(POSTGRES_PASSWORD=fixture-only docker compose --env-file /dev/null --profile web config --format json | jq -r '.services.caddy.image')
-docker pull "$image"
-CADDY_FIXTURE_IMAGE="$image" bun test tests/unit/web-server.test.ts tests/unit/deploy-script.test.ts
+docker build --target web -t ghcr.io/deconfined/tarubot:web-ci .
+CADDY_FIXTURE_IMAGE=ghcr.io/deconfined/tarubot:web-ci bun test tests/unit/web-server.test.ts
+# CI's Caddyfile check, under the proxy service's hardening; --pull never keeps a published tag out.
+TARUBOT_IMAGE_TAG=ci WEB_PUBLIC_ORIGIN=https://tarubot.example.org docker compose --env-file .env.example \
+  run --rm --no-deps --pull never caddy caddy validate --config /etc/caddy/Caddyfile
 ```
 
-They require Linux and Compose 2.24.4 or newer; the HTTPS fixture also requires IPv6 loopback for its isolated overrides. That fixture uses host networking with ephemeral loopback-only listeners, Caddy's local CA and invented accounts. The managed fixture runs only Caddy validation through the real entry, with stock mounts/capabilities, an isolated Compose project and simulated bot/database operations. Both remove their own containers, volumes and temporary files. CI enables them with the shared manifest's pinned image. Ordinary unit checks skip these native cases unless `CADDY_FIXTURE_IMAGE` is set; no image is built or downloaded by either test.
+The HTTPS fixture requires Linux, Compose 2.24.4 or newer and IPv6 loopback for its isolated overrides. It uses host networking with ephemeral loopback-only listeners, Caddy's local CA and invented accounts. It mounts readable copies of the checkout's Caddyfile and offline page over the image's, so a checkout made under `umask 077` works too, and removes its own containers, volumes and temporary files. CI builds the same image and enables it. Ordinary unit checks skip this native case unless `CADDY_FIXTURE_IMAGE` is set; the test never builds or downloads an image itself.
 
-The native DNSSEC/SSHFP transport fixture uses invented DNS zones and disposable server identities, with no client authentication key or live network access:
-
-```sh
-docker build -t tarubot-sshfp-test -f tests/fixtures/sshfp/Dockerfile tests/fixtures/sshfp
-SSHFP_FIXTURE_IMAGE=tarubot-sshfp-test bun test tests/sshfp
-```
-
-It runs native BIND, Unbound and OpenSSH in isolated containers with `NET_ADMIN`, no published ports and only the runner helper mounted read-only. The explicit image variable enables these tests; ordinary unit/contract checks do not build or download the image. CI builds the fixture and enables it for the full suite. The lab's non-root users must be able to read the build context and the helper, as Git's `0644`/`0755` modes allow: in a checkout made under `umask 077`, build from and mount copies with those modes.
-
-The deploy entry's and transport's public failure reasons (`reason` lines) run in the ordinary unit checks: `tests/unit/deploy-script.test.ts` drives `ops/deploy.sh` against the fake-Docker host runtime in `tests/fixtures/host-runtime`, whose observation runs the entry's real probe against invented schema and readiness state, and `tests/unit/deploy-transport.test.ts` drives `ops/deploy-ssh.sh` with privilege, package and SSH stand-ins that never touch the resolver or a network.
-
-CI also runs `tests/fixtures/sshfp/host-profile-smoke.py` natively on Ubuntu 24.04 under the stock enforcing Unbound AppArmor profile. It requires root in private network and mount namespaces, launches the transport as the unprivileged runner, holds SSH at a local unauthenticated TCP peer, and verifies private resolver readiness and TERM cleanup. Private bind mounts isolate resolver/hosts/state changes; it creates no access key and uses no public network. The container fixture does not substitute for this host-profile check.
+The real backup and restore test (`tests/integration/backups.test.ts`) dumps a migrated database through age into in-memory storage and restores it into a second, empty database. `pg_dump` refuses a newer server, so it needs PostgreSQL client tools at least as new as the test server: the image carries Alpine's PostgreSQL 18 client, so `bun run test:docker` runs it, and a machine with older tools skips it. The other backup and restore tests use the doubles in `tests/fixtures/backups.ts` (storage, `pg_dump`, `pg_restore` and the healthchecks.io pings) or, for the S3 adapter, a recording S3 double on loopback, with no bucket or credential.
 
 ## Make a change
 
@@ -58,7 +49,7 @@ Do not commit credentials, `.env`, dumps, backups, generated output or local cod
 
 ## CI and dependencies
 
-`ci.yml` checks source, migration immutability, the application build, unit/contract tests, disposable PostgreSQL fixtures and native DNSSEC/SSHFP acceptance/refusal, plus `bash -n`/ShellCheck for `ops/*.sh`, pinned actionlint for workflows and credential-free production/staging Compose validation. PRs need no live credentials. `publish.yml` reuses the pull-request CI result for the identical merged tree (running `ci.yml` when it can't prove that), builds AMD64/ARM64 images on native runners for an explicit stable release, calls `scan.yml`, attests the exact index digest and calls `deploy.yml` with `target=production`. Routine deployment uses one owner-approved `production` job. Optional owner-dispatched staging rehearsal has its own activation, environment and approval; it is not a second production gate. Publication is not evidence of a live deploy. See [deployment](docs/DEPLOYMENT.md).
+`ci.yml` checks source, migration immutability, the application build, unit/contract tests, disposable PostgreSQL fixtures, the native Caddy fixture against this tree's web image, pinned actionlint for workflows (with ShellCheck for their `run:` blocks), and credential-free Compose validation of the stock, production and staging manifests and this tree's Caddyfile. PRs need no live credentials. `publish.yml` reuses the pull-request CI result for the identical merged tree (running `ci.yml` when it can't prove that), builds AMD64/ARM64 bot images on native runners and the `web` image for an explicit stable release, calls `scan.yml` for the bot image, attests both index digests and calls `deploy.yml` with `target=production`. Routine deployment uses one owner-approved `production` job, which only moves the `production` and `web-production` tags; the runtime's Watchtower follows them. Optional owner-dispatched staging rehearsal has its own activation, environment and approval; it is not a second production gate. Neither publication nor a moved tag is evidence of a live deploy: `/version` says what runs. See [deployment](docs/DEPLOYMENT.md).
 
 For local workflow validation, put ShellCheck on `PATH` before running the pinned actionlint. Check `command -v shellcheck` first: actionlint skips unavailable external linters, so a YAML-only pass is not CI parity. `actionlint -verbose` reports disabled integrations.
 
@@ -69,7 +60,9 @@ Actions use full-SHA pins; checkouts do not persist credentials. `pages.yml` bui
 | Dependency | Update method / paired pins |
 | --- | --- |
 | Bun | Dependabot Docker PR; synchronize runtime, `@types/bun`, lockfile and README |
-| PostgreSQL | Dependabot Compose minor PR; synchronize CI and README; majors need a migration plan |
+| Alpine base, Caddy (web image) | Dependabot Docker PR, tag and digest together; synchronize README |
+| PostgreSQL | Dependabot Compose minor PR; synchronize CI and README; majors need a migration plan, and the image's `postgresqlNN-client` at least as new (`pg_dump` refuses a newer server) |
+| Watchtower | Dependabot Compose PR, tag and digest; one pin in every manifest (`compose-manifests.test.ts`); synchronize README |
 | Actions | Dependabot SHA-pin PR; retain full pins and version comments |
 | Site | Dependabot pnpm PR; install/build from `site/` and check peer compatibility |
 | Bun packages | Manual Bun update and frozen install; Dependabot cannot read the current lockfile format |
@@ -91,7 +84,7 @@ The build validates site links; `tests/unit/docs-site.test.ts` checks public con
 ## Live testing and delivery
 
 - [DevBot](docs/DEV_GUILD.md): DevBot on the staging host, isolated local development and owner-run acceptance.
-- [Deployment](docs/DEPLOYMENT.md): release orchestration, pinned provenance, owner provisioning, cutover and recovery.
+- [Deployment](docs/DEPLOYMENT.md): release delivery, signed provenance, the runtime, owner provisioning, cutover, backups and recovery.
 - [Threat model](docs/THREAT_MODEL.md): agreed scope and the requirement to prefer simple, standard components.
 
 Building a release does not authorize restarting a shared bot, migrating a live database, writing to Discord, changing a provider/environment, pushing, or dispatching a workflow. Agents must follow [AGENTS.md](AGENTS.md); production deployment approval remains the owner's GitHub action.

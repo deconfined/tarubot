@@ -29,7 +29,7 @@ Officers see more than members: a diagnostic, what's affected, and how to fix it
 | `initialized`, `uninitialized` | Opening balance already set, or not set | The ledger's opening balance state | An officer runs `/ledger initialize` once, or `/ledger adjust`. |
 | `insufficient_funds` | Not enough recorded gil | A withdrawal that would go below zero | None; check `/ledger balance`. |
 | `conflict`, `superseded` | Settings changed — try again | The server's settings changed while the command ran | None; run it again. |
-| `stale` | This control is out of date, Please reopen /apply, This review message is out of date | A button, form or review message from an older state or release | Register the commands again after an update if it persists. |
+| `stale` | This control is out of date, Please reopen /apply, This review message is out of date | A button, form or review message from an older state or release | The bot registers its commands at every start; if it persists after an update, check that registration succeeded with [`commands.js list`](/tarubot/deploy/tools/#commandsjs). |
 | `expired` | Token expired during verification | The claim token expired while it was being checked | None; `/claim` again. |
 | `pending_proof` | Token not on the Lodestone yet | The Lodestone hasn't published the biography token yet | None; wait and use **Check again**. |
 | `cooldown`, `rate_limited`, `busy`, `transient`, `stopping` | Please wait a moment, and the claim, application, report and suggestion limits, which have their own titles | A limit, contention, a temporary Discord change or a shutdown; for `/suggest`, also GitHub's rate limit | None; the reply says when to try again. |
