@@ -1,6 +1,6 @@
 # Apply Alpine fixes released after the pinned Bun image was published. All stages use the
 # same patched base so compilation/tests exercise the runtime's musl and system libraries.
-FROM oven/bun:1.4.2-alpine AS base
+FROM oven/bun:1.4.4-alpine AS base
 RUN apk upgrade --no-cache
 
 # Compile all first-party code plus discoverable modules using pinned Bun. The runtime image
